@@ -1,0 +1,1617 @@
+# Compose-spec capability manifest for `urunc-macos compose`.
+#
+# Single source of truth for the conformance suite (ADR 0002). One entry per
+# capability, covering every top-level compose-spec element, every service-
+# level schema key (pinned snapshot in spec/compose-spec.json), the urunc
+# extensions, and the docker compose v2 CLI verbs.
+#
+# Statuses reflect the implementation on `main`
+# (cmd/urunc-macos/compose.go + run.go), NOT aspiration:
+#   supported   - behaves per spec
+#   partial     - works with a documented divergence (see notes)
+#   unsupported - not honored; the binary must warn/error, never drop silently
+#
+# tier   - which conformance test backs the entry (static = parse/validate/
+#          normalize, no VM boot; runtime = boots real VMs)
+# security - MANDATORY for every supported/partial entry ("none identified"
+#          is acceptable, absence is not)
+# test   - the backing test: TestConformanceStatic/<id> (conformance_test.go)
+#          or TestConformanceRuntime/<id> (runtime_test.go, exec_runtime_test.go,
+#          oneshot_runtime_test.go). Every entry has one, and the coverage
+#          guards in each tier fail when an entry or a case loses its pair.
+#
+# A capability whose claims span both tiers keeps ONE tier here (where its
+# primary proof lives) and names the other tier's case in its notes, e.g.
+# service.restart (static parsing) pointing at TestConformanceRuntime/cli.up
+# for the supervision loop's live effects.
+
+capabilities:
+  # ---------------------------------------------------------------------------
+  # Top-level compose-spec elements (schema .properties -- 9 keys)
+  # ---------------------------------------------------------------------------
+  - id: toplevel.services
+    area: services
+    status: supported
+    tier: static
+    security: >
+      Each service is a separate VM with its own writable rootfs clone; the
+      blast radius of a compromised service is its own guest plus whatever
+      host paths and ports that service explicitly declares.
+    test: TestConformanceStatic/toplevel.services
+
+  - id: toplevel.name
+    area: config
+    status: unsupported
+    tier: static
+    notes: >
+      The compose-file 'name:' key is not read. The project name comes from
+      -p / COMPOSE_PROJECT_NAME / the working-directory name instead.
+    test: TestConformanceStatic/toplevel.name
+
+  - id: toplevel.version
+    area: config
+    status: unsupported
+    tier: static
+    notes: >
+      The deprecated top-level 'version:' key is ignored, matching docker
+      compose v2 which also ignores it.
+    test: TestConformanceStatic/toplevel.version
+
+  - id: toplevel.include
+    area: config
+    status: supported
+    tier: static
+    notes: >
+      Included files are merged into the project: the short form (a path) and
+      the long form (path, project_directory, env_file) both work, and an
+      included file can include more files. Relative paths inside an included
+      file resolve against that file's directory, or against its
+      'project_directory' when the include sets one, so 'config' and 'up'
+      mount the same host path. Each included file is interpolated with its
+      own environment: the include's 'env_file' when given, else the .env in
+      the directory that file's relative paths resolve against, which is its
+      own directory unless the include set 'project_directory'; the including
+      file's environment is not inherited. A single include entry that lists
+      several paths merges them, later overriding earlier, docker's own
+      multi-file semantics; a service declared in both the including file and
+      an included one (or in two included files) field-merges the same way a
+      multi-file '-f' merge would, the including/later file's fields winning
+      ties — this and the path-list merge were both bespoke-loader-only
+      divergences (refused outright) that compose-go resolves correctly.
+      Include nests arbitrarily deep (compose-go imposes no depth cap; the
+      bespoke loader's own 32-level cap is gone), and a cycle is reported as
+      a cycle. Unsupported keys inside an included file warn like any other,
+      with the file named.
+    security: >
+      An include reads any path the file names, so a compose file from
+      elsewhere can pull in files from outside the project directory, exactly
+      as docker compose does. What it can do with them is bounded by the same
+      loader: the included services go through the same validation, and a
+      volume name they declare still cannot escape the volumes root — not
+      because of a urunc-side check (there is none anymore), but because
+      compose-go's own JSON-schema pattern for a volume name
+      ([a-zA-Z0-9._-]+) already rules out '/' and '..', and namedVolumeDir
+      always joins the name onto '<project>_<name>', so traversal is
+      unreachable by construction.
+    test: TestConformanceStatic/toplevel.include
+
+  - id: toplevel.networks
+    area: networking
+    status: unsupported
+    tier: static
+    notes: >
+      Top-level network definitions are not honored. One flat project subnet
+      is used; size it with 'compose up --subnet CIDR'.
+    test: TestConformanceStatic/toplevel.networks
+
+  - id: toplevel.volumes
+    area: volumes
+    status: partial
+    tier: static
+    notes: >
+      Bare named-volume declarations are honored: each becomes a
+      store-managed host directory (<store>/volumes/<project>_<name>,
+      docker's naming) mounted over virtiofs, persisting across down/up
+      and removed only by 'down --volumes'. Divergences: declaration
+      options (driver, driver_opts, external, labels, name) warn and are
+      ignored, so an 'external: true' volume IS created and IS removed by
+      'down --volumes' (Docker never removes external volumes); services
+      sharing a volume see host-filesystem semantics through independent
+      virtiofs devices, not Docker's single-kernel page-cache coherence;
+      volume identity is the directory name, so on a case-insensitive
+      filesystem two names differing only in case are one volume, and a
+      project/volume pair that concatenates to another project's pair
+      shares its directory (Docker distinguishes both via volume labels);
+      a volume directory orphaned by a failed 'up' or a moved compose file
+      has no reclamation command. The declaration contract is pinned by
+      the static case named below; the data lifecycle (persistence across
+      down/up, removal by 'down --volumes') is proven inside
+      TestConformanceRuntime/service.volumes.
+    security: >
+      Named volumes are plain host directories under the store: readable
+      and writable by any process with store access and by every service
+      that mounts them; contents persist in plaintext with no quota, and
+      'down --volumes' is the only deletion path.
+    test: TestConformanceStatic/toplevel.volumes
+
+  - id: toplevel.secrets
+    area: security
+    status: unsupported
+    tier: static
+    notes: >
+      Top-level secrets are not created and no secret is delivered to guests.
+    security: >
+      Secret sources (file/environment) are silently not provisioned; an app
+      relying on a mounted secret may fall back to an insecure default.
+    test: TestConformanceStatic/toplevel.secrets
+
+  - id: toplevel.configs
+    area: config
+    status: unsupported
+    tier: static
+    notes: >
+      Top-level configs are not created or mounted. Bake configuration into
+      the image or supply it through a bind volume.
+    test: TestConformanceStatic/toplevel.configs
+
+  - id: toplevel.models
+    area: models
+    status: out-of-scope
+    tier: static
+    notes: >
+      Top-level AI model definitions are not supported; ignored.
+      Out of scope (ADR-0003): Docker-platform machinery.
+    test: TestConformanceStatic/toplevel.models
+
+  # ---------------------------------------------------------------------------
+  # Service-level schema keys (schema $defs.service.properties -- 93 keys)
+  # ---------------------------------------------------------------------------
+
+  # -- core service config ----------------------------------------------------
+  - id: service.image
+    area: services
+    status: supported
+    tier: static
+    security: >
+      The reference is pulled by the registry client and runs as guest code;
+      no digest pinning is enforced, so a mutable or typosquatted tag can
+      substitute the image.
+    test: TestConformanceStatic/service.image
+
+  - id: service.command
+    area: services
+    status: supported
+    tier: static
+    security: >
+      The string form is shell-word split on the host with shlex (no host
+      shell is invoked) and becomes the guest process args; the only exposure
+      is running the operator-chosen command inside the guest VM.
+    test: TestConformanceStatic/service.command
+
+  - id: service.container_name
+    area: services
+    status: partial
+    tier: static
+    notes: >
+      sanitizeName restricts names to [a-z0-9_-]; uppercase letters and dots,
+      which the spec pattern permits, are rejected with an error rather than
+      silently renamed.
+    security: >
+      The name derives on-host state paths under the store; the [a-z0-9_-]
+      restriction blocks path traversal via a crafted container_name.
+    test: TestConformanceStatic/service.container_name
+
+  - id: service.environment
+    area: services
+    status: supported
+    tier: static
+    notes: >
+      Map and list (KEY=VAL) forms are both accepted and both normalize to
+      a sorted KEY: VAL mapping in 'compose config' output. A bare/null key
+      (map form) or a bare name with no '=' (list form) inherits the host
+      process's value when one is set, and renders null/empty when it is
+      not — matching docker; the bespoke loader's own divergence here
+      (never inheriting) is gone under compose-go.
+    security: >
+      Values are passed as --env and persisted verbatim in the instance state
+      JSON (CmdLine) under the store in plaintext; anyone with store read
+      access can recover secrets placed in environment.
+    test: TestConformanceStatic/service.environment
+
+  - id: service.entrypoint
+    area: services
+    status: unsupported
+    tier: static
+    notes: >
+      Entrypoint override is not read; the image ENTRYPOINT is used as-is. Use
+      'command' to override the process arguments.
+    test: TestConformanceStatic/service.entrypoint
+
+  - id: service.env_file
+    area: services
+    status: supported
+    tier: static
+    notes: >
+      String, list, and long ({path, required}) forms; dotenv format with
+      comments and quoting; paths resolve against the compose file's
+      directory; a missing required file fails at load. Precedence is
+      docker's: 'environment' beats env_file, later files beat earlier.
+    security: >
+      Env-file contents are read by the host, merged into the guest
+      environment, and persist in plaintext instance state like all
+      environment values; 'compose config' prints them resolved.
+    test: TestConformanceStatic/service.env_file
+
+  - id: service.working_dir
+    area: services
+    status: unsupported
+    tier: static
+    notes: >
+      Working-directory override is not applied; the image's WorkingDir is
+      used.
+    test: TestConformanceStatic/service.working_dir
+
+  - id: service.platform
+    area: services
+    status: unsupported
+    tier: static
+    notes: >
+      Target platform selection is not honored; the image's native
+      architecture is used.
+    test: TestConformanceStatic/service.platform
+
+  - id: service.runtime
+    area: services
+    status: out-of-scope
+    tier: static
+    notes: >
+      Container runtime selection is not applicable; the VM backend is chosen
+      with the x-hypervisor extension.
+      Out of scope (ADR-0003): Docker-platform machinery.
+    test: TestConformanceStatic/service.runtime
+
+  - id: service.pull_policy
+    area: services
+    status: unsupported
+    tier: static
+    notes: >
+      Pull policy is not honored; the image is pulled only when absent from
+      the store.
+    test: TestConformanceStatic/service.pull_policy
+
+  - id: service.pull_refresh_after
+    area: services
+    status: unsupported
+    tier: static
+    notes: >
+      Time-based image refresh (pull_policy=refresh) is not honored.
+    test: TestConformanceStatic/service.pull_refresh_after
+
+  - id: service.provider
+    area: services
+    status: out-of-scope
+    tier: static
+    notes: >
+      Externally managed provider services are not supported; ignored.
+      Out of scope (ADR-0003): Docker-platform machinery.
+    test: TestConformanceStatic/service.provider
+
+  - id: service.build
+    area: build
+    status: unsupported
+    tier: static
+    notes: >
+      Image building is out of scope; pre-build and push images ('image:' is
+      required). loadComposeFile errors when a service has no image.
+    test: TestConformanceStatic/service.build
+
+  - id: service.extends
+    area: config
+    status: supported
+    tier: static
+    notes: >
+      compose-go resolves 'extends' during load, before urunc-macos sees the
+      project: both the short form ('extends: SERVICE', same file) and the
+      long form ('extends: {file, service}', a base service in another
+      file) work. Scalar and list fields the extending service declares
+      (image, command, ...) win over the base's; map fields (environment)
+      merge key by key, the extending service's own entries winning ties.
+      An 'extends' target that does not exist is a load error naming the
+      missing service.
+    security: >
+      An 'extends: {file: ...}' target is read like any other compose file
+      urunc-macos is pointed at, from wherever the path resolves to; it goes
+      through the same size cap and loud-warning walk as a directly named or
+      included file (via compose-go's own "extends" load event, the same
+      mechanism 'include:' uses), so an unsupported key declared only on the
+      extends target does not silently vanish. Scope matches 'include:'s:
+      only an extends used directly in a file passed to Load fires the
+      event, so an extends inside an already-included file, or inside an
+      extends target itself (an extends chain more than one file deep), is
+      not separately capped or warn-walked — compose-go resolves it, but
+      this package's UX layer does not see it.
+    test: TestConformanceStatic/service.extends
+
+  - id: service.annotations
+    area: metadata
+    status: unsupported
+    tier: static
+    notes: >
+      OCI annotations are not applied to the guest; ignored.
+    test: TestConformanceStatic/service.annotations
+
+  - id: service.labels
+    area: metadata
+    status: unsupported
+    tier: static
+    notes: >
+      Container labels are not applied; ignored.
+    test: TestConformanceStatic/service.labels
+
+  - id: service.label_file
+    area: metadata
+    status: unsupported
+    tier: static
+    notes: >
+      Labels themselves are never applied to a running service, so
+      label_file stays unsupported: the key still warns as unsupported.
+      Behavior changed under the hood: compose-go reads and parses the
+      named file during load, to resolve the service's Labels, whether or
+      not urunc-macos does anything with them; a label_file that does not
+      exist now fails the load with compose-go's own error, where the
+      bespoke loader never looked at the file at all. Previously-optional
+      decoration is now a hard requirement for the file to exist and parse.
+    test: TestConformanceStatic/service.label_file
+
+  # -- networking -------------------------------------------------------------
+  - id: service.ports
+    area: networking
+    status: partial
+    tier: runtime
+    notes: >
+      TCP only; [HOSTIP:]HOST:GUEST forms only (single-port, ranges and
+      /udp are rejected with targeted errors). Publishing binds 127.0.0.1 by
+      default rather than Docker's 0.0.0.0.
+    security: >
+      The default 127.0.0.1 bind is a security-positive divergence from
+      Docker: a published port is reachable off-host only when an explicit
+      HOSTIP prefix requests it.
+    test: TestConformanceRuntime/service.ports
+
+  - id: service.networks
+    area: networking
+    status: unsupported
+    tier: static
+    notes: >
+      Per-service network attachment and configuration are not supported;
+      every service sits on the single flat project subnet (see --subnet).
+    test: TestConformanceStatic/service.networks
+
+  - id: service.network_mode
+    area: networking
+    status: out-of-scope
+    tier: static
+    notes: >
+      Alternate network modes (host/none/service:/container:) are not
+      supported; every service is on the project subnet.
+      Out of scope (ADR-0003): cross-VM namespace sharing.
+    security: >
+      A guest cannot join the host network namespace; 'network_mode: host'
+      is inert, which is a security-positive default.
+    test: TestConformanceStatic/service.network_mode
+
+  - id: service.expose
+    area: networking
+    status: unsupported
+    tier: static
+    notes: >
+      expose is a no-op: the private subnet already permits service-to-service
+      traffic on any port, so nothing needs exposing. Ignored.
+    test: TestConformanceStatic/service.expose
+
+  - id: service.hostname
+    area: networking
+    status: unsupported
+    tier: static
+    notes: >
+      The hostname key is ignored; urunc-macos does not set a guest hostname
+      (whatever the image/kernel chooses applies). Services are still
+      reachable by their compose name via the gateway.
+    test: TestConformanceStatic/service.hostname
+
+  - id: service.domainname
+    area: networking
+    status: unsupported
+    tier: static
+    notes: >
+      Guest domainname is not set; ignored.
+    test: TestConformanceStatic/service.domainname
+
+  - id: service.dns
+    area: networking
+    status: unsupported
+    tier: static
+    notes: >
+      Custom DNS servers are not configurable; the project gateway is the
+      resolver.
+    test: TestConformanceStatic/service.dns
+
+  - id: service.dns_opt
+    area: networking
+    status: unsupported
+    tier: static
+    notes: >
+      Custom DNS resolver options are not passed to the guest; ignored.
+    test: TestConformanceStatic/service.dns_opt
+
+  - id: service.dns_search
+    area: networking
+    status: unsupported
+    tier: static
+    notes: >
+      Custom DNS search domains are not set; ignored.
+    test: TestConformanceStatic/service.dns_search
+
+  - id: service.extra_hosts
+    area: networking
+    status: unsupported
+    tier: static
+    notes: >
+      Additional /etc/hosts entries are not injected beyond the automatic
+      service-name to IP map the gateway installs.
+    test: TestConformanceStatic/service.extra_hosts
+
+  - id: service.mac_address
+    area: networking
+    status: unsupported
+    tier: static
+    notes: >
+      A declared MAC is ignored; the runtime assigns a deterministic MAC per
+      instance for lease-based IP capture.
+    test: TestConformanceStatic/service.mac_address
+
+  - id: service.links
+    area: networking
+    status: out-of-scope
+    tier: static
+    notes: >
+      Legacy container links are superseded by name-based discovery on the
+      project subnet; ignored.
+      Out of scope (ADR-0003): cross-VM namespace sharing.
+    test: TestConformanceStatic/service.links
+
+  - id: service.external_links
+    area: networking
+    status: out-of-scope
+    tier: static
+    notes: >
+      Links to containers started outside the project are not supported.
+      Out of scope (ADR-0003): cross-VM namespace sharing.
+    test: TestConformanceStatic/service.external_links
+
+  # -- lifecycle --------------------------------------------------------------
+  - id: service.depends_on
+    area: lifecycle
+    status: partial
+    tier: runtime
+    notes: >
+      List and map forms are accepted. 'service_started',
+      'service_healthy' and 'service_completed_successfully' are honored;
+      no other condition is. 'service_healthy' requires the dependency to
+      declare a healthcheck (exec form) or x-healthcheck-tcp; the exec form
+      wins when both are present. 'service_completed_successfully' runs the
+      dependency as a job (its command executes through the guest agent)
+      and gates on exit code 0: an image without /urunit-agent cannot
+      report a status, so the up fails loudly instead of assuming success.
+      The gated dependency must declare a 'command' — a job with nothing to
+      run cannot report anything — and a file that omits it fails at load
+      (pinned by TestConformanceStatic/ext.x-oneshot). The gate reads the
+      recorded exit code and nothing else: it is evaluated once, in startup
+      order, and a dependency whose record carries no status is a refusal
+      rather than an assumed success. 'required' is honored and defaults to
+      true. 'required: false' never fails its dependent: an optional
+      dependency that no active profile enables warns and its edge is
+      dropped (TestConformanceStatic/service.profiles), and one that is
+      enabled but never completes or never becomes healthy warns and the
+      dependent starts anyway, as docker does. Divergence: the condition is checked
+      only while 'up' walks the graph, so a dependency that dies later does
+      not retroactively stop its dependents (docker behaves the same way).
+    security: >
+      A completion-gated dependency runs its command inside the guest
+      through the agent socket, at the same trust level as the service
+      command itself; the job's captured output is printed by 'up' when it
+      fails, so anything the job wrote to stdout or stderr (including
+      secrets) reaches the operator's terminal and CI logs.
+    test: TestConformanceRuntime/service.depends_on
+
+  - id: service.healthcheck
+    area: lifecycle
+    status: partial
+    tier: runtime
+    notes: >
+      Exec-form probes (test as CMD / CMD-SHELL / NONE, interval, timeout,
+      retries, start_period, disable) run inside the guest through the
+      urunit-agent and gate depends_on 'service_healthy'. Divergences: the
+      image must ship /urunit-agent (a declared healthcheck that cannot run
+      fails 'up' loudly instead of passing); health state is only evaluated
+      while 'up' waits on a dependency, not continuously; when both
+      healthcheck and x-healthcheck-tcp are declared the exec form wins.
+    security: >
+      Probe commands execute inside the guest as the image's configured
+      user (root when unset) via the agent socket, and their output is
+      captured to the host process; a malicious compose file can run
+      arbitrary commands in the guest it defines, which is the same trust
+      level as the service command itself.
+    test: TestConformanceRuntime/service.healthcheck
+
+  - id: service.restart
+    area: lifecycle
+    status: partial
+    tier: static
+    notes: >
+      'no | always | on-failure[:N] | unless-stopped' are parsed, validated
+      (an unknown value, and a non-numeric ':N', are load errors naming the
+      accepted set) and honored by the per-project supervisor inside the
+      gateway daemon, which polls instance liveness and re-runs a service
+      that disappeared with capped exponential backoff. 'compose config'
+      renders the policy as declared, not the mode it degrades to, and
+      renders nothing when the file declared nothing. Divergences (ADR-0007
+      section 3): a restart is noticed within the poll interval, not
+      instantly; 'on-failure' degrades to 'always' with a load-time warning,
+      because no exit code is observable for a plain service, so a clean
+      exit cannot be told from a failure (the ':N' attempt cap is still
+      honored); an explicit 'urunc-macos stop' outranks EVERY policy through
+      the StoppedByUser marker (ADR-0007 section 2), so 'always' and
+      'unless-stopped' are indistinguishable here and both behave like
+      docker's 'unless-stopped' — docker's 'always' would bring a manually
+      stopped container back when the daemon restarts, this supervisor never
+      does; and a one-shot service (job) is never restarted whatever its
+      policy says, which warns at load. A restarted service is re-run alone,
+      so its depends_on gates are not re-evaluated and it can come back
+      while a dependency is down (docker behaves the same way). Enforcement
+      needs the project's gateway daemon: a hand-started gateway without
+      --project parses the policy and supervises nothing. Parsing,
+      validation, the degrade warning and rendering are pinned by the static
+      case named below; the supervision loop's own effects — a killed
+      service returning, a stopped one staying stopped — need a booted
+      project and are proven inside TestConformanceRuntime/cli.up.
+    security: >
+      A restart re-runs the service from the project's own persisted state and
+      compose file, as the user that ran 'up', with the service's CURRENT
+      definition: the supervisor re-reads the compose file each poll, so a
+      file edited after 'up' takes effect on the next restart, while the
+      gateway's port forwards stay as 'up' set them (a service given a new
+      port comes back unreachable). It grants no privilege the first start
+      did not have. Restart storms are bounded by the capped exponential backoff, so a
+      crash-looping guest cannot be used to spin host resources. The
+      supervisor refuses to start anything once the project's supervision flag
+      is cleared or its state is removed, so teardown cannot be undone by a
+      daemon that outlives it.
+    test: TestConformanceStatic/service.restart
+
+  - id: service.stop_grace_period
+    area: lifecycle
+    status: unsupported
+    tier: static
+    notes: >
+      Per-service stop grace is not read; the runtime uses a fixed
+      SIGTERM-then-SIGKILL grace (run --stop-grace, default 10s).
+    test: TestConformanceStatic/service.stop_grace_period
+
+  - id: service.stop_signal
+    area: lifecycle
+    status: unsupported
+    tier: static
+    notes: >
+      Custom stop signal is not configurable; SIGTERM is sent to the VM
+      supervisor.
+    test: TestConformanceStatic/service.stop_signal
+
+  - id: service.pre_start
+    area: lifecycle
+    status: unsupported
+    tier: static
+    notes: >
+      pre_start init containers are not executed; the compose layer does
+      not drive the instance-level exec facility for lifecycle hooks yet.
+    test: TestConformanceStatic/service.pre_start
+
+  - id: service.post_start
+    area: lifecycle
+    status: partial
+    tier: runtime
+    notes: >
+      Runs after the service starts, through the guest agent (command,
+      user, environment). Divergences: requires an agent-bearing image; a
+      failed hook fails 'up' and tears the project down; privileged and
+      working_dir are not honored and warn.
+    security: >
+      Hook commands execute inside the guest with the requested user (the
+      image's user when unset); same trust level as the service command.
+    test: TestConformanceRuntime/service.post_start
+
+  - id: service.pre_stop
+    area: lifecycle
+    status: partial
+    tier: runtime
+    notes: >
+      Runs before each service stops during 'compose down', through the
+      guest agent (command, user, environment). Divergences: requires an
+      agent-bearing image; a failed or unreachable hook warns and the stop
+      proceeds (down must always work); requires the original compose file
+      to still exist at its recorded path.
+    security: >
+      Hook commands execute inside the guest with the requested user (the
+      image's user when unset); same trust level as the service command.
+    test: TestConformanceRuntime/service.pre_stop
+
+  - id: service.init
+    area: lifecycle
+    status: unsupported
+    tier: static
+    notes: >
+      Init-process injection is not applicable; urunit runs as PID 1 in the
+      guest.
+    test: TestConformanceStatic/service.init
+
+  - id: service.stdin_open
+    area: lifecycle
+    status: unsupported
+    tier: static
+    notes: >
+      Interactive stdin is not modeled; up is always detached.
+    test: TestConformanceStatic/service.stdin_open
+
+  - id: service.tty
+    area: lifecycle
+    status: unsupported
+    tier: static
+    notes: >
+      PTY allocation is not modeled; ignored.
+    test: TestConformanceStatic/service.tty
+
+  - id: service.attach
+    area: lifecycle
+    status: unsupported
+    tier: static
+    notes: >
+      stdio attach is not modeled; up runs detached. Use 'compose logs'.
+    test: TestConformanceStatic/service.attach
+
+  - id: service.logging
+    area: lifecycle
+    status: unsupported
+    tier: static
+    notes: >
+      Logging drivers are not configurable; output goes to a per-instance log
+      file read by 'compose logs'.
+    test: TestConformanceStatic/service.logging
+
+  - id: service.develop
+    area: develop
+    status: unsupported
+    tier: static
+    notes: >
+      Watch/develop mode is not implemented; ignored.
+    test: TestConformanceStatic/service.develop
+
+  # -- resources --------------------------------------------------------------
+  - id: service.mem_limit
+    area: resources
+    status: partial
+    tier: static
+    notes: >
+      m/mb, g/gb, k/kb and b suffixes, and plain byte counts, are all
+      accepted (compose-go's unit vocabulary is wider than the bespoke
+      parser's, which rejected k/b as "too small"). 'compose config' renders
+      a byte count as a quoted string (e.g. 1g renders "1073741824"), not a
+      normalized "<N>m" value. The value that reaches the VM backend is
+      bytes / 1048576, floor division, and 'config' renders that same
+      floored amount so the two cannot drift: a declared 3670016 (3.5 MiB)
+      renders "3145728", the 3 MB the VM actually gets. A value under 1 MiB
+      would floor to 0, so 'validateProject' rejects it at load/validate
+      time instead, naming the service and the byte value.
+    security: >
+      A mem_limit under 1 MiB is rejected before it ever reaches the run
+      layer, so '--mem 0' is not reachable through this path; the error
+      names the service and points at the compose file, not an opaque VM
+      boot failure.
+    test: TestConformanceStatic/service.mem_limit
+
+  - id: service.cpus
+    area: resources
+    status: partial
+    tier: static
+    notes: >
+      Number and quoted-string forms are accepted. A fractional value is
+      rounded UP to a whole vCPU (only whole vCPUs are allocatable), with a
+      warning printed. 'compose config' renders the rounded count, matching
+      what 'up' passes as --cpus. Docker renders the declared fraction
+      instead, but docker can deliver a fractional CPU share and urunc
+      cannot, so reporting the declared value would misstate what the VM
+      gets.
+    security: >
+      Rounding fractional cpus up over-allocates host CPU versus the declared
+      limit; a dense stack can oversubscribe host cores.
+    test: TestConformanceStatic/service.cpus
+
+  - id: service.cpu_count
+    area: resources
+    status: out-of-scope
+    tier: static
+    notes: >
+      Only 'cpus' maps to vCPUs; cpu_count is ignored.
+      Out of scope (ADR-0003): Windows containers only.
+    test: TestConformanceStatic/service.cpu_count
+
+  - id: service.cpu_percent
+    area: resources
+    status: out-of-scope
+    tier: static
+    notes: >
+      CPU percentage is not modeled; ignored.
+      Out of scope (ADR-0003): Windows containers only.
+    test: TestConformanceStatic/service.cpu_percent
+
+  - id: service.cpu_shares
+    area: resources
+    status: unsupported
+    tier: static
+    notes: >
+      Relative CPU shares do not map to whole-vCPU allocation; ignored. Use
+      'cpus'.
+    test: TestConformanceStatic/service.cpu_shares
+
+  - id: service.cpu_period
+    area: resources
+    status: unsupported
+    tier: static
+    notes: >
+      CFS CPU period tuning is not applicable to whole-vCPU allocation;
+      ignored.
+    test: TestConformanceStatic/service.cpu_period
+
+  - id: service.cpu_quota
+    area: resources
+    status: unsupported
+    tier: static
+    notes: >
+      CFS CPU quota tuning is not applicable to whole-vCPU allocation;
+      ignored.
+    test: TestConformanceStatic/service.cpu_quota
+
+  - id: service.cpu_rt_period
+    area: resources
+    status: unsupported
+    tier: static
+    notes: >
+      Real-time CPU period tuning is not applicable; ignored.
+    test: TestConformanceStatic/service.cpu_rt_period
+
+  - id: service.cpu_rt_runtime
+    area: resources
+    status: unsupported
+    tier: static
+    notes: >
+      Real-time CPU runtime tuning is not applicable; ignored.
+    test: TestConformanceStatic/service.cpu_rt_runtime
+
+  - id: service.cpuset
+    area: resources
+    status: unsupported
+    tier: static
+    notes: >
+      CPU pinning is not exposed by the VM backends; ignored.
+    test: TestConformanceStatic/service.cpuset
+
+  - id: service.mem_reservation
+    area: resources
+    status: unsupported
+    tier: static
+    notes: >
+      Soft memory reservation is not modeled; use 'mem_limit'.
+    test: TestConformanceStatic/service.mem_reservation
+
+  - id: service.mem_swappiness
+    area: resources
+    status: unsupported
+    tier: static
+    notes: >
+      Guest swappiness is not tunable; ignored.
+    test: TestConformanceStatic/service.mem_swappiness
+
+  - id: service.memswap_limit
+    area: resources
+    status: unsupported
+    tier: static
+    notes: >
+      Swap limits are not modeled; ignored.
+    test: TestConformanceStatic/service.memswap_limit
+
+  - id: service.pids_limit
+    area: resources
+    status: unsupported
+    tier: static
+    notes: >
+      PID limits are not enforced; ignored.
+    test: TestConformanceStatic/service.pids_limit
+
+  - id: service.shm_size
+    area: resources
+    status: unsupported
+    tier: static
+    notes: >
+      /dev/shm sizing is not configurable; ignored.
+    test: TestConformanceStatic/service.shm_size
+
+  - id: service.ulimits
+    area: resources
+    status: unsupported
+    tier: static
+    notes: >
+      ulimits are not applied to the guest; ignored.
+    test: TestConformanceStatic/service.ulimits
+
+  - id: service.oom_kill_disable
+    area: resources
+    status: unsupported
+    tier: static
+    notes: >
+      OOM-killer control is not modeled; ignored.
+    test: TestConformanceStatic/service.oom_kill_disable
+
+  - id: service.oom_score_adj
+    area: resources
+    status: unsupported
+    tier: static
+    notes: >
+      OOM score adjustment is not modeled; ignored.
+    test: TestConformanceStatic/service.oom_score_adj
+
+  - id: service.blkio_config
+    area: resources
+    status: unsupported
+    tier: static
+    notes: >
+      Block-IO limits are not passed to the VM backend; ignored.
+    test: TestConformanceStatic/service.blkio_config
+
+  - id: service.devices
+    area: resources
+    status: out-of-scope
+    tier: static
+    notes: >
+      Host device passthrough is not implemented; ignored.
+      Out of scope (ADR-0003): no device passthrough.
+    test: TestConformanceStatic/service.devices
+
+  - id: service.device_cgroup_rules
+    area: resources
+    status: unsupported
+    tier: static
+    notes: >
+      Device cgroup rules do not apply to a VM guest; ignored.
+    test: TestConformanceStatic/service.device_cgroup_rules
+
+  - id: service.gpus
+    area: resources
+    status: out-of-scope
+    tier: static
+    notes: >
+      GPU passthrough is not available; ignored.
+      Out of scope (ADR-0003): no device passthrough.
+    test: TestConformanceStatic/service.gpus
+
+  - id: service.storage_opt
+    area: storage
+    status: out-of-scope
+    tier: static
+    notes: >
+      Storage-driver options are not applicable; ignored.
+      Out of scope (ADR-0003): Windows containers only.
+    test: TestConformanceStatic/service.storage_opt
+
+  # -- deploy / scale ---------------------------------------------------------
+  - id: service.deploy
+    area: deploy
+    status: out-of-scope
+    tier: static
+    notes: >
+      Swarm deploy config (replicas, placement, update/rollback, resources)
+      is not honored; use 'cpus'/'mem_limit' for resources.
+      Out of scope (ADR-0003): orchestration.
+    test: TestConformanceStatic/service.deploy
+
+  - id: service.scale
+    area: deploy
+    status: out-of-scope
+    tier: static
+    notes: >
+      Replica scaling is not supported; one VM per service.
+      Out of scope (ADR-0003): orchestration.
+    test: TestConformanceStatic/service.scale
+
+  - id: service.profiles
+    area: config
+    status: supported
+    tier: static
+    notes: >
+      Profiles select the services that start. A service that declares no
+      profiles always starts; a service that declares one or more starts only
+      when one of them is active. Profiles are activated with the repeatable
+      'compose --profile NAME' or with COMPOSE_PROFILES (comma-separated),
+      and '*' activates every declared profile. 'config' renders the same set
+      'up' would start. Cross-service references into a disabled service are
+      still validated (a required depends_on target no active profile
+      enables is an error), but a disabled service's own shape is not: the
+      profile filter runs before compose-go's consistency check, so a
+      disabled service's missing image, for instance, is never seen while it
+      stays disabled. A depends_on target that no active profile enables is
+      an error, never an automatic activation, which is docker's behavior
+      too (docker reports it as "service is required by ... but is
+      disabled"), and
+      docker's escape hatch for it is honored: 'required: false' warns and
+      drops the edge instead of failing. Profile names are not validated,
+      because neither the JSON schema nor compose-go validates them, so a
+      name docker accepts cannot fail here. Naming a service on the command
+      line ('up SERVICE...', 'config SERVICE...') activates that service's
+      own profiles and then reduces to the named services plus their
+      depends_on closure, docker's WithServicesEnabled order. So a
+      dependency sharing the named service's profile comes along, while a
+      service that merely shares that profile and is in no closure stays
+      out. The whole enabled project is
+      validated before the file is narrowed to the named services, so
+      naming one service does not excuse another enabled service's gated
+      dependency. The selection was diffed against docker compose v5.1.1
+      over a real multi-profile file and a synthetic one covering siblings,
+      gated dependencies and 'required: false'; every case agreed, and no
+      divergence is known. Addition,
+      not a divergence: an active profile that no service declares emits a
+      warning line, where docker is silent. Which services start is
+      unchanged by it.
+    security: >
+      Selection only ever removes services from the set that boots, so an
+      unrecognized or misspelled profile can never start more than the file
+      declares. A profile name is only ever compared as a string and is
+      never joined onto a path, so leaving names unvalidated adds no
+      filesystem exposure.
+    test: TestConformanceStatic/service.profiles
+
+  # -- security / isolation ---------------------------------------------------
+  - id: service.privileged
+    area: security
+    status: unsupported
+    tier: static
+    notes: >
+      Privileged mode does not apply to a VM guest; ignored.
+    security: >
+      A VM guest cannot escalate to host privileges via 'privileged'; the
+      flag is inert, which is a security-positive default.
+    test: TestConformanceStatic/service.privileged
+
+  - id: service.cap_add
+    area: security
+    status: unsupported
+    tier: static
+    notes: >
+      Linux capabilities are a container concept and do not apply to a VM
+      guest; ignored.
+    security: >
+      The guest is a VM, not a namespaced container sharing the host kernel,
+      so added capabilities grant no host-level privilege.
+    test: TestConformanceStatic/service.cap_add
+
+  - id: service.cap_drop
+    area: security
+    status: unsupported
+    tier: static
+    notes: >
+      Capability drops do not apply to a VM guest; ignored.
+    security: >
+      Dropping capabilities is a no-op here; guest-to-host isolation comes
+      from the VM boundary, not the capability set.
+    test: TestConformanceStatic/service.cap_drop
+
+  - id: service.security_opt
+    area: security
+    status: unsupported
+    tier: static
+    notes: >
+      seccomp/apparmor/label options do not apply to a VM guest; ignored.
+    security: >
+      Host-kernel LSM/seccomp policies do not gate a VM guest; isolation is
+      provided by the hypervisor boundary instead.
+    test: TestConformanceStatic/service.security_opt
+
+  - id: service.read_only
+    area: security
+    status: unsupported
+    tier: static
+    notes: >
+      A read-only rootfs is not enforced; the guest boots a writable rootfs
+      clone.
+    security: >
+      read_only is not honored, so a compromised guest can modify its own
+      per-instance rootfs clone; the host and other guests are unaffected.
+    test: TestConformanceStatic/service.read_only
+
+  - id: service.user
+    area: security
+    status: unsupported
+    tier: static
+    notes: >
+      Process user override is not applied; the image's user is used.
+    security: >
+      Not applying 'user' means the process runs as the image's declared
+      user inside the guest; it does not affect host-side privileges.
+    test: TestConformanceStatic/service.user
+
+  - id: service.userns_mode
+    area: security
+    status: unsupported
+    tier: static
+    notes: >
+      User-namespace remapping does not apply to a VM guest; ignored.
+    security: >
+      Guest UIDs never map onto host UIDs (VM boundary), so userns_mode has
+      no host-side effect.
+    test: TestConformanceStatic/service.userns_mode
+
+  - id: service.group_add
+    area: security
+    status: unsupported
+    tier: static
+    notes: >
+      Supplementary groups are not applied to the guest process; ignored.
+    security: none identified
+    test: TestConformanceStatic/service.group_add
+
+  - id: service.ipc
+    area: security
+    status: out-of-scope
+    tier: static
+    notes: >
+      IPC-namespace sharing does not apply across independent VMs; ignored.
+      Out of scope (ADR-0003): cross-VM namespace sharing.
+    security: >
+      Guests cannot share an IPC namespace with the host or each other; the
+      key is inert, a security-positive default.
+    test: TestConformanceStatic/service.ipc
+
+  - id: service.pid
+    area: security
+    status: out-of-scope
+    tier: static
+    notes: >
+      PID-namespace sharing does not apply across independent VMs; ignored.
+      Out of scope (ADR-0003): cross-VM namespace sharing.
+    security: >
+      A guest cannot join the host PID namespace; the key is inert.
+    test: TestConformanceStatic/service.pid
+
+  - id: service.uts
+    area: security
+    status: out-of-scope
+    tier: static
+    notes: >
+      UTS-namespace sharing does not apply across independent VMs; ignored.
+      Out of scope (ADR-0003): cross-VM namespace sharing.
+    security: >
+      A guest cannot share the host UTS namespace; the key is inert.
+    test: TestConformanceStatic/service.uts
+
+  - id: service.cgroup
+    area: security
+    status: unsupported
+    tier: static
+    notes: >
+      cgroup-namespace selection does not apply to a VM guest; ignored.
+    security: none identified
+    test: TestConformanceStatic/service.cgroup
+
+  - id: service.cgroup_parent
+    area: resources
+    status: unsupported
+    tier: static
+    notes: >
+      Host cgroup placement of the guest is not modeled; ignored.
+    test: TestConformanceStatic/service.cgroup_parent
+
+  - id: service.sysctls
+    area: security
+    status: unsupported
+    tier: static
+    notes: >
+      Guest kernel sysctls are not set; ignored.
+    security: none identified
+    test: TestConformanceStatic/service.sysctls
+
+  - id: service.isolation
+    area: security
+    status: out-of-scope
+    tier: static
+    notes: >
+      Isolation-technology selection is not applicable; ignored.
+      Out of scope (ADR-0003): Windows containers only.
+    test: TestConformanceStatic/service.isolation
+
+  - id: service.credential_spec
+    area: security
+    status: out-of-scope
+    tier: static
+    notes: >
+      Windows managed-service-account credential specs are not applicable;
+      ignored.
+      Out of scope (ADR-0003): Windows containers only.
+    test: TestConformanceStatic/service.credential_spec
+
+  - id: service.use_api_socket
+    area: security
+    status: out-of-scope
+    tier: static
+    notes: >
+      Bind-mounting the Docker API socket is not supported; ignored.
+      Out of scope (ADR-0003): Docker-platform machinery.
+    security: >
+      Not honoring use_api_socket avoids exposing a host Docker daemon socket
+      to the guest, a security-positive default.
+    test: TestConformanceStatic/service.use_api_socket
+
+  # -- volumes ----------------------------------------------------------------
+  - id: service.volumes
+    area: volumes
+    status: partial
+    tier: runtime
+    notes: >
+      Bind mounts and declared named volumes, short syntax only; named
+      sources resolve to store-managed directories and must be declared
+      top-level (undeclared names fail at load). Relative host paths are
+      rewritten against the compose file's directory only when they start
+      with '.'. ':ro' is accepted but NOT enforced (mounted read-write; a
+      warning is emitted); the guest path must be absolute. Anonymous
+      volumes and the long syntax are rejected.
+    security: >
+      The host filesystem is exposed to the guest over virtiofs; read-only
+      intent is not enforced, so a compromised guest can write to any bound
+      host path.
+    test: TestConformanceRuntime/service.volumes
+
+  - id: service.volumes_from
+    area: volumes
+    status: unsupported
+    tier: static
+    notes: >
+      Mounting volumes from another service/container is not supported;
+      ignored.
+    test: TestConformanceStatic/service.volumes_from
+
+  - id: service.tmpfs
+    area: volumes
+    status: unsupported
+    tier: static
+    notes: >
+      tmpfs mounts are not created; ignored.
+    test: TestConformanceStatic/service.tmpfs
+
+  # -- config / secrets (service-level references) ----------------------------
+  - id: service.configs
+    area: config
+    status: unsupported
+    tier: static
+    notes: >
+      Per-service config mounts are not created; bake config into the image or
+      use a bind volume.
+    test: TestConformanceStatic/service.configs
+
+  - id: service.secrets
+    area: security
+    status: unsupported
+    tier: static
+    notes: >
+      Per-service secret mounts are not created; no secret file is delivered
+      to the guest.
+    security: >
+      Silently dropping secrets can push an app to an insecure fallback; and
+      any secret placed in 'environment' instead persists in plaintext state
+      JSON under the store.
+    test: TestConformanceStatic/service.secrets
+
+  # -- models -----------------------------------------------------------------
+  - id: service.models
+    area: models
+    status: out-of-scope
+    tier: static
+    notes: >
+      Referencing top-level AI models is not supported; ignored.
+      Out of scope (ADR-0003): Docker-platform machinery.
+    test: TestConformanceStatic/service.models
+
+  # ---------------------------------------------------------------------------
+  # urunc extensions (x- prefixed, keep the file compose-valid)
+  # ---------------------------------------------------------------------------
+  - id: ext.x-hypervisor
+    area: extensions
+    status: partial
+    tier: static
+    notes: >
+      Selects the guest VMM backend per service ('vz' or 'qemu', plus the
+      aliases qemu-hvf/virtualization/apple); unknown values are rejected at
+      parse time. Divergence: the implemented default is 'vz' when unset,
+      while the docs claim it defaults to the image annotation.
+    security: >
+      Chooses the hypervisor backend only; both run unprivileged with no
+      entitlements and no root, so backend choice grants no extra host access.
+    test: TestConformanceStatic/ext.x-hypervisor
+
+  - id: ext.x-oneshot
+    area: extensions
+    status: partial
+    tier: static
+    notes: >
+      Marks a service as a job (ADR-0007 section 1): its 'command' runs to
+      completion through the guest agent, the exact exit code is recorded on
+      the instance record, and the VM is stopped once the command returns.
+      The marker is implied as well as declared — a service targeted by any
+      dependent's 'service_completed_successfully' condition is a job too,
+      and 'compose config' renders 'x-oneshot: true' for both. Divergences:
+      a job REQUIRES an agent-bearing image (without /urunit-agent it cannot
+      report a status, so 'up' fails loudly naming the requirement instead
+      of assuming success); a job must declare a 'command', from either
+      direction (x-oneshot without one, or a completion-gated dependency
+      without one, is a load error); the job's VM boots a benign init
+      ('/bin/sleep 86400', so the image must carry /bin/sleep on top of the
+      agent) and the command runs through the agent, so the job's output
+      does NOT appear in 'compose logs' — it is captured and printed only
+      when the job fails, where docker would stream it like any other
+      service; and a
+      job is never restarted whatever its 'restart:' policy says, which
+      warns at load. Marker rendering, both load errors and the
+      ignored-restart warning are pinned by the static case named below;
+      the exit-status behavior the extension exists for — a job exiting 0
+      releasing its dependents, a non-zero one failing 'up' with the code —
+      needs a booted agent-bearing guest and is proven inside
+      TestConformanceRuntime/service.depends_on.
+    security: >
+      A job's command executes inside the guest through the agent socket in
+      the store directory, at the same trust level as the service command
+      itself; its captured output is printed by 'up' on failure, so anything
+      the job prints (including secrets) reaches the operator's terminal and
+      CI logs, and the recorded exit code persists in plaintext instance
+      state under the store.
+    test: TestConformanceStatic/ext.x-oneshot
+
+  - id: ext.x-healthcheck-tcp
+    area: extensions
+    status: supported
+    tier: runtime
+    notes: >
+      Bare-port or struct ({port, interval, retries, start_period}) form.
+      Gates depends_on 'service_healthy'. A plain TCP connect: proves a
+      listener exists, not application readiness.
+    security: >
+      Probes are issued by the per-project gateway through its local HTTP API
+      socket over the private subnet; no probe traffic leaves the host and no
+      guest exec is performed.
+    test: TestConformanceRuntime/ext.x-healthcheck-tcp
+
+  # ---------------------------------------------------------------------------
+  # docker compose v2 CLI verbs
+  # ---------------------------------------------------------------------------
+  - id: cli.up
+    area: cli
+    status: partial
+    tier: runtime
+    notes: >
+      Boots one VM per service and a per-project user-mode gateway. Always
+      detached (-d accepted but ignored); re-running up on an already-up
+      project errors instead of reconciling. --subnet sizes the network.
+      Positional SERVICE arguments start only those services and their
+      depends_on closure, and start a named service whatever its profiles
+      say (TestConformanceStatic/service.profiles pins the selection rules
+      through 'config', which applies them identically). Divergence:
+      --no-deps is not implemented, so the closure is always included.
+      The gateway it starts is also the project supervisor (ADR-0007
+      section 3), so restart policies keep acting after up has returned:
+      TestConformanceRuntime/cli.up is where that is proven live — a killed
+      'restart: always' service returns within a bounded wait, and a service
+      stopped with 'urunc-macos stop' stays stopped.
+    security: >
+      Runs unprivileged (no root, no vmnet entitlement). Ctrl-C during up
+      tears down whatever was created, leaving no orphaned gateway. The
+      gateway daemon it leaves behind can boot VMs after up has returned
+      (supervision), bounded by the project's own compose file and by the
+      on-disk Supervise flag that teardown clears before it stops anything.
+    test: TestConformanceRuntime/cli.up
+
+  - id: cli.down
+    area: cli
+    status: partial
+    tier: runtime
+    notes: >
+      Stops and removes every project service in reverse startup order and
+      terminates the gateway. Divergence: no --volumes/--rmi/-t flags.
+    security: >
+      Best-effort teardown removes the gateway control sockets on success, so
+      no listening endpoint is left behind.
+    test: TestConformanceRuntime/cli.down
+
+  - id: cli.ps
+    area: cli
+    status: partial
+    tier: runtime
+    notes: >
+      Lists the project's services with instance, status and IP.
+      Divergences: no --format/-a/-q flags, no JSON output; and the status
+      column is the bare instance state word, so a service that ended reads
+      'stopped' where docker prints 'Exited (N)'. A recorded exit code (only
+      a one-shot job has one, ADR-0007 section 2) is visible through the
+      top-level 'urunc-macos ps' EXIT column and 'urunc-macos inspect', not
+      here; TestConformanceRuntime/service.depends_on has a completed job to
+      look at and pins both halves.
+    security: none identified
+    test: TestConformanceRuntime/cli.ps
+
+  - id: cli.logs
+    area: cli
+    status: partial
+    tier: runtime
+    notes: >
+      Prints per-service logs; with no argument, all services are prefixed.
+      --follow (-f) is restricted to a single named service, unlike docker
+      compose which can follow all.
+    security: >
+      Log lines are echoed verbatim with no redaction, so secrets a service
+      prints to stdout appear in 'compose logs' output.
+    test: TestConformanceRuntime/cli.logs
+
+  - id: cli.config
+    area: cli
+    status: partial
+    tier: static
+    notes: >
+      Validates and prints the effective config without booting VMs (the
+      static-tier entrypoint; added in #56). Positional SERVICE arguments
+      select the services to render, docker's selection rules: the named
+      services plus their depends_on closure, with a named service's own
+      profiles honored. Divergence: none of docker's config flags
+      (--services, --volumes, --hash, --format, --quiet, --no-interpolate,
+      --resolve-image-digests).
+    security: >
+      Prints normalized values with interpolation applied, so resolved
+      secrets from the environment and .env reach stdout; avoid running it
+      where its output is captured.
+    test: TestConformanceStatic/cli.config
+
+  - id: spec.interpolation
+    area: config
+    status: partial
+    tier: static
+    notes: >
+      Substitutes over the parsed YAML scalars, docker's model: comments
+      are inert and values cannot inject structure. All operator forms
+      ($VAR, ${VAR}, :-/-/:?/?/:+/+, $$ escape) over process env then the
+      .env beside the compose file, replaceable with --env-file; unset
+      substitutes empty with a warning, :?/? fail loudly. .env values
+      expand against earlier entries in the same file, and a default
+      nested several levels deep resolves fully — both used to be
+      documented divergences from docker under the bespoke loader; neither
+      is anymore. One divergence remains: a $ before a non-variable
+      character passes through literally where docker errors.
+    security: >
+      Interpolation reads the caller's process environment and .env files;
+      resolved values (including secrets) appear in 'compose config' output
+      and persist in instance state like all environment values.
+    test: TestConformanceStatic/spec.interpolation
+
+  - id: cli.start
+    area: cli
+    status: unsupported
+    tier: static
+    notes: >
+      No 'compose start' subcommand; bring the project up with 'compose up'.
+    test: TestConformanceStatic/cli.start
+
+  - id: cli.stop
+    area: cli
+    status: unsupported
+    tier: static
+    notes: >
+      No 'compose stop' subcommand; use 'compose down'. (Top-level
+      'urunc-macos stop' targets a single instance.)
+    test: TestConformanceStatic/cli.stop
+
+  - id: cli.restart
+    area: cli
+    status: unsupported
+    tier: static
+    notes: >
+      No 'compose restart' subcommand; run 'compose down' then 'compose up'.
+    test: TestConformanceStatic/cli.restart
+
+  - id: cli.pull
+    area: cli
+    status: unsupported
+    tier: static
+    notes: >
+      No 'compose pull' subcommand; images are pulled during 'up'. (Top-level
+      'urunc-macos pull' exists.)
+    test: TestConformanceStatic/cli.pull
+
+  - id: cli.push
+    area: cli
+    status: unsupported
+    tier: static
+    notes: >
+      No 'compose push' subcommand; image publishing is out of scope.
+    test: TestConformanceStatic/cli.push
+
+  - id: cli.build
+    area: cli
+    status: unsupported
+    tier: static
+    notes: >
+      No 'compose build' subcommand; building is out of scope and 'image:' is
+      required.
+    test: TestConformanceStatic/cli.build
+
+  - id: cli.create
+    area: cli
+    status: unsupported
+    tier: static
+    notes: >
+      No 'compose create' subcommand; 'up' both creates and starts.
+    test: TestConformanceStatic/cli.create
+
+  - id: cli.exec
+    area: cli
+    status: partial
+    tier: runtime
+    notes: >
+      'compose exec [-T] [--user] [--env] [--workdir] SERVICE CMD...'
+      resolves the service onto its instance and runs through the guest
+      agent, allocating a tty when stdin is one (-T disables). Divergences:
+      requires an agent-bearing image; no --detach, --privileged or --index
+      (one VM per service, no replicas).
+    security: >
+      Grants interactive command execution inside the guest to anyone who
+      can reach the instance's agent socket in the store directory; the
+      socket is a plain unix socket protected only by file permissions.
+    test: TestConformanceRuntime/cli.exec
+
+  - id: cli.run
+    area: cli
+    status: unsupported
+    tier: static
+    notes: >
+      No 'compose run' one-off subcommand. (Top-level 'urunc-macos run'
+      launches a single instance.)
+    test: TestConformanceStatic/cli.run
+
+  - id: cli.kill
+    area: cli
+    status: unsupported
+    tier: static
+    notes: >
+      No 'compose kill' subcommand; use 'compose down'.
+    test: TestConformanceStatic/cli.kill
+
+  - id: cli.rm
+    area: cli
+    status: unsupported
+    tier: static
+    notes: >
+      No 'compose rm' subcommand; 'compose down' removes stopped services.
+      (Top-level 'urunc-macos rm' exists.)
+    test: TestConformanceStatic/cli.rm
+
+  - id: cli.top
+    area: cli
+    status: partial
+    tier: runtime
+    notes: >
+      'compose top [SERVICE...]' lists guest processes by running /bin/ps
+      through the agent. Divergences: requires an agent-bearing image with
+      /bin/ps; output is the guest's ps format, not docker's UID/PID table.
+    security: >
+      Process listings can reveal command-line secrets of guest processes
+      to anyone able to invoke the CLI against the store.
+    test: TestConformanceRuntime/cli.top
+
+  - id: cli.events
+    area: cli
+    status: unsupported
+    tier: static
+    notes: >
+      No 'compose events' subcommand; there is no event stream.
+    test: TestConformanceStatic/cli.events
+
+  - id: cli.cp
+    area: cli
+    status: unsupported
+    tier: static
+    notes: >
+      No 'compose cp' subcommand; use a bind volume to move files.
+    test: TestConformanceStatic/cli.cp
+
+  - id: cli.wait
+    area: cli
+    status: unsupported
+    tier: static
+    notes: >
+      No 'compose wait' subcommand; exit-code capture is not implemented.
+    test: TestConformanceStatic/cli.wait
+
+  - id: cli.scale
+    area: cli
+    status: out-of-scope
+    tier: static
+    notes: >
+      No 'compose scale' subcommand; one VM per service.
+      Out of scope (ADR-0003): orchestration.
+    test: TestConformanceStatic/cli.scale
+
+  - id: cli.version
+    area: cli
+    status: unsupported
+    tier: static
+    notes: >
+      No 'compose version' subcommand; 'urunc-macos --version' reports the
+      binary version.
+    test: TestConformanceStatic/cli.version
+
+  - id: cli.ls
+    area: cli
+    status: unsupported
+    tier: static
+    notes: >
+      No 'compose ls' subcommand; projects are not enumerated across the
+      store.
+    test: TestConformanceStatic/cli.ls
+
+  - id: cli.attach
+    area: cli
+    status: unsupported
+    tier: static
+    notes: >
+      No 'compose attach' subcommand; stdio attach is not modeled.
+    test: TestConformanceStatic/cli.attach
+
+  - id: cli.port
+    area: cli
+    status: unsupported
+    tier: static
+    notes: >
+      No 'compose port' subcommand; inspect 'ports:' via 'compose config'.
+    test: TestConformanceStatic/cli.port
+
+  - id: cli.pause
+    area: cli
+    status: unsupported
+    tier: static
+    notes: >
+      No 'compose pause' subcommand; VM pause/resume is not exposed.
+    test: TestConformanceStatic/cli.pause
+
+  - id: cli.unpause
+    area: cli
+    status: unsupported
+    tier: static
+    notes: >
+      No 'compose unpause' subcommand; VM pause/resume is not exposed.
+    test: TestConformanceStatic/cli.unpause
+
+  - id: cli.stats
+    area: cli
+    status: unsupported
+    tier: static
+    notes: >
+      No 'compose stats' subcommand; per-VM resource stats are not collected.
+    test: TestConformanceStatic/cli.stats
+
+  - id: cli.watch
+    area: cli
+    status: unsupported
+    tier: static
+    notes: >
+      No 'compose watch' subcommand; develop/watch mode is not implemented.
+    test: TestConformanceStatic/cli.watch

@@ -1,0 +1,7 @@
+# service.mem_limit (partial): compose-go parses the g suffix to its raw byte
+# count, so 1g renders as the quoted byte count "1073741824", not a
+# normalized "1024m" (compose config no longer normalizes the unit).
+services:
+  web:
+    image: alpine:3.19
+    mem_limit: 1g

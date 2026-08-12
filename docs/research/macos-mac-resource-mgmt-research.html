@@ -1,0 +1,902 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>macOS MAC Framework &amp; Resource Management -- Technical Research</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --text-muted: #8b949e;
+    --heading: #e6edf3;
+    --accent: #58a6ff;
+    --accent2: #3fb950;
+    --warn: #d29922;
+    --danger: #f85149;
+    --code-bg: #1c2128;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    padding: 2rem 1rem;
+    max-width: 960px;
+    margin: 0 auto;
+  }
+  h1 {
+    color: var(--heading);
+    font-size: 1.8rem;
+    font-weight: 700;
+    margin-bottom: 0.25rem;
+    border-bottom: 2px solid var(--accent);
+    padding-bottom: 0.5rem;
+  }
+  .subtitle {
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    margin-bottom: 2rem;
+  }
+  h2 {
+    color: var(--accent);
+    font-size: 1.35rem;
+    font-weight: 600;
+    margin: 2.5rem 0 0.75rem 0;
+    padding-bottom: 0.3rem;
+    border-bottom: 1px solid var(--border);
+  }
+  h3 {
+    color: var(--heading);
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin: 1.5rem 0 0.5rem 0;
+  }
+  h4 {
+    color: var(--accent2);
+    font-size: 0.95rem;
+    font-weight: 600;
+    margin: 1.2rem 0 0.4rem 0;
+  }
+  p { margin: 0.5rem 0; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code {
+    background: var(--code-bg);
+    padding: 0.15em 0.4em;
+    border-radius: 4px;
+    font-size: 0.88em;
+    font-family: 'SF Mono', 'Menlo', 'Monaco', monospace;
+    color: #e6edf3;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 1rem;
+    overflow-x: auto;
+    margin: 0.75rem 0;
+    font-size: 0.85em;
+    line-height: 1.5;
+  }
+  pre code { background: none; padding: 0; }
+  .toc {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.25rem 1.5rem;
+    margin: 1.5rem 0;
+  }
+  .toc-title {
+    font-weight: 600;
+    color: var(--heading);
+    margin-bottom: 0.5rem;
+  }
+  .toc ol { padding-left: 1.5rem; }
+  .toc li { margin: 0.25rem 0; color: var(--text-muted); }
+  .toc a { color: var(--accent); }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0.75rem 0;
+    font-size: 0.9em;
+  }
+  .table-wrap { overflow-x: auto; }
+  th {
+    background: var(--surface);
+    color: var(--heading);
+    font-weight: 600;
+    text-align: left;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  td {
+    padding: 0.4rem 0.75rem;
+    border: 1px solid var(--border);
+    vertical-align: top;
+  }
+  tr:nth-child(even) td { background: rgba(22,27,34,0.5); }
+  .callout {
+    border-left: 3px solid var(--accent);
+    background: var(--surface);
+    padding: 0.75rem 1rem;
+    margin: 1rem 0;
+    border-radius: 0 6px 6px 0;
+  }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout.danger { border-left-color: var(--danger); }
+  .callout.success { border-left-color: var(--accent2); }
+  .callout-label {
+    font-weight: 600;
+    font-size: 0.85em;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.25rem;
+  }
+  .callout.warn .callout-label { color: var(--warn); }
+  .callout.danger .callout-label { color: var(--danger); }
+  .callout.success .callout-label { color: var(--accent2); }
+  .source-list {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.75rem 1rem;
+    margin: 0.75rem 0;
+    font-size: 0.85em;
+  }
+  .source-list ul { list-style: none; padding: 0; }
+  .source-list li { padding: 0.15rem 0; }
+  .source-list li::before { content: "[src] "; color: var(--text-muted); font-size: 0.8em; }
+  .tag {
+    display: inline-block;
+    font-size: 0.75em;
+    padding: 0.1em 0.5em;
+    border-radius: 3px;
+    font-weight: 600;
+    vertical-align: middle;
+  }
+  .tag-yes { background: rgba(63,185,80,0.15); color: var(--accent2); border: 1px solid rgba(63,185,80,0.3); }
+  .tag-no { background: rgba(248,81,73,0.15); color: var(--danger); border: 1px solid rgba(248,81,73,0.3); }
+  .tag-partial { background: rgba(210,153,34,0.15); color: var(--warn); border: 1px solid rgba(210,153,34,0.3); }
+  .tag-private { background: rgba(88,166,255,0.15); color: var(--accent); border: 1px solid rgba(88,166,255,0.3); }
+  ul, ol { padding-left: 1.5rem; }
+  li { margin: 0.3rem 0; }
+  .section-divider {
+    border: none;
+    border-top: 2px solid var(--border);
+    margin: 3rem 0;
+  }
+</style>
+</head>
+<body>
+
+<h1>macOS MAC Framework &amp; Resource Management</h1>
+<p class="subtitle">Technical research for container runtime development -- June 2026</p>
+
+<div class="toc">
+  <div class="toc-title">Contents</div>
+  <ol>
+    <li><strong>Part I: Mandatory Access Control</strong>
+      <ol>
+        <li><a href="#macf-overview">TrustedBSD MAC Framework Overview</a></li>
+        <li><a href="#mac-policies">MAC Policies Shipping with macOS</a></li>
+        <li><a href="#mac-hooks">MAC Hooks and Check Points</a></li>
+        <li><a href="#custom-policies">Custom MAC Policy Loading</a></li>
+        <li><a href="#amfi">AMFI (Apple Mobile File Integrity)</a></li>
+        <li><a href="#code-signing">Code Signing, Entitlements, and AMFI Interaction</a></li>
+      </ol>
+    </li>
+    <li><strong>Part II: Resource Management</strong>
+      <ol>
+        <li><a href="#cgroups-equiv">cgroups Equivalent on macOS</a></li>
+        <li><a href="#setrlimit">setrlimit/getrlimit</a></li>
+        <li><a href="#taskpolicy">taskpolicy and QoS Classes</a></li>
+        <li><a href="#jetsam">Jetsam / memorystatus</a></li>
+        <li><a href="#proc-apis">proc_set_dirty / proc_set_cpumon_params</a></li>
+        <li><a href="#iokit">IOKit Resource Management</a></li>
+        <li><a href="#summary-table">Summary: Resource Limiting Capabilities</a></li>
+      </ol>
+    </li>
+  </ol>
+</div>
+
+<hr class="section-divider">
+
+<!-- ============================================================ -->
+<!-- PART I: MANDATORY ACCESS CONTROL                              -->
+<!-- ============================================================ -->
+
+<h2 id="macf-overview">1. TrustedBSD MAC Framework Overview</h2>
+
+<p>The Mandatory Access Control Framework (MACF) is the foundational security substrate in the XNU kernel, derived from the <strong>TrustedBSD</strong> project originally developed for FreeBSD. Unlike Discretionary Access Control (DAC) which governs traditional Unix file permissions, MAC enforces policies that users cannot alter.</p>
+
+<p>The MACF itself <strong>makes no security decisions</strong> -- it is a stub layer that intercepts kernel operations and delegates decisions to registered <em>Policy Modules</em>. Multiple policies can be loaded simultaneously; results are composed with <strong>deny-wins semantics</strong> (all policies must approve for an operation to succeed).</p>
+
+<h3>Initialization (Three-Phase Boot Sequence)</h3>
+<ol>
+  <li><strong><code>mac_policy_init()</code></strong> -- Pre-malloc phase. Initializes the <code>mac_policy_list</code> array, creates the <code>mac_policy_mtx</code> mutex.</li>
+  <li><strong><code>mac_policy_initmach()</code></strong> -- Post-Mach, pre-BSD phase. Calls <code>load_security_extensions_function()</code> which iterates over all kernel extensions with <code>AppleSecurityExtension = true</code> in their Info.plist. Sets <code>mac_late = 1</code>.</li>
+  <li><strong><code>mac_policy_initbsd()</code></strong> -- BSD phase. Creates audit data zone, calls <code>mpo_policy_initbsd</code> callback for all loaded policies.</li>
+</ol>
+
+<h3>Policy Registration</h3>
+<p>A policy module calls <code>mac_policy_register(&amp;my_policy_conf, &amp;my_handle)</code>, typically from a KEXT start routine. The key structure:</p>
+<pre><code>struct mac_policy_conf {
+    .mpc_name           // Short policy name (unique identifier)
+    .mpc_fullname       // Human-readable full name
+    .mpc_labelnames     // Array of label namespace names
+    .mpc_labelname_count
+    .mpc_ops            // Pointer to mac_policy_ops (callback table)
+    .mpc_loadtime_flags // MPC_LOADTIME_FLAG_*
+    .mpc_field_off      // Label slot offset storage
+    .mpc_runtime_flags  // Set by framework
+};</code></pre>
+
+<h4>Loadtime Flags</h4>
+<div class="table-wrap">
+<table>
+  <tr><th>Flag</th><th>Meaning</th></tr>
+  <tr><td><code>MPC_LOADTIME_FLAG_UNLOADOK</code></td><td>Permits policy unloading</td></tr>
+  <tr><td><code>MPC_LOADTIME_FLAG_NOTLATE</code></td><td>Must load early in boot; late-load rejected</td></tr>
+  <tr><td><code>MPC_LOADTIME_FLAG_LABELMBUFS</code></td><td>Policy requires network buffer (mbuf) labeling</td></tr>
+</table>
+</div>
+
+<h4>Policy Composition</h4>
+<p>When multiple policies are loaded, <strong>all must approve</strong> for an operation to succeed. Error precedence: <code>EDEADLK</code> &gt; <code>EINVAL</code> &gt; <code>ESRCH</code> &gt; <code>EACCES</code> &gt; <code>EPERM</code>.</p>
+
+<div class="source-list"><ul>
+  <li><a href="https://karol-mazurek.medium.com/macf-on-macos-004b8a490e2c">MACF on macOS -- Karol Mazurek</a></li>
+  <li><a href="https://docs.freebsd.org/en/books/arch-handbook/mac/">FreeBSD MAC Framework Architecture Handbook</a></li>
+  <li><a href="https://github.com/apple/darwin-xnu/blob/main/security/mac_policy.h">darwin-xnu/security/mac_policy.h</a></li>
+  <li><a href="https://github.com/apple/darwin-xnu/blob/main/security/mac_base.c">darwin-xnu/security/mac_base.c</a></li>
+</ul></div>
+
+<!-- ============================================================ -->
+
+<h2 id="mac-policies">2. MAC Policies Shipping with macOS</h2>
+
+<div class="table-wrap">
+<table>
+  <tr><th>Policy Module</th><th>Bundle ID</th><th>Purpose</th></tr>
+  <tr><td><strong>Sandbox</strong> (Seatbelt)</td><td><code>com.apple.security.sandbox</code></td><td>App sandboxing, SIP enforcement, TCC privacy</td></tr>
+  <tr><td><strong>AMFI</strong></td><td><code>com.apple.driver.AppleMobileFileIntegrity</code></td><td>Code signing enforcement, entitlement validation, Mach port protection</td></tr>
+  <tr><td><strong>Quarantine</strong></td><td><code>com.apple.security.quarantine</code></td><td>Quarantine attribute handling, Gatekeeper integration</td></tr>
+  <tr><td><strong>AppleSystemPolicy</strong></td><td><code>com.apple.AppleSystemPolicy</code></td><td>System volume integrity, notarization enforcement</td></tr>
+  <tr><td><strong>EndpointSecurity</strong></td><td><code>com.apple.iokit.EndpointSecurity</code></td><td>Proxies MAC events to userspace security products</td></tr>
+  <tr><td><strong>AppleImage4</strong></td><td><code>com.apple.security.AppleImage4</code></td><td>Image4 manifest / boot object validation (Secure Boot)</td></tr>
+  <tr><td><strong>MCX ALR</strong></td><td><code>com.apple.kext.mcx.alr</code></td><td>Managed Client Application Launch Restrictions</td></tr>
+</table>
+</div>
+
+<p>Together these implement: Code Signing, Gatekeeper, Sandboxing, System Integrity Protection (SIP), Privacy Protections (TCC), and Configuration Profiles.</p>
+
+<div class="source-list"><ul>
+  <li><a href="https://karol-mazurek.medium.com/macf-on-macos-004b8a490e2c">MACF on macOS -- Karol Mazurek</a></li>
+  <li><a href="https://karol-mazurek.medium.com/snake-apple-vi-amfi-31c48fb92d33">Snake&amp;Apple VI: AMFI -- Karol Mazurek</a></li>
+</ul></div>
+
+<!-- ============================================================ -->
+
+<h2 id="mac-hooks">3. MAC Hooks and Check Points</h2>
+
+<p>The MAC framework provides <strong>300+ entry points</strong> in the <code>mac_policy_ops</code> structure. Hooks follow the naming convention:</p>
+<ul>
+  <li><strong>Kernel-side:</strong> <code>mac_&lt;OBJECT&gt;_&lt;OPTYPE&gt;_&lt;OPNAME&gt;()</code></li>
+  <li><strong>Policy callbacks:</strong> <code>mpo_&lt;OBJECT&gt;_&lt;OPTYPE&gt;_&lt;OPNAME&gt;()</code></li>
+</ul>
+
+<p>Where OBJECT = <code>cred, file, proc, vnode, socket, pipe, mount, devfs, mbuf, ifnet, iokit, system</code>, etc. OPTYPE = <code>check</code> (access decision), <code>label</code> (lifecycle), <code>notify</code> (post-op).</p>
+
+<h4>Key Hook Categories</h4>
+<div class="table-wrap">
+<table>
+  <tr><th>Category</th><th>Example Hooks</th></tr>
+  <tr><td>Process/Credential</td><td><code>mpo_proc_check_fork</code>, <code>mpo_proc_check_get_task</code>, <code>mpo_proc_check_expose_task</code>, <code>mpo_cred_label_update_execve</code></td></tr>
+  <tr><td>File/Vnode</td><td><code>mpo_vnode_check_exec</code>, <code>mpo_vnode_check_open</code>, <code>mpo_vnode_check_read</code>, <code>mpo_vnode_check_write</code>, <code>mpo_vnode_check_signature</code></td></tr>
+  <tr><td>Mount/FS</td><td><code>mpo_mount_check_mount</code>, <code>mpo_mount_check_umount</code>, <code>mpo_mount_check_getattr</code></td></tr>
+  <tr><td>Network</td><td><code>mpo_socket_check_bind</code>, <code>mpo_socket_check_connect</code>, <code>mpo_socket_check_send</code>, <code>mpo_socket_check_receive</code></td></tr>
+  <tr><td>IPC/Mach</td><td><code>mpo_exc_action_check_exception_send</code>, <code>mpo_proc_check_inherit_ipc_ports</code></td></tr>
+  <tr><td>Memory</td><td><code>mpo_proc_check_mprotect</code>, <code>mpo_proc_check_map_anon</code>, <code>mpo_file_check_mmap</code></td></tr>
+  <tr><td>Library</td><td><code>mpo_file_check_library_validation</code>, <code>mpo_proc_check_run_cs_invalid</code></td></tr>
+  <tr><td>System</td><td><code>mpo_policy_syscall</code> (handles <code>__mac_syscall</code> from userspace)</td></tr>
+</table>
+</div>
+
+<h4>Syscall Interception Flow</h4>
+<ol>
+  <li>User-space app initiates a syscall (e.g., <code>open()</code>)</li>
+  <li>Trap transitions to kernel mode (EL0 to EL1 on ARM64)</li>
+  <li>MACF hooks execute <strong>before</strong> core kernel logic</li>
+  <li>Registered callbacks execute sequentially across all loaded policies</li>
+  <li>Results composed: all policies must approve (deny-wins)</li>
+</ol>
+
+<div class="source-list"><ul>
+  <li><a href="https://github.com/apple-oss-distributions/xnu/blob/main/security/mac_policy.h">darwin-xnu mac_policy.h</a></li>
+  <li><a href="https://www.fortinet.com/blog/threat-research/monitoring-macos--part-i--monitoring-process-execution-via-macf">Fortinet: Monitoring macOS via MACF</a></li>
+</ul></div>
+
+<!-- ============================================================ -->
+
+<h2 id="custom-policies">4. Can Custom MAC Policies Be Loaded?</h2>
+
+<div class="callout danger">
+  <div class="callout-label">Effectively Blocked on Modern macOS</div>
+  <p>On modern macOS (especially Apple Silicon), custom MAC policy loading is effectively blocked for third parties. The MAC framework remains internal Apple infrastructure.</p>
+</div>
+
+<h3>Via Kexts -- Theoretically Yes, Practically Blocked</h3>
+
+<p>The <code>mac_policy.h</code> header carries a prominent warning: <em>"MAC policy is not KPI, see Technical Q&amp;A QA1574, this header will be removed in next version."</em></p>
+
+<div class="table-wrap">
+<table>
+  <tr><th>macOS Version</th><th>MACF Kext Status</th></tr>
+  <tr><td>&le; 10.12 (Sierra)</td><td>Full SDK support, kexts load freely</td></tr>
+  <tr><td>10.13 (High Sierra)</td><td>MAC headers removed from SDK; kexts still load via older SDK</td></tr>
+  <tr><td>10.15 (Catalina)</td><td>Kext KPIs officially deprecated; System Extensions introduced</td></tr>
+  <tr><td>11 (Big Sur)</td><td>Kexts using deprecated KPIs no longer load by default</td></tr>
+  <tr><td>Apple Silicon</td><td>Full Security mode blocks all third-party kexts; Reduced Security required</td></tr>
+  <tr><td>15+ (Sequoia+)</td><td>Continuing kext removal</td></tr>
+</table>
+</div>
+
+<h3>Via System Extensions -- No</h3>
+<p>System Extensions run in <strong>userspace</strong> and have no access to the kernel's MAC framework. They cannot register MAC policies. They use higher-level frameworks: Endpoint Security, Network Extension, DriverKit.</p>
+
+<h3>Apple's Sanctioned Replacement: Endpoint Security Framework</h3>
+<p><code>EndpointSecurity.kext</code> (Apple's own MAC policy module) proxies selected MAC events to userspace ES clients. The limitation: ES only exposes events Apple chooses to surface. Third parties cannot access undocumented system events.</p>
+
+<div class="source-list"><ul>
+  <li><a href="https://www.elastic.co/blog/mac-system-extensions-for-threat-detection-part-1">Elastic: Mac System Extensions for Threat Detection</a></li>
+  <li><a href="https://eclecticlight.co/2024/07/24/how-macos-is-moving-away-from-kernel-extensions/">Eclectic Light: Moving Away from Kernel Extensions</a></li>
+  <li><a href="https://support.apple.com/guide/deployment/system-extensions-in-macos-depa5fb8376f/web">Apple: System Extensions in macOS</a></li>
+</ul></div>
+
+<!-- ============================================================ -->
+
+<h2 id="amfi">5. AMFI (Apple Mobile File Integrity)</h2>
+
+<p>AMFI is a MAC Policy Module implemented as <code>AppleMobileFileIntegrity.kext</code>. It registers during <code>mac_policy_initmach()</code> through <code>bootstrapLoadSecurityExtensions()</code>.</p>
+
+<h3>Three Components</h3>
+<div class="table-wrap">
+<table>
+  <tr><th>Component</th><th>Location</th><th>Role</th></tr>
+  <tr><td><strong>Kernel Extension</strong></td><td><code>/System/Library/Extensions/AppleMobileFileIntegrity.kext</code></td><td>Registers MACF hooks, performs in-kernel enforcement</td></tr>
+  <tr><td><strong>amfid daemon</strong></td><td><code>/usr/libexec/amfid</code></td><td>Full code signature validation via Security.framework, certificate trust evaluation</td></tr>
+  <tr><td><strong>IPC</strong></td><td>Mach port <code>HOST_AMFID_PORT</code> (18)</td><td>MIG subsystem, messages 1000-1008; response on reply port 1100</td></tr>
+</table>
+</div>
+
+<h3>What AMFI Enforces</h3>
+<ul>
+  <li><strong>Code Signature Validation</strong> -- Two-stage: load-time CDHash check against Trust Caches (fast path), fallback to <code>amfid</code> for full validation. Runtime page-fault validation via <code>cs_validate_page</code>.</li>
+  <li><strong>Entitlement Enforcement</strong> -- Validates that processes only use entitlements they are authorized to have.</li>
+  <li><strong>Library Validation</strong> -- Platform binaries only load other platform binaries; loaded libraries must share TeamID.</li>
+  <li><strong>Mach Task Port Protection</strong> -- Controls access via <code>get-task-allow</code>, <code>task_for_pid-allow</code> entitlements.</li>
+  <li><strong>Memory Protection</strong> -- Prevents mapping executable memory for unsigned code.</li>
+  <li><strong>Dyld Policy</strong> -- Blocks <code>DYLD_INSERT_LIBRARIES</code> injection for binaries with Hardened Runtime, Library Validation, <code>CS_RESTRICT</code>, or SUID/SGID bits.</li>
+  <li><strong>Process Integrity</strong> -- Sets <code>cs_hard | cs_kill</code> flags at exec, killing process if code pages become invalid.</li>
+</ul>
+
+<h3>MACF Hooks Registered by AMFI</h3>
+<pre><code>mpo_vnode_check_signature        // Primary code signature validation
+mpo_vnode_check_exec             // Sets cs_hard | cs_kill flags
+mpo_file_check_mmap              // Executable memory mapping check
+mpo_file_check_library_validation
+mpo_proc_check_get_task          // Task port access (entitlement check)
+mpo_proc_check_expose_task
+mpo_proc_check_mprotect
+mpo_proc_check_run_cs_invalid
+mpo_proc_check_map_anon
+mpo_proc_check_inherit_ipc_ports
+mpo_proc_check_launch_constraints
+mpo_policy_syscall               // Handles __mac_syscall("AMFI", ...)
+mpo_cred_check_label_update_execve
+mpo_vnode_check_getextattr / setextattr
+mpo_exc_action_check_exception_send</code></pre>
+
+<h3>Trust Caches</h3>
+<p>On Apple Silicon, trust caches are part of the Secure Boot chain. They store precomputed CDHash values for Apple-signed binaries, enabling rapid validation without full cryptographic verification. Modern trust caches tie metadata to "launch constraints."</p>
+
+<div class="source-list"><ul>
+  <li><a href="https://karol-mazurek.medium.com/snake-apple-vi-amfi-31c48fb92d33">Snake&amp;Apple VI: AMFI -- Karol Mazurek</a></li>
+  <li><a href="https://www.theiphonewiki.com/wiki/AppleMobileFileIntegrity">AppleMobileFileIntegrity -- The iPhone Wiki</a></li>
+  <li><a href="https://github.com/HackTricks-wiki/hacktricks/blob/master/src/macos-hardening/macos-security-and-privilege-escalation/macos-security-protections/macos-amfi-applemobilefileintegrity.md">HackTricks: macOS AMFI</a></li>
+  <li><a href="https://www.offsec.com/blog/amfi-syscall/">OffSec: AMFI Syscall</a></li>
+</ul></div>
+
+<!-- ============================================================ -->
+
+<h2 id="code-signing">6. Code Signing, Entitlements, and AMFI Interaction</h2>
+
+<h3>Restricted vs. Unrestricted Entitlements</h3>
+
+<div class="table-wrap">
+<table>
+  <tr><th>Type</th><th>Who Can Use</th><th>Examples</th></tr>
+  <tr>
+    <td><strong>Unrestricted</strong></td>
+    <td>Any signed binary (including ad-hoc)</td>
+    <td><code>com.apple.application-identifier</code>, <code>com.apple.security.application-groups.*</code>, sandbox family</td>
+  </tr>
+  <tr>
+    <td><strong>Restricted</strong></td>
+    <td>Apple-signed binaries, or binaries with Apple-approved provisioning profiles</td>
+    <td><code>get-task-allow</code>, <code>com.apple.security.virtualization</code>, <code>com.apple.vm.networking</code>, <code>dynamic-codesigning</code>, <code>com.apple.security.cs.allow-jit</code></td>
+  </tr>
+</table>
+</div>
+
+<div class="callout warn">
+  <div class="callout-label">Critical for urunc-macos</div>
+  <p>The entitlements <code>com.apple.security.virtualization</code> and <code>com.apple.vm.networking</code> are <strong>restricted entitlements</strong>. AMFI will kill any ad-hoc signed binary claiming these -- <strong>unless</strong> SIP is disabled and <code>amfi_get_out_of_my_way=1</code> is set.</p>
+</div>
+
+<h3>AMFI Boot Arguments</h3>
+<div class="table-wrap">
+<table>
+  <tr><th>Boot Arg</th><th>Effect</th><th>Requires SIP Off?</th></tr>
+  <tr><td><code>amfi_get_out_of_my_way=1</code></td><td>Disables AMFI enforcement (restricted entitlements honored with ad-hoc signing)</td><td>Yes</td></tr>
+  <tr><td><code>amfi_allow_any_signature</code></td><td>Allows any code signature</td><td>Yes</td></tr>
+  <tr><td><code>amfi_unrestrict_task_for_pid</code></td><td>Allows <code>task_for_pid</code> without entitlements</td><td>Yes</td></tr>
+  <tr><td><code>cs_enforcement_disable</code></td><td>System-wide code signing enforcement disable</td><td>Yes</td></tr>
+</table>
+</div>
+
+<h3>AMFI and SIP Interaction</h3>
+<ul>
+  <li><strong>SIP protects AMFI's infrastructure</strong> -- prevents root from hijacking <code>HOST_AMFID_PORT</code>; only <code>launchd</code> can obtain special ports.</li>
+  <li><strong>SIP gates AMFI boot arguments</strong> -- all AMFI-weakening boot args are ignored when SIP is enabled.</li>
+  <li><strong>Layered enforcement:</strong> SIP enabled + AMFI enabled = maximum security. SIP off + <code>amfi_get_out_of_my_way=1</code> = restricted entitlements work with ad-hoc signatures.</li>
+</ul>
+
+<h3>Dyld Policy Syscall</h3>
+<p><code>__mac_syscall("AMFI", 0x5a, ...)</code> queries AMFI for dyld policy flags:</p>
+<pre><code>Bit 0: AMFI_DYLD_OUTPUT_ALLOW_AT_PATH
+Bit 1: AMFI_DYLD_OUTPUT_ALLOW_PATH_VARS
+Bit 2: AMFI_DYLD_OUTPUT_ALLOW_CUSTOM_SHARED_CACHE
+Bit 3: AMFI_DYLD_OUTPUT_ALLOW_FALLBACK_PATHS
+Bit 4: AMFI_DYLD_OUTPUT_ALLOW_PRINT_VARS
+Bit 5: AMFI_DYLD_OUTPUT_ALLOW_FAILED_LIBRARY_INSERTION</code></pre>
+
+<div class="source-list"><ul>
+  <li><a href="https://www.offsec.com/blog/amfi-syscall/">OffSec: AMFI Syscall</a></li>
+  <li><a href="https://pvieito.com/2016/12/amfid-patching">PVIEITO: Jailbreaking macOS -- Patching AMFI</a></li>
+  <li><a href="https://eclecticlight.co/2018/12/29/amfi-checking-file-integrity-on-your-mac/">Eclectic Light: AMFI -- Checking File Integrity</a></li>
+</ul></div>
+
+<hr class="section-divider">
+
+<!-- ============================================================ -->
+<!-- PART II: RESOURCE MANAGEMENT                                  -->
+<!-- ============================================================ -->
+
+<h2 id="cgroups-equiv">7. cgroups Equivalent on macOS</h2>
+
+<div class="callout danger">
+  <div class="callout-label">No Equivalent Exists</div>
+  <p>macOS has <strong>no direct equivalent to Linux cgroups</strong>. There is no hierarchical, per-group resource accounting and limiting subsystem. Resource limits are fundamentally <strong>per-process</strong> (or per-UID for some limits like <code>RLIMIT_NPROC</code>).</p>
+</div>
+
+<p>macOS uses a collection of separate, per-process mechanisms:</p>
+<ul>
+  <li><code>setrlimit/getrlimit</code> -- BSD resource limits</li>
+  <li><code>taskpolicy / process_policy</code> -- XNU kernel task policy system</li>
+  <li>Jetsam / memorystatus -- memory pressure killing</li>
+  <li>launchd plist resource keys -- daemon resource configuration</li>
+  <li>QoS classes -- scheduling tiers</li>
+  <li>sandbox-exec profiles -- access control, limited resource throttling</li>
+</ul>
+
+<p>None provide hierarchical grouping, accounting, or delegation. This is a fundamental limitation for container runtime development on macOS.</p>
+
+<div class="source-list"><ul>
+  <li><a href="https://news.ycombinator.com/item?id=28430443">Hacker News: macOS cgroups discussion</a></li>
+  <li><a href="https://forums.docker.com/t/docker-cgroups-on-mac-os-x/14731">Docker Forums: cgroups on Mac OS X</a></li>
+</ul></div>
+
+<!-- ============================================================ -->
+
+<h2 id="setrlimit">8. setrlimit / getrlimit</h2>
+
+<div class="table-wrap">
+<table>
+  <tr><th>Constant</th><th>Description</th><th>Enforced?</th></tr>
+  <tr><td><code>RLIMIT_CORE</code></td><td>Max core file size (bytes)</td><td><span class="tag tag-yes">YES</span></td></tr>
+  <tr><td><code>RLIMIT_CPU</code></td><td>Max CPU time (seconds); SIGXCPU on soft limit, SIGKILL on hard</td><td><span class="tag tag-yes">YES</span></td></tr>
+  <tr><td><code>RLIMIT_DATA</code></td><td>Max data segment size (bytes)</td><td><span class="tag tag-yes">YES</span></td></tr>
+  <tr><td><code>RLIMIT_FSIZE</code></td><td>Max file creation size; SIGXFSZ sent</td><td><span class="tag tag-yes">YES</span></td></tr>
+  <tr><td><code>RLIMIT_MEMLOCK</code></td><td>Max locked memory via mlock(2)</td><td><span class="tag tag-yes">YES</span></td></tr>
+  <tr><td><code>RLIMIT_NOFILE</code></td><td>Max open file descriptors</td><td><span class="tag tag-yes">YES</span> (but <code>RLIM_INFINITY</code> rejected)</td></tr>
+  <tr><td><code>RLIMIT_NPROC</code></td><td>Max simultaneous processes per UID</td><td><span class="tag tag-yes">YES</span></td></tr>
+  <tr><td><code>RLIMIT_RSS</code></td><td>Max resident set size (advisory)</td><td><span class="tag tag-no">NOT ENFORCED</span> -- hint for page-out priority only</td></tr>
+  <tr><td><code>RLIMIT_STACK</code></td><td>Max stack segment size</td><td><span class="tag tag-partial">PARTIAL</span> -- SIGSEGV on overflow, but runtime expansion may fail</td></tr>
+  <tr><td><code>RLIMIT_AS</code></td><td>Address space limit</td><td><span class="tag tag-no">NOT SUPPORTED</span> -- not defined on macOS</td></tr>
+</table>
+</div>
+
+<div class="callout warn">
+  <div class="callout-label">Key Gaps</div>
+  <p><code>RLIMIT_RSS</code> is defined but not enforced. <code>RLIMIT_AS</code> does not exist. Modern macOS uses Jetsam/memorystatus for actual memory enforcement, not <code>setrlimit</code>.</p>
+</div>
+
+<h3>launchd Plist Resource Controls</h3>
+<p>For daemons managed by launchd, plists support <code>SoftResourceLimits</code> / <code>HardResourceLimits</code> dictionaries mapping to the <code>RLIMIT_*</code> constants, plus:</p>
+<ul>
+  <li><code>ProcessType</code>: <code>Background</code>, <code>Standard</code>, <code>Adaptive</code>, <code>Interactive</code></li>
+  <li><code>Nice</code>: sets <code>nice(3)</code> priority</li>
+  <li><code>LowPriorityIO</code>: marks low-priority for filesystem I/O</li>
+</ul>
+
+<div class="source-list"><ul>
+  <li><a href="https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/getrlimit.2.html">Apple: getrlimit(2) man page</a></li>
+  <li><a href="https://keith.github.io/xcode-man-pages/launchd.plist.5.html">launchd.plist(5) man page</a></li>
+  <li><a href="https://ss64.com/mac/ulimit.html">ss64: macOS ulimit</a></li>
+</ul></div>
+
+<!-- ============================================================ -->
+
+<h2 id="taskpolicy">9. taskpolicy and QoS Classes</h2>
+
+<h3>taskpolicy Command</h3>
+<p>The most powerful per-process resource control tool on macOS. Wraps <code>setiopolicy_np(3)</code> and <code>setpriority(2)</code>:</p>
+
+<div class="table-wrap">
+<table>
+  <tr><th>Flag</th><th>Effect</th></tr>
+  <tr><td><code>-b</code></td><td>Background priority (<code>PRIO_DARWIN_BG</code>) -- throttles CPU scheduling, disk I/O, network I/O. On Apple Silicon: confines to E-cores.</td></tr>
+  <tr><td><code>-B</code></td><td>Remove background priority</td></tr>
+  <tr><td><code>-c clamp</code></td><td>QoS clamp: <code>utility</code>, <code>background</code>, or <code>maintenance</code></td></tr>
+  <tr><td><code>-d policy</code></td><td>Disk I/O policy: <code>default</code>, <code>throttle</code>, etc.</td></tr>
+  <tr><td><code>-m limit</code></td><td><strong>Memory limit in MiB</strong> (sets Jetsam high-water mark)</td></tr>
+  <tr><td><code>-j pri</code></td><td><strong>Jetsam priority level</strong> (0-21; lower = killed first)</td></tr>
+  <tr><td><code>-P pcontrol</code></td><td>Resource exhaustion action: <code>kill</code>, <code>throttle</code>, <code>suspend</code></td></tr>
+  <tr><td><code>-t / -l</code></td><td>Throughput / latency tier</td></tr>
+  <tr><td><code>-p pid</code></td><td>Target an existing process</td></tr>
+</table>
+</div>
+
+<div class="callout">
+  <div class="callout-label">Can taskpolicy limit CPU to a percentage?</div>
+  <p><strong>No.</strong> It can demote a process to background QoS (E-cores only on Apple Silicon) or apply a QoS clamp, but it cannot set a precise CPU percentage cap. It is a "brake, not an accelerator."</p>
+</div>
+
+<h3>QoS Classes</h3>
+<div class="table-wrap">
+<table>
+  <tr><th>QoS Value</th><th>Name</th><th>Apple Silicon Behavior</th></tr>
+  <tr><td>33</td><td><code>userInteractive</code></td><td>P-cores preferred, highest priority</td></tr>
+  <tr><td>25</td><td><code>userInitiated</code></td><td>P-cores preferred</td></tr>
+  <tr><td>17</td><td><code>utility</code></td><td>May run on E-cores</td></tr>
+  <tr><td>9</td><td><code>background</code></td><td><strong>E-cores only</strong> -- ~12-23% of full chip performance</td></tr>
+</table>
+</div>
+
+<p>On Apple Silicon with a base chip (4E + 4P), <code>taskpolicy -b</code> confines a process to E-cores, effectively limiting it to ~12-23% of full-chip performance. This is the closest macOS has to a CPU cap.</p>
+
+<h3>I/O Throttle Tiers</h3>
+<p>Via <code>setiopolicy_np</code>: <code>IOPOL_IMPORTANT</code> > <code>IOPOL_STANDARD</code> > <code>IOPOL_UTILITY</code> > <code>IOPOL_THROTTLE</code> > <code>IOPOL_PASSIVE</code>. The XNU kernel maps these to internal <code>THROTTLE_LEVEL_TIER0</code> through <code>TIER3</code>.</p>
+
+<div class="source-list"><ul>
+  <li><a href="https://ss64.com/mac/taskpolicy.html">ss64: taskpolicy command</a></li>
+  <li><a href="https://eclecticlight.co/2022/10/20/making-the-most-of-apple-silicon-power-5-user-control/">Eclectic Light: Apple Silicon Power -- User Control</a></li>
+  <li><a href="https://eclecticlight.co/2025/05/09/what-is-quality-of-service-and-how-does-it-matter/">Eclectic Light: What is Quality of Service?</a></li>
+  <li><a href="https://eclecticlight.co/2022/01/07/how-macos-controls-performance-qos-on-intel-and-m1-processors/">Eclectic Light: QoS on Intel and M1</a></li>
+  <li><a href="https://jmmv.dev/2019/03/macos-threads-qos-and-bazel.html">Julio Merino: Darwin's QoS and Performance</a></li>
+</ul></div>
+
+<!-- ============================================================ -->
+
+<h2 id="jetsam">10. Jetsam / memorystatus</h2>
+
+<p>Jetsam is the kernel subsystem that actually enforces memory limits on macOS (and iOS). It is far more effective than <code>RLIMIT_RSS</code>.</p>
+
+<h3>How It Works</h3>
+<ol>
+  <li>Maintains <strong>21+ priority bands</strong> (linked-list buckets, lowest to highest priority)</li>
+  <li>Monitors <code>phys_footprint</code> ledger per process (includes RSS, compressed memory, IOKit allocations)</li>
+  <li>Under memory pressure, kills processes from lowest to highest priority band</li>
+  <li>Processes can have a <strong>High Water Mark</strong> -- exceeding it makes them eligible for immediate termination</li>
+</ol>
+
+<h3>macOS vs iOS Jetsam</h3>
+<div class="table-wrap">
+<table>
+  <tr><th>Aspect</th><th>macOS</th><th>iOS</th></tr>
+  <tr><td>Swap</td><td>Yes (<code>/var/vm/</code>)</td><td>No</td></tr>
+  <tr><td>Aggressiveness</td><td>Gentler -- targets idle-exit first</td><td>Aggressive -- kills background apps readily</td></tr>
+  <tr><td>Primary mechanism</td><td><code>vm_pressure_thread</code> + idle exit + jetsam</td><td><code>memorystatus_jetsam_thread</code> (blocking loop)</td></tr>
+</table>
+</div>
+
+<h3>memorystatus_control() Syscall (#440)</h3>
+<pre><code>int memorystatus_control(
+    uint32_t command,
+    int32_t  pid,
+    uint32_t flags,
+    user_addr_t buffer,
+    size_t   buffersize
+);</code></pre>
+
+<div class="table-wrap">
+<table>
+  <tr><th>#</th><th>Command</th><th>Description</th></tr>
+  <tr><td>1</td><td><code>GET_PRIORITY_LIST</code></td><td>Retrieve priority band array for all processes</td></tr>
+  <tr><td>2</td><td><code>SET_PRIORITY_PROPERTIES</code></td><td>Set priority/limit for a process <span class="tag tag-private">PRIVILEGED</span></td></tr>
+  <tr><td>3</td><td><code>GET_JETSAM_SNAPSHOT</code></td><td>Snapshot of jetsam state</td></tr>
+  <tr><td>4</td><td><code>GET_PRESSURE_STATUS</code></td><td>Check memory pressure level <span class="tag tag-private">PRIVILEGED</span></td></tr>
+  <tr><td>5</td><td><code>SET_JETSAM_HIGH_WATER_MARK</code></td><td>Set non-fatal memory limit</td></tr>
+  <tr><td>6</td><td><code>SET_JETSAM_TASK_LIMIT</code></td><td>Set <strong>fatal</strong> memory limit</td></tr>
+  <tr><td>7</td><td><code>SET_MEMLIMIT_PROPERTIES</code></td><td>Independent active/inactive limits with fatal flags</td></tr>
+  <tr><td>8</td><td><code>GET_MEMLIMIT_PROPERTIES</code></td><td>Retrieve memory limit properties</td></tr>
+  <tr><td>9-10</td><td><code>PRIVILEGED_LISTENER_*</code></td><td>Register/unregister privileged pressure listener</td></tr>
+  <tr><td>13</td><td><code>GET_MEMLIMIT_EXCESS</code></td><td>Query how much process exceeds limit</td></tr>
+  <tr><td>16-17</td><td><code>SET/GET_PROCESS_IS_MANAGED</code></td><td>Mark/query managed status</td></tr>
+  <tr><td>18-19</td><td><code>SET/GET_PROCESS_IS_FREEZABLE</code></td><td>Set/query freeze eligibility</td></tr>
+  <tr><td>22</td><td><code>INCREASE_JETSAM_TASK_LIMIT</code></td><td>Increase limits (dev/debug only)</td></tr>
+  <tr><td>100</td><td><code>GRP_SET_PROPERTIES</code></td><td>Modify properties for multiple processes at once</td></tr>
+</table>
+</div>
+
+<h3>Memory Limit Types</h3>
+<div class="table-wrap">
+<table>
+  <tr><th>Type</th><th>Command</th><th>Behavior</th></tr>
+  <tr><td><strong>Non-fatal (HWM)</strong></td><td>CMD 5</td><td>Process becomes early jetsam candidate under pressure</td></tr>
+  <tr><td><strong>Fatal (hard)</strong></td><td>CMD 6</td><td>Process <strong>immediately killed</strong> when exceeding limit, regardless of pressure</td></tr>
+  <tr><td><strong>Independent</strong></td><td>CMD 7</td><td>Separate active/inactive limits, each with own fatal/non-fatal flag</td></tr>
+</table>
+</div>
+
+<h3>Priority Bands</h3>
+<div class="table-wrap">
+<table>
+  <tr><th>Value</th><th>Constant</th><th>Description</th></tr>
+  <tr><td>-2</td><td><code>IDLE_HEAD</code></td><td>Absolute lowest -- killed first</td></tr>
+  <tr><td>0</td><td><code>IDLE</code></td><td>Idle processes</td></tr>
+  <tr><td>1</td><td><code>AGING_BAND1</code></td><td>System processes aging toward idle</td></tr>
+  <tr><td>2</td><td><code>AGING_BAND2</code></td><td>Apps aging toward idle</td></tr>
+  <tr><td>3</td><td><code>BACKGROUND</code></td><td>Standard background</td></tr>
+  <tr><td>8</td><td><code>UI_SUPPORT</code></td><td>UI support (keyboard extensions)</td></tr>
+  <tr><td>10</td><td><code>FOREGROUND</code></td><td>Currently foreground apps</td></tr>
+  <tr><td>12</td><td><code>AUDIO_AND_ACCESSORY</code></td><td>Audio services</td></tr>
+  <tr><td>16</td><td><code>HOME</code></td><td>SpringBoard/Home</td></tr>
+  <tr><td>18</td><td><code>IMPORTANT/DEFAULT</code></td><td>Important / default priority</td></tr>
+  <tr><td>19</td><td><code>CRITICAL/TELEPHONY</code></td><td>Critical services</td></tr>
+  <tr><td>21</td><td><code>MAX</code></td><td>Maximum assignable</td></tr>
+</table>
+</div>
+
+<h3>Kill Algorithm</h3>
+<ol>
+  <li>Start at lowest non-empty priority bucket (IDLE_HEAD at -2)</li>
+  <li>Kill first process in that bucket; check if enough memory freed</li>
+  <li>If not, continue through bucket, then move to next higher bucket</li>
+  <li>If normal kills are insufficient, <strong>aggressive mode</strong> kills multiple candidates across bands simultaneously</li>
+</ol>
+
+<p>Before killing, <code>NOTE_VM_PRESSURE</code> is sent via kevent. Processes can respond via <code>DISPATCH_SOURCE_TYPE_MEMORYPRESSURE</code>. The public API <code>os_proc_available_memory()</code> returns bytes available before jetsam.</p>
+
+<h3>Relevant sysctl Parameters</h3>
+<pre><code>kern.memorystatus_vm_pressure_level   # 1=NORMAL, 2=WARN, 4=CRITICAL
+kern.memorystatus_level               # Pressure percentage
+kern.max_task_pmem                    # Max physical memory per task (read-only)
+vm.vm_page_free_target                # Minimum free pages desired
+vm.vm_page_free_count                 # Currently free pages</code></pre>
+
+<div class="callout">
+  <div class="callout-label">Documentation Status</div>
+  <p>The XNU source code is open (headers + implementation), and Apple documents jetsam event reports. But the <code>memorystatus_control()</code> syscall itself is <strong>undocumented SPI</strong> -- learned from reading kernel source or community research (notably Jonathan Levin's newosxbook.com).</p>
+</div>
+
+<div class="source-list"><ul>
+  <li><a href="http://newosxbook.com/articles/MemoryPressure.html">newosxbook.com: No Pressure, Mon! (Jonathan Levin)</a></li>
+  <li><a href="https://github.com/apple/darwin-xnu/blob/main/bsd/sys/kern_memorystatus.h">darwin-xnu kern_memorystatus.h</a></li>
+  <li><a href="https://github.com/apple/darwin-xnu/blob/main/bsd/kern/kern_memorystatus.c">darwin-xnu kern_memorystatus.c</a></li>
+  <li><a href="https://developer.apple.com/documentation/xcode/identifying-high-memory-use-with-jetsam-event-reports">Apple: Identifying High-Memory Use with Jetsam Event Reports</a></li>
+  <li><a href="https://developer.apple.com/documentation/os/3191911-os_proc_available_memory">Apple: os_proc_available_memory()</a></li>
+  <li><a href="https://github.com/Torrekie/jetsam_utils">jetsam_utils (GitHub)</a></li>
+</ul></div>
+
+<!-- ============================================================ -->
+
+<h2 id="proc-apis">11. proc_set_dirty / proc_set_cpumon_params</h2>
+
+<h3>proc_set_cpumon_params -- CPU Usage Monitoring</h3>
+
+<p>This function is part of macOS's <code>libproc</code> <strong>private API</strong>. It configures CPU usage monitoring (not capping).</p>
+
+<pre><code>int proc_set_cpumon_params(pid_t pid, int percentage, int interval);</code></pre>
+
+<p>Implementation uses <code>__process_policy(PROC_POLICY_SCOPE_PROCESS, PROC_POLICY_ACTION_SET, PROC_POLICY_RESOURCE_USAGE, PROC_POLICY_RUSAGE_CPU, ...)</code>.</p>
+
+<div class="callout warn">
+  <div class="callout-label">Monitor, Not Limiter</div>
+  <p>This sets a CPU usage <strong>monitor</strong>, not a hard cap. It watches whether a process exceeds a given <code>percentage</code> over a given <code>interval</code> (seconds). When exceeded, a <strong>Mach exception notification</strong> is sent. It does not throttle CPU usage.</p>
+</div>
+
+<p>Default values: 50% over 180 seconds (3 minutes).</p>
+
+<h4>Related Functions</h4>
+<div class="table-wrap">
+<table>
+  <tr><th>Function</th><th>Purpose</th></tr>
+  <tr><td><code>proc_get_cpumon_params(pid, *pct, *interval)</code></td><td>Retrieve current monitoring parameters</td></tr>
+  <tr><td><code>proc_set_cpumon_defaults(pid)</code></td><td>Apply default 50%/3min monitoring</td></tr>
+  <tr><td><code>proc_disable_cpumon(pid)</code></td><td>Disable CPU monitoring</td></tr>
+  <tr><td><code>proc_set_cpumon_params_fatal(pid, pct, interval)</code></td><td>Monitor + <strong>terminate</strong> on violation</td></tr>
+</table>
+</div>
+
+<h3>proc_set_dirty -- Process Lifecycle Management</h3>
+
+<pre><code>int proc_set_dirty(pid_t pid, bool dirty);</code></pre>
+
+<p>Marks a process as "dirty" (doing useful work, should not be killed) or "clean" (eligible for idle-exit under memory pressure). Part of macOS's process lifecycle / idle-exit system.</p>
+
+<h4>P_DIRTY Flags</h4>
+<pre><code>#define P_DIRTY_TRACK                0x00000001
+#define P_DIRTY_ALLOW_IDLE_EXIT      0x00000002
+#define P_DIRTY_DEFER                0x00000004
+#define P_DIRTY                      0x00000008
+#define P_DIRTY_SHUTDOWN             0x00000010
+#define P_DIRTY_BUSY                 0x00000040
+#define P_DIRTY_AGING_IN_PROGRESS    0x00000100
+#define P_DIRTY_DEFER_ALWAYS         0x00000400</code></pre>
+
+<h4>Related Functions</h4>
+<ul>
+  <li><code>proc_track_dirty(pid, flags)</code> -- Enable dirty tracking</li>
+  <li><code>proc_get_dirty(pid, *flags)</code> -- Retrieve current dirty state</li>
+</ul>
+
+<h3>Other proc_* Resource Control APIs</h3>
+<div class="table-wrap">
+<table>
+  <tr><th>Function</th><th>Purpose</th></tr>
+  <tr><td><code>proc_pid_rusage(pid, flavor, *buf)</code></td><td>Get resource usage (CPU time, memory, I/O)</td></tr>
+  <tr><td><code>proc_setpcontrol(control)</code></td><td>Set process control during resource starvation</td></tr>
+  <tr><td><code>proc_terminate(pid, *sig)</code></td><td>Terminate a process</td></tr>
+  <tr><td><code>proc_rlimit_control(pid, flavor, arg)</code></td><td>Generic resource limit control</td></tr>
+</table>
+</div>
+
+<h4>proc_rlimit_control Flavors</h4>
+<pre><code>#define RLIMIT_WAKEUPS_MONITOR       0x1
+#define RLIMIT_CPU_USAGE_MONITOR     0x2
+#define RLIMIT_THREAD_CPULIMITS      0x3
+#define RLIMIT_FOOTPRINT_INTERVAL    0x4
+#define CPUMON_MAKE_FATAL            0x1000
+#define WAKEMON_MAKE_FATAL           0x10</code></pre>
+
+<div class="source-list"><ul>
+  <li><a href="https://newosxbook.com/src.php?file=%2Flibsyscall%2Fwrappers%2Flibproc%2Flibproc.c&tree=xnu">XNU libproc.c (newosxbook)</a></li>
+  <li><a href="https://opensource.apple.com/source/xnu/xnu-2422.1.72/libsyscall/wrappers/libproc/libproc.c?txt=">XNU libproc.c (opensource.apple.com)</a></li>
+  <li><a href="https://github.com/apple/darwin-xnu/blob/main/osfmk/kern/task_policy.c">darwin-xnu task_policy.c</a></li>
+  <li><a href="https://github.com/apple/darwin-xnu/blob/main/bsd/sys/resource.h">darwin-xnu resource.h</a></li>
+</ul></div>
+
+<!-- ============================================================ -->
+
+<h2 id="iokit">12. IOKit Resource Management</h2>
+
+<p>IOKit is Apple's device driver framework. It provides memory descriptor management (<code>IOMemoryDescriptor</code>) for DMA transfers and device-interface mechanisms for userspace driver access.</p>
+
+<div class="callout">
+  <div class="callout-label">Not a Resource Management API</div>
+  <p>IOKit does <strong>not</strong> provide per-process resource limiting. The only "resource" aspect is that Jetsam includes IOKit memory allocations in its <code>phys_footprint</code> accounting, so IOKit memory usage counts against a process's jetsam memory limit.</p>
+</div>
+
+<div class="source-list"><ul>
+  <li><a href="https://developer.apple.com/documentation/iokit">Apple Developer: IOKit</a></li>
+</ul></div>
+
+<!-- ============================================================ -->
+
+<h2 id="summary-table">13. Summary: Resource Limiting Capabilities</h2>
+
+<div class="table-wrap">
+<table>
+  <tr><th>Resource</th><th>Mechanism</th><th>Works?</th></tr>
+  <tr>
+    <td><strong>CPU time (hard limit)</strong></td>
+    <td><code>setrlimit(RLIMIT_CPU)</code> / launchd <code>CPU</code></td>
+    <td><span class="tag tag-yes">YES</span> -- SIGXCPU then SIGKILL</td>
+  </tr>
+  <tr>
+    <td><strong>CPU scheduling priority</strong></td>
+    <td><code>nice</code>, <code>taskpolicy -b</code>, QoS classes</td>
+    <td><span class="tag tag-yes">YES</span></td>
+  </tr>
+  <tr>
+    <td><strong>CPU percentage cap</strong></td>
+    <td>No native mechanism</td>
+    <td><span class="tag tag-no">NO</span></td>
+  </tr>
+  <tr>
+    <td><strong>CPU core affinity</strong></td>
+    <td>No user-space tool; internal thread affinity API</td>
+    <td><span class="tag tag-partial">LIMITED</span></td>
+  </tr>
+  <tr>
+    <td><strong>Memory (hard kill)</strong></td>
+    <td><code>taskpolicy -m</code> / Jetsam <code>memorystatus_control</code></td>
+    <td><span class="tag tag-yes">YES</span> -- process killed on exceed</td>
+  </tr>
+  <tr>
+    <td><strong>Memory (soft/advisory)</strong></td>
+    <td><code>setrlimit(RLIMIT_RSS)</code></td>
+    <td><span class="tag tag-no">NOT ENFORCED</span></td>
+  </tr>
+  <tr>
+    <td><strong>Virtual address space</strong></td>
+    <td><code>RLIMIT_AS</code></td>
+    <td><span class="tag tag-no">NOT SUPPORTED</span></td>
+  </tr>
+  <tr>
+    <td><strong>Disk I/O throttling</strong></td>
+    <td><code>taskpolicy -d throttle</code> / <code>setiopolicy_np</code></td>
+    <td><span class="tag tag-yes">YES</span> -- tiered throttling</td>
+  </tr>
+  <tr>
+    <td><strong>Network I/O throttling</strong></td>
+    <td><code>PRIO_DARWIN_BG</code></td>
+    <td><span class="tag tag-yes">YES</span> -- for sockets opened after flag set</td>
+  </tr>
+  <tr>
+    <td><strong>Open files</strong></td>
+    <td><code>setrlimit(RLIMIT_NOFILE)</code></td>
+    <td><span class="tag tag-yes">YES</span></td>
+  </tr>
+  <tr>
+    <td><strong>Max processes/UID</strong></td>
+    <td><code>setrlimit(RLIMIT_NPROC)</code></td>
+    <td><span class="tag tag-yes">YES</span></td>
+  </tr>
+  <tr>
+    <td><strong>File size</strong></td>
+    <td><code>setrlimit(RLIMIT_FSIZE)</code></td>
+    <td><span class="tag tag-yes">YES</span></td>
+  </tr>
+  <tr>
+    <td><strong>Locked memory</strong></td>
+    <td><code>setrlimit(RLIMIT_MEMLOCK)</code></td>
+    <td><span class="tag tag-yes">YES</span></td>
+  </tr>
+  <tr>
+    <td><strong>CPU usage monitoring</strong></td>
+    <td><code>proc_set_cpumon_params</code></td>
+    <td><span class="tag tag-partial">MONITOR ONLY</span> -- notify or kill, no throttle</td>
+  </tr>
+  <tr>
+    <td><strong>Hierarchical group limits</strong></td>
+    <td>None (no cgroups equivalent)</td>
+    <td><span class="tag tag-no">N/A</span></td>
+  </tr>
+</table>
+</div>
+
+<div class="callout success">
+  <div class="callout-label">For Container Runtime Development</div>
+  <p>The most useful primitives for a macOS container runtime are:</p>
+  <ul>
+    <li><strong>Memory limiting:</strong> <code>taskpolicy -m &lt;MiB&gt;</code> or <code>memorystatus_control(SET_JETSAM_TASK_LIMIT, ...)</code> for hard limits</li>
+    <li><strong>CPU scheduling:</strong> <code>taskpolicy -b</code> or <code>-c background</code> for background demotion; <code>RLIMIT_CPU</code> for total CPU time caps</li>
+    <li><strong>I/O throttling:</strong> <code>taskpolicy -d throttle</code> or <code>setiopolicy_np()</code></li>
+    <li><strong>File descriptors:</strong> <code>setrlimit(RLIMIT_NOFILE, ...)</code></li>
+    <li>The <strong>absence of cgroups</strong> means there is no way to limit a group of processes collectively. Each process must be limited individually.</li>
+  </ul>
+</div>
+
+<hr class="section-divider">
+<p style="color: var(--text-muted); font-size: 0.8em; margin-top: 1rem;">Research compiled June 2026. Sources include XNU open-source kernel code, Apple developer documentation, community research (newosxbook.com, Eclectic Light, HackTricks), and security research blogs. All <code>memorystatus_control()</code> commands and <code>proc_*</code> APIs are undocumented SPI -- use at your own risk.</p>
+
+</body>
+</html>

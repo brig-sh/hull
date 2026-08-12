@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>macOS Sandbox Profiles for Container-Like Isolation -- Research Report</title>
+<style>
+  :root {
+    --bg: #fafafa;
+    --fg: #1a1a1a;
+    --muted: #555;
+    --accent: #0055aa;
+    --border: #ddd;
+    --code-bg: #f0f0f0;
+    --section-bg: #fff;
+    --highlight: #fffce0;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    line-height: 1.65;
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 2rem 1.5rem;
+  }
+  h1 { font-size: 1.8rem; margin-bottom: 0.3rem; }
+  .subtitle { color: var(--muted); font-size: 0.95rem; margin-bottom: 2rem; }
+  h2 { font-size: 1.35rem; margin-top: 2.5rem; margin-bottom: 0.8rem; border-bottom: 2px solid var(--accent); padding-bottom: 0.3rem; }
+  h3 { font-size: 1.1rem; margin-top: 1.5rem; margin-bottom: 0.5rem; color: var(--accent); }
+  p, li { margin-bottom: 0.6rem; }
+  ul, ol { padding-left: 1.5rem; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code {
+    background: var(--code-bg);
+    padding: 0.15em 0.4em;
+    border-radius: 3px;
+    font-size: 0.9em;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+  }
+  pre {
+    background: #1e1e1e;
+    color: #d4d4d4;
+    padding: 1rem;
+    border-radius: 6px;
+    overflow-x: auto;
+    margin: 0.8rem 0;
+    font-size: 0.85rem;
+    line-height: 1.5;
+  }
+  pre code { background: none; color: inherit; padding: 0; }
+  .section {
+    background: var(--section-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.5rem;
+    margin-bottom: 1.5rem;
+  }
+  .highlight {
+    background: var(--highlight);
+    border-left: 4px solid #e6c300;
+    padding: 0.8rem 1rem;
+    margin: 1rem 0;
+    border-radius: 0 4px 4px 0;
+  }
+  .source {
+    font-size: 0.82rem;
+    color: var(--muted);
+    margin-top: 0.3rem;
+  }
+  .source a { color: var(--muted); }
+  .source a:hover { color: var(--accent); }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0;
+    font-size: 0.9rem;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 0.5rem 0.7rem;
+    text-align: left;
+  }
+  th { background: var(--code-bg); font-weight: 600; }
+  .toc { margin: 1.5rem 0; }
+  .toc ol { list-style: none; counter-reset: toc-counter; padding-left: 0; }
+  .toc li { counter-increment: toc-counter; margin-bottom: 0.3rem; }
+  .toc li::before { content: counter(toc-counter) ". "; font-weight: 600; color: var(--accent); }
+  .tag {
+    display: inline-block;
+    background: var(--accent);
+    color: #fff;
+    padding: 0.15em 0.5em;
+    border-radius: 3px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    margin-right: 0.3rem;
+  }
+  .tag.warn { background: #c44; }
+  .tag.ok { background: #2a7; }
+  @media (max-width: 640px) {
+    body { padding: 1rem; }
+    h1 { font-size: 1.4rem; }
+    pre { font-size: 0.78rem; }
+  }
+</style>
+</head>
+<body>
+
+<h1>macOS Sandbox Profiles for Container-Like Process Isolation</h1>
+<p class="subtitle">Research report -- June 2026. All claims sourced from web references listed inline.</p>
+
+<nav class="toc">
+<ol>
+  <li><a href="#arch">Sandbox Architecture: TrustedBSD, Seatbelt, SBPL</a></li>
+  <li><a href="#sbpl">SBPL Language Reference</a></li>
+  <li><a href="#system">Apple's Own System Sandbox Profiles</a></li>
+  <li><a href="#chromium">Chromium/Chrome macOS Sandbox</a></li>
+  <li><a href="#firefox">Firefox macOS Sandbox</a></li>
+  <li><a href="#docker">Docker Desktop and Container Runtimes on macOS</a></li>
+  <li><a href="#apple-containers">Apple Containerization Framework</a></li>
+  <li><a href="#projects">Open-Source Projects Using sandbox-exec</a></li>
+  <li><a href="#build">Sandboxing Build Tools and Untrusted Code</a></li>
+  <li><a href="#nesting">Nesting and Composing Sandbox Profiles</a></li>
+  <li><a href="#comparison">sandbox-exec vs. Linux Namespaces/Cgroups</a></li>
+  <li><a href="#limitations">Practical Limitations</a></li>
+  <li><a href="#deprecation">Deprecation Status and Future</a></li>
+</ol>
+</nav>
+
+<!-- ===== 1. Architecture ===== -->
+<h2 id="arch">1. Sandbox Architecture: TrustedBSD, Seatbelt, SBPL</h2>
+<div class="section">
+
+<p>The macOS sandbox (commonly called <strong>Seatbelt</strong>) is built on the <strong>TrustedBSD Mandatory Access Control (MAC) framework</strong> ported into XNU. It operates through a layered kernel architecture:</p>
+
+<ol>
+  <li><strong>Sandbox.kext</strong> -- a kernel extension that registers itself as a MAC policy module. It is consulted whenever a sandboxed process executes a monitored system call. A single denial from any policy module cancels the syscall and returns an error.</li>
+  <li><strong>libsandbox</strong> -- a userspace library that compiles sandbox profiles. It contains a custom Scheme interpreter based on <strong>TinySCHEME</strong> that evaluates SBPL (Sandbox Profile Language) source into opaque bytecode passed to Sandbox.kext for enforcement.</li>
+  <li><strong>sandbox-exec</strong> -- a CLI wrapper that reads an SBPL profile, compiles it via libsandbox, and applies it to a child process before exec. This is the only documented way to apply Seatbelt policies to arbitrary user-space processes without App Store enrollment or Xcode entitlements.</li>
+  <li><strong>sandbox_init()</strong> -- the C API that processes can call to sandbox themselves. Chromium, Firefox, and other applications use this to self-confine child processes.</li>
+</ol>
+
+<p>The compilation pipeline: SBPL source + parameters (entitlements, paths, bundle IDs) are evaluated by the TinySCHEME interpreter in libsandbox, producing a binary profile that is passed through the kernel to Sandbox.kext. The <em>last applicable rule</em> in a profile determines the final sandbox decision.</p>
+
+<div class="source">Sources:
+  <a href="https://ubrigens.com/posts/sandbox_tour.html">Ubrigens -- A Whirlwind Tour of the Apple Sandbox</a>,
+  <a href="https://dnesting.com/2026/macos-sandbox-sbpl-reference/">David Nesting -- SBPL Reference</a>,
+  <a href="https://chromium.googlesource.com/chromium/src/+/HEAD/sandbox/mac/README.md">Chromium -- The Mac Sandbox</a>
+</div>
+</div>
+
+<!-- ===== 2. SBPL Reference ===== -->
+<h2 id="sbpl">2. SBPL Language Reference</h2>
+<div class="section">
+
+<p>SBPL is an S-expression (Scheme-dialect) language. Profiles consist of <code>(allow ...)</code> and <code>(deny ...)</code> rules with operations and optional filters.</p>
+
+<h3>Core Syntax</h3>
+<pre><code>(version 1)
+(deny default)                              ; deny everything by default
+
+(allow file-read* (subpath "/usr/lib"))     ; allow reading under /usr/lib
+(allow file-read* (literal "/dev/null"))    ; exact path match
+(deny  network-outbound)                    ; block all outbound network
+(allow process-exec (literal "/bin/sh"))    ; allow executing /bin/sh
+(allow mach-lookup (global-name "com.apple.system.logger"))
+</code></pre>
+
+<h3>Primary Operations</h3>
+<table>
+  <tr><th>Category</th><th>Operations</th></tr>
+  <tr><td>File</td><td><code>file-read*</code>, <code>file-write*</code>, <code>file-clone</code>, <code>file-link</code>, <code>file-ioctl</code>, <code>file-search</code>, <code>file-test-existence</code>, <code>file-unlink</code>, <code>file-mount</code>, <code>file-unmount</code></td></tr>
+  <tr><td>Network</td><td><code>network-bind</code>, <code>network-inbound</code>, <code>network-outbound</code></td></tr>
+  <tr><td>IPC/Mach</td><td><code>mach-lookup</code>, <code>mach-register</code>, <code>mach-bootstrap</code>, <code>ipc-posix-shm*</code>, <code>ipc-posix-sem*</code></td></tr>
+  <tr><td>IOKit</td><td><code>iokit-open*</code>, <code>iokit-get-properties</code>, <code>iokit-set-properties</code>, <code>iokit-external-method</code></td></tr>
+  <tr><td>Process</td><td><code>process-exec*</code>, <code>process-fork</code>, <code>process-info*</code>, <code>process-codesigning</code></td></tr>
+  <tr><td>System</td><td><code>syscall-unix</code>, <code>syscall-mach</code>, <code>sysctl-read</code>, <code>sysctl-write</code></td></tr>
+</table>
+
+<h3>Filter Types</h3>
+<table>
+  <tr><th>Type</th><th>Description</th><th>Example</th></tr>
+  <tr><td><code>literal</code></td><td>Exact path match</td><td><code>(literal "/dev/null")</code></td></tr>
+  <tr><td><code>subpath</code></td><td>Path and all descendants</td><td><code>(subpath "/usr/lib")</code></td></tr>
+  <tr><td><code>prefix</code></td><td>String prefix match</td><td><code>(prefix "/tmp/build-")</code></td></tr>
+  <tr><td><code>regex</code></td><td>POSIX regex</td><td><code>(regex "^/Users/[^/]+/Library")</code></td></tr>
+  <tr><td><code>path-ancestors</code></td><td>Parent directories of path</td><td><code>(path-ancestors "/a/b/c")</code></td></tr>
+  <tr><td><code>global-name</code></td><td>Mach service name</td><td><code>(global-name "com.apple.audio")</code></td></tr>
+  <tr><td><code>require-all</code></td><td>Logical AND</td><td><code>(require-all (subpath "/a") (vnode-type REGULAR-FILE))</code></td></tr>
+  <tr><td><code>require-any</code></td><td>Logical OR</td><td><code>(require-any (literal "/a") (literal "/b"))</code></td></tr>
+  <tr><td><code>require-not</code></td><td>Logical NOT</td><td><code>(require-not (subpath "/secret"))</code></td></tr>
+  <tr><td><code>require-entitlement</code></td><td>Check code-signing entitlement</td><td><code>(require-entitlement "com.apple.security.network.client")</code></td></tr>
+</table>
+
+<h3>Parameters (Runtime Variables)</h3>
+<pre><code>; Profiles accept parameters -- variable info not known at compile time
+; Passed via sandbox-exec -D flags or sandbox_init_with_parameters()
+(allow file-read* (subpath (param "HOME_DIR")))
+</code></pre>
+
+<h3>Profile Composition via Import</h3>
+<pre><code>(import "/System/Library/Sandbox/Profiles/bsd.sb")
+(deny network-outbound)  ; add restrictions on top of imported base
+</code></pre>
+
+<div class="source">Sources:
+  <a href="https://dnesting.com/2026/macos-sandbox-sbpl-reference/">David Nesting -- macOS Sandbox SBPL Reference</a>,
+  <a href="https://ubrigens.com/posts/sandbox_tour.html">Ubrigens -- Sandbox Tour</a>,
+  <a href="https://chromium.googlesource.com/chromium/src/+/HEAD/sandbox/mac/seatbelt_sandbox_design.md">Chromium -- Mac Sandbox V2 Design</a>
+</div>
+</div>
+
+<!-- ===== 3. Apple System Profiles ===== -->
+<h2 id="system">3. Apple's Own System Sandbox Profiles</h2>
+<div class="section">
+
+<p>Apple extensively uses sandbox profiles for its own system daemons. Profiles are stored in two locations:</p>
+<ul>
+  <li><code>/System/Library/Sandbox/Profiles/*.sb</code> -- system daemon profiles</li>
+  <li><code>/usr/share/sandbox/*.sb</code> -- additional profiles</li>
+</ul>
+
+<h3>Key System Profiles</h3>
+<ul>
+  <li><strong><code>application.sb</code></strong> -- the base profile for App Store applications. It dynamically generates rules based on supplied entitlements and parameters. This is what backs the "App Sandbox" feature.</li>
+  <li><strong><code>bsd.sb</code></strong> -- base profile providing standard POSIX/BSD functionality. Other profiles can <code>(import)</code> it as a base layer.</li>
+  <li><strong><code>rootless.conf</code></strong> -- the <code>platform_profile</code> profile that implements SIP (System Integrity Protection), which is conceptually a sandbox profile applied system-wide.</li>
+</ul>
+
+<p>Most Apple daemon services run in a Service Sandbox context, applying their sandbox via <code>sandbox_init_XXX()</code> in their <code>main()</code> function. This gives each daemon the minimum required permissions for its functionality.</p>
+
+<div class="highlight">
+  <strong>Note:</strong> On modern macOS, many of these profiles are compiled into the shared cache and are not directly readable as plaintext .sb files. Security researchers have created tools like <a href="https://github.com/0xbf00/simbple">simbple</a> (an SBPL interpreter) and <a href="https://ar5iv.labs.arxiv.org/html/1608.04303">SandBlaster</a> to reverse-engineer compiled profiles.
+</div>
+
+<div class="source">Sources:
+  <a href="https://hacktricks.wiki/en/macos-hardening/macos-security-and-privilege-escalation/macos-security-protections/macos-sandbox/index.html">HackTricks -- macOS Sandbox</a>,
+  <a href="https://ubrigens.com/posts/sandbox_tour.html">Ubrigens -- Sandbox Tour</a>,
+  <a href="https://ar5iv.labs.arxiv.org/html/1608.04303">SandBlaster: Reversing the Apple Sandbox</a>
+</div>
+</div>
+
+<!-- ===== 4. Chromium ===== -->
+<h2 id="chromium">4. Chromium/Chrome macOS Sandbox</h2>
+<div class="section">
+
+<p>Chromium is the most sophisticated public user of the macOS Seatbelt sandbox. It uses the <code>sandbox(7)</code> API (not the App Sandbox) to confine child processes.</p>
+
+<h3>Architecture</h3>
+<ul>
+  <li>Sandbox profiles are written in SBPL and stored as <code>.sb</code> files in the source tree.</li>
+  <li>Different process types receive different sandbox configurations: <code>content/common/common.sb</code> for shared setup, <code>content/renderer/renderer.sb</code> for renderer/extension processes, etc.</li>
+  <li>The <code>--process-type</code> argument designates which sandbox each subprocess receives.</li>
+  <li>Profiles are compiled via <code>Seatbelt::Compile</code> into binary representations, transmitted through Mojo IPC to new processes via <code>SeatbeltExecClient</code>, then applied by <code>SeatbeltExecServer::ApplySandboxProfile</code>.</li>
+</ul>
+
+<h3>V2 Sandbox Design (Current)</h3>
+<ul>
+  <li>Removes the historically unsandboxed "warmup phase" -- processes are sandboxed from the start.</li>
+  <li>All process types use V2 except the GPU process (still on V1).</li>
+  <li>Default-deny posture: <code>(deny default)</code> with explicit allowlists for file access, Mach services, sysctls, IPC, IOKit calls.</li>
+  <li>Processes may access system libraries and frameworks but require explicit allowlists for everything else.</li>
+</ul>
+
+<h3>Runtime Parameters</h3>
+<p>SBPL profiles accept parameters not known at compile time, passed at process launch:</p>
+<ul>
+  <li>Sandbox logging flags</li>
+  <li>Home directory path</li>
+  <li>OS version info</li>
+  <li>App bundle location</li>
+  <li>Process PID</li>
+  <li>Permitted read/write directories</li>
+</ul>
+
+<h3>Development Workflow</h3>
+<p>Developers use <code>--enable-sandbox-logging</code> to empirically identify required resources, then for each denied resource they choose: grant access, implement brokering (controlled proxy access), or fix the code to eliminate the need.</p>
+
+<div class="highlight">
+  <strong>Key insight:</strong> Chromium demonstrates that SBPL profiles can be compiled and transmitted programmatically via <code>sandbox_init_with_parameters()</code> -- you do not need to use <code>sandbox-exec</code> at all. The C API is what production applications use.
+</div>
+
+<div class="source">Sources:
+  <a href="https://chromium.googlesource.com/chromium/src/+/HEAD/sandbox/mac/seatbelt_sandbox_design.md">Chromium -- Mac Sandbox V2 Design Doc</a>,
+  <a href="https://chromium.googlesource.com/chromium/src/+/HEAD/sandbox/mac/README.md">Chromium -- The Mac Sandbox README</a>,
+  <a href="https://github.com/chromium/chromium/blob/main/sandbox/policy/mac/sandbox_mac.h">Chromium -- sandbox_mac.h</a>
+</div>
+</div>
+
+<!-- ===== 5. Firefox ===== -->
+<h2 id="firefox">5. Firefox macOS Sandbox</h2>
+<div class="section">
+
+<p>Firefox also uses the macOS Seatbelt sandbox, applying a whitelist (default-deny) policy to all sandboxed process types.</p>
+
+<h3>Content Process Sandbox Levels</h3>
+<p>Mac content processes use <strong>sandbox level 3</strong> (the most restrictive). Levels control progressive filesystem restriction:</p>
+<table>
+  <tr><th>Level</th><th>Filesystem Access</th></tr>
+  <tr><td>Level 1</td><td>Global file read permitted</td></tr>
+  <tr><td>Level 2</td><td>Blocks <code>~/Library</code> and profile directory (except <code>/extensions</code> and <code>/chrome</code>)</td></tr>
+  <tr><td>Level 3</td><td>No global read access; only <code>/extensions</code> and <code>/chrome</code> within the profile directory</td></tr>
+</table>
+
+<h3>What the Content Sandbox Allows</h3>
+<ul>
+  <li><strong>File reads:</strong> System paths (<code>/System</code>, <code>/usr/lib</code>, <code>/Library/GPUBundles</code>), app bundle, <code>/dev/random</code>, <code>/dev/urandom</code>, <code>/dev/null</code>, <code>/dev/zero</code>, timezone data, fonts</li>
+  <li><strong>Mach services:</strong> <code>com.apple.windowserver.active</code> (conditional), <code>com.apple.system.opendirectoryd.libinfo</code>, <code>com.apple.CoreServices.coreservicesd</code>, <code>com.apple.audio.coreaudiod</code>, <code>com.apple.cvmsServ</code> (GPU acceleration)</li>
+  <li><strong>File writes:</strong> Only to debug directories when <code>debugWriteDir</code> is defined</li>
+  <li><strong>Network:</strong> Not explicitly allowed (denied by default)</li>
+  <li><strong>IPC:</strong> POSIX shared memory for specific prefixes (<code>CFPBS:</code>, <code>AudioIO</code>)</li>
+</ul>
+
+<h3>Runtime Parameters</h3>
+<p>The policy uses parameterization: <code>SHOULD_LOG</code>, <code>SANDBOX_LEVEL_1/2/3</code>, <code>MAC_OS_VERSION</code>, <code>APP_PATH</code>, <code>PROFILE_DIR</code>, <code>HOME_PATH</code>, and testing paths.</p>
+
+<h3>Debugging</h3>
+<p>Enable violation logging via <code>security.sandbox.logging.enabled=true</code> pref or <code>MOZ_SANDBOX_LOGGING</code> environment variable. Violations appear in Console.app.</p>
+
+<div class="source">Sources:
+  <a href="https://wiki.mozilla.org/Security/Sandbox">Mozilla Wiki -- Security/Sandbox</a>,
+  <a href="https://searchfox.org/firefox-main/source/security/sandbox/mac/SandboxPolicyContent.h">Firefox Source -- SandboxPolicyContent.h</a>,
+  <a href="https://wiki.mozilla.org/Security/Sandbox/macOS_Release">Mozilla Wiki -- macOS Sandbox Release</a>
+</div>
+</div>
+
+<!-- ===== 6. Docker ===== -->
+<h2 id="docker">6. Docker Desktop and Container Runtimes on macOS</h2>
+<div class="section">
+
+<p>Docker Desktop on macOS does <strong>not</strong> use sandbox-exec for isolation. Instead, it runs a full Linux VM.</p>
+
+<h3>Docker Desktop Architecture</h3>
+<ul>
+  <li>Docker's Virtual Machine Monitor (VMM) uses Apple's <strong>Hypervisor.framework</strong> to run a Linux VM natively.</li>
+  <li>All Linux containers run inside this VM, which provides kernel-level isolation from macOS.</li>
+  <li>As of February 2026, QEMU-based virtualization is being deprecated in Docker Desktop for Mac in favor of Hypervisor.framework exclusively.</li>
+</ul>
+
+<h3>Docker Sandboxes (New in 2026)</h3>
+<p>Docker Desktop 4.58+ introduced "Sandboxes" -- each sandbox wraps a container in a <strong>lightweight microVM</strong> using Apple Virtualization Framework on macOS:</p>
+<ul>
+  <li>Each sandbox gets its own Linux kernel (hardware-boundary isolation)</li>
+  <li>Private Docker daemon inside the VM</li>
+  <li>Full <code>docker build</code>, <code>run</code>, and <code>compose</code> with no socket mounting and no host privileges</li>
+  <li>Sub-second start times through optimized kernel configuration</li>
+</ul>
+
+<div class="highlight">
+  <strong>Key takeaway:</strong> Docker on macOS relies on <strong>VM-level isolation</strong> (Hypervisor.framework / Virtualization.framework), not process-level sandboxing. The VM boundary is the security boundary.
+</div>
+
+<h3>Other macOS Container Projects</h3>
+<ul>
+  <li><strong>OSXIEC</strong> -- a native macOS container solution that works without virtualization or disabling SIP. Provides VLAN networking and vulnerability scanning, but isolation is "less robust compared to Linux-based containers."</li>
+  <li><strong>Darwin Containers</strong> -- attempts to port Docker functionality to macOS but requires disabling SIP, recommended only for development.</li>
+</ul>
+
+<div class="source">Sources:
+  <a href="https://www.docker.com/blog/why-microvms-the-architecture-behind-docker-sandboxes/">Docker Blog -- Why MicroVMs</a>,
+  <a href="https://medium.com/@okerew/containerization-on-macos-vs-9053f906b582">Medium -- Containerization on macOS vs Linux</a>,
+  <a href="https://www.docker.com/blog/docker-desktop-for-mac-qemu-virtualization-option-to-be-deprecated-in-90-days/">Docker Blog -- QEMU Deprecation</a>
+</div>
+</div>
+
+<!-- ===== 7. Apple Containerization ===== -->
+<h2 id="apple-containers">7. Apple Containerization Framework</h2>
+<div class="section">
+
+<p>Announced at WWDC 2025, Apple's <strong>Containerization</strong> is a Swift framework and <code>container</code> CLI for running Linux containers on macOS.</p>
+
+<h3>Architecture</h3>
+<ul>
+  <li><strong>One-VM-per-container model</strong> -- each OCI Linux container runs inside its own lightweight VM via Virtualization.framework on Apple Silicon.</li>
+  <li>Sub-second start times through optimized Linux kernel configuration and minimal root filesystem.</li>
+  <li>OCI-compatible: pull/push images from any standard container registry.</li>
+  <li>Each container gets a <strong>dedicated IP address</strong> (no port forwarding needed).</li>
+  <li>APIs to create and populate ext4 filesystems and interact with Netlink sockets.</li>
+</ul>
+
+<h3>Timeline</h3>
+<ul>
+  <li>v0.1.0 at WWDC 2025 (June 2025)</li>
+  <li>v0.8.0 in January 2026</li>
+  <li><strong>v1.0.0 on June 9, 2026</strong></li>
+  <li>Requires macOS 26 (Tahoe)</li>
+  <li>30K+ GitHub stars, 840+ forks as of June 2026</li>
+</ul>
+
+<div class="highlight">
+  <strong>Important distinction:</strong> Apple Containerization is strictly for <strong>Linux containers</strong> running inside VMs -- it is <em>not</em> a replacement for sandbox-exec for native macOS process isolation. It does not provide Seatbelt-style sandboxing of native macOS processes.
+</div>
+
+<div class="source">Sources:
+  <a href="https://github.com/apple/containerization">GitHub -- apple/containerization</a>,
+  <a href="https://github.com/apple/container">GitHub -- apple/container (CLI)</a>,
+  <a href="https://addozhang.medium.com/apple-container-0-8-0-seven-month-evolution-from-birth-to-maturity-1021e570bbb7">Medium -- Apple Container 0.8.0</a>,
+  <a href="https://thenewstack.io/what-you-need-to-know-about-apples-new-container-framework/">The New Stack -- Apple Container Framework</a>
+</div>
+</div>
+
+<!-- ===== 8. Open Source Projects ===== -->
+<h2 id="projects">8. Open-Source Projects Using sandbox-exec for Isolation</h2>
+<div class="section">
+
+<h3>SandVault <span class="tag ok">Active</span></h3>
+<p>Two-layer isolation for AI coding agents on macOS:</p>
+<ul>
+  <li><strong>Layer 1:</strong> Limited user account (<code>sandvault-$USER</code>) with standard privileges</li>
+  <li><strong>Layer 2:</strong> sandbox-exec restricting filesystem to <code>/Users/Shared/sv-$USER</code> and system directories</li>
+  <li>Supports Claude Code, OpenAI Codex, OpenCode, Google Gemini</li>
+  <li>Includes browser automation (Chrome DevTools Protocol) and iOS Simulator integration</li>
+  <li>Documents that "macOS does not support nested sandboxes" and provides <code>-x/--no-sandbox</code> flag for workaround</li>
+</ul>
+<div class="source"><a href="https://github.com/webcoyote/sandvault">GitHub -- webcoyote/sandvault</a></div>
+
+<h3>bx-mac <span class="tag ok">Active</span></h3>
+<p>File-level sandboxing tool that dynamically generates sandbox-exec profiles:</p>
+<ul>
+  <li>Scans <code>$HOME</code> at launch, generates per-directory deny rules</li>
+  <li>Works around SBPL quirk: <strong>deny rules always override allow rules regardless of order</strong>. Never denies parent directories of allowed paths.</li>
+  <li>Supports <code>.bxignore</code> files with <code>rw:</code> and <code>ro:</code> prefixes for granular access</li>
+  <li>Protects <code>.ssh</code>, <code>.gnupg</code>, <code>.docker</code>, <code>~/Documents</code>, <code>~/Desktop</code>, <code>~/Downloads</code>, password managers</li>
+  <li>Detects nested sandbox conflicts, auto-adds <code>--no-sandbox</code> for Electron apps</li>
+  <li><strong>Does NOT restrict network access or provide process isolation beyond filesystem</strong></li>
+</ul>
+<div class="source"><a href="https://github.com/holtwick/bx-mac">GitHub -- holtwick/bx-mac</a></div>
+
+<h3>Microsoft MXC (eXecution Containers) <span class="tag">Experimental</span></h3>
+<p>Policy-driven, layered isolation with a Seatbelt backend for macOS:</p>
+<ul>
+  <li>Generates TinyScheme SBPL profiles dynamically and applies via <code>sandbox_init()</code> in <code>pre_exec</code></li>
+  <li>Supports <code>readwritePaths</code>, <code>readonlyPaths</code>, <code>deniedPaths</code>, and network policies</li>
+  <li>Display isolation: denies <code>mach-lookup</code> for WindowServer services</li>
+  <li>Clipboard isolation: denies <code>com.apple.pasteboard.1</code></li>
+  <li>Input isolation: denies <code>iokit-open</code> for <code>IOHIDLibUserClient</code></li>
+  <li><strong>Limitation:</strong> Cannot interpose at TLS layer; per-host network filtering is best-effort (DNS not resolved by Seatbelt)</li>
+</ul>
+<pre><code>{
+  "containment": "seatbelt",
+  "process": {"commandLine": "echo hi from seatbelt"},
+  "filesystem": {
+    "readwritePaths": ["/tmp/output"],
+    "readonlyPaths": ["/Users/me/project"],
+    "deniedPaths": ["/Users/me/.ssh"]
+  },
+  "network": {
+    "defaultPolicy": "block",
+    "allowedHosts": ["api.github.com"]
+  }
+}</code></pre>
+<div class="source"><a href="https://github.com/microsoft/mxc/blob/main/docs/macos-support/seatbelt-backend.md">GitHub -- microsoft/mxc seatbelt-backend.md</a></div>
+
+<h3>Alcoholless <span class="tag ok">Active</span></h3>
+<p>Lightweight sandbox using user-account isolation instead of sandbox-exec:</p>
+<ul>
+  <li>Creates isolated user accounts (<code>alcless_${USER}_default</code>) using <code>su</code>, <code>sudo</code>, <code>rsync</code></li>
+  <li>Syncs working directory to isolated user, runs command, syncs back</li>
+  <li>No performance overhead (no virtualization), direct hardware access (GPU)</li>
+  <li>Compatible with GitHub Actions (no nested virtualization needed)</li>
+  <li>Deliberately avoids sandbox-exec due to deprecation concerns</li>
+</ul>
+<div class="source"><a href="https://medium.com/nttlabs/alcoholless-a-lightweight-security-sandbox-for-macos-programs-homebrew-ai-agents-etc-ccf0d1927301">Medium (NTT Labs) -- Alcoholless</a></div>
+
+<h3>Ozymandias42/macOS-Sandbox-Profiles</h3>
+<p>Collection of custom sandbox-exec profiles for various applications.</p>
+<div class="source"><a href="https://github.com/Ozymandias42/macOS-Sandbox-Profiles">GitHub -- Ozymandias42/macOS-Sandbox-Profiles</a></div>
+
+<h3>ai-jail</h3>
+<p>Sandbox for AI agents that uses bubblewrap on Linux and sandbox-exec on macOS as fallback.</p>
+<div class="source"><a href="https://github.com/akitaonrails/ai-jail">GitHub -- akitaonrails/ai-jail</a></div>
+
+</div>
+
+<!-- ===== 9. Build Tools ===== -->
+<h2 id="build">9. Sandboxing Build Tools and Untrusted Code</h2>
+<div class="section">
+
+<h3>Bazel (darwin-sandbox)</h3>
+<p>Bazel is the most prominent production user of sandbox-exec for build isolation:</p>
+<ul>
+  <li>Each build action runs inside sandbox-exec, confined to its <code>execroot/</code> directory</li>
+  <li>Prevents actions from reading undeclared input files or writing unexpected outputs</li>
+  <li>The <code>darwin-sandbox</code> strategy "uses Apple's sandbox-exec tool to achieve roughly the same as the Linux sandbox"</li>
+  <li><strong>Critical limitation:</strong> Cannot run sandbox-exec inside an already-sandboxed process; Bazel falls back to <code>processwrapper-sandbox</code> in that case</li>
+</ul>
+<div class="source"><a href="https://bazel.build/docs/sandboxing">Bazel -- Sandboxing Documentation</a></div>
+
+<h3>macOSSandboxBuild</h3>
+<p>Provides profiles for building open-source software (configure, make, cmake) in a sandbox:</p>
+<ul>
+  <li>Four profiles: <code>confined.sb</code> (no network), <code>download.sb</code> (network allowed), <code>nomach.sb</code> (blocks Mach lookups), <code>ping.sb</code> (restrictive, ping only)</li>
+  <li>Parameterized paths: <code>_RX1</code> (read/execute source), <code>_RW1</code> (read/write build output), <code>_TMPDIR</code> (temp files)</li>
+  <li>Denies execution of suid programs, blocks sysctl access, restricts reads to unauthorized directories</li>
+</ul>
+
+<pre><code># Example: sandboxed cmake build
+sandbox-exec -D_RX1="/path/to/source" \
+             -D_RW1="/path/to/build" \
+             -D_TMPDIR="/tmp/build" \
+             -f confined.sb \
+             cmake --build /path/to/build</code></pre>
+
+<div class="source"><a href="https://github.com/BrianSwift/macOSSandboxBuild">GitHub -- BrianSwift/macOSSandboxBuild</a></div>
+
+<h3>Example: Restrictive Profile for Untrusted Code</h3>
+<pre><code>(version 1)
+(deny default)
+
+; Allow basic process execution
+(allow process-fork)
+(allow process-exec (literal "/usr/bin/clang"))
+(allow process-exec (literal "/usr/bin/clang++"))
+
+; Read-only access to system libraries and headers
+(allow file-read* (subpath "/usr/lib"))
+(allow file-read* (subpath "/usr/include"))
+(allow file-read* (subpath "/Library/Developer/CommandLineTools"))
+
+; Read/write only the build directory
+(allow file-read* file-write* (subpath "/tmp/sandbox-build"))
+
+; Block all network access (deny default handles this)
+; Block access to home directory (deny default handles this)
+; Block Mach service lookups except essentials
+(allow mach-lookup (global-name "com.apple.system.logger"))</code></pre>
+
+</div>
+
+<!-- ===== 10. Nesting ===== -->
+<h2 id="nesting">10. Nesting and Composing Sandbox Profiles</h2>
+<div class="section">
+
+<div class="highlight">
+  <strong>Sandbox profiles CANNOT be nested.</strong> Attempting to run <code>sandbox-exec</code> inside a process that is already sandboxed results in <code>"sandbox_apply: Operation not permitted"</code>. This is a hard kernel limitation.
+</div>
+
+<h3>Impact on Real-World Tools</h3>
+<ul>
+  <li><strong>Bazel:</strong> Falls back to <code>processwrapper-sandbox</code> when already inside a sandbox</li>
+  <li><strong>SandVault:</strong> Provides <code>-x/--no-sandbox</code> flag; tools like <code>swift</code> and <code>xcodebuild</code> that already use sandbox-exec internally will fail inside SandVault's sandbox</li>
+  <li><strong>bx-mac:</strong> Detects existing sandbox via <code>CODEBOX_SANDBOX=1</code> env var and EPERM probes; refuses to start if nested</li>
+  <li><strong>Electron apps:</strong> Already sandboxed internally; require <code>--no-sandbox</code> flag when run inside an outer sandbox</li>
+</ul>
+
+<h3>Profile Composition (Partial Alternative)</h3>
+<p>While nesting is impossible, profiles <em>can</em> be composed at the SBPL level using <code>(import)</code>:</p>
+<pre><code>(version 1)
+(import "/System/Library/Sandbox/Profiles/bsd.sb")  ; base layer
+(deny network-outbound)                               ; additional restriction
+(deny file-write* (subpath "/Users"))                  ; further restriction</code></pre>
+<p>This is compile-time composition only -- you cannot layer on additional restrictions to an already-running sandboxed process.</p>
+
+<div class="source">Sources:
+  <a href="https://jmmv.dev/2019/11/macos-sandbox-exec.html">jmmv.dev -- A quick glance at macOS' sandbox-exec</a>,
+  <a href="https://github.com/webcoyote/sandvault">GitHub -- SandVault</a>,
+  <a href="https://github.com/holtwick/bx-mac">GitHub -- bx-mac</a>,
+  <a href="https://bazel.build/docs/sandboxing">Bazel -- Sandboxing</a>
+</div>
+</div>
+
+<!-- ===== 11. Comparison ===== -->
+<h2 id="comparison">11. sandbox-exec vs. Linux Namespaces/Cgroups</h2>
+<div class="section">
+
+<table>
+  <tr><th>Capability</th><th>Linux (namespaces + cgroups + seccomp)</th><th>macOS (Seatbelt / sandbox-exec)</th></tr>
+  <tr><td><strong>Filesystem isolation</strong></td><td>Mount namespaces: full filesystem virtualization via bind mounts, overlayfs, pivot_root</td><td>Path-level allow/deny rules only. No mount namespace equivalent. Cannot create an isolated filesystem view.</td></tr>
+  <tr><td><strong>Network isolation</strong></td><td>Network namespaces: separate network stack, virtual interfaces, iptables rules</td><td>Allow/deny network-outbound/inbound only. No separate network stack. Per-host filtering is best-effort (no DNS resolution). Cannot interpose at TLS layer.</td></tr>
+  <tr><td><strong>PID isolation</strong></td><td>PID namespaces: each container sees its own PID 1</td><td>No PID isolation. Sandboxed processes share the global PID namespace.</td></tr>
+  <tr><td><strong>User/UID isolation</strong></td><td>User namespaces: unprivileged UID mapping, fake root</td><td>No user namespace equivalent. Workaround: run as separate macOS user account (Alcoholless, SandVault approach).</td></tr>
+  <tr><td><strong>Resource limits</strong></td><td>cgroups v2: CPU, memory, I/O, PIDs caps per group</td><td>No cgroup equivalent. No CPU/memory/IO limiting. Must use separate mechanisms (e.g., <code>ulimit</code>, which is coarser).</td></tr>
+  <tr><td><strong>IPC isolation</strong></td><td>IPC namespaces: separate SysV IPC, POSIX message queues</td><td>Mach service filtering via <code>mach-lookup</code> rules. Can deny specific Mach services but not full IPC isolation.</td></tr>
+  <tr><td><strong>Seccomp (syscall filtering)</strong></td><td>seccomp-BPF: fine-grained per-syscall allow/deny/errno</td><td><code>syscall-unix</code> and <code>syscall-mach</code> operations in SBPL, but much coarser granularity.</td></tr>
+  <tr><td><strong>Nesting</strong></td><td>Fully nestable (namespaces within namespaces)</td><td><strong>Cannot nest.</strong> <code>sandbox_apply: Operation not permitted</code></td></tr>
+  <tr><td><strong>Unprivileged use</strong></td><td>User namespaces enable unprivileged containers (bubblewrap)</td><td>sandbox-exec works unprivileged (any user can apply profiles)</td></tr>
+  <tr><td><strong>Tooling maturity</strong></td><td>bubblewrap, nsjail, firejail, systemd-nspawn, Docker, Podman</td><td>sandbox-exec (deprecated), bx-mac, SandVault, MXC (experimental)</td></tr>
+  <tr><td><strong>Kernel support</strong></td><td>Maintained, evolving (cgroups v2, Landlock)</td><td>Actively used by Apple internally, but CLI API deprecated with no replacement</td></tr>
+</table>
+
+<h3>Closest macOS Equivalents to Linux Tools</h3>
+<table>
+  <tr><th>Linux Tool</th><th>macOS Equivalent</th><th>Gap</th></tr>
+  <tr><td>bubblewrap (bwrap)</td><td>sandbox-exec</td><td>No mount/PID/user/network namespaces</td></tr>
+  <tr><td>nsjail</td><td>No direct equivalent</td><td>nsjail combines namespaces + cgroups + seccomp; macOS has only Seatbelt</td></tr>
+  <tr><td>firejail</td><td>bx-mac, SandVault</td><td>Filesystem-only on macOS; no network/PID/mount isolation</td></tr>
+  <tr><td>Docker / Podman</td><td>Apple Containerization (Linux VMs only)</td><td>No native macOS container runtime with namespace isolation</td></tr>
+  <tr><td>systemd-nspawn</td><td>No equivalent</td><td>macOS has no container-oriented init system</td></tr>
+</table>
+
+<div class="source">Sources:
+  <a href="https://medium.com/@okerew/containerization-on-macos-vs-9053f906b582">Medium -- Containerization on macOS vs Linux</a>,
+  <a href="https://github.com/akitaonrails/ai-jail/blob/master/docs/sandbox-alternatives.md">ai-jail -- sandbox-alternatives.md</a>,
+  <a href="https://github.com/novotnyllc/ContainAI/blob/main/docs/security-comparison.md">ContainAI -- security-comparison.md</a>,
+  <a href="https://www.infralovers.com/blog/2026-02-15-sandboxing-claude-code-macos/">Infralovers -- Sandboxing Claude Code on macOS</a>
+</div>
+</div>
+
+<!-- ===== 12. Limitations ===== -->
+<h2 id="limitations">12. Practical Limitations of macOS Sandbox for Container-Like Isolation</h2>
+<div class="section">
+
+<ol>
+  <li><strong>No filesystem virtualization.</strong> Only path-level allow/deny rules. Cannot create isolated mount points, overlayfs, or bind mounts. A sandboxed process sees the full filesystem tree; it just gets EPERM on denied paths.</li>
+
+  <li><strong>No PID isolation.</strong> Sandboxed processes share the global PID namespace. A sandboxed process can see all other processes via <code>ps</code> (unless <code>process-info*</code> is denied).</li>
+
+  <li><strong>No network namespace.</strong> Cannot create separate network stacks or virtual interfaces. Network filtering is limited to allow/deny outbound/inbound with best-effort host matching (no DNS resolution).</li>
+
+  <li><strong>No resource limits.</strong> No CPU, memory, or I/O caps. No cgroup equivalent.</li>
+
+  <li><strong>Cannot nest.</strong> Kernel hard limitation. Tools that internally sandbox (Xcode, Swift compiler, Electron, Bazel) will fail inside an outer sandbox.</li>
+
+  <li><strong>Deny overrides allow.</strong> In SBPL, deny rules always take precedence regardless of order. This makes "allow everything except X" straightforward but "deny everything except fine-grained allows" tricky -- you cannot override a deny with a more specific allow.</li>
+
+  <li><strong>No TLS interposition.</strong> Cannot inspect or filter HTTPS traffic. Per-host network filtering is best-effort at the TCP connect level.</li>
+
+  <li><strong>GPU/Display cannot be restricted.</strong> Metal and Cocoa are system-level; sandbox-exec cannot meaningfully restrict GPU or display access.</li>
+
+  <li><strong>Undocumented profile language.</strong> SBPL is an "Apple System Private Interface" with no official documentation. Changes between macOS versions can break profiles.</li>
+
+  <li><strong>Static at launch.</strong> The sandbox profile is applied once at process start. Cannot add or remove restrictions dynamically (except via sandbox extensions for specific file access grants).</li>
+
+  <li><strong>SIP overrides profiles.</strong> System Integrity Protection takes precedence over sandbox rules for protected paths.</li>
+
+  <li><strong>Deprecated with no replacement.</strong> Apple recommends "App Sandbox" (requires Xcode, code signing, entitlements), which does not cover CLI/server process sandboxing use cases.</li>
+</ol>
+
+<div class="source">Sources:
+  <a href="https://news.ycombinator.com/item?id=44283454">Hacker News -- sandbox-exec frustration discussion</a>,
+  <a href="https://github.com/apple/containerization/issues/737">GitHub Issue #737 -- sandbox-exec deprecation</a>,
+  <a href="https://github.com/holtwick/bx-mac">GitHub -- bx-mac (deny override behavior)</a>,
+  <a href="https://github.com/microsoft/mxc/blob/main/docs/macos-support/seatbelt-backend.md">MXC seatbelt-backend.md (TLS limitation)</a>,
+  <a href="https://www.infralovers.com/blog/2026-02-15-sandboxing-claude-code-macos/">Infralovers -- Sandboxing Claude Code on macOS</a>
+</div>
+</div>
+
+<!-- ===== 13. Deprecation ===== -->
+<h2 id="deprecation">13. Deprecation Status and Future</h2>
+<div class="section">
+
+<h3>Current State (June 2026)</h3>
+<ul>
+  <li><code>sandbox-exec</code> has been marked <strong>DEPRECATED</strong> in its man page since at least 2016-2017.</li>
+  <li>The deprecation warning says: "Consider adopting the App Sandbox instead."</li>
+  <li>Despite the deprecation, sandbox-exec remains present and functional on macOS 26 (Tahoe).</li>
+  <li>The underlying sandbox subsystem is actively maintained -- it is what all of Apple's system software uses for sandboxing.</li>
+  <li>Apple has provided <strong>no official deprecation timeline</strong> and no documented migration path for CLI/server process sandboxing.</li>
+</ul>
+
+<h3>Why App Sandbox Is Not a Replacement</h3>
+<ul>
+  <li>Requires <code>com.apple.security.app-sandbox</code> entitlement and code signing</li>
+  <li>Designed for GUI apps distributed through the Mac App Store</li>
+  <li>Not suitable for headless server processes, build tools, or arbitrary CLI commands</li>
+  <li>Cannot be applied to third-party or unsigned binaries</li>
+</ul>
+
+<h3>Alternative Paths</h3>
+<table>
+  <tr><th>Approach</th><th>Viability</th></tr>
+  <tr><td>Continue using sandbox-exec</td><td>Works today. Risk of future removal, but unlikely given Apple's own dependency on the subsystem.</td></tr>
+  <tr><td>Use <code>sandbox_init()</code> C API directly</td><td>What Chromium/Firefox do. More stable than the CLI wrapper. Also technically private API.</td></tr>
+  <tr><td>Apple Containerization framework</td><td>Linux VMs only. Not for native macOS process isolation.</td></tr>
+  <tr><td>User-account isolation (Alcoholless)</td><td>No API deprecation risk. Coarser isolation. No filesystem virtualization.</td></tr>
+  <tr><td>VM-based isolation (Docker, Vz)</td><td>Strongest isolation. Higher overhead. Overkill for lightweight process sandboxing.</td></tr>
+</table>
+
+<h3>Open Issue on Apple's Repo</h3>
+<p><a href="https://github.com/apple/containerization/issues/737">Issue #737</a> on the Apple Containerization repo asks three specific questions: (1) Will Apple remove sandbox-exec? (2) Is there a supported API for applying Seatbelt policies to unsigned binaries? (3) Will Apple Containerization support lightweight process isolation without a Linux VM? As of June 2026, <strong>Apple has not responded</strong>.</p>
+
+<div class="source">Sources:
+  <a href="https://github.com/apple/containerization/issues/737">GitHub Issue #737</a>,
+  <a href="https://news.ycombinator.com/item?id=44283454">Hacker News discussion</a>,
+  <a href="https://developer.apple.com/forums/thread/661939">Apple Developer Forums -- How to build a replacement for sandbox-exec?</a>,
+  <a href="https://medium.com/nttlabs/alcoholless-a-lightweight-security-sandbox-for-macos-programs-homebrew-ai-agents-etc-ccf0d1927301">Alcoholless announcement</a>
+</div>
+</div>
+
+</body>
+</html>

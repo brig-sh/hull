@@ -1,0 +1,211 @@
+name: Sign and Notarize
+
+# Manually-invoked release signing: builds urunc-macos + vz-runner, signs them
+# with the Developer ID Application identity, packages a .dmg, notarizes it
+# with Apple's notary service, staples the ticket, and uploads the result as a
+# workflow artifact.
+#
+# Kept out of regular CI on purpose — notarization costs minutes and there is
+# no need to notarize every commit. Trigger from the Actions tab (or
+# `gh workflow run sign-notarize.yml`) when a distributable build is needed.
+#
+# Required repository secrets (see README "Release signing" for how to
+# produce each value):
+#   MACOS_CERT_P12       base64-encoded Developer ID Application .p12
+#                        (certificate + private key)
+#   MACOS_CERT_PASSWORD  password protecting the .p12
+#   NOTARY_KEY_P8        App Store Connect API private key (.p8 contents)
+#   NOTARY_KEY_ID        App Store Connect API key ID
+#   NOTARY_ISSUER_ID     App Store Connect API issuer UUID
+
+on:
+  # Dispatch against a tag ref to rebuild one by hand:
+  #   gh workflow run sign-notarize.yml --ref v0.1.0-rc14
+  workflow_dispatch:
+  # Called by release.yml, which is the only automated entry point. There is
+  # deliberately no `push: tags` trigger: it existed because tags pushed with
+  # GITHUB_TOKEN raise no push event, and that stopped being true once the
+  # release bot started pushing the tag. Both would then fire for the same
+  # tag and race each other over the shared macOS keychain, which is how
+  # rc12 and rc13 each ended up with one failed signing run.
+  workflow_call:
+    inputs:
+      tag:
+        description: "Tag to build and release (e.g. v0.1.0-rc4)"
+        type: string
+        required: true
+
+# contents: write is needed to create the GitHub release on tag builds.
+permissions:
+  contents: write
+
+jobs:
+  sign-notarize:
+    name: sign, notarize, staple
+    runs-on: [self-hosted, macOS, ARM64]
+    # A release must sign alone. `security list-keychains -d user -s` is
+    # a per-user global (ci.yml's `test` job runs it too); a concurrent
+    # caller evicts this job's ephemeral keychain mid-sign, so codesign
+    # dies with errSecInternalComponent -- how rc12, rc13 and rc15 each
+    # lost a signing run. The competing test job came from CI triggered
+    # by the release's own VERSION-bump push, which now carries [skip ci]
+    # (release.yml), so it no longer runs during a release. This group is
+    # the remaining guard: it stops two releases from overlapping, and
+    # cancel-in-progress: false never cancels a running sign. Full CI
+    # parallelism is preserved -- the test job is deliberately not in it.
+    concurrency:
+      group: macos-keychain-signing
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0 # full history + tags so git-cliff builds the release notes
+
+      # Self-hosted runners provide their own Go toolchain; setup-go is only
+      # needed on ephemeral GitHub-hosted runners.
+      - uses: actions/setup-go@v5
+        if: runner.environment == 'github-hosted'
+        with:
+          go-version-file: go.mod
+
+      - name: Install create-dmg
+        run: command -v create-dmg >/dev/null || brew install create-dmg
+
+      - name: Import Developer ID certificate into ephemeral keychain
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          KEYCHAIN_PASSWORD=$(uuidgen)
+          KEYCHAIN=$RUNNER_TEMP/release.keychain-db
+          echo "KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+
+          echo "$MACOS_CERT_P12" | base64 -d > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+            -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/cert.p12"
+
+          security set-key-partition-list -S apple-tool:,apple: \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN" \
+            | grep -o '"Developer ID Application: [^"]*"' | head -1 | tr -d '"')
+          if [ -z "$IDENTITY" ]; then
+            echo "No Developer ID Application identity found in the imported .p12" >&2
+            exit 1
+          fi
+          echo "IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          echo "Imported identity: $IDENTITY"
+
+      # TELEMETRY_ENDPOINT comes from the repo Actions variable of the same
+      # name (empty until the prod ingest exists -- NOFireAI/engineering#1002).
+      # Empty means the built client never sends anything, so releases stay
+      # telemetry-silent until the variable is set; the /v1/logs suffix is
+      # load-bearing (it selects the OTLP wrapping in the client).
+      - name: Build the signed installer image (app bundle + styled dmg)
+        run: make dmg_image CODESIGN_IDENTITY="$IDENTITY" CODESIGN_KEYCHAIN="$KEYCHAIN" TELEMETRY_ENDPOINT="${{ vars.TELEMETRY_ENDPOINT }}"
+
+      - name: Notarize and staple
+        env:
+          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          echo "$NOTARY_KEY_P8" > "$RUNNER_TEMP/notary-key.p8"
+          xcrun notarytool submit dist/urunc-macos.dmg \
+            --key "$RUNNER_TEMP/notary-key.p8" \
+            --key-id "$NOTARY_KEY_ID" \
+            --issuer "$NOTARY_ISSUER_ID" \
+            --wait
+          rm "$RUNNER_TEMP/notary-key.p8"
+          xcrun stapler staple dist/urunc-macos.dmg
+          xcrun stapler validate dist/urunc-macos.dmg
+          spctl -a -vv -t open --context context:primary-signature dist/urunc-macos.dmg
+
+      # release_tarball re-signs the binaries as *standalone* Developer ID code
+      # (the bundle main-exec seal is invalid once extracted -> AMFI "Killed: 9")
+      # and gates on codesign --verify --strict. We re-assert here that the lone
+      # binaries are valid and vz-runner kept its virtualization entitlement.
+      - name: Package the Homebrew release tarball
+        run: |
+          make release_tarball CODESIGN_IDENTITY="$IDENTITY" CODESIGN_KEYCHAIN="$KEYCHAIN"
+          codesign --verify --strict dist/tarball-stage/urunc-macos
+          codesign --verify --strict dist/tarball-stage/vz-runner
+          codesign -d --entitlements - --xml dist/tarball-stage/vz-runner \
+            | grep -q com.apple.security.virtualization \
+            || { echo "vz-runner lost its virtualization entitlement" >&2; exit 1; }
+          # release_tarball itself refuses an identity that is not a Developer
+          # ID and asserts the signature it produced, so the omission that
+          # shipped ad-hoc tarballs through rc11 and rc12 cannot recur here or
+          # in a local packaging run.
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: urunc-macos-dmg
+          path: dist/urunc-macos.dmg
+          retention-days: 30
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: urunc-macos-brew-tarball
+          path: |
+            dist/urunc-macos-*.tar.gz
+            dist/urunc-macos-*.tar.gz.sha256
+          retention-days: 30
+
+      - name: Create the GitHub release (tag builds only)
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          if [ "v$(cat VERSION)" != "$TAG" ]; then
+            echo "VERSION file ($(cat VERSION)) does not match tag $TAG" >&2
+            exit 1
+          fi
+
+          # Release notes = optional curated highlights + the generated
+          # changelog section for this tag + the install/notarization footer.
+          NOTES="$RUNNER_TEMP/release-notes.md"
+          : > "$NOTES"
+          if [ -f "docs/release-notes/$TAG.md" ]; then
+            cat "docs/release-notes/$TAG.md" >> "$NOTES"
+            printf '\n\n' >> "$NOTES"
+          fi
+          ./scripts/changelog.sh --notes "$TAG" >> "$NOTES" || true
+          # Append the install footer with printf (not a heredoc): heredoc
+          # body lines sit at column 0, and a bare "---" there is a YAML
+          # document separator that breaks the workflow parse.
+          {
+            printf '\n---\n'
+            # shellcheck disable=SC2016  # backticks are literal markdown, not command substitution
+            printf 'Signed and notarized build. `urunc-macos-*.tar.gz` feeds the Homebrew tap (nofireai/nofire); the dmg is the drag-install image.\n'
+          } >> "$NOTES"
+
+          gh release create "$TAG" \
+            --title "urunc-macos $TAG" \
+            --notes-file "$NOTES" \
+            dist/urunc-macos.dmg dist/urunc-macos-*.tar.gz dist/urunc-macos-*.tar.gz.sha256
+
+      - name: Publish the tarball checksum in the job summary
+        run: |
+          {
+            echo "### Homebrew tap update"
+            echo '```'
+            cat dist/urunc-macos-*.tar.gz.sha256
+            echo '```'
+            echo "Update \`Formula/urunc-macos.rb\` in NOFireAI/homebrew-nofire with this sha256 (and the new version URL)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Delete ephemeral keychain
+        if: always()
+        run: |
+          if [ -n "$KEYCHAIN" ] && [ -f "$KEYCHAIN" ]; then
+            security delete-keychain "$KEYCHAIN"
+          fi

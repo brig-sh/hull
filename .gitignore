@@ -1,0 +1,7 @@
+.DS_Store
+dist/
+vz-runner/.build/
+*.dmg
+go.work
+go.work.sum
+.worktrees/

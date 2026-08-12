@@ -1,0 +1,6 @@
+# Valid minimal project: one service with only the required image key. Serves
+# the supported-tier cases (toplevel.services, service.image), the x-hypervisor
+# default divergence, and cli.config's happy path.
+services:
+  web:
+    image: alpine:3.19

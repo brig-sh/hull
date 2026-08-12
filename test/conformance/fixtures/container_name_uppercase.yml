@@ -1,0 +1,7 @@
+# service.container_name (partial): uppercase letters are rejected with an
+# error rather than silently renamed (the [a-z0-9_-] restriction blocks path
+# traversal via a crafted name).
+services:
+  web:
+    image: alpine:3.19
+    container_name: WebApp

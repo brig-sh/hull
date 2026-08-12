@@ -1,0 +1,7 @@
+# spec.interpolation (unsupported): ${VAR} / ${VAR:-default} is NOT expanded;
+# the value passes through byte-for-byte, with no warning.
+services:
+  web:
+    image: alpine:3.19
+    environment:
+      - "GREETING=${HELLO:-hi}"

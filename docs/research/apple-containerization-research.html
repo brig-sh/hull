@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Apple Containerization Framework - Deep Technical Research</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --text-muted: #8b949e;
+    --heading: #f0f6fc;
+    --accent: #58a6ff;
+    --accent2: #3fb950;
+    --warn: #d29922;
+    --red: #f85149;
+    --code-bg: #1c2128;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    padding: 2em 1em;
+    max-width: 960px;
+    margin: 0 auto;
+  }
+  h1 {
+    color: var(--heading);
+    font-size: 1.8em;
+    border-bottom: 2px solid var(--accent);
+    padding-bottom: 0.4em;
+    margin-bottom: 0.6em;
+  }
+  h2 {
+    color: var(--accent);
+    font-size: 1.35em;
+    margin-top: 2em;
+    margin-bottom: 0.5em;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0.3em;
+  }
+  h3 {
+    color: var(--accent2);
+    font-size: 1.1em;
+    margin-top: 1.3em;
+    margin-bottom: 0.4em;
+  }
+  p { margin-bottom: 0.8em; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code {
+    background: var(--code-bg);
+    padding: 0.15em 0.4em;
+    border-radius: 4px;
+    font-size: 0.9em;
+    font-family: 'SF Mono', SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 1em;
+    overflow-x: auto;
+    margin: 0.8em 0;
+    font-size: 0.85em;
+    line-height: 1.5;
+  }
+  pre code { background: none; padding: 0; }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.2em;
+    margin: 1em 0;
+  }
+  .card-accent {
+    border-left: 3px solid var(--accent);
+  }
+  .card-warn {
+    border-left: 3px solid var(--warn);
+  }
+  .card-green {
+    border-left: 3px solid var(--accent2);
+  }
+  .card-red {
+    border-left: 3px solid var(--red);
+  }
+  .label {
+    display: inline-block;
+    font-size: 0.75em;
+    font-weight: 600;
+    padding: 0.15em 0.6em;
+    border-radius: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .label-yes { background: #1a3a2a; color: var(--accent2); }
+  .label-no { background: #3a1a1a; color: var(--red); }
+  .label-partial { background: #3a2a1a; color: var(--warn); }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1em 0;
+    font-size: 0.9em;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 0.6em 0.8em;
+    text-align: left;
+  }
+  th {
+    background: var(--surface);
+    color: var(--heading);
+    font-weight: 600;
+  }
+  tr:nth-child(even) { background: rgba(22,27,34,0.5); }
+  ul, ol { margin: 0.5em 0 0.8em 1.5em; }
+  li { margin-bottom: 0.3em; }
+  .toc {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1em 1.5em;
+    margin: 1.5em 0;
+  }
+  .toc ul { list-style: none; margin: 0; padding: 0; }
+  .toc li { margin: 0.3em 0; }
+  .toc a { color: var(--text-muted); }
+  .toc a:hover { color: var(--accent); }
+  .meta {
+    color: var(--text-muted);
+    font-size: 0.85em;
+    margin-bottom: 1.5em;
+  }
+  .verdict {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1em;
+    margin: 1em 0;
+  }
+  @media (max-width: 600px) {
+    .verdict { grid-template-columns: 1fr; }
+    body { padding: 1em 0.5em; }
+  }
+  .src {
+    font-size: 0.8em;
+    color: var(--text-muted);
+    margin-top: 0.3em;
+  }
+  .comparison-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 0.5em;
+    margin: 0.5em 0;
+  }
+  @media (max-width: 600px) {
+    .comparison-row { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<h1>Apple Containerization Framework -- Deep Technical Research</h1>
+<p class="meta">Research date: 2026-06-22 | Framework version: v1.0.0 (June 2026) | Repos: <a href="https://github.com/apple/containerization">apple/containerization</a> + <a href="https://github.com/apple/container">apple/container</a></p>
+
+<div class="toc">
+  <strong>Table of Contents</strong>
+  <ul>
+    <li><a href="#overview">1. Overview and History</a></li>
+    <li><a href="#architecture">2. Architecture</a></li>
+    <li><a href="#isolation">3. Isolation Model (VM-per-Container)</a></li>
+    <li><a href="#vminitd">4. vminitd -- The Guest Init System</a></li>
+    <li><a href="#filesystem">5. Filesystem Handling</a></li>
+    <li><a href="#networking">6. Networking</a></li>
+    <li><a href="#resources">7. Resource Management and Limits</a></li>
+    <li><a href="#security">8. Security Model</a></li>
+    <li><a href="#kernel">9. Kernel Requirements</a></li>
+    <li><a href="#apis">10. Undocumented / Private APIs</a></li>
+    <li><a href="#pods">11. LinuxPod (Multi-Container VMs)</a></li>
+    <li><a href="#machines">12. Container Machines (WWDC26)</a></li>
+    <li><a href="#comparison">13. Comparison with urunc/Vz</a></li>
+    <li><a href="#ecosystem">14. Ecosystem (nerdbox, Kata, Docker)</a></li>
+    <li><a href="#answers">15. Direct Answers to Your Questions</a></li>
+    <li><a href="#sources">16. Sources</a></li>
+  </ul>
+</div>
+
+<h2 id="overview">1. Overview and History</h2>
+<p>Apple announced the Containerization framework and the <code>container</code> CLI at <strong>WWDC 2025</strong> (June 2025). It is an open-source (Apache 2.0) Swift package that enables running Linux containers on macOS using <strong>Virtualization.framework</strong> on Apple Silicon. At <strong>WWDC 2026</strong>, Apple shipped version 1.0.0 with the addition of <strong>Container Machines</strong> (persistent Linux VM environments) and full macOS 26 support.</p>
+
+<div class="card card-accent">
+  <strong>Two repositories:</strong>
+  <ul>
+    <li><code>apple/containerization</code> -- The Swift framework/library (APIs for images, VMs, networking, ext4, vminitd)</li>
+    <li><code>apple/container</code> -- The CLI tool and system services (apiserver, vmnet daemon, image store, runtime)</li>
+  </ul>
+</div>
+
+<h2 id="architecture">2. Architecture</h2>
+
+<h3>System Components</h3>
+<table>
+  <tr><th>Component</th><th>Role</th><th>Communication</th></tr>
+  <tr><td><code>container</code> CLI</td><td>User-facing commands</td><td>XPC to apiserver</td></tr>
+  <tr><td><code>container-apiserver</code></td><td>Central daemon for container/network lifecycle</td><td>XPC + launchd</td></tr>
+  <tr><td><code>container-core-images</code></td><td>XPC helper for OCI image storage</td><td>XPC service</td></tr>
+  <tr><td><code>container-network-vmnet</code></td><td>Virtual networking via vmnet.framework</td><td>XPC service</td></tr>
+  <tr><td><code>container-runtime-linux</code></td><td>Per-container VM management</td><td>vsock to guest</td></tr>
+  <tr><td><code>vminitd</code> (guest)</td><td>PID 1 inside each VM; gRPC server</td><td>vsock port 1024</td></tr>
+</table>
+<p class="src">Source: <a href="https://github.com/apple/container/blob/main/docs/technical-overview.md">apple/container technical-overview.md</a></p>
+
+<h3>Framework Modules (from Package.swift)</h3>
+<table>
+  <tr><th>Module</th><th>Purpose</th></tr>
+  <tr><td><code>Containerization</code></td><td>Core: LinuxContainer, LinuxPod, VM management, networking, vminitd client</td></tr>
+  <tr><td><code>ContainerizationEXT4</code></td><td>Pure-Swift ext4 filesystem creation, formatting, reading, and population</td></tr>
+  <tr><td><code>ContainerizationOCI</code></td><td>OCI image management and registry interaction</td></tr>
+  <tr><td><code>ContainerizationNetlink</code></td><td>Linux netlink socket family interaction (for guest networking)</td></tr>
+  <tr><td><code>ContainerizationIO</code></td><td>I/O stream management</td></tr>
+  <tr><td><code>ContainerizationOS</code></td><td>OS-level abstractions</td></tr>
+  <tr><td><code>ContainerizationExtras</code></td><td>Additional utilities (NATInterface, CIDRv4/v6, etc.)</td></tr>
+  <tr><td><code>ContainerizationArchive</code></td><td>Archive handling with zstd support</td></tr>
+</table>
+<p class="src">Source: <a href="https://raw.githubusercontent.com/apple/containerization/main/Package.swift">Package.swift</a> (Swift 6.2, min macOS 15.0)</p>
+
+<h3>macOS Framework Dependencies</h3>
+<ul>
+  <li><strong>Virtualization.framework</strong> -- VM lifecycle, virtio devices, boot</li>
+  <li><strong>vmnet.framework</strong> -- Virtual networking (shared/bridged modes)</li>
+  <li><strong>XPC</strong> -- Inter-process communication between CLI and services</li>
+  <li><strong>launchd</strong> -- Service lifecycle management</li>
+  <li><strong>Keychain Services</strong> -- Registry credential storage</li>
+  <li><strong>Unified Logging</strong> -- Diagnostic output integration</li>
+</ul>
+
+<h2 id="isolation">3. Isolation Model (VM-per-Container)</h2>
+
+<div class="card card-green">
+  <strong>Core design:</strong> Every container runs inside its own lightweight Linux VM. This is NOT namespace-based isolation. Each container gets its own Linux kernel, providing hypervisor-level (hardware-backed) isolation.
+</div>
+
+<p>This is architecturally equivalent to what <strong>Kata Containers</strong> does on Linux, but reimplemented from scratch in Swift for Apple Silicon. As one analyst put it: Apple "basically wrote Kata for macOS in Swift."</p>
+
+<h3>Two Container Models</h3>
+<table>
+  <tr><th>Type</th><th>Class</th><th>VM Model</th><th>Use Case</th></tr>
+  <tr><td>LinuxContainer</td><td><code>LinuxContainer</code></td><td>1 VM per container</td><td>Maximum isolation (default)</td></tr>
+  <tr><td>LinuxPod</td><td><code>LinuxPod</code></td><td>1 VM, multiple containers</td><td>Shared resources, k8s-style pods</td></tr>
+</table>
+
+<h3>LinuxContainer Lifecycle</h3>
+<ol>
+  <li><strong>create()</strong> -- Initializes VM, boots kernel, waits for vminitd on vsock:1024, mounts filesystems, configures networking</li>
+  <li><strong>start()</strong> -- Launches the container's initial process inside the VM</li>
+  <li><strong>exec()</strong> -- Runs additional processes (like <code>docker exec</code>)</li>
+  <li><strong>stop()</strong> -- Gracefully shuts down VM and frees resources</li>
+</ol>
+
+<h3>LinuxContainer Defaults</h3>
+<pre><code>CPUs:   4
+Memory: 1024 MiB (1 GiB)
+</code></pre>
+
+<h3>Boot Sequence (from source)</h3>
+<ol>
+  <li>Validate VM is in stopped state</li>
+  <li>Prestart hook: install Rosetta binary translation if requested</li>
+  <li>Kernel boot via <code>VZVirtualMachine.start()</code></li>
+  <li>Agent handshake: block until vsock port 1024 (vminitd) responds</li>
+  <li>Feature configuration: enable Rosetta post-boot if needed</li>
+  <li>Time sync: initiate periodic host-guest clock synchronization</li>
+</ol>
+<p class="src">Source: <a href="https://deepwiki.com/apple/containerization/2.3-virtual-machine-management">DeepWiki VM Management</a>, <a href="https://github.com/apple/containerization/blob/main/Sources/Containerization/LinuxContainer.swift">LinuxContainer.swift</a></p>
+
+<h2 id="vminitd">4. vminitd -- The Guest Init System</h2>
+
+<div class="card card-accent">
+  <strong>vminitd</strong> is a minimal init system written in Swift, cross-compiled from macOS using the <strong>Swift Static Linux SDK</strong> with <strong>musl libc</strong>. It runs as PID 1 inside each VM and provides a <strong>gRPC API over vsock</strong> (port 1024).
+</div>
+
+<h3>gRPC Service API (from SandboxContext.proto)</h3>
+<p>The full gRPC service definition covers these categories:</p>
+
+<table>
+  <tr><th>Category</th><th>Operations</th></tr>
+  <tr><td>Filesystem</td><td>Mount, Umount, Mkdir, WriteFile, Copy (bidirectional via vsock), Stat, FilesystemOperation (trim/freeze/thaw)</td></tr>
+  <tr><td>Process</td><td>CreateProcess, StartProcess, KillProcess, WaitProcess, DeleteProcess, ResizeProcess (TTY), CloseProcessStdin</td></tr>
+  <tr><td>Network</td><td>IpLinkSet, IpAddrAdd, IpRouteAddLink, IpRouteAddDefault, ConfigureDns, ConfigureHosts</td></tr>
+  <tr><td>Environment</td><td>Setenv, Getenv, Sysctl, SetTime, SetupEmulator (binfmt for Rosetta)</td></tr>
+  <tr><td>Statistics</td><td>ContainerStatistics (process, memory, CPU, block I/O, network, memory events)</td></tr>
+  <tr><td>Vsock Proxy</td><td>ProxyVsock (bridge vsock to unix sockets), StopVsockProxy</td></tr>
+</table>
+
+<h3>The Minimal Filesystem</h3>
+<p>The VM's root filesystem contains <strong>only the vminitd binary</strong>. No core utilities (ls, cp, cat), no dynamic libraries, no libc. This drastically reduces attack surface.</p>
+
+<h3>I/O Streams via Vsock</h3>
+<p>Each container process gets dedicated vsock ports for stdin, stdout, stderr. Port allocation uses atomic counters starting at <code>0x1000_0000</code>.</p>
+<p class="src">Source: <a href="https://github.com/apple/containerization/blob/main/Sources/Containerization/SandboxContext/SandboxContext.proto">SandboxContext.proto</a>, <a href="https://github.com/apple/containerization/blob/main/Sources/Containerization/Vminitd.swift">Vminitd.swift</a></p>
+
+<h2 id="filesystem">5. Filesystem Handling</h2>
+
+<h3>Primary: EXT4 Block Devices</h3>
+<div class="card card-green">
+  Container filesystems are exposed as <strong>EXT4-formatted block devices</strong> via <code>virtio-blk</code>. The <code>ContainerizationEXT4</code> module is an <strong>entire ext4 filesystem implementation written in Swift</strong> that can format, create directory structures, and populate filesystems directly -- no external tools needed.
+</div>
+
+<p>The kernel command line for ext4 rootfs: <code>console=hvc0 init=/sbin/vminitd ro rootfstype=ext4 root=/dev/vda</code></p>
+
+<h3>Mount Conversion Strategy</h3>
+<table>
+  <tr><th>Mount Type</th><th>Runtime Option</th><th>Guest Device</th></tr>
+  <tr><td>Initial rootfs (ext4)</td><td><code>virtioblk</code></td><td><code>/dev/vda</code></td></tr>
+  <tr><td>Additional block mounts</td><td><code>virtioblk</code></td><td><code>/dev/vdb</code>, <code>/dev/vdc</code>, ...</td></tr>
+  <tr><td>Directory shares</td><td><code>virtiofs</code></td><td>Custom tag via <code>VZMultipleDirectoryShare</code></td></tr>
+  <tr><td>Shared pod volumes</td><td><code>shared</code></td><td>Volume name reference</td></tr>
+  <tr><td>Guest-only mounts</td><td><code>any</code></td><td>proc, sysfs, devtmpfs, tmpfs, cgroup2</td></tr>
+</table>
+
+<h3>Default Mounts (from LinuxContainer source)</h3>
+<pre><code>proc      /proc
+sysfs     /sys
+devtmpfs  /dev
+tmpfs     /tmp (and others)
+cgroup2   /sys/fs/cgroup</code></pre>
+
+<h3>Block Device Features</h3>
+<ul>
+  <li>Disk image caching modes: automatic, cached, uncached</li>
+  <li>Synchronization modes: full, fsync, none</li>
+  <li>Network Block Device (NBD) support: <code>nbd://</code>, <code>nbds://</code>, <code>nbd+unix://</code> schemes</li>
+  <li>Copy-on-write cloning mentioned for macOS-specific file copying</li>
+</ul>
+
+<h3>Does It Use APFS Clones?</h3>
+<div class="card card-warn">
+  <span class="label label-partial">Indirect</span>
+  The framework itself does not explicitly call APFS clone APIs (like <code>clonefile()</code>). However, the Mount.swift source mentions "copy-on-write cloning" for macOS-specific file copying. Since the host filesystem is APFS, any file copies done on the host side will inherently use APFS clonefile semantics. The primary isolation mechanism is the <strong>per-VM ext4 block device</strong>, not APFS volume clones.
+</div>
+
+<h3>Performance Note</h3>
+<p>The pure-Swift ext4 implementation has known performance concerns. Anil Madhavapeddy reported that unpacking a 415.9 MB image with 112,000+ entries took approximately 9+ minutes on an M4 MacBook Air.</p>
+<p class="src">Sources: <a href="https://github.com/apple/containerization/blob/main/Sources/Containerization/Mount.swift">Mount.swift</a>, <a href="https://github.com/apple/containerization/blob/main/Sources/Containerization/AttachedFilesystem.swift">AttachedFilesystem.swift</a>, <a href="https://anil.recoil.org/notes/apple-containerisation">Anil Madhavapeddy analysis</a></p>
+
+<h2 id="networking">6. Networking</h2>
+
+<h3>Architecture</h3>
+<div class="card card-accent">
+  Every container gets a <strong>dedicated IP address</strong> -- no port mapping needed. Networking is provided by the <strong>vmnet.framework</strong> on the host side and configured via <strong>netlink</strong> (gRPC calls to vminitd) on the guest side.
+</div>
+
+<h3>Host-Side: VmnetNetwork</h3>
+<ul>
+  <li>Default mode: <code>VMNET_SHARED_MODE</code> (NAT)</li>
+  <li><strong>DHCP is explicitly disabled</strong> (<code>vmnet_network_configuration_disable_dhcp</code>)</li>
+  <li>Static IP allocation via the <code>Allocator</code> struct</li>
+  <li>IPv4 pool: addresses between <code>cidrV4.lower + 2</code> and <code>cidrV4.upper - 3</code> (rotating)</li>
+  <li>IPv6: UInt32 index applied to host portion of prefix</li>
+  <li>Dual-stack (IPv4 + IPv6) support</li>
+  <li>Configurable MTU (default 1500)</li>
+  <li>Per-container MAC address assignment</li>
+</ul>
+
+<h3>Guest-Side: Network Configuration via gRPC</h3>
+<ol>
+  <li><code>IpLinkSet</code> -- bring interface up, set MTU</li>
+  <li><code>IpAddrAdd</code> -- assign IPv4/IPv6 addresses</li>
+  <li><code>IpRouteAddDefault</code> -- set default gateway (first interface)</li>
+  <li><code>ConfigureDns</code> -- write resolver configuration</li>
+  <li><code>ConfigureHosts</code> -- write /etc/hosts</li>
+</ol>
+
+<h3>NATInterface</h3>
+<p>The <code>NATInterface</code> struct configures: IPv4 CIDR + optional gateway, IPv6 CIDR + optional gateway, MAC address, MTU.</p>
+
+<h3>DNS</h3>
+<p>The <code>container</code> CLI tool includes an embedded DNS service. Containers can be accessed by domain names (e.g., <code>myapp.test</code>). Setting up the DNS service requires administrator privileges.</p>
+
+<h3>Vsock Communication</h3>
+<table>
+  <tr><th>Direction</th><th>Method</th><th>Purpose</th></tr>
+  <tr><td>Host-to-Guest</td><td><code>dialAgent()</code></td><td>Connect to vminitd on port 1024</td></tr>
+  <tr><td>Host-to-Guest</td><td><code>dial(port)</code></td><td>Connect to arbitrary guest ports</td></tr>
+  <tr><td>Guest-to-Host</td><td><code>listen()</code></td><td>AsyncSequence of inbound connections</td></tr>
+  <tr><td>Proxy</td><td><code>ProxyVsock</code></td><td>Bridge vsock ports to guest unix sockets</td></tr>
+</table>
+<p class="src">Sources: <a href="https://github.com/apple/containerization/blob/main/Sources/Containerization/VmnetNetwork.swift">VmnetNetwork.swift</a>, <a href="https://github.com/apple/containerization/blob/main/Sources/Containerization/NATInterface.swift">NATInterface.swift</a></p>
+
+<h2 id="resources">7. Resource Management and Limits</h2>
+
+<h3>VM-Level Resources</h3>
+<table>
+  <tr><th>Resource</th><th>Default</th><th>Configurable</th></tr>
+  <tr><td>CPUs</td><td>4</td><td>Yes, per container</td></tr>
+  <tr><td>Memory</td><td>1 GiB</td><td>Yes, per container (in bytes)</td></tr>
+  <tr><td>Network interfaces</td><td>[]</td><td>Yes, array of Interface objects</td></tr>
+  <tr><td>Nested virtualization</td><td>false</td><td>Yes (requires hardware support)</td></tr>
+</table>
+
+<h3>Guest-Level Resources (cgroups v2)</h3>
+<p>Inside LinuxPod, per-container resource limits are enforced via <strong>cgroups v2</strong>:</p>
+<ul>
+  <li>CPU limits (can oversubscribe beyond pod total)</li>
+  <li>Memory limits with swap control</li>
+  <li>Per-container namespaces: mount, UTS, cgroup, IPC</li>
+  <li>Optional shared PID namespace (via pause container)</li>
+</ul>
+
+<h3>Statistics Tracked (from ContainerStatistics.swift)</h3>
+<ul>
+  <li><strong>Process:</strong> current count, limit</li>
+  <li><strong>Memory:</strong> usage, limit, swap usage, swap limit, cache, kernel stack, page faults, reclamation stats</li>
+  <li><strong>CPU:</strong> total usage (microseconds), user time, system time, throttling periods/duration</li>
+  <li><strong>Block I/O:</strong> per-device read/write bytes and operations (by major:minor)</li>
+  <li><strong>Network:</strong> per-interface packets/bytes/errors (rx/tx)</li>
+  <li><strong>Memory Events:</strong> low reclamation, high-limit exceeded, max-limit hits, OOM triggers, OOM kills</li>
+</ul>
+
+<div class="card card-accent">
+  <strong>Key insight:</strong> Resources are dynamically allocated -- CPU and memory are only consumed when containers are running. When idle, resources are released back to the host. This is a property of Virtualization.framework's balloon/yield behavior.
+</div>
+<p class="src">Sources: <a href="https://github.com/apple/containerization/blob/main/Sources/Containerization/ContainerStatistics.swift">ContainerStatistics.swift</a>, <a href="https://github.com/apple/containerization/blob/main/Sources/Containerization/VMConfiguration.swift">VMConfiguration.swift</a></p>
+
+<h2 id="security">8. Security Model</h2>
+
+<h3>Isolation Layers</h3>
+<ol>
+  <li><strong>Hypervisor isolation</strong> -- Each container has its own Linux kernel in a separate VM. No shared kernel means no container escape via kernel exploits.</li>
+  <li><strong>Minimal attack surface</strong> -- The VM root filesystem contains ONLY the vminitd binary. No shell, no utilities, no libc, no dynamic libraries.</li>
+  <li><strong>Scoped file sharing</strong> -- Directories are shared on a per-container basis only. A container cannot access files shared with other containers.</li>
+  <li><strong>Process isolation</strong> -- Processes in one container cannot observe processes on the host or in other containers.</li>
+</ol>
+
+<h3>Does It Use Sandbox Profiles (.sb files)?</h3>
+<div class="card card-red">
+  <span class="label label-no">No</span>
+  Apple's containerization does <strong>NOT</strong> use macOS sandbox profiles (.sb files / Seatbelt / TrustedBSD MAC). The isolation is entirely at the hypervisor level via Virtualization.framework. In fact, <a href="https://github.com/apple/containerization/issues/737">issue #737</a> explicitly asks whether Apple Containerization will ever offer native process sandboxing without requiring Linux VMs -- the answer is currently no. The <code>SandboxContext</code> in the source code is the name of the gRPC protobuf service for the vminitd agent, NOT a macOS sandbox profile.
+</div>
+
+<h3>Required Entitlements</h3>
+<ul>
+  <li><code>com.apple.security.virtualization</code> -- Required for Virtualization.framework</li>
+  <li><code>com.apple.vm.networking</code> -- Required for vmnet.framework</li>
+</ul>
+<p class="src">Sources: <a href="https://github.com/apple/containerization/issues/737">Issue #737</a>, <a href="https://developer.apple.com/videos/play/wwdc2025/346/">WWDC25 Session</a></p>
+
+<h2 id="kernel">9. Kernel Requirements</h2>
+
+<div class="card card-accent">
+  <ul>
+    <li><strong>Minimum version:</strong> Linux 6.14.9+ (tested), 6.12.28 also used in practice</li>
+    <li><strong>Default source:</strong> Kata Containers project provides pre-built kernels</li>
+    <li><strong>Critical requirement:</strong> VIRTIO drivers must be <strong>compiled into the kernel</strong> (not as modules)</li>
+    <li><strong>Architecture:</strong> arm64 only (x86_64 via Rosetta 2 translation)</li>
+    <li><strong>Custom config:</strong> Available at <code>kernel/config-arm64</code> in the repo</li>
+    <li><strong>Optimized for:</strong> Sub-second boot with minimal driver set targeting container workloads</li>
+  </ul>
+</div>
+
+<h3>Required Kernel Features (VIRTIO)</h3>
+<ul>
+  <li><code>virtio-blk</code> -- Block device storage (ext4 rootfs)</li>
+  <li><code>virtio-net</code> -- Network interfaces</li>
+  <li><code>virtio-fs</code> -- Shared directory filesystem</li>
+  <li><code>virtio-vsock</code> -- Host-guest communication channel</li>
+  <li><code>virtio-console</code> -- Serial console (<code>hvc0</code>)</li>
+  <li><code>cgroup2</code> -- Resource management (for LinuxPod)</li>
+  <li><code>ext4</code> -- Root filesystem</li>
+  <li>Linux namespaces -- mount, UTS, cgroup, IPC, PID (for pod containers)</li>
+</ul>
+
+<h3>Rosetta 2 Support</h3>
+<p>For running x86_64 containers on arm64: Rosetta is installed as a <code>VZLinuxRosettaDirectoryShare</code> virtiofs device, with binfmt_misc configured via the <code>SetupEmulator</code> gRPC call. Known issue with kernel 6.13 builds.</p>
+<p class="src">Sources: <a href="https://github.com/apple/containerization">Repository README</a>, <a href="https://deepwiki.com/apple/containerization/2.3-virtual-machine-management">DeepWiki VM Management</a></p>
+
+<h2 id="apis">10. Undocumented / Private APIs</h2>
+
+<div class="card card-warn">
+  <span class="label label-partial">Mostly public APIs</span>
+  Based on thorough source code analysis, the framework primarily uses <strong>documented public APIs</strong>:
+  <ul>
+    <li><strong>Virtualization.framework</strong> -- All public API (VZVirtualMachine, VZLinuxBootLoader, VZVirtioBlockDeviceConfiguration, etc.)</li>
+    <li><strong>vmnet.framework</strong> -- This is a <em>semi-documented</em> C framework. It was originally reverse-engineered for OCaml/MirageOS around 2014. Apple has since made it more accessible but it remains lower-level than Virtualization.framework.</li>
+    <li><strong>CShim target</strong> -- The Package.swift includes a C shim target, likely for bridging to C APIs not directly accessible from Swift (potentially vmnet C functions).</li>
+  </ul>
+  <p style="margin-top:0.5em">No evidence of private SPI (System Programming Interfaces) or undocumented kernel extensions was found in the source code.</p>
+</div>
+<p class="src">Source: <a href="https://anil.recoil.org/notes/apple-containerisation">Anil Madhavapeddy analysis</a> (notes vmnet was reverse-engineered circa 2014)</p>
+
+<h2 id="pods">11. LinuxPod (Multi-Container VMs)</h2>
+
+<p><code>LinuxPod</code> is marked as <strong>experimental</strong>. It runs multiple containers in a single VM, similar to Kubernetes pods.</p>
+
+<h3>Key Differences from LinuxContainer</h3>
+<table>
+  <tr><th>Feature</th><th>LinuxContainer</th><th>LinuxPod</th></tr>
+  <tr><td>VM per container</td><td>Yes</td><td>No -- shared VM</td></tr>
+  <tr><td>Kernel isolation</td><td>Full</td><td>Shared kernel, namespace isolation</td></tr>
+  <tr><td>Networking</td><td>Dedicated per VM</td><td>Shared within pod</td></tr>
+  <tr><td>Resource limits</td><td>VM-level</td><td>cgroups v2 per container</td></tr>
+  <tr><td>Hot-plugging</td><td>N/A</td><td>Yes -- add containers to running VM</td></tr>
+  <tr><td>Shared volumes</td><td>No</td><td>Yes -- NBD-backed, mountable by multiple containers</td></tr>
+</table>
+
+<h3>Pod Namespace Configuration</h3>
+<ul>
+  <li>Each container: dedicated mount, UTS, cgroup, IPC namespaces</li>
+  <li>PID namespace: shared (via pause container) or isolated</li>
+  <li>Container rootfs at: <code>/run/container/{id}/rootfs</code></li>
+  <li>Shared volumes at: <code>/run/volumes/{name}</code></li>
+</ul>
+<p class="src">Source: <a href="https://github.com/apple/containerization/blob/main/Sources/Containerization/LinuxPod.swift">LinuxPod.swift</a></p>
+
+<h2 id="machines">12. Container Machines (WWDC26)</h2>
+
+<div class="card card-green">
+  <strong>New in v1.0.0 (June 2026):</strong> Container Machines are persistent, long-lived Linux environments built on Containerization. They combine container speed with VM persistence -- like WSL for macOS.
+</div>
+
+<h3>Key Properties</h3>
+<ul>
+  <li><strong>Persistent:</strong> Modifications survive across stop/start cycles</li>
+  <li><strong>Ext4 root filesystem</strong> for persistent storage</li>
+  <li><strong>Automatic user mapping:</strong> macOS username is mirrored inside the VM</li>
+  <li><strong>Automatic directory sharing:</strong> CWD is mirrored via virtiofs</li>
+  <li><strong>Sub-second start times</strong></li>
+  <li><strong>Isolated networking</strong> with dedicated IP per machine</li>
+  <li><strong>OCI image base:</strong> Created from standard container images</li>
+</ul>
+<p class="src">Source: <a href="https://developer.apple.com/videos/play/wwdc2026/389/">WWDC26 Session: Discover Container Machines</a></p>
+
+<h2 id="comparison">13. Comparison with urunc/Vz Backend</h2>
+
+<table>
+  <tr><th>Feature</th><th>Apple Containerization</th><th>urunc-macos (Vz backend)</th></tr>
+  <tr><td>Language</td><td>Swift</td><td>Go + Swift (vz-runner)</td></tr>
+  <tr><td>Guest workload</td><td>Linux containers (full distro)</td><td>Unikernels</td></tr>
+  <tr><td>Init system</td><td>vminitd (Swift, gRPC/vsock)</td><td>.vz-init (shell script, overlay setup)</td></tr>
+  <tr><td>Rootfs</td><td>ext4 block device (virtio-blk)</td><td>virtiofs (directory share)</td></tr>
+  <tr><td>Writable layer</td><td>ext4 block device</td><td>overlayfs (tmpfs upper) on virtiofs</td></tr>
+  <tr><td>Image cache isolation</td><td>ext4 per-container image</td><td>APFS clonefile (cp -c -a)</td></tr>
+  <tr><td>Networking</td><td>vmnet.framework + static IP alloc</td><td>Virtualization.framework NAT</td></tr>
+  <tr><td>Boot time</td><td>~0.7s (Alpine)</td><td>~60ms kernel-to-init</td></tr>
+  <tr><td>OCI support</td><td>Full OCI image spec</td><td>OCI via bunny frontend</td></tr>
+  <tr><td>Resource limits</td><td>CPU, memory, cgroups v2</td><td>CPU, memory (VM-level)</td></tr>
+  <tr><td>Multi-container</td><td>LinuxPod (shared VM)</td><td>N/A</td></tr>
+</table>
+
+<h2 id="ecosystem">14. Ecosystem Comparison</h2>
+
+<table>
+  <tr><th>Project</th><th>Platform</th><th>Isolation</th><th>Approach</th></tr>
+  <tr><td>Apple Containerization</td><td>macOS (Apple Silicon)</td><td>VM-per-container</td><td>Virtualization.framework, Swift</td></tr>
+  <tr><td>Docker Desktop</td><td>macOS/Windows/Linux</td><td>Single shared VM</td><td>LinuxKit VM, containerd</td></tr>
+  <tr><td>Kata Containers</td><td>Linux</td><td>VM-per-container</td><td>QEMU/Cloud-Hypervisor, Go</td></tr>
+  <tr><td>gVisor</td><td>Linux</td><td>User-space kernel</td><td>Kernel syscall interception, Go</td></tr>
+  <tr><td>nerdbox</td><td>macOS/Linux</td><td>VM-per-container</td><td>libkrun (Rust VMM), containerd shim</td></tr>
+  <tr><td>Firecracker</td><td>Linux</td><td>microVM</td><td>KVM-based, Rust</td></tr>
+  <tr><td>urunc</td><td>Linux/macOS</td><td>VM (unikernel)</td><td>Multiple hypervisors, Go</td></tr>
+</table>
+
+<div class="card card-accent">
+  <strong>nerdbox</strong> (<a href="https://github.com/containerd/nerdbox">containerd/nerdbox</a>) is a notable alternative: a containerd runtime shim that uses libkrun for VM isolation. It is cross-platform (macOS + Linux), uses EROFS for rootfs, and provides a containerd integration path that Apple Containerization lacks.
+</div>
+
+<h2 id="answers">15. Direct Answers to Your Questions</h2>
+
+<div class="verdict">
+  <div class="card card-green">
+    <h3>Is each container a lightweight VM?</h3>
+    <span class="label label-yes">Yes</span>
+    <p>Each <code>LinuxContainer</code> runs in its own Virtualization.framework VM with a dedicated Linux kernel. <code>LinuxPod</code> shares one VM across multiple containers with namespace isolation.</p>
+  </div>
+  <div class="card card-red">
+    <h3>Does it use sandbox profiles (.sb)?</h3>
+    <span class="label label-no">No</span>
+    <p>No macOS sandbox profiles or Seatbelt policies. Isolation is purely via the hypervisor. The "SandboxContext" in source is a gRPC service name, not a macOS sandbox.</p>
+  </div>
+  <div class="card card-warn">
+    <h3>Does it use APFS clones?</h3>
+    <span class="label label-partial">Not directly</span>
+    <p>The framework creates ext4 block device images per container. Standard macOS file copy on APFS will use clonefile automatically, but there is no explicit APFS clone API usage for isolation.</p>
+  </div>
+  <div class="card card-green">
+    <h3>How does networking isolation work?</h3>
+    <span class="label label-yes">Per-VM network stack</span>
+    <p>Each VM gets a dedicated vmnet interface with static IP allocation (DHCP disabled). Guest networking configured via gRPC/netlink calls. Full network stack isolation.</p>
+  </div>
+  <div class="card card-warn">
+    <h3>Does it use undocumented APIs?</h3>
+    <span class="label label-partial">Minimal</span>
+    <p>Primarily public Virtualization.framework APIs. vmnet.framework is semi-documented (lower-level C API). A CShim bridges some C functions. No evidence of private SPI.</p>
+  </div>
+  <div class="card card-green">
+    <h3>Resource limiting beyond Virt.framework?</h3>
+    <span class="label label-yes">Yes (in pods)</span>
+    <p>LinuxPod uses cgroups v2 for per-container CPU/memory limits within a shared VM. LinuxContainer relies on VM-level allocation (Virtualization.framework). Statistics include OOM events, throttling, and per-device I/O.</p>
+  </div>
+  <div class="card card-green">
+    <h3>What kernel features does it rely on?</h3>
+    <span class="label label-yes">Standard Linux</span>
+    <p>VIRTIO (blk, net, fs, vsock, console), ext4, cgroups v2, Linux namespaces (mount, UTS, cgroup, IPC, PID), netlink, binfmt_misc (Rosetta). No custom kernel modules.</p>
+  </div>
+</div>
+
+<h2 id="sources">16. Sources</h2>
+<ul>
+  <li><a href="https://github.com/apple/containerization">github.com/apple/containerization</a> -- Framework repository</li>
+  <li><a href="https://github.com/apple/container">github.com/apple/container</a> -- CLI tool repository</li>
+  <li><a href="https://github.com/apple/container/blob/main/docs/technical-overview.md">Technical Overview</a> -- Official architecture docs</li>
+  <li><a href="https://developer.apple.com/videos/play/wwdc2025/346/">WWDC25: Meet Containerization</a> -- Framework announcement</li>
+  <li><a href="https://developer.apple.com/videos/play/wwdc2026/389/">WWDC26: Discover Container Machines</a> -- Container Machines announcement</li>
+  <li><a href="https://deepwiki.com/apple/containerization">DeepWiki: apple/containerization</a> -- AI-generated code analysis</li>
+  <li><a href="https://deepwiki.com/apple/containerization/2.3-virtual-machine-management">DeepWiki: VM Management</a> -- Detailed VM lifecycle</li>
+  <li><a href="https://anil.recoil.org/notes/apple-containerisation">Anil Madhavapeddy: Under the hood</a> -- Independent technical analysis</li>
+  <li><a href="https://www.kevnu.com/en/posts/apple-native-containerization-deep-dive-architecture-comparisons-and-practical-guide">kevnu.com Deep Dive</a> -- Architecture comparison</li>
+  <li><a href="https://edera.dev/stories/apple-just-validated-hypervisor-isolated-containers-heres-what-that-means">Edera: Hypervisor-Isolated Containers</a> -- Security analysis</li>
+  <li><a href="https://chamodshehanka.medium.com/apples-new-containerization-framework-a-deep-dive-into-macos-s-future-for-developers-cf102643394a">Medium: Deep Dive into macOS's Future</a> -- Technical overview</li>
+  <li><a href="https://en.wikipedia.org/wiki/Apple_container">Wikipedia: Apple container</a> -- History and overview</li>
+  <li><a href="https://github.com/apple/containerization/issues/737">Issue #737</a> -- Discussion on macOS sandbox deprecation</li>
+  <li><a href="https://github.com/containerd/nerdbox">containerd/nerdbox</a> -- Alternative VM-isolated containerd shim</li>
+  <li><a href="https://github.com/apple/containerization/blob/main/Sources/Containerization/LinuxContainer.swift">LinuxContainer.swift</a> -- Core container class</li>
+  <li><a href="https://github.com/apple/containerization/blob/main/Sources/Containerization/LinuxPod.swift">LinuxPod.swift</a> -- Multi-container pod class</li>
+  <li><a href="https://github.com/apple/containerization/blob/main/Sources/Containerization/VmnetNetwork.swift">VmnetNetwork.swift</a> -- vmnet networking</li>
+  <li><a href="https://github.com/apple/containerization/blob/main/Sources/Containerization/Vminitd.swift">Vminitd.swift</a> -- vminitd client</li>
+  <li><a href="https://github.com/apple/containerization/blob/main/Sources/Containerization/SandboxContext/SandboxContext.proto">SandboxContext.proto</a> -- gRPC service definition</li>
+  <li><a href="https://raw.githubusercontent.com/apple/containerization/main/Package.swift">Package.swift</a> -- Framework dependencies</li>
+</ul>
+
+</body>
+</html>

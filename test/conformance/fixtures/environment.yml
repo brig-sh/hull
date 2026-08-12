@@ -1,0 +1,9 @@
+# service.environment (supported): map form is accepted and normalized to a
+# sorted KEY: VAL mapping; a bare/null key with no host value set renders
+# null (see caseEnvironment for the host-inheritance-positive cases).
+services:
+  web:
+    image: alpine:3.19
+    environment:
+      FOO: bar
+      EMPTY:

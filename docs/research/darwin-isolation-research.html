@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>macOS/Darwin Process Isolation Primitives -- Research Report</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --text-muted: #8b949e;
+    --heading: #e6edf3;
+    --accent: #58a6ff;
+    --accent2: #3fb950;
+    --red: #f85149;
+    --orange: #d29922;
+    --purple: #bc8cff;
+    --code-bg: #0d1117;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    padding: 2rem 1rem;
+    max-width: 960px;
+    margin: 0 auto;
+  }
+  h1 { color: var(--heading); font-size: 1.8rem; margin-bottom: 0.25rem; border-bottom: 1px solid var(--border); padding-bottom: 0.75rem; }
+  .subtitle { color: var(--text-muted); font-size: 0.95rem; margin-bottom: 2rem; }
+  h2 { color: var(--accent); font-size: 1.35rem; margin: 2.5rem 0 1rem 0; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
+  h3 { color: var(--heading); font-size: 1.1rem; margin: 1.5rem 0 0.5rem 0; }
+  h4 { color: var(--text-muted); font-size: 0.95rem; margin: 1rem 0 0.4rem 0; text-transform: uppercase; letter-spacing: 0.05em; }
+  p { margin-bottom: 0.75rem; }
+  ul, ol { margin: 0.5rem 0 1rem 1.5rem; }
+  li { margin-bottom: 0.4rem; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code {
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.15em 0.35em;
+    font-size: 0.88em;
+    color: var(--orange);
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 1rem;
+    overflow-x: auto;
+    margin: 0.75rem 0 1rem 0;
+    font-size: 0.85rem;
+    line-height: 1.5;
+  }
+  pre code { border: none; padding: 0; background: none; color: var(--text); }
+  .verdict {
+    display: inline-block;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 0.15em 0.55em;
+    border-radius: 3px;
+    margin-left: 0.5rem;
+    vertical-align: middle;
+  }
+  .verdict-no { background: rgba(248,81,73,0.15); color: var(--red); }
+  .verdict-partial { background: rgba(210,153,34,0.15); color: var(--orange); }
+  .verdict-yes { background: rgba(63,185,80,0.15); color: var(--accent2); }
+  .verdict-deprecated { background: rgba(188,140,255,0.15); color: var(--purple); }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.25rem;
+    margin: 1rem 0;
+  }
+  .source {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    margin-top: 0.25rem;
+  }
+  .source a { color: var(--text-muted); }
+  .source a:hover { color: var(--accent); }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0;
+    font-size: 0.9rem;
+  }
+  .table-wrap { overflow-x: auto; }
+  th { background: var(--surface); color: var(--heading); text-align: left; padding: 0.6rem 0.75rem; border-bottom: 2px solid var(--border); }
+  td { padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  .toc { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.25rem 1.5rem; margin: 1.5rem 0 2rem 0; }
+  .toc h3 { margin-top: 0; color: var(--text-muted); font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.05em; }
+  .toc ol { margin: 0.5rem 0 0 1.25rem; }
+  .toc li { margin-bottom: 0.3rem; font-size: 0.9rem; }
+  .summary-box {
+    background: rgba(88,166,255,0.08);
+    border: 1px solid rgba(88,166,255,0.25);
+    border-radius: 8px;
+    padding: 1.25rem;
+    margin: 1rem 0;
+  }
+  .warning-box {
+    background: rgba(248,81,73,0.08);
+    border: 1px solid rgba(248,81,73,0.25);
+    border-radius: 8px;
+    padding: 1.25rem;
+    margin: 1rem 0;
+  }
+  .key-point { border-left: 3px solid var(--accent); padding-left: 1rem; margin: 1rem 0; }
+</style>
+</head>
+<body>
+
+<h1>macOS/Darwin Process Isolation Primitives</h1>
+<p class="subtitle">Technical research report -- June 2026 | 15 sources, 5 search angles, adversarially verified</p>
+
+<div class="summary-box">
+<strong>Executive Summary:</strong> XNU provides <strong>zero Linux-style namespaces</strong> (no mount, PID, network, user, UTS, or IPC namespaces) and <strong>no cgroups</strong>. The strongest non-VM isolation primitive is <code>sandbox-exec</code> (Seatbelt/MACF), which provides capability-based access control over ~300 operation types but cannot create private namespaces. Apple's own containerization framework (WWDC 2025) chose one-VM-per-container via Virtualization.framework, confirming the gap. The Darwin <code>persona</code> mechanism provides partial UID remapping but requires a private entitlement. <code>chroot</code> exists but is blocked by AMFI when SIP is enabled.
+</div>
+
+<div class="toc">
+<h3>Contents</h3>
+<ol>
+  <li><a href="#chroot">chroot on macOS</a></li>
+  <li><a href="#sandbox">sandbox-exec / Seatbelt (MACF)</a></li>
+  <li><a href="#namespaces">Namespace-Like Mechanisms on XNU</a></li>
+  <li><a href="#posix-spawn">posix_spawn Isolation Attributes</a></li>
+  <li><a href="#persona">Darwin Persona Mechanism</a></li>
+  <li><a href="#pgroups">Process Groups and Sessions</a></li>
+  <li><a href="#mounts">Private Mount Trees</a></li>
+  <li><a href="#mach">Mach Port Namespaces</a></li>
+  <li><a href="#launchd">launchd Domains</a></li>
+  <li><a href="#sip">SIP / Rootless Interactions</a></li>
+  <li><a href="#resources">Resource Limits (cgroups equivalent)</a></li>
+  <li><a href="#comparison">Comparison Table: Linux vs. Darwin Isolation</a></li>
+  <li><a href="#sources">Sources</a></li>
+</ol>
+</div>
+
+<!-- ===== 1. CHROOT ===== -->
+<h2 id="chroot">1. chroot on macOS <span class="verdict verdict-partial">Broken by default</span></h2>
+
+<div class="card">
+<h3>Does it work?</h3>
+<p>The <code>chroot(2)</code> syscall exists on macOS but is <strong>effectively blocked by AMFI</strong> (Apple Mobile File Integrity) when SIP is enabled. Attempting to execute binaries inside a chroot produces:</p>
+<pre><code>AMFI: hook..execve() hardened runtime not allowed in chroot
+AMFI: hook..execve() killing pid 93189: not allowed in chroot</code></pre>
+<p>The process is killed with SIGKILL (signal 9).</p>
+<p class="source">Source: <a href="https://threedots.ovh/blog/2021/01/chroot-on-modern-macos-disallowed/">threedots.ovh -- chroot on modern macOS</a></p>
+</div>
+
+<h3>Requirements and Limitations</h3>
+<ul>
+  <li><strong>Root required:</strong> Always. The <code>chroot(2)</code> syscall is privileged (section 8 man page).</li>
+  <li><strong>SIP must be disabled</strong> for any macOS-signed binary to execute inside the chroot. AMFI, which enforces hardened runtime restrictions, blocks execution otherwise.</li>
+  <li><strong>Alternative:</strong> The boot argument <code>amfi_get_out_of_my_way=1</code> can bypass AMFI enforcement without fully disabling SIP.</li>
+  <li><strong>~21 GB of bindings needed:</strong> macOS binaries depend on <code>libSystem.B.dylib</code> and system frameworks. You need <code>bindfs</code> (via macFUSE) to bind <code>/bin</code>, <code>/usr/lib</code>, <code>/usr/libexec</code>, <code>/System</code>, <code>/Library</code> into the chroot since macOS lacks native bind mounts.</li>
+  <li><strong>Read-only root FS:</strong> Since Big Sur, the system volume is a Signed System Volume. Chroots must be in writable locations (<code>~/</code> or external volumes).</li>
+  <li><strong>Not real isolation:</strong> chroot only changes the filesystem root path. Processes can escape via <code>fchdir()</code> to pre-opened file descriptors outside the chroot. No PID, network, IPC, or resource isolation.</li>
+</ul>
+<p class="source">Sources: <a href="https://gist.github.com/eddieh/b3c04436eb6b28826939cd57f1b704bb">eddieh gist</a>, <a href="https://github.com/macOScontainers/macos-jail">macos-jail</a></p>
+
+
+<!-- ===== 2. SANDBOX-EXEC ===== -->
+<h2 id="sandbox">2. sandbox-exec / Seatbelt <span class="verdict verdict-deprecated">Deprecated but functional</span></h2>
+
+<div class="summary-box">
+<strong>Key takeaway:</strong> This is the <strong>strongest non-VM isolation primitive</strong> on macOS. It does not require root, works with SIP enabled, is inherited by children, and cannot be escaped. However, it provides <em>access control</em> (allow/deny), NOT <em>namespace isolation</em> (private views).
+</div>
+
+<h3>Architecture</h3>
+<ul>
+  <li>Built on the <strong>TrustedBSD Mandatory Access Control Framework</strong> (MACF). The Sandbox kernel extension hooks ~300 policy checkpoints throughout XNU.</li>
+  <li>Profiles are written in <strong>SBPL</strong> (Sandbox Profile Language), a Scheme dialect interpreted by TinyScheme within <code>libsandbox</code>. Profiles are compiled to bytecode containing filter and action instructions.</li>
+  <li><strong>Does NOT require root.</strong> Any user can sandbox their own processes.</li>
+  <li><strong>Irrevocable:</strong> Once applied, the sandbox can only be tightened, never loosened or removed.</li>
+  <li><strong>Inherited by children:</strong> All child processes inherit the parent's sandbox.</li>
+  <li>Violations return <code>EPERM</code> to the calling process.</li>
+</ul>
+<p class="source">Source: <a href="https://bdash.net.nz/posts/sandboxing-on-macos/">bdash.net.nz -- Sandboxing on macOS</a></p>
+
+<h3>Restrictable Operations (~90 filter predicates)</h3>
+<div class="table-wrap">
+<table>
+<tr><th>Category</th><th>Operations</th></tr>
+<tr><td>Filesystem</td><td><code>file-read-data</code>, <code>file-read-metadata</code>, <code>file-write*</code>, <code>file-ioctl</code></td></tr>
+<tr><td>Network</td><td><code>network*</code>, <code>network-outbound</code></td></tr>
+<tr><td>Process</td><td><code>process-exec</code>, <code>process*</code></td></tr>
+<tr><td>Mach IPC</td><td><code>mach*</code>, <code>mach-lookup</code> (critical for service isolation)</td></tr>
+<tr><td>IOKit</td><td><code>iokit-open</code>, <code>iokit*</code></td></tr>
+<tr><td>Signals</td><td><code>signal</code></td></tr>
+<tr><td>Sysctl</td><td><code>sysctl-read</code>, <code>sysctl*</code></td></tr>
+<tr><td>IPC</td><td><code>ipc*</code></td></tr>
+<tr><td>System</td><td><code>system*</code>, <code>nvram*</code>, <code>lsopen</code></td></tr>
+</table>
+</div>
+
+<h3>Profile Example</h3>
+<pre><code>(version 1)
+(deny default)                                    ; deny everything
+(allow file-read* (subpath "/usr/lib"))            ; allow reading system libs
+(allow file-read* (subpath "/usr/share"))
+(allow process-exec (literal "/usr/bin/python3"))  ; allow executing python
+(allow network* (local ip "localhost:*"))           ; localhost only
+(deny network-outbound (remote ip "*:*"))          ; block all outbound</code></pre>
+
+<h3>C API</h3>
+<ul>
+  <li><strong>Predefined profiles:</strong> <code>kSBXProfileNoInternet</code>, <code>kSBXProfileNoNetwork</code>, <code>kSBXProfileNoWrite</code>, <code>kSBXProfileNoWriteExceptTemporary</code>, <code>kSBXProfilePureComputation</code></li>
+  <li><strong>Lower-level:</strong> <code>sandbox_compile_string()</code> + <code>sandbox_apply()</code></li>
+  <li><strong>Extensions:</strong> <code>sandbox_extension_issue_file()</code>, <code>sandbox_extension_consume()</code> -- for granting temporary access tokens</li>
+  <li><strong>Chromium pattern (gold standard):</strong> Parent compiles SBPL profile, sends compiled bytecode to child via pipe, child applies it to itself before running main()</li>
+</ul>
+<p class="source">Sources: <a href="https://bdash.net.nz/posts/sandboxing-on-macos/">bdash.net.nz</a>, <a href="https://chromium.googlesource.com/chromium/src/+/HEAD/sandbox/mac/seatbelt_sandbox_design.md">Chromium sandbox design</a></p>
+
+<h3>Deprecation Status</h3>
+<p><code>sandbox-exec(1)</code> is marked <strong>DEPRECATED</strong> in its man page (since ~macOS 10.13). However, it still works on macOS 26.x. The underlying Sandbox.kext is essential to macOS and cannot be removed. macOS ships 501 sandbox profiles in <code>/System/Library/Sandbox/Profiles/</code>. There is <strong>no replacement</strong> for CLI/server process sandboxing.</p>
+<p class="source">Source: <a href="https://github.com/apple/containerization/issues/737">apple/containerization issue #737</a></p>
+
+
+<!-- ===== 3. NAMESPACES ===== -->
+<h2 id="namespaces">3. Namespace-Like Mechanisms on XNU <span class="verdict verdict-no">None exist</span></h2>
+
+<div class="warning-box">
+<strong>Bottom line:</strong> XNU has <strong>zero</strong> Linux-style namespaces. No mount namespaces, no PID namespaces, no network namespaces, no user namespaces, no UTS namespaces, no IPC namespaces. FreeBSD jails were never ported to Darwin.
+</div>
+
+<h3>Mount Namespaces</h3>
+<p><strong>Not available.</strong> XNU maintains a single global mount table: <code>extern TAILQ_HEAD(mntlist, mount) mountlist;</code> in <code>mount_internal.h</code>. There are no per-process mount visibility fields in <code>struct mount</code>. No <code>MNT_*</code> flags relate to namespace isolation.</p>
+<p class="source">Source: <a href="https://github.com/apple/darwin-xnu/blob/main/bsd/sys/mount_internal.h">darwin-xnu mount_internal.h</a></p>
+
+<h3>PID Namespaces</h3>
+<p><strong>Not available.</strong> The BSD process table is flat and global. <code>struct proc</code> in <code>proc_internal.h</code> has no namespace or container ID fields. Every process has a globally unique PID.</p>
+<p class="source">Source: <a href="https://newosxbook.com/src.php?file=%2Fbsd%2Fsys%2Fproc_internal.h&tree=xnu">XNU proc_internal.h</a></p>
+
+<h3>Network Namespaces</h3>
+<p><strong>Not available.</strong> There is no per-process network stack. The vmnet framework provides virtual networking for VMs but operates at the VM level. Seatbelt can restrict network access (allow/deny) but cannot create separate network stacks.</p>
+<p class="source">Source: <a href="https://github.com/containerd/containerd/discussions/5525">containerd Discussion #5525</a></p>
+
+<h3>User Namespaces</h3>
+<p><strong>Not available.</strong> No UID remapping mechanism exists. The <code>persona</code> subsystem (see section 5) provides limited identity switching but not Linux-style user namespace mapping.</p>
+
+<h3>FreeBSD Jails</h3>
+<p><strong>Not ported.</strong> Despite XNU's BSD heritage: "Darwin doesn't include the jail() syscall, nor zones."</p>
+<p class="source">Source: <a href="https://groups.google.com/g/darwin-dev/c/6-FP9GCsBG4">darwin-dev mailing list</a></p>
+
+
+<!-- ===== 4. POSIX_SPAWN ===== -->
+<h2 id="posix-spawn">4. posix_spawn Isolation Attributes <span class="verdict verdict-partial">Resource isolation only</span></h2>
+
+<h3>Apple-Specific Spawn Flags (beyond POSIX)</h3>
+<div class="table-wrap">
+<table>
+<tr><th>Flag</th><th>Value</th><th>Purpose</th></tr>
+<tr><td><code>POSIX_SPAWN_SETEXEC</code></td><td>0x0040</td><td>Replace current process (exec-in-place)</td></tr>
+<tr><td><code>POSIX_SPAWN_START_SUSPENDED</code></td><td>0x0080</td><td>Child starts SIGSTOP'd</td></tr>
+<tr><td><code>POSIX_SPAWN_SETSID</code></td><td>0x0400</td><td>New session (like setsid())</td></tr>
+<tr><td><code>POSIX_SPAWN_CLOEXEC_DEFAULT</code></td><td>0x4000</td><td>Close all FDs by default</td></tr>
+<tr><td><code>_POSIX_SPAWN_DISABLE_ASLR</code></td><td>0x0100</td><td>Disable ASLR (private)</td></tr>
+<tr><td><code>_POSIX_SPAWN_ALLOW_DATA_EXEC</code></td><td>0x2000</td><td>W^X relaxation (private)</td></tr>
+<tr><td><code>_POSIX_SPAWN_RESLIDE</code></td><td>0x0800</td><td>Dyld shared cache reslide (private)</td></tr>
+</table>
+</div>
+<p class="source">Source: <a href="https://github.com/apple/darwin-xnu/blob/main/bsd/sys/spawn.h">darwin-xnu spawn.h</a>, <a href="https://github.com/AlexanderOMara/posixspawn/blob/master/README.md">posixspawn README</a></p>
+
+<h3>Isolation-Relevant Private Attribute Setters</h3>
+
+<h4>Resource Isolation</h4>
+<ul>
+  <li><code>posix_spawnattr_set_qos_clamp_np(attr, qos)</code> -- Caps max QoS class. Values: <code>NONE</code>, <code>UTILITY</code>, <code>BACKGROUND</code>, <code>MAINTENANCE</code>. Limits CPU scheduling priority, not access to resources.</li>
+  <li><code>posix_spawnattr_setjetsam_ext(attr, flags, priority, memlimit_active, memlimit_inactive)</code> -- Sets jetsam (OOM-killer) attributes. Memory limits in MB. Flags include <code>JETSAM_MEMLIMIT_ACTIVE_FATAL</code> (0x04) and <code>JETSAM_MEMLIMIT_INACTIVE_FATAL</code> (0x08).</li>
+  <li><code>posix_spawnattr_setcpumonitor(attr, percent, interval)</code> -- CPU usage monitoring threshold.</li>
+  <li><code>posix_spawnattr_setpcontrol_np(attr, pcontrol)</code> -- Resource starvation behavior: <code>NONE</code>, <code>THROTTLE</code>, <code>SUSPEND</code>, <code>KILL</code>.</li>
+  <li><code>posix_spawnattr_set_darwin_role_np(attr, role)</code> -- Process role for scheduling.</li>
+</ul>
+
+<h4>Identity Isolation</h4>
+<ul>
+  <li><code>psa_persona_info</code> field -- Spawn with a different persona (UID/GID/groups). Flags: <code>POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE</code> (0x1), <code>POSIX_SPAWN_PERSONA_FLAGS_VERIFY</code> (0x2).</li>
+  <li><code>psa_posix_cred_info</code> field -- Set POSIX credentials (UID, GID, groups, login). Flags: <code>POSIX_SPAWN_POSIX_CRED_UID</code> (0x00010000), etc.</li>
+  <li><code>responsibility_spawnattrs_setdisclaim(attr, 1)</code> -- Decouples TCC responsibility from parent. Child becomes its own "responsible process" for permission dialogs.</li>
+</ul>
+
+<h4>Security-Adjacent (Private/Undocumented)</h4>
+<ul>
+  <li><code>posix_spawnattr_setmacpolicyinfo_np(attr, "policy_name", data, datalen)</code> -- Attaches opaque MAC policy data for TrustedBSD hooks during spawn. The Sandbox.kext is one such MAC policy. This is how launch constraints work internally.</li>
+  <li><code>posix_spawnattr_set_platform_np(attr, PLATFORM_IOS, 0)</code> -- Run as iOS process on Apple Silicon, which changes sandbox initialization behavior.</li>
+  <li><code>posix_spawnattr_set_subsystem_root_path_np(attr, path)</code> -- Sets subsystem root path (possibly for relocated subsystem roots; exact semantics unclear).</li>
+</ul>
+<p class="source">Sources: <a href="https://github.com/apple/darwin-xnu/blob/main/bsd/sys/spawn_internal.h">spawn_internal.h</a>, <a href="https://wts.dev/posts/bypassing-launch-constraints/">CVE-2025-43253</a>, <a href="https://jhftss.github.io/Debug-any-iOS-Apps-on-M1-Mac/">Mickey's Blog</a></p>
+
+<div class="key-point">
+<strong>Can you set a sandbox profile via posix_spawn?</strong> No. Apple DTS explicitly states: "We don't support custom sandboxes at all." Child processes inherit the parent's sandbox. The child must apply its own sandbox after launch via <code>sandbox_init_with_parameters()</code> or <code>sandbox_compile_string()</code> / <code>sandbox_apply()</code>. The Chromium pattern (compile in parent, send bytecode via pipe, child applies before main) is the gold standard.
+<p class="source">Source: <a href="https://developer.apple.com/forums/thread/747880">Apple Developer Forums</a>, <a href="https://chromium.googlesource.com/chromium/src/+/HEAD/sandbox/mac/seatbelt_sandbox_design.md">Chromium sandbox design</a></p>
+</div>
+
+<h3>Internal _posix_spawnattr Structure (Isolation-Relevant Fields)</h3>
+<pre><code>typedef struct _posix_spawnattr {
+    short       psa_flags;
+    pid_t       psa_pgroup;
+    int         psa_pcontrol;              // Resource starvation behavior
+    int         psa_apptype;               // App launch type
+    uint64_t    psa_cpumonitor_percent;
+    uint64_t    psa_cpumonitor_interval;
+    short       psa_jetsam_flags;          // Jetsam control flags
+    int         psa_priority;              // Jetsam relative priority
+    int         psa_memlimit_active;       // Memory limit (MB) active
+    int         psa_memlimit_inactive;     // Memory limit (MB) inactive
+    uint64_t    psa_qos_clamp;             // QoS ceiling
+    task_role_t psa_darwin_role;           // Process role
+    int         psa_thread_limit;          // Max threads
+    bool        psa_no_smt;               // Disable hyperthreading
+    int         psa_platform;              // Platform ID (macOS/iOS)
+    _posix_spawn_mac_policy_extensions_t psa_mac_extensions;
+    struct _posix_spawn_persona_info    *psa_persona_info;
+    struct _posix_spawn_posix_cred_info *psa_posix_cred_info;
+    char       *psa_subsystem_root_path;
+    // ... additional fields ...
+} *_posix_spawnattr_t;</code></pre>
+<p class="source">Source: <a href="https://github.com/apple/darwin-xnu/blob/main/bsd/sys/spawn_internal.h">darwin-xnu spawn_internal.h</a></p>
+
+
+<!-- ===== 5. PERSONA ===== -->
+<h2 id="persona">5. Darwin Persona Mechanism <span class="verdict verdict-partial">Partial UID isolation</span></h2>
+
+<div class="summary-box">
+The persona mechanism is a <strong>kernel-level identity abstraction</strong> that allows processes to adopt alternate user identities (UID, GID, groups, login name). It provides partial UID namespace-like isolation but requires the private entitlement <code>com.apple.private.persona-mgmt</code>.
+</div>
+
+<h3>Syscall Interface</h3>
+<p>Single multiplexed syscall <strong>#494</strong> (<code>SYS_persona</code>) with <code>NO_SYSCALL_STUB</code> (no libSystem wrapper):</p>
+<pre><code>494 AUE_PERSONA ALL { int persona(uint32_t operation, uint32_t flags,
+    struct kpersona_info *info, uid_t *id, size_t *idlen, char *path)
+    NO_SYSCALL_STUB; }</code></pre>
+
+<h3>Operations</h3>
+<div class="table-wrap">
+<table>
+<tr><th>Operation</th><th>Code</th><th>Description</th></tr>
+<tr><td><code>PERSONA_OP_ALLOC</code></td><td>0</td><td>Allocate persona (no path)</td></tr>
+<tr><td><code>PERSONA_OP_PALLOC</code></td><td>1</td><td>Allocate persona with filesystem path</td></tr>
+<tr><td><code>PERSONA_OP_DEALLOC</code></td><td>2</td><td>Deallocate persona</td></tr>
+<tr><td><code>PERSONA_OP_GET</code></td><td>3</td><td>Get current thread's persona ID</td></tr>
+<tr><td><code>PERSONA_OP_INFO</code></td><td>4</td><td>Get persona info by ID</td></tr>
+<tr><td><code>PERSONA_OP_PIDINFO</code></td><td>5</td><td>Get persona info for a PID</td></tr>
+<tr><td><code>PERSONA_OP_FIND</code></td><td>6</td><td>Find persona by name/UID</td></tr>
+<tr><td><code>PERSONA_OP_GETPATH</code></td><td>7</td><td>Get filesystem path for persona</td></tr>
+<tr><td><code>PERSONA_OP_FIND_BY_TYPE</code></td><td>8</td><td>Find personas by type</td></tr>
+</table>
+</div>
+
+<h3>Persona Types</h3>
+<div class="table-wrap">
+<table>
+<tr><th>Type</th><th>Value</th><th>Purpose</th></tr>
+<tr><td><code>PERSONA_GUEST</code></td><td>1</td><td>Guest/temporary sessions</td></tr>
+<tr><td><code>PERSONA_MANAGED</code></td><td>2</td><td>MDM-managed sessions</td></tr>
+<tr><td><code>PERSONA_PRIV</code></td><td>3</td><td>Privileged persona</td></tr>
+<tr><td><code>PERSONA_SYSTEM</code></td><td>4</td><td>System processes (adoption NOT allowed)</td></tr>
+<tr><td><code>PERSONA_DEFAULT</code></td><td>5</td><td>Default/primary user</td></tr>
+<tr><td><code>PERSONA_SYSTEM_PROXY</code></td><td>6</td><td>System proxy (adoption NOT allowed)</td></tr>
+<tr><td><code>PERSONA_SYS_EXT</code></td><td>7</td><td>System extensions</td></tr>
+<tr><td><code>PERSONA_ENTERPRISE</code></td><td>8</td><td>Enterprise/managed</td></tr>
+</table>
+</div>
+
+<h3>Kernel Implementation Details</h3>
+<ul>
+  <li>Global list <code>all_personas</code>; max <strong>512</strong> personas (<code>MAX_PERSONAS</code>)</li>
+  <li>IDs start at <strong>501</strong> (<code>FIRST_PERSONA_ID</code>), increment by <strong>10</strong> (<code>PERSONA_ID_STEP</code>)</li>
+  <li><code>PERSONA_MAGIC</code> = <code>0x0aa55aa0</code></li>
+  <li>During <code>persona_proc_adopt()</code>, the kernel calls <code>kauth_cred_proc_update()</code> with a credential derivation callback that creates new credentials from the persona's UID/GID/groups</li>
+  <li>The <code>P_ADOPTPERSONA</code> flag is set on the process during adoption</li>
+  <li><code>RLIMIT_NPROC</code> is enforced per-persona-UID</li>
+</ul>
+
+<h3>Can It Provide UID Namespace-Like Isolation?</h3>
+<div class="card">
+<p><strong>Partially yes:</strong></p>
+<ul>
+  <li>Assigns a process a different UID, GID, and group memberships at the kernel level</li>
+  <li>Each persona has a member process list tracking which processes belong to it</li>
+  <li>Resource limits are enforced per-persona-UID</li>
+  <li>Each persona can have an associated filesystem path</li>
+</ul>
+<p><strong>But NOT a full user namespace:</strong></p>
+<ul>
+  <li>No UID remapping (no inner-to-outer UID mapping)</li>
+  <li>No filesystem ownership translation</li>
+  <li>The persona UID is a real system UID visible in file ownership and process tables</li>
+  <li>Max 512 personas is a hard kernel limit</li>
+  <li>Requires private entitlement <code>com.apple.private.persona-mgmt</code></li>
+</ul>
+</div>
+
+<h3>Real-World Usage</h3>
+<ul>
+  <li><strong>Shared iPad:</strong> Provisions per-user UNIX UIDs and APFS volumes using personas for multi-user session isolation</li>
+  <li><strong>TrollStore exploit:</strong> Exploited <code>com.apple.private.persona-mgmt</code> to spawn root helpers from non-root processes. Patched in iOS 17.6/18.0</li>
+</ul>
+<p class="source">Sources: <a href="https://github.com/apple/darwin-xnu/blob/main/bsd/sys/persona.h">persona.h</a>, <a href="https://fergofrog.com/code/cbowser/xnu/bsd/kern/kern_persona.c.html">kern_persona.c</a>, <a href="https://support.apple.com/guide/security/shared-ipad-security-secd99f373ef/web">Apple Shared iPad Security</a>, <a href="https://theapplewiki.com/wiki/TrollStore">TrollStore wiki</a></p>
+
+
+<!-- ===== 6. PROCESS GROUPS ===== -->
+<h2 id="pgroups">6. Process Groups and Sessions <span class="verdict verdict-no">Signal scope only</span></h2>
+
+<p><code>setsid(2)</code> and <code>setpgid(2)</code> exist on macOS and behave per POSIX.</p>
+<ul>
+  <li><code>setsid()</code> creates a new session and process group</li>
+  <li><code>setpgid()</code> joins or creates a process group within the current session</li>
+  <li><code>POSIX_SPAWN_SETSID</code> (0x0400) flag creates a new session atomically at spawn time</li>
+</ul>
+
+<div class="key-point">
+<strong>Isolation is limited to signal delivery and job control.</strong> Process groups only scope <code>kill(-pgid, sig)</code> targeting and terminal foreground/background status. They provide <strong>no filesystem, network, PID namespace, or resource isolation</strong>. There are no hidden isolation properties beyond POSIX.
+</div>
+<p class="source">Source: <a href="https://keith.github.io/xcode-man-pages/setsid.2.html">Apple setsid(2) man page</a></p>
+
+
+<!-- ===== 7. PRIVATE MOUNTS ===== -->
+<h2 id="mounts">7. Private Mount Trees <span class="verdict verdict-no">Not possible</span></h2>
+
+<ul>
+  <li><strong>No mount namespaces:</strong> Linux <code>unshare(CLONE_NEWNS)</code> has no equivalent. All processes see the single global mount table.</li>
+  <li><strong>No native bind mounts:</strong> macOS does not provide <code>mount --bind</code>. Workaround: <code>bindfs</code> via macFUSE.</li>
+  <li><strong>No union/overlay mounts:</strong> "macOS does not support stacking in its file-system design." APFS does not support overlayfs.</li>
+  <li><strong>Firmlinks are NOT a namespace mechanism:</strong> They merge APFS System + Data volumes into a unified hierarchy (introduced in Catalina). They are system-wide, immutable, and the same for every process. Users cannot create OS-level firmlinks; only synthetic firmlinks via <code>/etc/synthetic.conf</code>.</li>
+  <li><strong>APFS clonefile(2)</strong> is the practical alternative: instant COW copies of directory trees. Not a mount namespace, but provides copy-on-write filesystem copies per instance.</li>
+  <li><strong>Sparse bundle disk images</strong> are another workaround: create a <code>.sparseimage</code>, mount it, use it as an isolated filesystem root.</li>
+</ul>
+<p class="source">Sources: <a href="https://github.com/containerd/containerd/discussions/5525">containerd #5525</a>, <a href="https://eclecticlight.co/2023/07/22/how-macos-depends-on-firmlinks/">Eclectic Light -- firmlinks</a></p>
+
+
+<!-- ===== 8. MACH PORTS ===== -->
+<h2 id="mach">8. Mach Port Namespaces <span class="verdict verdict-yes">Per-task by default</span></h2>
+
+<p>This is the one area where macOS actually has genuine namespace isolation:</p>
+<ul>
+  <li><strong>Each task has its own isolated port namespace.</strong> Port names (32-bit integers) are meaningful only within the owning task. Sending a port name integer to another task does NOT grant access.</li>
+  <li><strong>Capability-based security:</strong> Port rights are unforgeable capabilities. The only way to obtain a right: (1) create it yourself, or (2) receive it from another task via Mach IPC message.</li>
+  <li><strong>Receive rights are exclusive:</strong> Only one task holds the receive right (MPSC queue). Prevents message interception.</li>
+  <li><strong>Port rights are NOT inherited across fork/exec</strong> except for special ports (task port, bootstrap port, host port, exception ports).</li>
+  <li><strong>Seatbelt can restrict <code>mach-lookup</code></strong> operations, preventing service discovery and connection.</li>
+</ul>
+
+<div class="key-point">
+<strong>Weakness:</strong> The bootstrap port leaks service discovery. Any process can look up Mach services by name through launchd's bootstrap server, unless restricted by sandbox <code>mach-lookup</code> rules.
+</div>
+<p class="source">Sources: <a href="https://docs.darlinghq.org/internals/macos-specifics/mach-ports.html">Darling -- Mach Ports</a>, <a href="https://developer.apple.com/library/archive/documentation/Darwin/Conceptual/KernelProgramming/Mach/Mach.html">Apple Kernel Programming Guide</a></p>
+
+
+<!-- ===== 9. LAUNCHD ===== -->
+<h2 id="launchd">9. launchd Domains <span class="verdict verdict-partial">Service-level isolation</span></h2>
+
+<div class="table-wrap">
+<table>
+<tr><th>Domain</th><th>Scope</th><th>Notes</th></tr>
+<tr><td><code>system</code></td><td>Privileged, root</td><td>System daemons</td></tr>
+<tr><td><code>user/&lt;uid&gt;</code></td><td>Per-user, no GUI</td><td>Background agents</td></tr>
+<tr><td><code>gui/&lt;uid&gt;</code></td><td>Per-user, GUI session</td><td>GUI agents</td></tr>
+<tr><td><code>login</code></td><td>Login window</td><td>Login session</td></tr>
+<tr><td><code>pid/&lt;pid&gt;</code></td><td>Per-process</td><td>XPC service instances</td></tr>
+</table>
+</div>
+
+<p><strong>PID domains</strong> provide per-process XPC service isolation. Each process gets its own set of XPC services; if two apps embed the same service, each gets a separate instance. However, GUI and user domains share Mach bootstrap names (flat namespace for lookups).</p>
+<p class="source">Source: <a href="https://gist.github.com/masklinn/a532dfe55bdeab3d60ab8e46ccc38a68">launchctl cheat sheet</a></p>
+
+
+<!-- ===== 10. SIP ===== -->
+<h2 id="sip">10. SIP / Rootless Interactions <span class="verdict verdict-partial">Protection, not isolation</span></h2>
+
+<p><strong>SIP is NOT a container isolation mechanism.</strong> It protects system integrity but does not provide per-process isolation boundaries.</p>
+
+<h3>What SIP Does</h3>
+<ul>
+  <li>Blocks <code>task_for_pid()</code> on protected processes</li>
+  <li>Prevents DTrace attachment to protected processes</li>
+  <li>Sanitizes <code>DYLD_LIBRARY_PATH</code> and <code>LD_LIBRARY_PATH</code> for system binaries</li>
+  <li>Prevents modifications to <code>/System</code>, <code>/bin</code>, <code>/sbin</code>, <code>/usr</code> (excluding <code>/usr/local</code>)</li>
+  <li>Enforces hardened runtime via AMFI</li>
+</ul>
+
+<h3>How SIP Affects Isolation Attempts</h3>
+<ul>
+  <li><strong>chroot:</strong> Blocked. AMFI kills processes attempting to exec hardened-runtime binaries inside a chroot.</li>
+  <li><strong>sandbox-exec:</strong> Not affected. Works fine with SIP enabled.</li>
+  <li><strong>Persona:</strong> The <code>com.apple.private.persona-mgmt</code> entitlement cannot be used by ad-hoc signed binaries when SIP+AMFI are active. Requires SIP disabled or <code>amfi_get_out_of_my_way=1</code>.</li>
+  <li><strong>Private frameworks:</strong> Many private APIs for isolation require restricted entitlements that are only valid with SIP disabled.</li>
+</ul>
+
+<h3>CSR Flags</h3>
+<div class="table-wrap">
+<table>
+<tr><th>Flag</th><th>Purpose</th></tr>
+<tr><td><code>CSR_ALLOW_TASK_FOR_PID</code> (0x4)</td><td>Process debugging/interaction</td></tr>
+<tr><td><code>CSR_ALLOW_UNRESTRICTED_FS</code></td><td>Filesystem modifications to protected paths</td></tr>
+<tr><td><code>CSR_ALLOW_KERNEL_DEBUGGER</code></td><td>Kernel debugging</td></tr>
+</table>
+</div>
+<p class="source">Source: <a href="https://en.wikipedia.org/wiki/System_Integrity_Protection">Wikipedia -- SIP</a></p>
+
+
+<!-- ===== 11. RESOURCE LIMITS ===== -->
+<h2 id="resources">11. Resource Limits (cgroups equivalent) <span class="verdict verdict-no">No group hierarchy</span></h2>
+
+<ul>
+  <li><strong>No cgroups equivalent.</strong> No hierarchical resource controller for process groups.</li>
+  <li><strong>POSIX rlimits only:</strong> <code>setrlimit(2)</code> provides per-process <code>RLIMIT_CPU</code>, <code>RLIMIT_DATA</code>, <code>RLIMIT_FSIZE</code>, <code>RLIMIT_NOFILE</code> (default 256, max 10240), etc.</li>
+  <li><strong>XNU task policy subsystem</strong> (via <code>task_policy_set()</code> Mach trap): Task roles, QoS tiers (0-5), IO throttling, Darwin Background mode, App Nap suppression. Per-process only.</li>
+  <li><strong>No memory cgroup equivalent:</strong> Cannot hard-limit a process group's memory and have the kernel OOM-kill within the group. <code>RLIMIT_DATA</code> only limits the data segment.</li>
+  <li><strong>posix_spawn attributes</strong> can set jetsam limits (memory in MB, fatal/non-fatal) and QoS clamps at spawn time, but these are per-process.</li>
+</ul>
+
+
+<!-- ===== 12. COMPARISON TABLE ===== -->
+<h2 id="comparison">12. Comparison: Linux vs. Darwin Isolation</h2>
+
+<div class="table-wrap">
+<table>
+<tr><th>Linux Primitive</th><th>Darwin Equivalent</th><th>Status</th></tr>
+<tr><td>Mount namespace</td><td>None. Global mount table. chroot only (requires SIP off).</td><td style="color:var(--red)">NOT AVAILABLE</td></tr>
+<tr><td>PID namespace</td><td>None. Global PID table.</td><td style="color:var(--red)">NOT AVAILABLE</td></tr>
+<tr><td>Network namespace</td><td>None. Seatbelt can restrict access only.</td><td style="color:var(--red)">NOT AVAILABLE</td></tr>
+<tr><td>User namespace</td><td>Persona mechanism (partial, private entitlement)</td><td style="color:var(--orange)">PARTIAL</td></tr>
+<tr><td>UTS namespace</td><td>None.</td><td style="color:var(--red)">NOT AVAILABLE</td></tr>
+<tr><td>IPC namespace</td><td>Mach port per-task namespaces + Seatbelt <code>mach-lookup</code></td><td style="color:var(--orange)">PARTIAL</td></tr>
+<tr><td>cgroups</td><td>Per-process rlimits + jetsam + QoS clamp only</td><td style="color:var(--orange)">PER-PROCESS ONLY</td></tr>
+<tr><td>seccomp-bpf</td><td>Seatbelt/MACF (~300 hooks, ~90 predicates)</td><td style="color:var(--accent2)">AVAILABLE (deprecated CLI)</td></tr>
+<tr><td>FreeBSD jails</td><td>None. Never ported.</td><td style="color:var(--red)">NOT AVAILABLE</td></tr>
+<tr><td>Overlayfs</td><td>None. APFS clonefile(2) as workaround.</td><td style="color:var(--red)">NOT AVAILABLE</td></tr>
+<tr><td>bind mounts</td><td>None native. bindfs via macFUSE.</td><td style="color:var(--red)">NOT AVAILABLE</td></tr>
+<tr><td>Container runtime</td><td>Virtualization.framework (1 VM per container)</td><td style="color:var(--accent2)">AVAILABLE (VM-based)</td></tr>
+</table>
+</div>
+
+
+<!-- ===== 13. SOURCES ===== -->
+<h2 id="sources">13. Sources</h2>
+<ol>
+  <li><a href="https://threedots.ovh/blog/2021/01/chroot-on-modern-macos-disallowed/">threedots.ovh -- chroot on modern macOS: disallowed</a></li>
+  <li><a href="https://gist.github.com/eddieh/b3c04436eb6b28826939cd57f1b704bb">eddieh -- Setting up macOS chroot (gist)</a></li>
+  <li><a href="https://bdash.net.nz/posts/sandboxing-on-macos/">bdash.net.nz -- Sandboxing on macOS (Seatbelt deep dive)</a></li>
+  <li><a href="https://github.com/apple/containerization/issues/737">apple/containerization issue #737 -- sandbox-exec deprecation</a></li>
+  <li><a href="https://github.com/containerd/containerd/discussions/5525">containerd Discussion #5525 -- macOS container support</a></li>
+  <li><a href="https://github.com/apple/darwin-xnu/blob/main/bsd/sys/mount_internal.h">darwin-xnu -- mount_internal.h</a></li>
+  <li><a href="https://github.com/apple/darwin-xnu/blob/main/bsd/sys/persona.h">darwin-xnu -- persona.h</a></li>
+  <li><a href="https://fergofrog.com/code/cbowser/xnu/bsd/kern/kern_persona.c.html">Woboq -- kern_persona.c</a></li>
+  <li><a href="https://github.com/apple/darwin-xnu/blob/main/bsd/sys/spawn_internal.h">darwin-xnu -- spawn_internal.h</a></li>
+  <li><a href="https://wts.dev/posts/bypassing-launch-constraints/">CVE-2025-43253 -- Bypassing launch constraints via MAC policy extensions</a></li>
+  <li><a href="https://chromium.googlesource.com/chromium/src/+/HEAD/sandbox/mac/seatbelt_sandbox_design.md">Chromium -- macOS Seatbelt sandbox design</a></li>
+  <li><a href="https://www.kevnu.com/en/posts/apple-native-containerization-deep-dive-architecture-comparisons-and-practical-guide">kevnu.com -- Apple Containerization deep dive</a></li>
+  <li><a href="https://docs.darlinghq.org/internals/macos-specifics/mach-ports.html">Darling -- Mach Ports documentation</a></li>
+  <li><a href="https://github.com/microsoft/mxc/blob/main/docs/macos-support/seatbelt-backend.md">Microsoft MXC -- Seatbelt backend</a></li>
+  <li><a href="https://theapplewiki.com/wiki/TrollStore">The Apple Wiki -- TrollStore (persona exploit)</a></li>
+  <li><a href="https://support.apple.com/guide/security/shared-ipad-security-secd99f373ef/web">Apple -- Shared iPad Security</a></li>
+  <li><a href="https://eclecticlight.co/2023/07/22/how-macos-depends-on-firmlinks/">Eclectic Light -- How macOS depends on firmlinks</a></li>
+  <li><a href="https://developer.apple.com/library/archive/documentation/Darwin/Conceptual/KernelProgramming/Mach/Mach.html">Apple -- Kernel Programming Guide (Mach)</a></li>
+  <li><a href="https://groups.google.com/g/darwin-dev/c/6-FP9GCsBG4">darwin-dev mailing list -- Mac OS X Jails discussion</a></li>
+  <li><a href="https://medium.com/nttlabs/alcoholless-a-lightweight-security-sandbox-for-macos-programs-homebrew-ai-agents-etc-ccf0d1927301">NTT Labs -- Alcoholless sandbox</a></li>
+  <li><a href="https://github.com/darwin-containers/rund">darwin-containers/rund</a></li>
+  <li><a href="https://jhftss.github.io/Debug-any-iOS-Apps-on-M1-Mac/">Mickey's Blog -- posix_spawn private APIs</a></li>
+  <li><a href="https://projectzero.google/2021/05/fuzzing-ios-code-on-macos-at-native.html">Project Zero -- posix_spawnattr_set_platform_np</a></li>
+  <li><a href="https://www.offsec.com/blog/amfi-syscall/">OffSec -- AMFI syscall enforcement</a></li>
+</ol>
+
+</body>
+</html>

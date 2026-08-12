@@ -1,0 +1,6 @@
+# ext.x-hypervisor (partial): an unknown backend value is rejected at parse
+# time.
+services:
+  web:
+    image: alpine:3.19
+    x-hypervisor: xen

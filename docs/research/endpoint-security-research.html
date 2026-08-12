@@ -1,0 +1,667 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>macOS EndpointSecurity Framework -- Deep Research</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --surface2: #1c2330;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --text-muted: #8b949e;
+    --heading: #e6edf3;
+    --accent: #58a6ff;
+    --accent2: #3fb950;
+    --warn: #d29922;
+    --danger: #f85149;
+    --tag-bg: #1f2937;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    padding: 2rem 1rem;
+    max-width: 960px;
+    margin: 0 auto;
+  }
+  h1 { color: var(--heading); font-size: 1.8rem; margin-bottom: 0.3rem; border-bottom: 2px solid var(--accent); padding-bottom: 0.5rem; }
+  .subtitle { color: var(--text-muted); margin-bottom: 2rem; font-size: 0.95rem; }
+  h2 { color: var(--accent); font-size: 1.35rem; margin-top: 2.5rem; margin-bottom: 0.8rem; }
+  h3 { color: var(--heading); font-size: 1.1rem; margin-top: 1.5rem; margin-bottom: 0.5rem; }
+  p { margin-bottom: 0.8rem; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code {
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    background: var(--surface2);
+    padding: 0.15em 0.4em;
+    border-radius: 4px;
+    font-size: 0.88em;
+    color: #e6edf3;
+  }
+  pre {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+    overflow-x: auto;
+    margin: 0.8rem 0;
+    font-size: 0.82rem;
+    line-height: 1.5;
+  }
+  pre code { background: none; padding: 0; }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.2rem 1.5rem;
+    margin: 1rem 0;
+  }
+  .card-accent { border-left: 3px solid var(--accent); }
+  .card-warn { border-left: 3px solid var(--warn); }
+  .card-danger { border-left: 3px solid var(--danger); }
+  .card-green { border-left: 3px solid var(--accent2); }
+  .tag {
+    display: inline-block;
+    background: var(--tag-bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 0.15em 0.6em;
+    font-size: 0.78rem;
+    margin: 0.15em 0.1em;
+    color: var(--text-muted);
+  }
+  .tag-auth { border-color: #f0883e55; color: #f0883e; }
+  .tag-notify { border-color: #58a6ff55; color: #58a6ff; }
+  .tag-version { border-color: #3fb95055; color: #3fb950; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0;
+    font-size: 0.88rem;
+  }
+  th, td { padding: 0.5rem 0.7rem; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--heading); background: var(--surface2); font-weight: 600; }
+  tr:hover td { background: var(--surface); }
+  ul, ol { padding-left: 1.5rem; margin-bottom: 0.8rem; }
+  li { margin-bottom: 0.3rem; }
+  .toc { list-style: none; padding-left: 0; }
+  .toc li { margin-bottom: 0.4rem; }
+  .toc li::before { content: none; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  @media (max-width: 640px) { .grid { grid-template-columns: 1fr; } }
+  .stat { text-align: center; padding: 1rem; }
+  .stat .num { font-size: 2rem; font-weight: 700; color: var(--accent); }
+  .stat .label { font-size: 0.85rem; color: var(--text-muted); }
+  .divider { border-top: 1px solid var(--border); margin: 2rem 0; }
+  .source { font-size: 0.8rem; color: var(--text-muted); margin-top: 0.3rem; }
+  .event-group { margin-bottom: 1.5rem; }
+  .event-group h4 { color: var(--warn); font-size: 0.95rem; margin-bottom: 0.4rem; }
+  details { margin: 0.5rem 0; }
+  details summary {
+    cursor: pointer;
+    color: var(--accent);
+    font-weight: 500;
+    padding: 0.3rem 0;
+  }
+  details summary:hover { color: var(--heading); }
+</style>
+</head>
+<body>
+
+<h1>macOS EndpointSecurity Framework</h1>
+<p class="subtitle">Deep Technical Research -- June 2026 | Extracted from SDK headers (macOS 26.x), Apple docs, security research blogs, and WWDC sessions</p>
+
+<!-- Stats -->
+<div class="grid" style="margin-bottom:1.5rem">
+  <div class="card stat">
+    <div class="num">44</div>
+    <div class="label">AUTH Event Types<br>(block/allow)</div>
+  </div>
+  <div class="card stat">
+    <div class="num">97</div>
+    <div class="label">NOTIFY Event Types<br>(observe only)</div>
+  </div>
+  <div class="card stat">
+    <div class="num">7</div>
+    <div class="label">RESERVED Events<br>(macOS 26.3+, undocumented)</div>
+  </div>
+  <div class="card stat">
+    <div class="num">10.15+</div>
+    <div class="label">Minimum macOS<br>(Catalina, Oct 2019)</div>
+  </div>
+</div>
+
+<!-- TOC -->
+<div class="card">
+<strong>Contents</strong>
+<ol class="toc" style="padding-left:1.2rem;margin-top:0.5rem;margin-bottom:0">
+  <li><a href="#overview">1. Overview and Architecture</a></li>
+  <li><a href="#auth-vs-notify">2. AUTH vs NOTIFY -- Active Enforcement vs Passive Monitoring</a></li>
+  <li><a href="#events">3. Complete Event Type Enumeration (from SDK Header)</a></li>
+  <li><a href="#capabilities">4. Monitoring Capabilities by Category</a></li>
+  <li><a href="#network">5. Network Monitoring: ES vs NetworkExtension</a></li>
+  <li><a href="#mach">6. Mach Messages, XPC, and IPC Monitoring</a></li>
+  <li><a href="#openbsm">7. Comparison with OpenBSM / auditd</a></li>
+  <li><a href="#sysext">8. System Extensions vs Kernel Extensions</a></li>
+  <li><a href="#entitlements">9. Entitlements and Requirements</a></li>
+  <li><a href="#containers">10. Container Workload Monitoring and Isolation</a></li>
+  <li><a href="#limitations">11. Limitations</a></li>
+  <li><a href="#sources">12. Sources</a></li>
+</ol>
+</div>
+
+<!-- 1. Overview -->
+<h2 id="overview">1. Overview and Architecture</h2>
+
+<p>The Endpoint Security (ES) framework is Apple's C API for monitoring and controlling security-relevant system events on macOS. Introduced in macOS 10.15 Catalina (2019), it replaces the deprecated KAuth KPI, the unsupported MAC Kernel Framework, and the deprecated OpenBSM audit trail.</p>
+
+<div class="card card-accent">
+<strong>Architecture (4 components)</strong>
+<ol>
+  <li><code>EndpointSecurity.kext</code> -- Kernel extension that hooks syscalls (execve, posix_spawn, open, etc.) and emits events</li>
+  <li><code>/usr/libexec/endpointsecurityd</code> -- User-space daemon that validates system extensions, manages client connections, handles installation/uninstallation, early boot registration</li>
+  <li><code>libEndpointSecurity.dylib</code> -- Developer-facing user-space library providing the public API for third-party ES clients</li>
+  <li><code>libEndpointSecuritySystem.dylib</code> -- Apple-internal library for system components to <em>emit</em> ES events (backgroundtaskmanagementd, XProtect, etc.)</li>
+</ol>
+</div>
+
+<p>Event flow: Kernel-emitted events originate from syscall hooks in <code>EndpointSecurity.kext</code> and are proxied through <code>endpointsecurityd</code> to subscribed ES clients. User-space events (authentication, XProtect, BTM) are emitted by Apple daemons via <code>libEndpointSecuritySystem.dylib</code>.</p>
+
+<p>ES clients can be implemented as either standalone daemons (LaunchDaemons) or System Extensions. System Extensions benefit from SIP protection against tampering.</p>
+
+<p class="source">Sources: <a href="https://github.com/redcanaryco/mac-monitor/wiki/5.-Endpoint-Security-Overview">Red Canary mac-monitor wiki</a>, <a href="https://research.meekolab.com/introduction-to-the-apple-endpoint-security-framework">MeekoLab ES Introduction</a></p>
+
+<!-- 2. AUTH vs NOTIFY -->
+<h2 id="auth-vs-notify">2. AUTH vs NOTIFY -- Active Enforcement vs Passive Monitoring</h2>
+
+<div class="grid">
+  <div class="card card-warn">
+    <h3>AUTH Events (Authorization)</h3>
+    <ul>
+      <li>Fire <strong>before</strong> the action occurs</li>
+      <li>The OS <strong>blocks the action</strong> until the ES client responds with <code>ES_AUTH_RESULT_ALLOW</code> or <code>ES_AUTH_RESULT_DENY</code></li>
+      <li>Response must arrive before a deadline (system-defined, not configurable)</li>
+      <li>If deadline passes without response, the action is <strong>allowed by default</strong></li>
+      <li>Use <code>es_respond_auth_result()</code> or <code>es_respond_flags_result()</code> (for AUTH_OPEN only)</li>
+      <li>Can actively block malicious execution, file modification, library loading, etc.</li>
+    </ul>
+  </div>
+  <div class="card card-accent">
+    <h3>NOTIFY Events (Notification)</h3>
+    <ul>
+      <li>Fire <strong>after or during</strong> the action</li>
+      <li>No response required -- purely observational</li>
+      <li>Better for telemetry collection and behavioral analysis</li>
+      <li>Many more NOTIFY events than AUTH events (97 vs 44)</li>
+      <li>All AUTH events have a corresponding NOTIFY variant; many NOTIFY events have no AUTH counterpart</li>
+    </ul>
+  </div>
+</div>
+
+<p class="source">Sources: <a href="https://medium.com/@alkenso/two-machine-debug-of-apples-endpointsecurity-framework-auth-events-da72d4601c0">Alkenso -- Two Machine Debug of AUTH Events</a>, <a href="https://www.elastic.co/blog/mac-system-extensions-for-threat-detection-part-3">Elastic -- Part 3</a></p>
+
+<!-- 3. Complete Event Enumeration -->
+<h2 id="events">3. Complete Event Type Enumeration</h2>
+
+<p>Extracted directly from <code>ESTypes.h</code> in the macOS SDK on this machine at:<br>
+<code>/Applications/Xcode.app/.../MacOSX.sdk/usr/include/EndpointSecurity/ESTypes.h</code></p>
+
+<details open>
+<summary>macOS 10.15 Catalina (initial release) -- 50 events</summary>
+<div style="overflow-x:auto">
+<table>
+<tr><th>AUTH Events</th><th>NOTIFY Events</th></tr>
+<tr><td><code>AUTH_EXEC</code></td><td><code>NOTIFY_EXEC</code></td></tr>
+<tr><td><code>AUTH_OPEN</code></td><td><code>NOTIFY_OPEN</code></td></tr>
+<tr><td><code>AUTH_KEXTLOAD</code></td><td><code>NOTIFY_KEXTLOAD</code>, <code>NOTIFY_KEXTUNLOAD</code></td></tr>
+<tr><td><code>AUTH_MMAP</code></td><td><code>NOTIFY_MMAP</code></td></tr>
+<tr><td><code>AUTH_MPROTECT</code></td><td><code>NOTIFY_MPROTECT</code></td></tr>
+<tr><td><code>AUTH_MOUNT</code></td><td><code>NOTIFY_MOUNT</code>, <code>NOTIFY_UNMOUNT</code></td></tr>
+<tr><td><code>AUTH_RENAME</code></td><td><code>NOTIFY_RENAME</code></td></tr>
+<tr><td><code>AUTH_SIGNAL</code></td><td><code>NOTIFY_SIGNAL</code></td></tr>
+<tr><td><code>AUTH_UNLINK</code></td><td><code>NOTIFY_UNLINK</code></td></tr>
+<tr><td><code>AUTH_FILE_PROVIDER_MATERIALIZE</code></td><td><code>NOTIFY_FILE_PROVIDER_MATERIALIZE</code></td></tr>
+<tr><td><code>AUTH_FILE_PROVIDER_UPDATE</code></td><td><code>NOTIFY_FILE_PROVIDER_UPDATE</code></td></tr>
+<tr><td><code>AUTH_READLINK</code></td><td><code>NOTIFY_READLINK</code></td></tr>
+<tr><td><code>AUTH_TRUNCATE</code></td><td><code>NOTIFY_TRUNCATE</code></td></tr>
+<tr><td><code>AUTH_LINK</code></td><td><code>NOTIFY_LINK</code></td></tr>
+<tr><td><code>AUTH_CREATE</code></td><td><code>NOTIFY_CREATE</code></td></tr>
+<tr><td><code>AUTH_SETATTRLIST</code></td><td><code>NOTIFY_SETATTRLIST</code></td></tr>
+<tr><td><code>AUTH_SETEXTATTR</code></td><td><code>NOTIFY_SETEXTATTR</code></td></tr>
+<tr><td><code>AUTH_SETFLAGS</code></td><td><code>NOTIFY_SETFLAGS</code></td></tr>
+<tr><td><code>AUTH_SETMODE</code></td><td><code>NOTIFY_SETMODE</code></td></tr>
+<tr><td><code>AUTH_SETOWNER</code></td><td><code>NOTIFY_SETOWNER</code></td></tr>
+<tr><td>--</td><td><code>NOTIFY_FORK</code>, <code>NOTIFY_CLOSE</code></td></tr>
+<tr><td>--</td><td><code>NOTIFY_EXCHANGEDATA</code>, <code>NOTIFY_EXIT</code></td></tr>
+<tr><td>--</td><td><code>NOTIFY_GET_TASK</code>, <code>NOTIFY_IOKIT_OPEN</code></td></tr>
+<tr><td>--</td><td><code>NOTIFY_WRITE</code>, <code>NOTIFY_LOOKUP</code></td></tr>
+</table>
+</div>
+</details>
+
+<details>
+<summary>macOS 10.15.1 -- 34 additional events</summary>
+<div style="overflow-x:auto">
+<table>
+<tr><th>AUTH Events</th><th>NOTIFY Events</th></tr>
+<tr><td><code>AUTH_CHDIR</code></td><td><code>NOTIFY_CHDIR</code></td></tr>
+<tr><td><code>AUTH_GETATTRLIST</code></td><td><code>NOTIFY_GETATTRLIST</code></td></tr>
+<tr><td><code>AUTH_CHROOT</code></td><td><code>NOTIFY_CHROOT</code></td></tr>
+<tr><td><code>AUTH_UTIMES</code></td><td><code>NOTIFY_UTIMES</code></td></tr>
+<tr><td><code>AUTH_CLONE</code></td><td><code>NOTIFY_CLONE</code></td></tr>
+<tr><td><code>AUTH_GETEXTATTR</code></td><td><code>NOTIFY_GETEXTATTR</code></td></tr>
+<tr><td><code>AUTH_LISTEXTATTR</code></td><td><code>NOTIFY_LISTEXTATTR</code></td></tr>
+<tr><td><code>AUTH_READDIR</code></td><td><code>NOTIFY_READDIR</code></td></tr>
+<tr><td><code>AUTH_DELETEEXTATTR</code></td><td><code>NOTIFY_DELETEEXTATTR</code></td></tr>
+<tr><td><code>AUTH_FSGETPATH</code></td><td><code>NOTIFY_FSGETPATH</code></td></tr>
+<tr><td><code>AUTH_SETTIME</code></td><td><code>NOTIFY_SETTIME</code></td></tr>
+<tr><td><code>AUTH_UIPC_BIND</code></td><td><code>NOTIFY_UIPC_BIND</code></td></tr>
+<tr><td><code>AUTH_UIPC_CONNECT</code></td><td><code>NOTIFY_UIPC_CONNECT</code></td></tr>
+<tr><td><code>AUTH_EXCHANGEDATA</code></td><td>--</td></tr>
+<tr><td><code>AUTH_SETACL</code></td><td><code>NOTIFY_SETACL</code></td></tr>
+<tr><td>--</td><td><code>NOTIFY_STAT</code>, <code>NOTIFY_ACCESS</code></td></tr>
+<tr><td>--</td><td><code>NOTIFY_FCNTL</code>, <code>NOTIFY_DUP</code></td></tr>
+</table>
+</div>
+</details>
+
+<details>
+<summary>macOS 10.15.4 -- 5 additional events</summary>
+<div style="overflow-x:auto">
+<table>
+<tr><th>AUTH Events</th><th>NOTIFY Events</th></tr>
+<tr><td><code>AUTH_PROC_CHECK</code></td><td><code>NOTIFY_PROC_CHECK</code></td></tr>
+<tr><td><code>AUTH_GET_TASK</code></td><td>--</td></tr>
+<tr><td>--</td><td><code>NOTIFY_PTY_GRANT</code>, <code>NOTIFY_PTY_CLOSE</code></td></tr>
+</table>
+</div>
+</details>
+
+<details>
+<summary>macOS 11.0 Big Sur -- 10 additional events</summary>
+<div style="overflow-x:auto">
+<table>
+<tr><th>AUTH Events</th><th>NOTIFY Events</th></tr>
+<tr><td><code>AUTH_SEARCHFS</code></td><td><code>NOTIFY_SEARCHFS</code></td></tr>
+<tr><td><code>AUTH_FCNTL</code></td><td>--</td></tr>
+<tr><td><code>AUTH_IOKIT_OPEN</code></td><td>--</td></tr>
+<tr><td><code>AUTH_PROC_SUSPEND_RESUME</code></td><td><code>NOTIFY_PROC_SUSPEND_RESUME</code></td></tr>
+<tr><td><code>AUTH_REMOUNT</code></td><td><code>NOTIFY_REMOUNT</code></td></tr>
+<tr><td>--</td><td><code>NOTIFY_CS_INVALIDATED</code></td></tr>
+<tr><td>--</td><td><code>NOTIFY_GET_TASK_NAME</code></td></tr>
+<tr><td>--</td><td><code>NOTIFY_TRACE</code></td></tr>
+<tr><td>--</td><td><code>NOTIFY_REMOTE_THREAD_CREATE</code></td></tr>
+</table>
+</div>
+</details>
+
+<details>
+<summary>macOS 11.3 -- 3 additional events</summary>
+<table>
+<tr><th>AUTH Events</th><th>NOTIFY Events</th></tr>
+<tr><td><code>AUTH_GET_TASK_READ</code></td><td><code>NOTIFY_GET_TASK_READ</code></td></tr>
+<tr><td>--</td><td><code>NOTIFY_GET_TASK_INSPECT</code></td></tr>
+</table>
+</details>
+
+<details>
+<summary>macOS 12.0 Monterey -- 8 additional events</summary>
+<table>
+<tr><th>AUTH Events</th><th>NOTIFY Events</th></tr>
+<tr><td><code>AUTH_COPYFILE</code></td><td><code>NOTIFY_COPYFILE</code></td></tr>
+<tr><td>--</td><td><code>NOTIFY_SETUID</code>, <code>NOTIFY_SETGID</code></td></tr>
+<tr><td>--</td><td><code>NOTIFY_SETEUID</code>, <code>NOTIFY_SETEGID</code></td></tr>
+<tr><td>--</td><td><code>NOTIFY_SETREUID</code>, <code>NOTIFY_SETREGID</code></td></tr>
+</table>
+</details>
+
+<details>
+<summary>macOS 13.0 Ventura -- 14 additional events</summary>
+<table>
+<tr><th>NOTIFY Events (all new events in this release are NOTIFY-only)</th></tr>
+<tr><td><code>NOTIFY_AUTHENTICATION</code> -- user authentication events (local login, Touch ID, Apple Watch unlock)</td></tr>
+<tr><td><code>NOTIFY_XP_MALWARE_DETECTED</code>, <code>NOTIFY_XP_MALWARE_REMEDIATED</code></td></tr>
+<tr><td><code>NOTIFY_LW_SESSION_LOGIN</code>, <code>NOTIFY_LW_SESSION_LOGOUT</code></td></tr>
+<tr><td><code>NOTIFY_LW_SESSION_LOCK</code>, <code>NOTIFY_LW_SESSION_UNLOCK</code></td></tr>
+<tr><td><code>NOTIFY_SCREENSHARING_ATTACH</code>, <code>NOTIFY_SCREENSHARING_DETACH</code></td></tr>
+<tr><td><code>NOTIFY_OPENSSH_LOGIN</code>, <code>NOTIFY_OPENSSH_LOGOUT</code></td></tr>
+<tr><td><code>NOTIFY_LOGIN_LOGIN</code>, <code>NOTIFY_LOGIN_LOGOUT</code></td></tr>
+<tr><td><code>NOTIFY_BTM_LAUNCH_ITEM_ADD</code>, <code>NOTIFY_BTM_LAUNCH_ITEM_REMOVE</code></td></tr>
+</table>
+</details>
+
+<details>
+<summary>macOS 14.0 Sonoma -- 16 additional events</summary>
+<table>
+<tr><th>NOTIFY Events (all NOTIFY-only)</th></tr>
+<tr><td><code>NOTIFY_PROFILE_ADD</code>, <code>NOTIFY_PROFILE_REMOVE</code></td></tr>
+<tr><td><code>NOTIFY_SU</code>, <code>NOTIFY_SUDO</code></td></tr>
+<tr><td><code>NOTIFY_AUTHORIZATION_PETITION</code>, <code>NOTIFY_AUTHORIZATION_JUDGEMENT</code></td></tr>
+<tr><td><code>NOTIFY_OD_GROUP_ADD</code>, <code>NOTIFY_OD_GROUP_REMOVE</code>, <code>NOTIFY_OD_GROUP_SET</code></td></tr>
+<tr><td><code>NOTIFY_OD_MODIFY_PASSWORD</code></td></tr>
+<tr><td><code>NOTIFY_OD_DISABLE_USER</code>, <code>NOTIFY_OD_ENABLE_USER</code></td></tr>
+<tr><td><code>NOTIFY_OD_ATTRIBUTE_VALUE_ADD</code>, <code>NOTIFY_OD_ATTRIBUTE_VALUE_REMOVE</code>, <code>NOTIFY_OD_ATTRIBUTE_SET</code></td></tr>
+<tr><td><code>NOTIFY_OD_CREATE_USER</code>, <code>NOTIFY_OD_CREATE_GROUP</code></td></tr>
+<tr><td><code>NOTIFY_OD_DELETE_USER</code>, <code>NOTIFY_OD_DELETE_GROUP</code></td></tr>
+<tr><td><code>NOTIFY_XPC_CONNECT</code></td></tr>
+</table>
+</details>
+
+<details>
+<summary>macOS 15.0 Sequoia -- 1 additional event</summary>
+<table>
+<tr><td><code>NOTIFY_GATEKEEPER_USER_OVERRIDE</code></td></tr>
+</table>
+</details>
+
+<details>
+<summary>macOS 15.4 -- 1 additional event</summary>
+<table>
+<tr><td><code>NOTIFY_TCC_MODIFY</code> -- fires when a TCC permission is granted or revoked</td></tr>
+</table>
+</details>
+
+<details>
+<summary>macOS 26.3 / 26.4 -- 7 RESERVED events (unreleased/undocumented)</summary>
+<table>
+<tr><td><code>RESERVED_0</code>, <code>RESERVED_1</code>, <code>RESERVED_2</code> (macOS 26.3)</td></tr>
+<tr><td><code>RESERVED_3</code>, <code>RESERVED_4</code> (macOS 26.4.0)</td></tr>
+<tr><td><code>RESERVED_5</code>, <code>RESERVED_6</code> (macOS 26.4.0) -- these are believed to be network AUTH/NOTIFY events for outbound connections, per reverse engineering by the LuLu firewall project</td></tr>
+</table>
+</details>
+
+<!-- 4. Capabilities by Category -->
+<h2 id="capabilities">4. Monitoring Capabilities by Category</h2>
+
+<div class="card card-green">
+<h3>Process Lifecycle</h3>
+<p>Full visibility into process creation, execution, forking, exit, signaling, suspension, and task introspection.</p>
+<ul>
+  <li><strong>AUTH</strong>: EXEC, SIGNAL, PROC_CHECK, PROC_SUSPEND_RESUME, GET_TASK, GET_TASK_READ</li>
+  <li><strong>NOTIFY</strong>: EXEC, FORK, EXIT, TRACE, REMOTE_THREAD_CREATE, GET_TASK_NAME, GET_TASK_INSPECT, CS_INVALIDATED</li>
+  <li>Process events include: PID (via audit token), executable path, command-line arguments, environment variables, code signing info (signing ID, team ID, cdhash, platform binary flag), codesigning flags</li>
+</ul>
+</div>
+
+<div class="card card-green">
+<h3>File System Operations</h3>
+<p>Comprehensive coverage of file creation, modification, deletion, renaming, linking, metadata changes, extended attributes, and ACLs.</p>
+<ul>
+  <li><strong>AUTH</strong>: OPEN, CREATE, RENAME, UNLINK, LINK, READLINK, TRUNCATE, CLONE, COPYFILE, EXCHANGEDATA, SETATTRLIST, SETEXTATTR, SETFLAGS, SETMODE, SETOWNER, SETACL, DELETEEXTATTR, GETATTRLIST, GETEXTATTR, LISTEXTATTR, READDIR, SEARCHFS, FSGETPATH</li>
+  <li><strong>NOTIFY</strong>: All of the above plus WRITE, CLOSE, STAT, ACCESS, LOOKUP, DUP, FCNTL</li>
+</ul>
+</div>
+
+<div class="card card-green">
+<h3>Memory and Code Injection</h3>
+<p>Monitor and control memory mapping, protection changes, and task port access (used for process injection).</p>
+<ul>
+  <li><strong>AUTH</strong>: MMAP, MPROTECT, GET_TASK, GET_TASK_READ</li>
+  <li><strong>NOTIFY</strong>: MMAP, MPROTECT, GET_TASK, GET_TASK_READ, GET_TASK_INSPECT, GET_TASK_NAME, REMOTE_THREAD_CREATE</li>
+</ul>
+</div>
+
+<div class="card card-green">
+<h3>Mount/Unmount</h3>
+<ul><li><strong>AUTH</strong>: MOUNT, REMOUNT | <strong>NOTIFY</strong>: MOUNT, UNMOUNT, REMOUNT</li></ul>
+</div>
+
+<div class="card card-green">
+<h3>Privilege and Identity Changes (NOTIFY only)</h3>
+<ul><li>SETUID, SETGID, SETEUID, SETEGID, SETREUID, SETREGID, CHROOT, SU, SUDO</li></ul>
+</div>
+
+<div class="card card-green">
+<h3>Authentication and Sessions (macOS 13+, NOTIFY only)</h3>
+<ul>
+  <li>AUTHENTICATION (local login, Touch ID, Apple Watch unlock)</li>
+  <li>LW_SESSION_LOGIN/LOGOUT/LOCK/UNLOCK</li>
+  <li>OPENSSH_LOGIN/LOGOUT, LOGIN_LOGIN/LOGOUT</li>
+  <li>SCREENSHARING_ATTACH/DETACH</li>
+  <li>AUTHORIZATION_PETITION/JUDGEMENT (macOS 14+)</li>
+</ul>
+</div>
+
+<div class="card card-green">
+<h3>Open Directory (macOS 14+, NOTIFY only)</h3>
+<ul><li>User/group creation, deletion, modification, password changes, attribute operations</li></ul>
+</div>
+
+<div class="card card-green">
+<h3>Security and Gatekeeper (NOTIFY only)</h3>
+<ul>
+  <li>XP_MALWARE_DETECTED, XP_MALWARE_REMEDIATED (macOS 13+)</li>
+  <li>GATEKEEPER_USER_OVERRIDE (macOS 15+)</li>
+  <li>TCC_MODIFY (macOS 15.4+)</li>
+  <li>CS_INVALIDATED (code signature invalidation)</li>
+  <li>PROFILE_ADD/REMOVE (macOS 14+)</li>
+</ul>
+</div>
+
+<div class="card card-green">
+<h3>IPC -- UNIX Domain Sockets Only</h3>
+<ul>
+  <li><strong>AUTH</strong>: UIPC_BIND, UIPC_CONNECT</li>
+  <li><strong>NOTIFY</strong>: UIPC_BIND, UIPC_CONNECT, XPC_CONNECT (macOS 14+)</li>
+  <li>Note: These are UNIX-domain sockets only, not TCP/UDP network sockets</li>
+</ul>
+</div>
+
+<!-- 5. Network -->
+<h2 id="network">5. Network Monitoring: ES vs NetworkExtension</h2>
+
+<div class="card card-danger">
+<h3>Critical Gap: ES Intentionally Excludes TCP/UDP Network Events</h3>
+<p>Apple explicitly stated at WWDC 2020:</p>
+<blockquote style="border-left:3px solid var(--text-muted);padding-left:1rem;margin:0.5rem 0;color:var(--text-muted);font-style:italic">
+"Those of you who have already worked with the EndpointSecurity framework have likely noticed that we do not provide events related to networking operations. This is intentional as these are better covered by the NetworkExtension framework."
+</blockquote>
+
+<p><strong>What ES provides for IPC:</strong></p>
+<ul>
+  <li><code>UIPC_BIND</code>, <code>UIPC_CONNECT</code> -- UNIX domain socket operations only (AUTH + NOTIFY)</li>
+  <li><code>XPC_CONNECT</code> -- XPC connection events (NOTIFY, macOS 14+)</li>
+</ul>
+
+<p><strong>What ES does NOT provide:</strong></p>
+<ul>
+  <li>TCP/UDP connect, bind, listen, accept</li>
+  <li>DNS resolution</li>
+  <li>Remote IP/port information</li>
+  <li>Any packet-level inspection</li>
+</ul>
+
+<p><strong>Emerging change (macOS 26.4, undocumented):</strong> The LuLu firewall project has reverse-engineered <code>ES_EVENT_TYPE_RESERVED_5</code> and <code>RESERVED_6</code> as network connection AUTH/NOTIFY events, with a struct containing address family, resolved IP, hostname, and resolver path. These events carry a 15-second AUTH deadline. This would be a significant shift from Apple's prior stance.</p>
+
+<p><strong>For network monitoring today, use <code>NetworkExtension</code></strong> with a Content Filter provider. Both ES and NetworkExtension can coexist in a single System Extension.</p>
+</div>
+
+<p class="source">Sources: <a href="https://developer.apple.com/forums/thread/748407">Apple Developer Forums -- ES and network events</a>, <a href="https://objective-see.org/blog/blog_0x86.html">Objective-See -- Building a Firewall via ES</a>, <a href="https://developer.apple.com/videos/play/wwdc2020/10159/">WWDC 2020 -- Build an ES app</a></p>
+
+<!-- 6. Mach Messages -->
+<h2 id="mach">6. Mach Messages, XPC, and IPC Monitoring</h2>
+
+<div class="card card-warn">
+<p><strong>Mach message monitoring is NOT supported by EndpointSecurity.</strong> There are no event types for raw Mach message send/receive.</p>
+<p>What IS available:</p>
+<ul>
+  <li><code>NOTIFY_XPC_CONNECT</code> (macOS 14+) -- notifies when an XPC connection is established, but not message content</li>
+  <li><code>AUTH_UIPC_BIND</code> / <code>AUTH_UIPC_CONNECT</code> -- for UNIX domain sockets used for IPC</li>
+  <li><code>AUTH_GET_TASK</code> / <code>AUTH_GET_TASK_READ</code> -- can block task port access, which is the prerequisite for Mach-based process injection</li>
+  <li>IOKit open events for device-level IPC monitoring</li>
+</ul>
+<p>For Mach-level monitoring, one would historically have needed kernel instrumentation (now deprecated with KEXT). There is no current user-space API that provides visibility into individual Mach message send/receive operations.</p>
+</div>
+
+<!-- 7. OpenBSM Comparison -->
+<h2 id="openbsm">7. Comparison with OpenBSM / auditd</h2>
+
+<div style="overflow-x:auto">
+<table>
+<tr><th>Aspect</th><th>OpenBSM / auditd</th><th>EndpointSecurity</th></tr>
+<tr><td>Status</td><td>Deprecated macOS 11, <strong>disabled macOS 14</strong>, removal imminent</td><td>Active, expanding every release</td></tr>
+<tr><td>Architecture</td><td>Kernel audit pipe, text/binary log files</td><td>Kernel kext + user-space daemon, structured events via callback API</td></tr>
+<tr><td>Timing</td><td>Post-event logging only</td><td>Pre-event (AUTH) + post-event (NOTIFY)</td></tr>
+<tr><td>Blocking</td><td>Cannot block actions</td><td>AUTH events can block/deny actions</td></tr>
+<tr><td>Event richness</td><td>Basic syscall audit records</td><td>Rich structured data: code signing, process tree, file metadata</td></tr>
+<tr><td>Authentication visibility</td><td>Had login/auth events</td><td>Matched + exceeded in macOS 13+ (including Apple Watch unlock)</td></tr>
+<tr><td>Network</td><td>Basic network audit events</td><td>No TCP/UDP (delegated to NetworkExtension)</td></tr>
+<tr><td>Compliance gap</td><td>Logged failed events (required by DISA/NIST)</td><td>Prevention-first architecture; failed-event logging less natural</td></tr>
+<tr><td>Complexity</td><td>Parse audit trail files</td><td>Simple callback-based API: <code>es_new_client</code> + <code>es_subscribe</code></td></tr>
+<tr><td>Entitlement</td><td>Root access only</td><td>Root + Apple-granted entitlement + Full Disk Access TCC</td></tr>
+</table>
+</div>
+
+<p class="source">Sources: <a href="https://developer.apple.com/forums/thread/654443">Apple Forums -- BSM audit deprecated</a>, <a href="https://ennetix.com/rip-bsm-and-the-coming-showdown/">Ennetix -- RIP BSM</a>, <a href="https://developer.apple.com/videos/play/wwdc2022/110345/">WWDC22 -- What's new in ES</a></p>
+
+<!-- 8. System Extensions -->
+<h2 id="sysext">8. System Extensions vs Kernel Extensions</h2>
+
+<div style="overflow-x:auto">
+<table>
+<tr><th>Aspect</th><th>Kernel Extensions (KEXT)</th><th>System Extensions (SYSEXT)</th></tr>
+<tr><td>Execution context</td><td>Kernel space (ring 0)</td><td>User space</td></tr>
+<tr><td>Status</td><td><strong>Deprecated since macOS 10.15</strong>; blocked on Apple Silicon without explicit user override</td><td>Current recommended approach</td></tr>
+<tr><td>Crash impact</td><td>Full kernel panic</td><td>Process crash only; OS continues</td></tr>
+<tr><td>SIP protection</td><td>No</td><td>Yes (rootless protection against tampering)</td></tr>
+<tr><td>Frameworks</td><td>KAuth KPI, MAC framework</td><td>EndpointSecurity, NetworkExtension, DriverKit</td></tr>
+<tr><td>Distribution</td><td>Notarization + user approval</td><td>Notarization + user approval + MDM for enterprise silent install</td></tr>
+<tr><td>Apple Silicon</td><td>Requires reduced security boot + explicit user action</td><td>Works at full security level</td></tr>
+</table>
+</div>
+
+<p>The transition timeline: Apple announced KEXT deprecation at WWDC 2019, introduced System Extensions in macOS 10.15.4, and has progressively restricted KEXT loading. On Apple Silicon Macs, loading a KEXT requires booting into Recovery, lowering security policy, and explicitly allowing the extension -- making KEXTs impractical for most production use.</p>
+
+<p class="source">Sources: <a href="https://support.apple.com/guide/deployment/system-extensions-in-macos-depa5fb8376f/web">Apple -- System Extensions deployment</a>, <a href="https://developer.apple.com/support/kernel-extensions/">Apple -- Deprecated KEXTs</a>, <a href="https://eclecticlight.co/2024/07/24/how-macos-is-moving-away-from-kernel-extensions/">Eclectic Light -- Moving away from KEXTs</a></p>
+
+<!-- 9. Entitlements -->
+<h2 id="entitlements">9. Entitlements and Requirements</h2>
+
+<div class="card card-warn">
+<h3>Required Entitlement</h3>
+<pre><code>&lt;key&gt;com.apple.developer.endpoint-security.client&lt;/key&gt;
+&lt;true/&gt;</code></pre>
+<p>This entitlement <strong>must be granted by Apple</strong> through the <a href="https://developer.apple.com/contact/request/system-extension/">System Extension Request Form</a>. Without it, <code>es_new_client()</code> returns <code>ES_NEW_CLIENT_RESULT_ERR_NOT_ENTITLED</code>.</p>
+</div>
+
+<h3>Full Requirements</h3>
+<ol>
+  <li><strong>Apple-granted entitlement</strong>: <code>com.apple.developer.endpoint-security.client</code> -- requires application to Apple, approval for your team ID</li>
+  <li><strong>Provisioning profile</strong>: Must create a provisioning profile that includes the entitlement via Apple Developer Account; Xcode imports it into the project</li>
+  <li><strong>Code signing</strong>: Must be properly code-signed (Hardened Runtime enabled)</li>
+  <li><strong>Root execution</strong>: The ES client process must run as root (UID 0)</li>
+  <li><strong>Full Disk Access</strong>: Must be granted TCC Full Disk Access authorization (either via System Preferences or MDM)</li>
+  <li><strong>Libraries to link</strong>: <code>libEndpointSecurity.tbd</code>, <code>libbsm.tbd</code></li>
+</ol>
+
+<h3>Development / Testing Workarounds</h3>
+<ul>
+  <li>Disable SIP to bypass entitlement check (for development only)</li>
+  <li>Apple's <code>eslogger</code> CLI tool (macOS 13+) ships pre-entitled and can output NOTIFY events as JSON without building a custom client</li>
+  <li>Red Canary's <a href="https://github.com/Brandon7CC/mac-monitor">Mac Monitor</a> provides a GUI for reading ES events without the formal entitlement</li>
+</ul>
+
+<h3>Internal Entitlement (Apple-only)</h3>
+<p><code>com.apple.private.endpoint-security.submit</code> -- used by Apple daemons to emit events into the ES subsystem. Not available to third parties.</p>
+
+<p class="source">Sources: <a href="https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.endpoint-security.client">Apple -- ES client entitlement</a>, <a href="https://gist.github.com/Omar-Ikram/8e6721d8e83a3da69b31d4c2612a68ba">Omar-Ikram ES demo</a>, <a href="https://research.meekolab.com/introduction-to-the-apple-endpoint-security-framework">MeekoLab</a></p>
+
+<!-- 10. Container Workloads -->
+<h2 id="containers">10. Container Workload Monitoring and Isolation</h2>
+
+<div class="card card-accent">
+<h3>Can ES Monitor Container-Like Workloads?</h3>
+<p><strong>Yes, with caveats.</strong> EndpointSecurity operates at the system level and sees all processes on the host, regardless of whether they run inside a VM, a sandbox, or a container-like construct. For your urunc-macos use case (Virtualization.framework VMs and QEMU+HVF VMs):</p>
+
+<ul>
+  <li><strong>Host-side process monitoring</strong>: ES can observe the VM hypervisor process itself (qemu, vz-runner), its file access patterns, mount operations, and any child processes it spawns on the host</li>
+  <li><strong>Guest-side visibility</strong>: ES has <strong>no visibility into guest OS operations</strong>. It monitors the host kernel only. Processes running inside a Linux VM (the unikernel workload) are invisible to ES</li>
+  <li><strong>Virtio/virtiofs file access</strong>: When the guest accesses shared host directories (via virtiofs or 9pfs), those accesses may generate file events on the host attributable to the VM process</li>
+  <li><strong>Network</strong>: VM network traffic via vmnet-shared appears to the host as network activity of the hypervisor process; ES has no visibility into this (network events not supported), but NetworkExtension could observe it</li>
+</ul>
+</div>
+
+<div class="card card-accent">
+<h3>Can ES Enforce Isolation?</h3>
+<p><strong>Partially.</strong> AUTH events can block specific operations, but ES is not a sandbox mechanism:</p>
+<ul>
+  <li>AUTH_EXEC can prevent unauthorized binaries from executing</li>
+  <li>AUTH_OPEN/CREATE/UNLINK can restrict file access</li>
+  <li>AUTH_MOUNT/REMOUNT can prevent filesystem mounts</li>
+  <li>AUTH_MMAP/MPROTECT can restrict memory operations</li>
+  <li><strong>But</strong>: ES has no concept of "containers" or per-process policy profiles. You would need to build the policy logic yourself, filtering by PID/audit token/path of the monitored process</li>
+  <li><strong>Better alternatives for isolation</strong>: macOS Sandbox (Seatbelt) profiles via <code>sandbox-exec</code> (deprecated but functional), or Apple's Containerization framework</li>
+</ul>
+</div>
+
+<div class="card card-warn">
+<h3>sandbox-exec vs ES for Container Isolation</h3>
+<p>An <a href="https://github.com/apple/containerization/issues/737">open issue in Apple's containerization repo</a> highlights the tension: <code>sandbox-exec</code> (Seatbelt) remains the only documented way to apply declarative sandbox profiles to arbitrary processes without App Store enrollment, but it is deprecated with no formal removal timeline. ES provides observation and authorization callbacks but not declarative per-process sandbox profiles.</p>
+<p>For urunc-macos, a combined approach could work: use ES AUTH events to monitor and gate host-side operations performed by the hypervisor process, while relying on the VM boundary itself for guest isolation.</p>
+</div>
+
+<!-- 11. Limitations -->
+<h2 id="limitations">11. Limitations</h2>
+
+<div class="card card-danger">
+<ol style="padding-left:1.2rem">
+  <li><strong>No TCP/UDP network events</strong> (until possibly macOS 26.4; must use NetworkExtension)</li>
+  <li><strong>No Mach message monitoring</strong> -- cannot observe raw Mach IPC</li>
+  <li><strong>No guest VM visibility</strong> -- only monitors the host kernel, not guest OS</li>
+  <li><strong>Entitlement gatekeeping</strong> -- requires Apple approval, creating a barrier for small developers and open-source projects</li>
+  <li><strong>AUTH event deadline</strong> -- responses must arrive within a system-defined (non-configurable) deadline; slow handlers get killed</li>
+  <li><strong>No blocking in handler</strong> -- performing blocking operations in the ES callback will cause the system to kill the client when event volume is high</li>
+  <li><strong>Root required</strong> -- ES clients must run as UID 0</li>
+  <li><strong>No per-process policy profiles</strong> -- unlike Sandbox (Seatbelt), ES does not provide declarative per-process containment</li>
+  <li><strong>Compliance gap</strong> -- prevention-first architecture does not naturally log failed events as required by DISA/NIST standards</li>
+  <li><strong>No DNS event support</strong> -- DNS resolution is not observable through ES</li>
+  <li><strong>TCC events limited</strong> -- <code>TCC_MODIFY</code> only fires on grant/revoke, not for entitled binaries or when TCC silently denies</li>
+  <li><strong>Muting complexity</strong> -- high-volume events (STAT, ACCESS, LOOKUP) require careful muting to avoid performance degradation</li>
+</ol>
+</div>
+
+<!-- 12. Sources -->
+<h2 id="sources">12. Sources</h2>
+
+<ul>
+  <li><a href="https://developer.apple.com/documentation/endpointsecurity">Apple Developer -- EndpointSecurity Framework</a></li>
+  <li><a href="https://developer.apple.com/documentation/endpointsecurity/es_event_type_t">Apple Developer -- es_event_type_t</a></li>
+  <li><a href="https://developer.apple.com/documentation/endpointsecurity/event-types">Apple Developer -- Event Types</a></li>
+  <li><a href="https://developer.apple.com/documentation/endpointsecurity/monitoring-system-events-with-endpoint-security">Apple Developer -- Monitoring System Events</a></li>
+  <li><a href="https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.endpoint-security.client">Apple Developer -- ES Client Entitlement</a></li>
+  <li><a href="https://developer.apple.com/videos/play/wwdc2022/110345/">WWDC22 -- What's new in Endpoint Security</a></li>
+  <li><a href="https://developer.apple.com/videos/play/wwdc2020/10159/">WWDC20 -- Build an Endpoint Security app</a></li>
+  <li><a href="https://developer.apple.com/support/kernel-extensions/">Apple -- Deprecated Kernel Extensions</a></li>
+  <li><a href="https://developer.apple.com/forums/thread/748407">Apple Forums -- EndpointSecurity and network events</a></li>
+  <li><a href="https://developer.apple.com/forums/thread/654443">Apple Forums -- BSM audit is deprecated</a></li>
+  <li><a href="https://github.com/redcanaryco/mac-monitor/wiki/5.-Endpoint-Security-Overview">Red Canary mac-monitor wiki -- ES Overview</a></li>
+  <li><a href="https://github.com/redcanaryco/mac-monitor/wiki/6.-Endpoint-Security-Daemon">Red Canary mac-monitor wiki -- ES Daemon</a></li>
+  <li><a href="https://gist.github.com/Omar-Ikram/8e6721d8e83a3da69b31d4c2612a68ba">Omar-Ikram -- ES Framework Demo (100+ events)</a></li>
+  <li><a href="https://research.meekolab.com/introduction-to-the-apple-endpoint-security-framework">MeekoLab -- Introduction to Apple ES Framework</a></li>
+  <li><a href="https://objective-see.org/blog/blog_0x47.html">Objective-See -- Writing a Process Monitor with ES</a></li>
+  <li><a href="https://objective-see.org/blog/blog_0x7F.html">Objective-See -- Apple adds TCC events to ES</a></li>
+  <li><a href="https://objective-see.org/blog/blog_0x86.html">Objective-See -- Building a Firewall via ES</a></li>
+  <li><a href="https://www.elastic.co/blog/mac-system-extensions-for-threat-detection-part-3">Elastic -- Mac System Extensions for Threat Detection Part 3</a></li>
+  <li><a href="https://sebastiangogola.me/mac-monitor-understanding-endpoint-security-framework-events-on-macos/">Sebastian Gogola -- Understanding ES Framework Events</a></li>
+  <li><a href="https://medium.com/red-teaming-with-a-blue-team-mentality/taking-the-macos-endpoint-security-framework-for-a-quick-spin-802a462dba06">Cedric Owens -- Taking ES for a Quick Spin</a></li>
+  <li><a href="https://medium.com/@alkenso/two-machine-debug-of-apples-endpointsecurity-framework-auth-events-da72d4601c0">Alkenso -- Two Machine Debug of ES AUTH Events</a></li>
+  <li><a href="https://keith.github.io/xcode-man-pages/EndpointSecurity.7.html">EndpointSecurity(7) man page</a></li>
+  <li><a href="https://ennetix.com/rip-bsm-and-the-coming-showdown/">Ennetix -- RIP BSM and the Coming Showdown</a></li>
+  <li><a href="https://support.apple.com/guide/deployment/system-extensions-in-macos-depa5fb8376f/web">Apple Support -- System Extensions Deployment</a></li>
+  <li><a href="https://eclecticlight.co/2024/07/24/how-macos-is-moving-away-from-kernel-extensions/">Eclectic Light -- Moving away from KEXTs</a></li>
+  <li><a href="https://github.com/apple/containerization/issues/737">Apple Containerization issue #737 -- sandbox-exec deprecation</a></li>
+  <li><a href="https://taomm.org/vol2/pdfs/CH%209%20Muting%20and%20Authorization%20Events.pdf">Art of Mac Malware Vol 2 -- Muting and Authorization Events</a></li>
+  <li>Local SDK: <code>/Applications/Xcode.app/.../MacOSX.sdk/usr/include/EndpointSecurity/ESTypes.h</code></li>
+</ul>
+
+<div class="divider"></div>
+<p style="color:var(--text-muted);font-size:0.82rem;text-align:center">Research compiled June 2026 from web sources + local macOS SDK headers</p>
+
+</body>
+</html>

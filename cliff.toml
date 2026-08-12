@@ -1,0 +1,70 @@
+# git-cliff configuration for urunc-macos.
+#
+# The changelog and the GitHub release notes are generated from the same
+# source: the Conventional-Commits history on main. Because PRs are
+# squash-merged, each PR lands as one commit whose subject is the PR title
+# (with the "(#NN)" GitHub appends), so the changelog entries map 1:1 to PRs.
+#
+# Local use:   scripts/changelog.sh            # rewrite CHANGELOG.md
+#              scripts/changelog.sh --notes vX  # print notes for one tag
+# CI drives the same script from the release workflow.
+
+[changelog]
+header = """
+# Changelog
+
+All notable changes to urunc-macos. Generated from the Conventional-Commits
+history; each entry links to the PR that introduced it.
+"""
+# Grouped, Keep-a-Changelog-ish body. Curated highlights (if any) are
+# prepended by the release workflow, not here.
+body = """
+{% if version %}\
+## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else %}\
+## [unreleased]
+{% endif %}\
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | upper_first }}
+{% for commit in commits %}
+- {{ commit.message | split(pat="\n") | first | upper_first }}\
+{% endfor %}
+{% endfor %}\n
+"""
+trim = true
+footer = ""
+# Turn the "(#NN)" that squash-merge appends into a PR link, without hitting
+# the GitHub API (the repo is private, so an unauthenticated remote lookup
+# 404s). This keeps changelog generation token-free.
+postprocessors = [
+  { pattern = '\(#([0-9]+)\)', replace = "([#${1}](https://github.com/NOFireAI/urunc-macos/pull/${1}))" },
+]
+
+[git]
+conventional_commits = true
+# Drop commits that are not Conventional Commits (stray merges, etc.) rather
+# than dumping them into a catch-all section.
+filter_unconventional = true
+split_commits = false
+# Group by type; skip the noise (version bumps, the changelog commit itself,
+# CI plumbing) so the changelog reads as user-facing change, not git chatter.
+commit_parsers = [
+  { message = "^feat", group = "Features" },
+  { message = "^fix", group = "Bug Fixes" },
+  { message = "^perf", group = "Performance" },
+  { message = "^refactor", group = "Refactor" },
+  { message = "^docs", group = "Documentation" },
+  { message = "^test", group = "Tests" },
+  { message = "^chore\\(release\\)", skip = true },
+  { message = "^chore: bump VERSION", skip = true },
+  { message = "^chore\\(changelog\\)", skip = true },
+  { message = "^chore", group = "Miscellaneous" },
+  { message = "^ci", skip = true },
+  { message = "^build", group = "Build" },
+]
+protect_breaking_commits = true
+filter_commits = false
+tag_pattern = "v[0-9].*"
+topo_order = false
+sort_commits = "newest"
+

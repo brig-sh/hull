@@ -1,0 +1,164 @@
+name: Release
+
+# One-shot release automation: bump VERSION on main, tag it, build the
+# signed + notarized artifacts (via sign-notarize.yml), publish the GitHub
+# release and open the Homebrew tap bump PR.
+#
+# Trigger from the Actions tab (or `gh workflow run release.yml
+# -f version=0.1.0-rc4`). The version goes in without the leading v.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, without the leading v (e.g. 0.1.0-rc4)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  bump-and-tag:
+    name: bump VERSION and tag main
+    # Pure git + git-cliff (in docker); nothing macOS-specific.
+    runs-on: ubuntu-latest
+    outputs:
+      tag: v${{ inputs.version }}
+    steps:
+      # main is protected and the ruleset grants no bypass to the repo's own
+      # GITHUB_TOKEN, so pushing the bump as github-actions[bot] is rejected
+      # ("Changes must be made through a pull request"). Push as the release
+      # bot instead, the same app the tap job already uses and the identity
+      # the ruleset lists as a bypass actor. Releases stay unattended without
+      # widening write access to every workflow in the repo.
+      - name: Mint a push token from the release bot app
+        id: bot-token
+        if: vars.NOFIRE_BOT_APP_ID != ''
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.NOFIRE_BOT_APP_ID }}
+          private-key: ${{ secrets.NOFIRE_BOT_PRIVATE_KEY }}
+          owner: NOFireAI
+          repositories: urunc-macos
+
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0 # full history + tags so git-cliff builds the whole changelog
+          # Persist the bot's credentials so the push below carries them.
+          token: ${{ steps.bot-token.outputs.token || github.token }}
+
+      - name: Commit the VERSION bump and push the tag
+        run: |
+          set -euo pipefail
+          VERSION="${{ inputs.version }}"
+          TAG="v$VERSION"
+          case "$VERSION" in
+            v*) echo "version must not carry the leading v" >&2; exit 1 ;;
+          esac
+          if git ls-remote --exit-code origin "refs/tags/$TAG" > /dev/null 2>&1; then
+            echo "tag $TAG already exists" >&2
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          echo "$VERSION" > VERSION
+          # Regenerate the changelog from the Conventional-Commits history,
+          # folding the unreleased commits into this release. VERSION +
+          # CHANGELOG.md land in one commit so main stays in lockstep with
+          # the tag. (chore: bump ... is skipped by cliff.toml.)
+          ./scripts/changelog.sh --tag "$TAG" || echo "::warning::changelog generation failed; releasing with VERSION only"
+          git add VERSION CHANGELOG.md 2>/dev/null || git add VERSION
+          if ! git diff --cached --quiet; then
+            # [skip ci]: this commit only touches VERSION + CHANGELOG on
+            # already-tested code. Skipping CI here is what keeps the
+            # release's own sign job from racing a CI test job over the
+            # shared macOS keychain (see sign-notarize.yml). The chore:
+            # bump prefix still matches cliff.toml's skip rule.
+            git commit -m "chore: bump VERSION to $VERSION [skip ci]"
+            git push origin HEAD:main
+          fi
+          git tag -a "$TAG" -m "urunc-macos $TAG"
+          git push origin "$TAG"
+
+  sign-notarize:
+    needs: bump-and-tag
+    uses: ./.github/workflows/sign-notarize.yml
+    with:
+      tag: ${{ needs.bump-and-tag.outputs.tag }}
+    secrets: inherit
+
+  tap:
+    name: open the homebrew tap bump PR
+    needs: [bump-and-tag, sign-notarize]
+    # Pure git + gh + perl; nothing macOS-specific.
+    runs-on: ubuntu-latest
+    # A tap hiccup must not fail an already-published release; the
+    # sign-notarize job summary carries the sha256 for a manual bump.
+    continue-on-error: true
+    steps:
+      # Cross-repo credentials come from the org release bot (a GitHub
+      # App), not from any human: the repo-scoped GITHUB_TOKEN cannot
+      # reach the tap repo, and personal tokens/ssh keys tie releases to
+      # an individual. Mirrors the URUNC_BOT pattern used upstream.
+      - name: Mint a tap token from the release bot app
+        id: bot-token
+        if: vars.NOFIRE_BOT_APP_ID != ''
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.NOFIRE_BOT_APP_ID }}
+          private-key: ${{ secrets.NOFIRE_BOT_PRIVATE_KEY }}
+          owner: NOFireAI
+          repositories: homebrew-nofire
+
+      - name: Update Formula/urunc-macos.rb and open the PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BOT_TOKEN: ${{ steps.bot-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ inputs.version }}"
+          TAG="v$VERSION"
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" \
+            --pattern '*.sha256' -O "$RUNNER_TEMP/rel.sha256"
+          SHA=$(awk '{print $1}' "$RUNNER_TEMP/rel.sha256")
+
+          rm -rf "$RUNNER_TEMP/tap"
+          if [ -n "${BOT_TOKEN:-}" ]; then
+            git clone "https://x-access-token:${BOT_TOKEN}@github.com/NOFireAI/homebrew-nofire" "$RUNNER_TEMP/tap"
+          else
+            # Fallback: the runner user's ssh identity.
+            git clone git@github.com:NOFireAI/homebrew-nofire "$RUNNER_TEMP/tap"
+          fi
+          cd "$RUNNER_TEMP/tap"
+          git switch -c "release/$TAG"
+
+          export TAG VERSION SHA
+          # Keep every formula anchored to this release in lockstep:
+          # urunc-macos (the tarball) and urunc-claude (wrapper, same
+          # url anchor so upgrades roll out together).
+          for f in Formula/urunc-macos.rb Formula/urunc-claude.rb; do
+            [ -f "$f" ] || continue
+            perl -pi -e '
+              s|releases/download/v[^/]+/urunc-macos-[^"]+-arm64\.tar\.gz|releases/download/$ENV{TAG}/urunc-macos-$ENV{VERSION}-arm64.tar.gz|;
+              s|version "[^"]+"|version "$ENV{VERSION}"|;
+              s|sha256 "[0-9a-f]{64}"|sha256 "$ENV{SHA}"|;
+            ' "$f"
+          done
+
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -am "feat: point urunc-macos at $TAG"
+          git push -u origin "release/$TAG"
+
+          # Cross-repo PR as the release bot; without the app configured,
+          # fall back to a warning with the compare URL.
+          if [ -n "${BOT_TOKEN:-}" ]; then
+            GH_TOKEN="$BOT_TOKEN" gh pr create -R NOFireAI/homebrew-nofire \
+              --base main --head "release/$TAG" \
+              --title "feat: point urunc-macos at $TAG" \
+              --body "Automated bump from the urunc-macos release workflow (run $GITHUB_RUN_ID)."
+          else
+            echo "::warning::release bot app not configured (vars.NOFIRE_BOT_APP_ID); open the tap PR manually: https://github.com/NOFireAI/homebrew-nofire/pull/new/release/$TAG"
+          fi

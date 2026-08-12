@@ -1,0 +1,242 @@
+name: CI
+
+# Lint and build urunc-macos on every push and pull request.
+#
+# The module is darwin-only (it consumes urunc's darwin hypervisor backends
+# and Virtualization.framework via vz-runner), so everything runs on a macOS
+# arm64 runner. Binaries built here are ad-hoc signed only — the signed and
+# notarized release artifacts come from the manually-invoked "Sign and
+# Notarize" workflow.
+#
+# The test job runs the unit suite and the PTY end-to-end harnesses, which
+# boot real VMs — possible only on a self-hosted Apple Silicon runner with
+# working HVF (GitHub-hosted macOS runners cannot nest virtualization).
+# Binaries are signed with the Developer ID from secrets so the
+# virtualization entitlement is honored under SIP.
+#
+# The macOS jobs target the self-hosted Apple Silicon runners (re-enabled
+# 2026-07-30; they had been parked on GitHub-hosted macos-15 while the
+# runner's VZ checkpoint/restore was broken). The VM-boot steps stay gated
+# on runner.environment == 'self-hosted', so parking the jobs back on
+# macos-15 degrades gracefully to the unit suite -- no other change needed
+# in either direction.
+
+on:
+  push:
+    branches: [main, exec-support]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint (golangci-lint)
+    # The module is darwin-only but pure Go -- the Virtualization.framework
+    # bits live in the Swift vz-runner, not here -- so it type-checks on Linux
+    # with GOOS/GOARCH set. No need to occupy a self-hosted macOS runner.
+    runs-on: ubuntu-latest
+    env:
+      GOOS: darwin
+      GOARCH: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
+
+      # The conformance report generator is pure Go with no darwin dependency,
+      # so its freshness can be checked here on Linux -- a stale
+      # docs/compose-conformance.md fails fast without occupying a mac runner.
+      # Clear the darwin GOOS/GOARCH set at job level so `go run` builds and
+      # executes natively on the Linux runner.
+      - name: Conformance report freshness
+        env:
+          GOOS: ""
+          GOARCH: ""
+        run: |
+          go run ./test/conformance/cmd/report
+          git diff --exit-code docs/compose-conformance.md
+
+  build:
+    name: build (go + swift, ad-hoc signed)
+    runs-on: [self-hosted, macOS, ARM64]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Self-hosted runners provide their own Go toolchain; setup-go is only
+      # needed on ephemeral GitHub-hosted runners.
+      - uses: actions/setup-go@v5
+        if: runner.environment == 'github-hosted'
+        with:
+          go-version-file: go.mod
+
+      - name: Build and ad-hoc sign urunc-macos + vz-runner
+        run: make macos
+
+      - name: Smoke-test the CLI binary
+        run: ./dist/urunc-macos_arm64 run --help
+
+      # Black-box smoke of the compose front-end: the supported surface must
+      # render deterministically, ignored keys must warn on stderr without
+      # leaking into the document, and load-time validation must reject bad
+      # input. Same script a developer runs against a local build.
+      - name: Smoke-test compose config
+        run: test/compose-config-smoke.sh ./dist/urunc-macos_arm64
+
+      - name: Verify vz-runner entitlements
+        run: |
+          codesign -d --entitlements - --xml \
+            vz-runner/.build/arm64-apple-macosx/release/vz-runner \
+            | grep -q com.apple.security.virtualization
+          echo "virtualization entitlement present"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: urunc-macos-adhoc
+          path: |
+            dist/urunc-macos_arm64
+            vz-runner/.build/arm64-apple-macosx/release/vz-runner
+          retention-days: 7
+
+  test:
+    name: unit + e2e (boots real VMs)
+    runs-on: [self-hosted, macOS, ARM64]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Self-hosted runners provide their own Go toolchain; setup-go is only
+      # needed on ephemeral GitHub-hosted runners.
+      - uses: actions/setup-go@v5
+        if: runner.environment == 'github-hosted'
+        with:
+          go-version-file: go.mod
+
+      - name: Unit tests
+        run: go test ./...
+
+      # Regenerate the manifest-driven report and fail if the checked-in doc
+      # has drifted (ADR 0002 part 4). The generator is pure Go and runs on the
+      # GitHub-hosted macOS runner without booting a VM.
+      - name: Conformance report freshness
+        run: |
+          go run ./test/conformance/cmd/report
+          git diff --exit-code docs/compose-conformance.md
+
+      # Everything below boots real VMs (or only exists to serve those
+      # steps), so it runs on the self-hosted runner only. On GitHub-hosted
+      # macos-15 the job stops at the unit suite.
+      - name: Import Developer ID certificate into ephemeral keychain
+        if: runner.environment == 'self-hosted'
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          KEYCHAIN_PASSWORD=$(uuidgen)
+          KEYCHAIN=$RUNNER_TEMP/ci-test.keychain-db
+          echo "KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          echo "$MACOS_CERT_P12" | base64 -d > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN"             -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple:             -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN"             | grep -o '"Developer ID Application: [^"]*"' | head -1 | tr -d '"')
+          [ -n "$IDENTITY" ] || { echo "no Developer ID identity" >&2; exit 1; }
+          echo "IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+
+      - name: Build signed binaries (entitlement honored under SIP)
+        if: runner.environment == 'self-hosted'
+        run: |
+          make macos CODESIGN_IDENTITY="$IDENTITY"
+          cp -p vz-runner/.build/arm64-apple-macosx/release/vz-runner dist/vz-runner
+
+      - name: Ensure QEMU
+        if: runner.environment == 'self-hosted'
+        run: command -v qemu-system-aarch64 >/dev/null || brew install qemu
+
+      - name: Ensure e2fsprogs (block-rootfs e2e)
+        if: runner.environment == 'self-hosted'
+        run: test -x /opt/homebrew/opt/e2fsprogs/sbin/mke2fs || brew install e2fsprogs
+
+      # Runtime conformance tier (ADR 0002): boots one real VM per runtime
+      # manifest entry and proves the capability claims against a live guest.
+      # Rides the same env contract and persistent store as the PTY matrix so
+      # the pulled image is cached across runs; new runtime-tier cases are
+      # picked up automatically by the -run pattern.
+      - name: Runtime conformance tier (boots real VMs)
+        if: runner.environment == 'self-hosted'
+        env:
+          URUNC_CONFORMANCE_RUNTIME: "1"
+          URUNC_MACOS_BIN: ${{ github.workspace }}/dist/urunc-macos_arm64
+          URUNC_STORE_DIR: ${{ runner.temp }}/../urunc-ci-store
+          # The conformance fixture from the urunc-images repo: a bunny base
+          # with the patched init (urunit + urunit-agent) overlaid plus the
+          # in-guest TCP listener tools (python3/nc/socat) the harness
+          # probes for, so one image serves the whole tier: the generic
+          # cases, the exec-dependent cases (cli.exec, cli.top,
+          # service.healthcheck, post_start/pre_stop), and the
+          # listener-dependent ones (service.ports, ext.x-healthcheck-tcp).
+          URUNC_TEST_IMAGE: ghcr.io/nofireai/urunc-ubuntu-conformance:aarch64
+          URUNC_EXEC_TEST_IMAGE: ghcr.io/nofireai/urunc-ubuntu-conformance:aarch64
+        run: go test -count=1 -v -run 'TestConformanceRuntime' ./test/conformance
+
+      - name: PTY end-to-end matrix
+        if: runner.environment == 'self-hosted'
+        env:
+          URUNC_MACOS_BIN: ${{ github.workspace }}/dist/urunc-macos_arm64
+          # Persistent store on the runner: the pulled image is cached
+          # across runs; instances are uniquely named and cleaned up.
+          URUNC_STORE_DIR: ${{ runner.temp }}/../urunc-ci-store
+        run: |
+          set -e
+          R=${GITHUB_RUN_ID}
+          python3 test/pty-terminal-test.py vz   ci-vt-$R  type
+          python3 test/pty-terminal-test.py vz   ci-vi-$R  intr
+          python3 test/pty-terminal-test.py vz   ci-vd-$R  double
+          python3 test/pty-terminal-test.py vz   ci-vs-$R  term
+          python3 test/pty-terminal-test.py qemu ci-qt-$R  type
+          python3 test/pty-terminal-test.py qemu ci-qi-$R  intr
+          python3 test/pty-jobcontrol-test.py "$URUNC_MACOS_BIN" vz   ci-jv-$R
+          python3 test/pty-jobcontrol-test.py "$URUNC_MACOS_BIN" qemu ci-jq-$R
+          python3 test/pty-checkpoint-test.py ci-ck-$R
+
+      - name: Shared-folder smoke matrix
+        if: runner.environment == 'self-hosted'
+        env:
+          URUNC_MACOS_BIN: ${{ github.workspace }}/dist/urunc-macos_arm64
+          URUNC_STORE_DIR: ${{ runner.temp }}/../urunc-ci-store
+        run: |
+          set -e
+          R=${GITHUB_RUN_ID}
+          for m in readwrite ownership persist multi nested negative; do
+            python3 test/share-test.py vz "ci-shv-$m-$R" "$m"
+          done
+          for m in readwrite ownership persist; do
+            python3 test/share-test.py qemu "ci-shq-$m-$R" "$m"
+          done
+
+      # Rosetta e2e: boots an unmodified amd64 rootfs under the arm64 guest
+      # kernel with the translator attached, and proves translation by
+      # running the rootfs's own x86_64 binaries through the agent. The
+      # script skips with a named reason on hosts without Rosetta.
+      - name: Rosetta e2e (amd64 rootfs, boots real VMs)
+        if: runner.environment == 'self-hosted'
+        env:
+          URUNC_MACOS_BIN: ${{ github.workspace }}/dist/urunc-macos_arm64
+          URUNC_STORE_DIR: ${{ runner.temp }}/../urunc-ci-store
+        run: python3 test/rosetta-test.py ci-rz-${GITHUB_RUN_ID}
+
+      - name: Delete ephemeral keychain
+        if: always() && runner.environment == 'self-hosted'
+        run: |
+          if [ -n "$KEYCHAIN" ] && [ -f "$KEYCHAIN" ]; then
+            security delete-keychain "$KEYCHAIN"
+          fi

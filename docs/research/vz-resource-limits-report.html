@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Virtualization.framework Resource Limits &amp; Containment</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-muted: #8b949e;
+    --accent: #58a6ff;
+    --accent-dim: #1f3a5f;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d29922;
+    --orange: #db6d28;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    padding: 2rem 1rem;
+    max-width: 960px;
+    margin: 0 auto;
+  }
+  h1 { font-size: 1.8rem; font-weight: 700; margin-bottom: 0.3rem; color: var(--text); }
+  .subtitle { color: var(--text-muted); font-size: 0.95rem; margin-bottom: 2rem; }
+  h2 {
+    font-size: 1.3rem;
+    font-weight: 600;
+    color: var(--accent);
+    margin-top: 2.5rem;
+    margin-bottom: 1rem;
+    padding-bottom: 0.4rem;
+    border-bottom: 1px solid var(--border);
+  }
+  h3 { font-size: 1.05rem; font-weight: 600; margin-top: 1.5rem; margin-bottom: 0.5rem; }
+  p { margin-bottom: 0.8rem; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code {
+    font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 0.15em 0.4em;
+    border-radius: 4px;
+    font-size: 0.88em;
+  }
+  pre {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+    overflow-x: auto;
+    margin-bottom: 1rem;
+    font-size: 0.85rem;
+    line-height: 1.5;
+  }
+  pre code { background: none; border: none; padding: 0; }
+  .verdict {
+    display: inline-block;
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 0.15em 0.6em;
+    border-radius: 12px;
+    vertical-align: middle;
+    margin-left: 0.4rem;
+  }
+  .yes { background: rgba(63,185,80,0.15); color: var(--green); }
+  .no { background: rgba(248,81,73,0.15); color: var(--red); }
+  .partial { background: rgba(210,153,34,0.15); color: var(--yellow); }
+  .restricted { background: rgba(219,109,40,0.15); color: var(--orange); }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 1rem;
+    font-size: 0.9rem;
+  }
+  th, td {
+    text-align: left;
+    padding: 0.6rem 0.8rem;
+    border: 1px solid var(--border);
+  }
+  th { background: var(--surface); font-weight: 600; white-space: nowrap; }
+  td { vertical-align: top; }
+  .table-wrap { overflow-x: auto; margin-bottom: 1rem; }
+  .callout {
+    background: var(--surface);
+    border-left: 3px solid var(--accent);
+    padding: 0.8rem 1rem;
+    margin: 1rem 0;
+    border-radius: 0 6px 6px 0;
+  }
+  .callout.warn { border-left-color: var(--yellow); }
+  .callout.danger { border-left-color: var(--red); }
+  .callout strong { color: var(--accent); }
+  .callout.warn strong { color: var(--yellow); }
+  .callout.danger strong { color: var(--red); }
+  .sources {
+    margin-top: 0.5rem;
+    padding: 0.6rem 0;
+    font-size: 0.82rem;
+    color: var(--text-muted);
+  }
+  .sources a { color: var(--text-muted); }
+  .sources a:hover { color: var(--accent); }
+  ul, ol { margin-left: 1.5rem; margin-bottom: 0.8rem; }
+  li { margin-bottom: 0.3rem; }
+  .toc { background: var(--surface); border-radius: 8px; padding: 1.2rem 1.5rem; margin-bottom: 2rem; }
+  .toc ol { margin-bottom: 0; counter-reset: toc; list-style: none; margin-left: 0; }
+  .toc li { counter-increment: toc; margin-bottom: 0.25rem; }
+  .toc li::before { content: counter(toc) ". "; color: var(--text-muted); font-weight: 600; }
+  .toc a { font-weight: 500; }
+  .section-num { color: var(--text-muted); margin-right: 0.3rem; }
+  hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
+</style>
+</head>
+<body>
+
+<h1>Apple Virtualization.framework</h1>
+<p class="subtitle">Resource Limits, Containment Capabilities, and Isolation Model -- Research Report, June 2026</p>
+
+<div class="toc">
+  <ol>
+    <li><a href="#config">VZVirtualMachineConfiguration -- Resource Properties</a></li>
+    <li><a href="#dynamic">Dynamic Reconfiguration (Hot-Add)</a></li>
+    <li><a href="#entitlements">Entitlements</a></li>
+    <li><a href="#network">Network Isolation</a></li>
+    <li><a href="#storage">Storage &amp; I/O Containment</a></li>
+    <li><a href="#hypervisor">Hypervisor.framework &amp; Kernel Isolation</a></li>
+    <li><a href="#cves">Security Track Record</a></li>
+    <li><a href="#comparison">Comparison with KVM / Hyper-V</a></li>
+    <li><a href="#gaps">Gaps Summary</a></li>
+  </ol>
+</div>
+
+<!-- ───────────────────────────────────────── -->
+<h2 id="config"><span class="section-num">1.</span> VZVirtualMachineConfiguration -- Resource Properties</h2>
+
+<h3>Core Resource Controls</h3>
+<div class="table-wrap">
+<table>
+  <tr><th>Property</th><th>Type</th><th>Since</th><th>Notes</th></tr>
+  <tr><td><code>cpuCount</code></td><td>Int</td><td>macOS 11</td><td>Number of virtual CPUs. Set before VM creation, immutable after.</td></tr>
+  <tr><td><code>memorySize</code></td><td>UInt64</td><td>macOS 11</td><td>Memory in bytes. Must be a multiple of 1 MiB.</td></tr>
+</table>
+</div>
+
+<h3>Framework-Enforced Bounds (Type Properties)</h3>
+<div class="table-wrap">
+<table>
+  <tr><th>Property</th><th>Value</th></tr>
+  <tr><td><code>minimumAllowedCPUCount</code></td><td>1</td></tr>
+  <tr><td><code>maximumAllowedCPUCount</code></td><td>Typically = <code>ProcessInfo.processorCount</code>; can go slightly above but performance degrades catastrophically</td></tr>
+  <tr><td><code>minimumAllowedMemorySize</code></td><td>Implementation-defined (small)</td></tr>
+  <tr><td><code>maximumAllowedMemorySize</code></td><td>Implementation-defined (tied to host RAM)</td></tr>
+</table>
+</div>
+
+<div class="callout warn">
+  <strong>Performance cliff:</strong> On a 10-core Mac, requesting 12 vCPUs causes "all physical cores maxed out" with "painfully slow booting and both host and guest grinding to a halt." Recommended: <code>physicalCores - 1</code>, clamped to framework bounds.
+</div>
+<div class="sources">Source: <a href="https://eclecticlight.co/2022/07/18/virtualisation-on-apple-silicon-macs-4-core-allocation-in-vms/">Eclectic Light Company -- Core Allocation in VMs</a></div>
+
+<h3>Full Device Configuration Arrays</h3>
+<div class="table-wrap">
+<table>
+  <tr><th>Property</th><th>Since</th></tr>
+  <tr><td><code>bootLoader</code></td><td>macOS 11</td></tr>
+  <tr><td><code>platform</code></td><td>macOS 12</td></tr>
+  <tr><td><code>storageDevices</code></td><td>macOS 11</td></tr>
+  <tr><td><code>networkDevices</code></td><td>macOS 11</td></tr>
+  <tr><td><code>serialPorts</code></td><td>macOS 11</td></tr>
+  <tr><td><code>entropyDevices</code></td><td>macOS 11</td></tr>
+  <tr><td><code>memoryBalloonDevices</code></td><td>macOS 11</td></tr>
+  <tr><td><code>socketDevices</code></td><td>macOS 11</td></tr>
+  <tr><td><code>graphicsDevices</code></td><td>macOS 12</td></tr>
+  <tr><td><code>pointingDevices</code></td><td>macOS 12</td></tr>
+  <tr><td><code>keyboards</code></td><td>macOS 12</td></tr>
+  <tr><td><code>audioDevices</code></td><td>macOS 12</td></tr>
+  <tr><td><code>directorySharingDevices</code></td><td>macOS 12</td></tr>
+  <tr><td><code>consoleDevices</code></td><td>macOS 13</td></tr>
+  <tr><td><code>usbControllers</code></td><td>macOS 15</td></tr>
+  <tr><td><code>customVirtioDevices</code></td><td>macOS 27</td></tr>
+</table>
+</div>
+
+<h3>What Does NOT Exist</h3>
+<ul>
+  <li>CPU scheduling priority / QoS -- vCPUs run as high-QoS host threads, not configurable</li>
+  <li>CPU affinity / pinning to specific physical cores</li>
+  <li>CPU topology (sockets, cores-per-socket, NUMA)</li>
+  <li>Cache allocation / partitioning (Intel CAT equivalent)</li>
+  <li>Resource reservations, limits, or shares (VMware-style)</li>
+  <li>Memory overcommit / KSM (kernel same-page merging)</li>
+</ul>
+<div class="sources">Source: <a href="https://developer.apple.com/documentation/virtualization/vzvirtualmachineconfiguration">Apple Developer Docs -- VZVirtualMachineConfiguration</a></div>
+
+<!-- ───────────────────────────────────────── -->
+<h2 id="dynamic"><span class="section-num">2.</span> Dynamic Reconfiguration</h2>
+
+<p><strong>Can CPU/memory be changed after VM creation?</strong> <span class="verdict no">No</span></p>
+
+<p><code>cpuCount</code> and <code>memorySize</code> are set at configuration time and are <strong>immutable once the <code>VZVirtualMachine</code> is instantiated</strong>. There is no API to change them while the VM is running, paused, or in any other state. No hot-add, no hot-remove. WWDC 2026 (session 224) introduced USB passthrough, custom Virtio devices, DiskImageKit, and advanced networking but <strong>no dynamic CPU/memory reconfiguration</strong>.</p>
+
+<h3>Memory Balloon Device (Partial Dynamic Memory)</h3>
+<p>The one runtime memory adjustment mechanism: <code>VZVirtioTraditionalMemoryBalloonDeviceConfiguration</code> implements the standard Virtio memory balloon protocol. The host can request the guest to inflate (free memory back to host) or deflate (reclaim memory). This does NOT change <code>memorySize</code> -- it changes how much of the fixed allocation the guest actively uses.</p>
+
+<div class="sources">Sources:
+  <a href="https://developer.apple.com/documentation/virtualization/vzvirtiotraditionalmemoryballoondevice">Apple Docs -- VZVirtioTraditionalMemoryBalloonDevice</a>,
+  <a href="https://developer.apple.com/videos/play/wwdc2026/224/">WWDC 2026 Session 224</a>
+</div>
+
+<!-- ───────────────────────────────────────── -->
+<h2 id="entitlements"><span class="section-num">3.</span> Entitlements</h2>
+
+<div class="table-wrap">
+<table>
+  <tr><th>Entitlement</th><th>Purpose</th><th>Required?</th><th>Restricted?</th></tr>
+  <tr>
+    <td><code>com.apple.security.virtualization</code></td>
+    <td>Use Virtualization.framework API</td>
+    <td><span class="verdict yes">Required</span></td>
+    <td><span class="verdict yes">Unrestricted</span> -- ad-hoc signing OK</td>
+  </tr>
+  <tr>
+    <td><code>com.apple.vm.networking</code></td>
+    <td>Bridged networking without root</td>
+    <td>Only for bridged</td>
+    <td><span class="verdict restricted">Restricted</span> -- Apple approval + provisioning profile</td>
+  </tr>
+  <tr>
+    <td><code>com.apple.vm.device-access</code></td>
+    <td>USB device passthrough to guest</td>
+    <td>Only for USB</td>
+    <td><span class="verdict restricted">Restricted</span> -- Apple approval</td>
+  </tr>
+  <tr>
+    <td><code>com.apple.security.hypervisor</code></td>
+    <td>Use Hypervisor.framework (low-level)</td>
+    <td>Only if using HV.framework directly</td>
+    <td><span class="verdict yes">Unrestricted</span> -- ad-hoc signing OK</td>
+  </tr>
+  <tr>
+    <td><code>com.apple.vm.hypervisor</code></td>
+    <td>Legacy/restricted hypervisor variant</td>
+    <td>Legacy only</td>
+    <td><span class="verdict restricted">Restricted</span></td>
+  </tr>
+</table>
+</div>
+
+<h3>Feature-to-Entitlement Mapping</h3>
+<div class="table-wrap">
+<table>
+  <tr><th>Feature</th><th>Entitlement(s)</th><th>Restricted?</th></tr>
+  <tr><td>Basic VM creation</td><td><code>com.apple.security.virtualization</code></td><td>No</td></tr>
+  <tr><td>NAT networking</td><td><code>com.apple.security.virtualization</code> only</td><td>No</td></tr>
+  <tr><td>Bridged networking</td><td>+ <code>com.apple.vm.networking</code></td><td>Yes</td></tr>
+  <tr><td>USB passthrough</td><td>+ <code>com.apple.vm.device-access</code></td><td>Yes</td></tr>
+  <tr><td>Virtiofs / serial / GUI</td><td><code>com.apple.security.virtualization</code> only</td><td>No</td></tr>
+</table>
+</div>
+
+<div class="callout">
+  <strong>Key relationship:</strong> <code>com.apple.security.virtualization</code> and <code>com.apple.security.hypervisor</code> are separate entitlements for separate frameworks. Virtualization.framework uses Hypervisor.framework internally -- you do NOT need the hypervisor entitlement when using Virtualization.framework. You only need both if your app uses both frameworks (e.g., UTM).
+</div>
+
+<div class="callout">
+  <strong>App Store:</strong> Virtualization.framework apps can be distributed on the Mac App Store (UTM is a shipped example). Bridged networking requires special Apple approval even for App Store distribution. Sandboxed apps need Seatbelt rules for the <code>com.apple.Virtualization.VirtualMachine</code> XPC service.
+</div>
+
+<div class="sources">Sources:
+  <a href="https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.virtualization">Apple Docs -- com.apple.security.virtualization</a>,
+  <a href="https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.vm.networking">Apple Docs -- com.apple.vm.networking</a>,
+  <a href="https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.vm.device-access">Apple Docs -- com.apple.vm.device-access</a>,
+  <a href="https://developer.apple.com/forums/thread/656411">Apple Forums -- Requesting com.apple.vm.* entitlements</a>,
+  <a href="https://hxr1.ghost.io/rootless-native-invisible-offensive-operations-via-apples-virtualization-framework/">hxr1 -- Offensive Operations via Apple Virtualization</a>
+</div>
+
+<!-- ───────────────────────────────────────── -->
+<h2 id="network"><span class="section-num">4.</span> Network Isolation</h2>
+
+<h3>Attachment Types</h3>
+<div class="table-wrap">
+<table>
+  <tr><th>Type</th><th>Since</th><th>Layer</th><th>Entitlement</th><th>Isolation</th></tr>
+  <tr>
+    <td><code>VZNATNetworkDeviceAttachment</code></td>
+    <td>macOS 12</td>
+    <td>L3 (NAT)</td>
+    <td>Base only</td>
+    <td><span class="verdict partial">Partial</span> -- vmnet isolation enabled but ARP spoofing possible</td>
+  </tr>
+  <tr>
+    <td><code>VZBridgedNetworkDeviceAttachment</code></td>
+    <td>macOS 12</td>
+    <td>L2 (bridge)</td>
+    <td><code>com.apple.vm.networking</code></td>
+    <td><span class="verdict no">None</span> -- same broadcast domain as host LAN</td>
+  </tr>
+  <tr>
+    <td><code>VZFileHandleNetworkDeviceAttachment</code></td>
+    <td>macOS 11</td>
+    <td>L2 (raw frames)</td>
+    <td>Base only</td>
+    <td><span class="verdict yes">Best</span> -- all packets flow through userspace daemon</td>
+  </tr>
+</table>
+</div>
+
+<h3>Can you limit network bandwidth per VM? <span class="verdict no">No</span></h3>
+<p>Virtualization.framework exposes <strong>no bandwidth limiting or traffic shaping APIs</strong>. No per-VM throttling on any attachment type.</p>
+
+<h3>Workarounds for bandwidth control:</h3>
+<ul>
+  <li><strong>VZFileHandleNetworkDeviceAttachment + custom daemon:</strong> Implement token-bucket rate limiting on the raw packet stream</li>
+  <li><strong>macOS pf / dnctl / dummynet:</strong> Host-level packet filter rules on vmnet bridge interfaces (e.g., <code>bridge100</code>)</li>
+  <li><strong>Guest-level tc/netem:</strong> Traffic control inside the guest Linux kernel</li>
+</ul>
+
+<h3>VZNATNetworkDeviceAttachment Details</h3>
+<ul>
+  <li>Uses vmnet.framework internally in shared mode</li>
+  <li>Creates virtual bridge <code>bridge100</code> on host</li>
+  <li>Default subnet: <strong>192.168.64.0/24</strong> (gateway 192.168.64.1)</li>
+  <li><code>vmnet_enable_isolation_key</code> enabled automatically (not configurable via VZ API)</li>
+  <li>No root/sudo required</li>
+</ul>
+
+<h3>VZFileHandleNetworkDeviceAttachment Details</h3>
+<ul>
+  <li>Operates at data link layer -- raw Ethernet frames via connected datagram socket</li>
+  <li>Each <code>send(2)</code>/<code>recv(2)</code> = one Ethernet frame</li>
+  <li>Configurable MTU (default 1500)</li>
+  <li>Can connect to: vmnet, custom daemons (softnet), userspace stacks (gvisor-tap-vsock)</li>
+  <li>This is the approach used by Cirrus Labs' Tart for production multi-tenant isolation</li>
+</ul>
+
+<div class="callout warn">
+  <strong>ARP spoofing risk with NAT:</strong> While <code>vmnet_enable_isolation_key</code> provides bridge-level isolation, it does NOT prevent ARP spoofing. Any VM can answer ARP requests with its own MAC and divert other VMs' traffic. For multi-tenant deployments, use VZFileHandleNetworkDeviceAttachment with a filtering daemon like <a href="https://github.com/cirruslabs/softnet">softnet</a>.
+</div>
+
+<h3>Softnet -- Production Network Isolation</h3>
+<p>Used by Cirrus Labs (Tart) and forked by OpenAI. A Rust-based userspace packet filter implementing:</p>
+<ul>
+  <li>DHCP snooping: only DHCP traffic initially allowed; learns each VM's assigned IP</li>
+  <li>Source IP filtering: after DHCP, only allows packets from VM's assigned IP</li>
+  <li>Destination filtering: only globally routable IPs and vmnet gateway</li>
+  <li>ARP spoofing prevention by construction</li>
+</ul>
+
+<div class="sources">Sources:
+  <a href="https://developer.apple.com/documentation/virtualization/vznatnetworkdeviceattachment">Apple Docs -- VZNATNetworkDeviceAttachment</a>,
+  <a href="https://developer.apple.com/documentation/virtualization/vzfilehandlenetworkdeviceattachment">Apple Docs -- VZFileHandleNetworkDeviceAttachment</a>,
+  <a href="https://medium.com/cirruslabs/isolating-network-between-tarts-macos-virtual-machines-9a4ae3dcf7be">Cirrus Labs -- Isolating Network Between Tart VMs</a>,
+  <a href="https://github.com/cirruslabs/softnet">softnet (Cirrus Labs)</a>,
+  <a href="https://github.com/openai/softnet">softnet (OpenAI fork)</a>
+</div>
+
+<!-- ───────────────────────────────────────── -->
+<h2 id="storage"><span class="section-num">5.</span> Storage &amp; I/O Containment</h2>
+
+<h3>Storage Device Types</h3>
+<div class="table-wrap">
+<table>
+  <tr><th>Device Config</th><th>Since</th><th>Notes</th></tr>
+  <tr><td><code>VZVirtioBlockDeviceConfiguration</code></td><td>macOS 11</td><td>Most performant for virtio-aware guests</td></tr>
+  <tr><td><code>VZNVMExpressControllerDeviceConfiguration</code></td><td>macOS 14</td><td>For kernels without virtio; avoids certain caching bugs</td></tr>
+  <tr><td><code>VZUSBMassStorageDeviceConfiguration</code></td><td>macOS 11</td><td>Broadest guest compatibility, slowest</td></tr>
+</table>
+</div>
+
+<h3>Storage Attachment Types</h3>
+<div class="table-wrap">
+<table>
+  <tr><th>Attachment</th><th>Since</th><th>Backed By</th></tr>
+  <tr><td><code>VZDiskImageStorageDeviceAttachment</code></td><td>macOS 11</td><td>RAW disk image file on host filesystem</td></tr>
+  <tr><td><code>VZDiskBlockDeviceStorageDeviceAttachment</code></td><td>macOS 14</td><td>Raw block device (physical disk); requires root</td></tr>
+  <tr><td><code>VZNetworkBlockDeviceStorageDeviceAttachment</code></td><td>macOS 14</td><td>NBD server (enables custom throttling in your NBD server)</td></tr>
+</table>
+</div>
+
+<h3>Can you limit disk I/O per VM? <span class="verdict no">No</span></h3>
+<p>Virtualization.framework exposes <strong>no IOPS or bandwidth limits, no I/O scheduling priority or weight, no per-VM disk quotas</strong>.</p>
+
+<h3>Workarounds for I/O containment:</h3>
+<ul>
+  <li><strong>Guest-level cgroups:</strong> Linux <code>blkio</code> controller for IOPS/bandwidth limits inside guest</li>
+  <li><strong>NBD attachment:</strong> <code>VZNetworkBlockDeviceStorageDeviceAttachment</code> with a custom NBD server implementing throttling</li>
+  <li><strong>Fixed-size images:</strong> Pre-sized RAW disk images bound guest storage by image size</li>
+</ul>
+
+<h3>VZDiskImageStorageDeviceAttachment Options</h3>
+
+<p><strong>Caching Modes</strong> (<code>VZDiskImageCachingMode</code>, macOS 12+):</p>
+<div class="table-wrap">
+<table>
+  <tr><th>Mode</th><th>Behavior</th></tr>
+  <tr><td><code>.automatic</code></td><td>Framework decides (often = cached)</td></tr>
+  <tr><td><code>.uncached</code></td><td>No host-side caching; each I/O goes to disk</td></tr>
+  <tr><td><code>.cached</code></td><td>Aggressive host-side caching</td></tr>
+</table>
+</div>
+
+<div class="callout danger">
+  <strong>EXT4 corruption risk:</strong> <code>.automatic</code>/<code>.cached</code> modes have been reported to cause EXT4 filesystem corruption in Linux guests under heavy I/O with <code>VZVirtioBlockDeviceConfiguration</code>. Use <code>.uncached</code> with virtio block, or switch to <code>VZNVMExpressControllerDeviceConfiguration</code> (macOS 14+).
+</div>
+
+<p><strong>Synchronization Modes</strong> (<code>VZDiskImageSynchronizationMode</code>, macOS 12+):</p>
+<div class="table-wrap">
+<table>
+  <tr><th>Mode</th><th>Behavior</th></tr>
+  <tr><td><code>.full</code></td><td>All flush/barrier commands forwarded to host. Maximum integrity.</td></tr>
+  <tr><td><code>.fsync</code></td><td>Best-effort sync (fsync only, no barriers). Middle ground.</td></tr>
+  <tr><td><code>.none</code></td><td>No sync. Best perf, no crash safety.</td></tr>
+</table>
+</div>
+
+<h3>Virtiofs (VZVirtioFileSystemDeviceConfiguration)</h3>
+<ul>
+  <li>Configuration: <code>tag</code> (mount identifier) + <code>share</code> (directory share)</li>
+  <li><code>VZSharedDirectory</code>: <code>url</code> + <code>readOnly</code> boolean</li>
+  <li><strong>No throughput controls whatsoever</strong> -- operates via direct memory-mapped I/O</li>
+  <li>Near-native host filesystem performance</li>
+  <li>Isolation depends entirely on host process configuring distinct paths per VM</li>
+</ul>
+
+<div class="sources">Sources:
+  <a href="https://developer.apple.com/documentation/virtualization/vzdiskimagestoragedeviceattachment">Apple Docs -- VZDiskImageStorageDeviceAttachment</a>,
+  <a href="https://developer.apple.com/documentation/virtualization/vzdiskblockdevicestoragedeviceattachment">Apple Docs -- VZDiskBlockDeviceStorageDeviceAttachment</a>,
+  <a href="https://developer.apple.com/documentation/virtualization/vzvirtiofilesystemdeviceconfiguration">Apple Docs -- VZVirtioFileSystemDeviceConfiguration</a>,
+  <a href="https://github.com/utmapp/UTM/pull/5869">UTM PR #5869 -- NVMe caching fix</a>
+</div>
+
+<!-- ───────────────────────────────────────── -->
+<h2 id="hypervisor"><span class="section-num">6.</span> Hypervisor.framework &amp; Kernel Isolation</h2>
+
+<h3>Architecture</h3>
+<p><strong>Yes, Virtualization.framework uses Hypervisor.framework underneath.</strong></p>
+<ul>
+  <li><strong>Hypervisor.framework</strong> (macOS 10.10, 2014): Low-level C API for hardware virtualization primitives -- vCPU creation/execution, memory mapping, register access. "Roughly equivalent to KVM."</li>
+  <li><strong>Virtualization.framework</strong> (macOS 11, 2020): High-level Swift/ObjC API built on top. Adds Virtio device backends, boot loaders, configuration APIs.</li>
+  <li>The kernel hypervisor code lives in XNU's closed-source hypervisor subsystem under <code>hv_vm_*</code> / <code>hv_vcpu_*</code> functions.</li>
+</ul>
+
+<h3>ARM64 Isolation Mechanisms</h3>
+<p>On Apple Silicon, the hypervisor operates at <strong>Exception Level 2 (EL2)</strong> using VHE (Virtualization Host Extensions):</p>
+
+<p><strong>Stage-2 Address Translation (hardware memory isolation):</strong></p>
+<ul>
+  <li>ARM provides two-stage address translation: Stage 1 (guest VA to guest IPA, controlled by guest at EL1) and Stage 2 (IPA to host PA, controlled by hypervisor at EL2)</li>
+  <li>Stage-2 page table entries include: valid bits, access flags, permission bits (RW/RO), execute-never (XN), 4KB page alignment</li>
+  <li><strong>Each VM gets hardware-enforced memory isolation</strong> -- guest cannot access any physical memory not explicitly mapped by the hypervisor</li>
+  <li>Architecturally equivalent to Intel EPT (Extended Page Tables)</li>
+</ul>
+
+<p><strong>Register and instruction trapping:</strong></p>
+<ul>
+  <li>Privileged EL1 register accesses trapped to EL2 for emulation</li>
+  <li>Fine-grained register trapping via <code>HFGRTR_EL2</code>/<code>HFGWTR_EL2</code></li>
+  <li>SME/SVE registers: unbanked registers (<code>Z</code>, <code>P</code>, <code>ZA</code>, <code>ZT0</code>) require state spilling on traps</li>
+  <li>Virtual interrupt forwarding to specific VMs/vCPUs</li>
+</ul>
+
+<p><strong>VHE mode exclusively:</strong> Apple Silicon runs the host kernel at EL2 (not classic EL1+EL2 split). Guest kernels run at EL1. This is VHE (Virtualization Host Extensions) -- the host uses EL2 privileges directly, with no separate hypervisor binary.</p>
+
+<div class="callout">
+  <strong>VM limit:</strong> macOS enforces a limit of 2 concurrent macOS guest VMs via <code>hv_apple_isa_vm_quota</code> in the kernel. A boot arg exists to change this but is gated behind <code>CSR_ALLOW_APPLE_INTERNAL</code> on release builds. Linux guest VMs are not subject to this limit.
+</div>
+
+<div class="sources">Sources:
+  <a href="https://vmfunc.re/blog/reverse-engineering-arm64-hypervisors">vmfunc.re -- Reverse Engineering ARM64 Hypervisor Internals</a>,
+  <a href="https://eclecticlight.co/2022/07/25/virtualisation-on-apple-silicon-macs-5-hypervisors-and-virtualisation/">Eclectic Light -- Hypervisors and Virtualisation</a>,
+  <a href="https://eclecticlight.co/2026/04/29/virtualisation-on-apple-silicon-macs-is-different/">Eclectic Light -- Virtualisation is Different (2026)</a>,
+  <a href="https://github.com/apple-oss-distributions/xnu/blob/main/doc/arm/sme.md">XNU SME Documentation</a>,
+  <a href="https://khronokernel.com/macos/2023/08/08/AS-VM.html">Khronokernel -- Beating the 2 VM Limit</a>
+</div>
+
+<!-- ───────────────────────────────────────── -->
+<h2 id="cves"><span class="section-num">7.</span> Security Track Record</h2>
+
+<h3>Known Hypervisor CVEs</h3>
+<div class="table-wrap">
+<table>
+  <tr><th>CVE</th><th>Year</th><th>Description</th><th>Severity</th></tr>
+  <tr><td>CVE-2017-2407</td><td>2017</td><td>CR8 control register leaked between guest and host (Intel-era)</td><td>Information leak</td></tr>
+  <tr><td>CVE-2021-30747 (M1RACLES)</td><td>2021</td><td>Covert channel via ARM register <code>s3_5_c15_c10_1</code> at EL0. NOT a VM escape -- hypervisors disable guest access to this register.</td><td>Low (covert channel only)</td></tr>
+</table>
+</div>
+
+<p><strong>No public VM escape CVEs</strong> have been documented for Apple's hypervisor. Searching Apple's security release notes for macOS 15.3 through 15.6 revealed zero hypervisor-related CVEs.</p>
+
+<div class="callout">
+  <strong>Industry context:</strong> VM escape vulnerabilities across all platforms are exceedingly rare ($250K-$500K bounties). By contrast, 8 container escape CVEs occurred in just 18 months (2024-2025), validating the security advantage of hypervisor isolation.
+</div>
+
+<div class="sources">Sources:
+  <a href="https://m1racles.com/">M1RACLES</a>,
+  <a href="https://support.apple.com/en-us/100100">Apple Security Releases</a>,
+  <a href="https://emirb.github.io/blog/microvm-2026/">MicroVM Isolation in 2026</a>
+</div>
+
+<!-- ───────────────────────────────────────── -->
+<h2 id="comparison"><span class="section-num">8.</span> Comparison: Apple Hypervisor vs KVM vs Hyper-V</h2>
+
+<div class="table-wrap">
+<table>
+  <tr><th>Feature</th><th>Apple Hypervisor</th><th>Linux KVM</th><th>Hyper-V</th></tr>
+  <tr><td>Type</td><td>Type 2 (hosted, VHE)</td><td>Type 1.5 (kernel module)</td><td>Type 1 (bare-metal)</td></tr>
+  <tr><td>ARM64 isolation</td><td>EL2 + stage-2</td><td>EL2 + stage-2</td><td>N/A (x86 only)</td></tr>
+  <tr><td>Memory isolation</td><td>Hardware stage-2</td><td>Hardware stage-2/EPT</td><td>Hardware EPT</td></tr>
+  <tr><td>Device model</td><td>Virtio only (paravirt)</td><td>Virtio + VFIO passthrough</td><td>Synthetic + SR-IOV</td></tr>
+  <tr><td>IOMMU passthrough</td><td><span class="verdict no">No</span></td><td><span class="verdict yes">Yes</span></td><td><span class="verdict yes">Yes</span></td></tr>
+  <tr><td>I/O throttling</td><td><span class="verdict no">No</span></td><td><span class="verdict yes">Yes</span> (blkdeviotune)</td><td><span class="verdict yes">Yes</span> (storage QoS)</td></tr>
+  <tr><td>CPU hot-add</td><td><span class="verdict no">No</span></td><td><span class="verdict yes">Yes</span></td><td><span class="verdict yes">Yes</span></td></tr>
+  <tr><td>API access control</td><td>Entitlement-gated</td><td>File permissions (/dev/kvm)</td><td>Hypercalls + WMI</td></tr>
+  <tr><td>VM escape CVEs</td><td>None public</td><td>Rare</td><td>Rare</td></tr>
+  <tr><td>Source</td><td>Closed (XNU)</td><td>Open source</td><td>Closed</td></tr>
+</table>
+</div>
+
+<div class="callout">
+  <strong>Isolation equivalence:</strong> At the hardware level, Apple and KVM use the same ARM isolation mechanisms (EL2, stage-2 page tables). The isolation guarantee comes from the silicon, not the software. The difference is in software attack surface (VMM complexity, device emulation).
+</div>
+
+<!-- ───────────────────────────────────────── -->
+<h2 id="gaps"><span class="section-num">9.</span> Gaps Summary for urunc-macosX</h2>
+
+<p>Capabilities that enterprise hypervisors provide but Virtualization.framework does not:</p>
+
+<div class="table-wrap">
+<table>
+  <tr><th>Capability</th><th>Status</th><th>Workaround</th></tr>
+  <tr><td>Network bandwidth limit</td><td><span class="verdict no">Missing</span></td><td>VZFileHandleNetworkDeviceAttachment + softnet/custom daemon</td></tr>
+  <tr><td>Disk I/O throttle (IOPS/BW)</td><td><span class="verdict no">Missing</span></td><td>Guest cgroups <code>blkio</code>, or NBD attachment with custom server</td></tr>
+  <tr><td>CPU hot-add/remove</td><td><span class="verdict no">Missing</span></td><td>None -- must recreate VM</td></tr>
+  <tr><td>Memory hot-add/remove</td><td><span class="verdict no">Missing</span></td><td>Memory balloon (adjusts usage within fixed allocation)</td></tr>
+  <tr><td>CPU affinity/pinning</td><td><span class="verdict no">Missing</span></td><td>None</td></tr>
+  <tr><td>CPU scheduling priority</td><td><span class="verdict no">Missing</span></td><td>None -- all vCPUs are high-QoS</td></tr>
+  <tr><td>Per-VM disk quota</td><td><span class="verdict no">Missing</span></td><td>Fixed-size RAW images, or host-level APFS volume limits</td></tr>
+  <tr><td>Network inter-VM isolation</td><td><span class="verdict partial">Partial</span></td><td>softnet via VZFileHandleNetworkDeviceAttachment</td></tr>
+  <tr><td>Storage inter-VM isolation</td><td><span class="verdict partial">Partial</span></td><td>Correct host-side path configuration (no framework enforcement)</td></tr>
+</table>
+</div>
+
+<div class="callout">
+  <strong>Bottom line:</strong> Virtualization.framework provides strong hardware-level isolation (stage-2 page tables, entitlement-gated access) but minimal resource <em>management</em>. You get a flat CPU count and memory size, both immutable after VM creation. Everything else -- bandwidth limits, I/O throttling, scheduling priority, inter-VM network isolation -- must be implemented in userspace or inside the guest. The NBD storage attachment and VZFileHandleNetworkDeviceAttachment are the primary extension points for building custom resource controls.
+</div>
+
+<hr>
+<p style="color:var(--text-muted); font-size:0.82rem; margin-top:1rem;">
+  Research compiled June 2026. All Apple documentation references are to the latest available versions.
+  Some information sourced from WWDC 2026 session materials, Eclectic Light Company testing,
+  Cirrus Labs production deployments, and reverse engineering research.
+</p>
+
+</body>
+</html>

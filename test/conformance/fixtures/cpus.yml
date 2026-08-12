@@ -1,0 +1,6 @@
+# service.cpus (partial): a fractional value is rounded UP to a whole vCPU with
+# a warning ("rounded up to 1").
+services:
+  web:
+    image: alpine:3.19
+    cpus: 0.5

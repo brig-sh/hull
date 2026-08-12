@@ -1,0 +1,6 @@
+# service.command (supported): the string form must shell-word split so the
+# normalized config renders a list.
+services:
+  web:
+    image: alpine:3.19
+    command: echo hello world
