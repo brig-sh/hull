@@ -15,6 +15,7 @@ Requires **macOS 26+ (Tahoe)** on Apple Silicon (M1–M5).
 
 ```bash
 brew tap brig-sh/brig
+brew trust brig-sh/brig   # brew refuses untrusted third-party taps
 brew install --cask hull
 ```
 
