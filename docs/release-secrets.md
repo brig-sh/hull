@@ -41,6 +41,70 @@ gh variable set TELEMETRY_ENDPOINT --repo brig-sh/hull
 Setting them at the organisation level instead is worth considering, since
 brig will want the same certificate to notarize its own binaries.
 
+## If we move signing to GoReleaser
+
+The credentials do not change. GoReleaser wants the same certificate and the
+same App Store Connect key, under different names:
+
+| what we store today | what GoReleaser reads | format |
+| --- | --- | --- |
+| `MACOS_CERT_P12` | `MACOS_SIGN_P12` | base64 of the `.p12`, unchanged |
+| `MACOS_CERT_PASSWORD` | `MACOS_SIGN_PASSWORD` | raw |
+| `NOTARY_KEY_P8` | `MACOS_NOTARY_KEY` | base64 of the `.p8`, unchanged |
+| `NOTARY_KEY_ID` | `MACOS_NOTARY_KEY_ID` | raw |
+| `NOTARY_ISSUER_ID` | `MACOS_NOTARY_ISSUER_ID` | raw |
+
+So nothing has to be re-exported from Apple. Keep the secret names we have
+and map them in the workflow, which also keeps both paths working while we
+switch:
+
+```yaml
+env:
+  MACOS_SIGN_P12: ${{ secrets.MACOS_CERT_P12 }}
+  MACOS_SIGN_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+  MACOS_NOTARY_KEY: ${{ secrets.NOTARY_KEY_P8 }}
+  MACOS_NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+  MACOS_NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+```
+
+The config takes one entry per set of entitlements, and `ids` picks which
+binaries each entry covers. hull needs none; vz-runner needs
+`com.apple.security.virtualization`, without which it cannot start a VM:
+
+```yaml
+notarize:
+  macos:
+    - enabled: '{{ isEnvSet "MACOS_SIGN_P12" }}'
+      ids: [hull]
+      sign:
+        certificate: "{{.Env.MACOS_SIGN_P12}}"
+        password: "{{.Env.MACOS_SIGN_PASSWORD}}"
+      notarize: &notary
+        issuer_id: "{{.Env.MACOS_NOTARY_ISSUER_ID}}"
+        key_id: "{{.Env.MACOS_NOTARY_KEY_ID}}"
+        key: "{{.Env.MACOS_NOTARY_KEY}}"
+        wait: true
+        timeout: 20m
+    - enabled: '{{ isEnvSet "MACOS_SIGN_P12" }}'
+      ids: [vz-runner]
+      sign:
+        certificate: "{{.Env.MACOS_SIGN_P12}}"
+        password: "{{.Env.MACOS_SIGN_PASSWORD}}"
+        entitlements: ./vz-runner/Entitlements.plist
+      notarize: *notary
+```
+
+Three things to settle before we switch, none of them about credentials:
+
+- vz-runner is Swift, and GoReleaser builds Go. It has to come in through the
+  prebuilt-binary builder, after a step that runs `swift build`.
+- The signing itself is cross-platform, so that job no longer needs a macOS
+  runner. Building vz-runner still does.
+- The styled DMG and the app bundle are a GoReleaser Pro feature. Open source
+  gives us notarized binaries in an archive, which is exactly what the
+  Homebrew cask consumes -- but if we want to keep the DMG for people who
+  install by hand, that stays on the current workflow or needs Pro.
+
 ## Two things that are not secrets
 
 The signing job runs on `[self-hosted, macOS, ARM64]`. That runner has to be
