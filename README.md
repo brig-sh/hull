@@ -1,4 +1,9 @@
-# hull
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/hull-lockup-on-dark.svg">
+    <img alt="hull" src="assets/hull-lockup-on-light.svg" width="300">
+  </picture>
+</p>
 
 Run unikernels and lightweight Linux containers on macOS with Apple Silicon,
 using the same OCI images and workflows as Linux.
