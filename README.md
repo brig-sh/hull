@@ -1,30 +1,30 @@
-# urunc on macOS
+# hull
 
 Run unikernels and lightweight Linux containers on macOS with Apple Silicon,
 using the same OCI images and workflows as Linux.
+
+hull is the microVM runtime [brig](https://github.com/brig-sh/brig) drives on
+macOS, and it is useful on its own: it boots an OCI image as a real VM through
+Virtualization.framework, with a QEMU backend as an alternative.
 
 Requires **macOS 26+ (Tahoe)** on Apple Silicon (M1–M5).
 
 ## Install
 
-### Homebrew (private tap)
-
-Team installs go through the private tap
-[`NOFireAI/homebrew-nofire`](https://github.com/NOFireAI/homebrew-nofire),
-which serves the signed + notarized binaries from GitHub releases:
+### Homebrew
 
 ```bash
-# one-time: a fine-grained PAT with contents:read on brig-sh/hull,
-# used by brew to download release assets from the private repo
-export HOMEBREW_GITHUB_API_TOKEN=github_pat_...
-
-brew tap nofireai/nofire git@github.com:NOFireAI/homebrew-nofire.git
-brew trust nofireai/nofire   # newer brew refuses untrusted third-party taps
-brew install hull
+brew tap brig-sh/brig
+brew install --cask hull
 ```
 
-The formula installs `hull` and `vz-runner` side by side (the CLI
-discovers the runner next to its own executable) and pulls in `e2fsprogs`
+Installing brig brings hull with it, since brig depends on it -- so
+`brew install --cask brig` is the other way in.
+
+The cask lands in the tap with hull's first stable release; until then, build
+from source as described below. It installs `hull` and `vz-runner` side by
+side (the CLI discovers the runner next to its own executable) and pulls in
+`e2fsprogs`
 for block-rootfs mode. The [QEMU](https://www.qemu.org/) backend stays
 optional: `brew install qemu`.
 
@@ -82,7 +82,7 @@ hull rm $ID
 
 ## Supported backends
 
-urunc on macOS supports two VMM backends:
+hull supports two VMM backends:
 
 | Backend | Technology | Network | Rootfs Modes | Boot Time |
 |---------|-----------|---------|--------------|-----------|
@@ -213,7 +213,7 @@ gh secret set NOTARY_KEY_ID --repo brig-sh/hull
 gh secret set NOTARY_ISSUER_ID --repo brig-sh/hull
 ```
 
-urunc on macOS consists of three binaries:
+hull consists of three binaries:
 
 | Binary | Language | Description |
 |--------|----------|-------------|

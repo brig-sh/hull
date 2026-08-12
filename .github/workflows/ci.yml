@@ -30,6 +30,34 @@ permissions:
   contents: read
 
 jobs:
+  # What kind of change is this? Booting VMs takes minutes and occupies a
+  # self-hosted Mac, and a README edit cannot break a boot. So the tier that
+  # boots real VMs runs when code changes and is skipped when it does not.
+  #
+  # Workflow files count as code: a change to CI has to be exercised by CI.
+  changes:
+    name: what changed
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - '**/*.go'
+              - '**/*.swift'
+              - 'go.mod'
+              - 'go.sum'
+              - 'Makefile'
+              - 'vz-runner/**'
+              - 'packaging/**'
+              - 'scripts/**'
+              - 'test/**'
+              - '.github/workflows/**'
+
   lint:
     name: lint (golangci-lint)
     # The module is darwin-only but pure Go -- the Virtualization.framework
@@ -114,6 +142,9 @@ jobs:
 
   test:
     name: unit + e2e (boots real VMs)
+    # Docs-only changes skip this entirely: nothing it asserts can have moved.
+    needs: changes
+    if: needs.changes.outputs.code == 'true' 
     # Pull requests run on a GitHub-hosted macOS runner; everything else
     # runs on ours.
     #
