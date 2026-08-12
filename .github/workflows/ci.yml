@@ -65,7 +65,15 @@ jobs:
 
   build:
     name: build (go + swift, ad-hoc signed)
-    runs-on: [self-hosted, macOS, ARM64]
+    # Pull requests run on a GitHub-hosted macOS runner; everything else
+    # runs on ours.
+    #
+    # This repository is public, so a pull request from any fork can propose
+    # workflow changes. Sending those to a self-hosted runner would let a
+    # stranger execute code on our machine. Fork PRs therefore never reach it:
+    # they get an ephemeral hosted runner, and the steps below that boot real
+    # VMs skip themselves there (see runner.environment).
+    runs-on: ${{ github.event_name == 'pull_request' && fromJSON('["macos-15"]') || fromJSON('["self-hosted","macOS","ARM64"]') }}
     steps:
       - uses: actions/checkout@v4
 
@@ -106,7 +114,15 @@ jobs:
 
   test:
     name: unit + e2e (boots real VMs)
-    runs-on: [self-hosted, macOS, ARM64]
+    # Pull requests run on a GitHub-hosted macOS runner; everything else
+    # runs on ours.
+    #
+    # This repository is public, so a pull request from any fork can propose
+    # workflow changes. Sending those to a self-hosted runner would let a
+    # stranger execute code on our machine. Fork PRs therefore never reach it:
+    # they get an ephemeral hosted runner, and the steps below that boot real
+    # VMs skip themselves there (see runner.environment).
+    runs-on: ${{ github.event_name == 'pull_request' && fromJSON('["macos-15"]') || fromJSON('["self-hosted","macOS","ARM64"]') }}
     steps:
       - uses: actions/checkout@v4
 
