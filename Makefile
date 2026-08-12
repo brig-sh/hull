@@ -26,7 +26,7 @@ PREFIX         ?= /usr/local/bin
 ARCH           ?= arm64
 
 # Binary variables
-URUNC_MACOS_BIN := $(BUILD_DIR)/urunc-macos
+HULL_BIN := $(BUILD_DIR)/hull
 VZ_RUNNER_DIR   := $(CURDIR)/vz-runner
 VZ_RUNNER_BIN   := $(VZ_RUNNER_DIR)/.build/arm64-apple-macosx/release/vz-runner
 
@@ -36,7 +36,7 @@ LDFLAGS        := -X main.version=$(VERSION) -s -w
 # Telemetry ingestion endpoint (NOFireAI/engineering#1002). Left empty
 # (dev builds), the client never sends anything.
 ifneq ($(TELEMETRY_ENDPOINT),)
-LDFLAGS        += -X github.com/nofireai/urunc-macos/internal/telemetry.Endpoint=$(TELEMETRY_ENDPOINT)
+LDFLAGS        += -X github.com/brig-sh/hull/internal/telemetry.Endpoint=$(TELEMETRY_ENDPOINT)
 endif
 
 # macOS code-signing
@@ -59,40 +59,40 @@ CODESIGN_KEYCHAIN ?=
 CODESIGN_FLAGS    := --force --options runtime $(if $(CODESIGN_KEYCHAIN),--keychain "$(CODESIGN_KEYCHAIN)")
 #? NOTARY_PROFILE notarytool keychain profile created with `xcrun notarytool store-credentials`
 NOTARY_PROFILE    ?= urunc-notary
-DMG               := $(BUILD_DIR)/urunc-macos.dmg
+DMG               := $(BUILD_DIR)/hull.dmg
 RELEASE_VERSION   := $(shell cat $(CURDIR)/VERSION 2>/dev/null || echo 0.0.0)
-TARBALL           := $(BUILD_DIR)/urunc-macos-$(RELEASE_VERSION)-arm64.tar.gz
+TARBALL           := $(BUILD_DIR)/hull-$(RELEASE_VERSION)-arm64.tar.gz
 
-## default Build and sign urunc-macos + vz-runner.
+## default Build and sign hull + vz-runner.
 .PHONY: default
 default: macos
 
-## urunc_macos Build the urunc-macos CLI.
+## urunc_macos Build the hull CLI.
 .PHONY: urunc_macos
 urunc_macos:
 	mkdir -p $(BUILD_DIR)
 	GOARCH=$(ARCH) $(GO) build -ldflags "$(LDFLAGS)" \
-		-o $(URUNC_MACOS_BIN)_$(ARCH) $(CURDIR)/cmd/urunc-macos
+		-o $(HULL_BIN)_$(ARCH) $(CURDIR)/cmd/hull
 
 ## vz_runner Build the Swift Virtualization.framework runner.
 .PHONY: vz_runner
 vz_runner:
 	cd $(VZ_RUNNER_DIR) && swift build -c release
 
-## sign Code-sign urunc-macos + vz-runner and strip quarantine.
+## sign Code-sign hull + vz-runner and strip quarantine.
 ##      Override the identity: make sign CODESIGN_IDENTITY="Apple Development: Name (TEAMID)"
 .PHONY: sign
 sign:
 	codesign $(CODESIGN_FLAGS) --sign "$(CODESIGN_IDENTITY)" \
 		--entitlements $(VZ_ENTITLEMENTS) $(VZ_RUNNER_BIN)
-	codesign $(CODESIGN_FLAGS) --sign "$(CODESIGN_IDENTITY)" $(URUNC_MACOS_BIN)_$(ARCH)
-	xattr -cr $(VZ_RUNNER_BIN) $(URUNC_MACOS_BIN)_$(ARCH)
-	@echo "Signed vz-runner + urunc-macos with identity: $(CODESIGN_IDENTITY)"
+	codesign $(CODESIGN_FLAGS) --sign "$(CODESIGN_IDENTITY)" $(HULL_BIN)_$(ARCH)
+	xattr -cr $(VZ_RUNNER_BIN) $(HULL_BIN)_$(ARCH)
+	@echo "Signed vz-runner + hull with identity: $(CODESIGN_IDENTITY)"
 
 ## codesign_verify Print signature authority + entitlements of the signed binaries.
 .PHONY: codesign_verify
 codesign_verify:
-	@echo "== urunc-macos =="; codesign -dvvv $(URUNC_MACOS_BIN)_$(ARCH) 2>&1 | grep -E "Authority|flags" || true
+	@echo "== hull =="; codesign -dvvv $(HULL_BIN)_$(ARCH) 2>&1 | grep -E "Authority|flags" || true
 	@echo "== vz-runner =="; codesign -dvvv $(VZ_RUNNER_BIN) 2>&1 | grep -E "Authority|flags" || true
 	@codesign -d --entitlements - --xml $(VZ_RUNNER_BIN) 2>/dev/null && echo || true
 
@@ -106,28 +106,28 @@ test:
 conformance-report:
 	$(GO) run ./test/conformance/cmd/report
 
-## macos Build urunc-macos + vz-runner, then sign both.
+## macos Build hull + vz-runner, then sign both.
 .PHONY: macos
 macos: urunc_macos vz_runner sign
 
-APP := $(BUILD_DIR)/urunc-macos.app
+APP := $(BUILD_DIR)/hull.app
 
-## app Build the urunc-macos.app bundle (binaries + icon), signed.
-##     vz-runner sits next to urunc-macos inside Contents/MacOS, so the
+## app Build the hull.app bundle (binaries + icon), signed.
+##     vz-runner sits next to hull inside Contents/MacOS, so the
 ##     executable-sibling discovery keeps working from /Applications.
 .PHONY: app
 app: urunc_macos vz_runner
 	rm -rf $(APP)
 	mkdir -p $(APP)/Contents/MacOS $(APP)/Contents/Resources
 	cp packaging/Info.plist $(APP)/Contents/Info.plist
-	cp -p $(URUNC_MACOS_BIN)_$(ARCH) $(APP)/Contents/MacOS/urunc-macos
+	cp -p $(HULL_BIN)_$(ARCH) $(APP)/Contents/MacOS/hull
 	cp -p $(VZ_RUNNER_BIN) $(APP)/Contents/MacOS/vz-runner
 	cp packaging/AppIcon.icns $(APP)/Contents/Resources/AppIcon.icns
 	# Sign nested code first (vz-runner carries the virtualization
 	# entitlement), then the bundle itself — never --deep.
 	codesign $(CODESIGN_FLAGS) --sign "$(CODESIGN_IDENTITY)" \
 		--entitlements $(VZ_ENTITLEMENTS) $(APP)/Contents/MacOS/vz-runner
-	codesign $(CODESIGN_FLAGS) --sign "$(CODESIGN_IDENTITY)" $(APP)/Contents/MacOS/urunc-macos
+	codesign $(CODESIGN_FLAGS) --sign "$(CODESIGN_IDENTITY)" $(APP)/Contents/MacOS/hull
 	codesign $(CODESIGN_FLAGS) --sign "$(CODESIGN_IDENTITY)" $(APP)
 	xattr -cr $(APP)
 	@echo "Built $(APP)"
@@ -145,8 +145,8 @@ dmg_image: app
 		--background packaging/dmg-background.tiff \
 		--window-size 660 420 \
 		--icon-size 128 \
-		--icon "urunc-macos.app" 180 280 \
-		--hide-extension "urunc-macos.app" \
+		--icon "hull.app" 180 280 \
+		--hide-extension "hull.app" \
 		--app-drop-link 480 280 \
 		--no-internet-enable \
 		$(DMG) $(BUILD_DIR)/dmg-stage/
@@ -157,7 +157,7 @@ dmg_image: app
 ##     Homebrew release tarball + sha256. Deliberately does NOT depend on
 ##     `app`: it must run after the app was built (and the dmg notarized).
 ##
-##     The bundle's main executable (urunc-macos, = CFBundleExecutable) is
+##     The bundle's main executable (hull, = CFBundleExecutable) is
 ##     sealed to the bundle's Info.plist + _CodeSignature. Extracted as a lone
 ##     binary its signature is INVALID ("invalid Info.plist / resource
 ##     directory"), so AMFI SIGKILLs it at exec ("Killed: 9") on any Mac that
@@ -179,26 +179,26 @@ release_tarball:
 			echo "       ALLOW_ADHOC_TARBALL=1 to package an unshippable one on purpose." >&2; \
 			exit 1; }; ;; \
 	esac
-	@test -x $(APP)/Contents/MacOS/urunc-macos -a -x $(APP)/Contents/MacOS/vz-runner || \
+	@test -x $(APP)/Contents/MacOS/hull -a -x $(APP)/Contents/MacOS/vz-runner || \
 		{ echo "error: $(APP) not built — run 'make dmg_image' (or 'make app') first" >&2; exit 1; }
 	rm -rf $(BUILD_DIR)/tarball-stage $(TARBALL) $(TARBALL).sha256
 	mkdir -p $(BUILD_DIR)/tarball-stage
-	cp -p $(APP)/Contents/MacOS/urunc-macos $(APP)/Contents/MacOS/vz-runner $(BUILD_DIR)/tarball-stage/
+	cp -p $(APP)/Contents/MacOS/hull $(APP)/Contents/MacOS/vz-runner $(BUILD_DIR)/tarball-stage/
 	codesign $(CODESIGN_FLAGS) --sign "$(CODESIGN_IDENTITY)" \
 		--entitlements $(VZ_ENTITLEMENTS) $(BUILD_DIR)/tarball-stage/vz-runner
-	codesign $(CODESIGN_FLAGS) --sign "$(CODESIGN_IDENTITY)" $(BUILD_DIR)/tarball-stage/urunc-macos
-	codesign --verify --strict $(BUILD_DIR)/tarball-stage/urunc-macos
+	codesign $(CODESIGN_FLAGS) --sign "$(CODESIGN_IDENTITY)" $(BUILD_DIR)/tarball-stage/hull
+	codesign --verify --strict $(BUILD_DIR)/tarball-stage/hull
 	codesign --verify --strict $(BUILD_DIR)/tarball-stage/vz-runner
 	@# --verify checks the seal, not the signer, and the entitlement is embedded
 	@# either way -- so neither notices an ad-hoc signature. Assert the identity.
-	@for b in urunc-macos vz-runner; do \
+	@for b in hull vz-runner; do \
 		codesign -dvv $(BUILD_DIR)/tarball-stage/$$b 2>&1 \
 			| grep -q "Authority=Developer ID Application" \
 			|| { test "$(ALLOW_ADHOC_TARBALL)" = 1 \
 				|| { echo "error: $$b is not Developer ID signed" >&2; exit 1; }; }; \
 	done
 	cp LICENSE $(BUILD_DIR)/tarball-stage/
-	tar -C $(BUILD_DIR)/tarball-stage -czf $(TARBALL) urunc-macos vz-runner LICENSE
+	tar -C $(BUILD_DIR)/tarball-stage -czf $(TARBALL) hull vz-runner LICENSE
 	(cd $(BUILD_DIR) && shasum -a 256 $(notdir $(TARBALL)) | tee $(notdir $(TARBALL)).sha256)
 	@echo "Built $(TARBALL)"
 
@@ -212,11 +212,11 @@ dmg: dmg_image
 	xcrun stapler validate $(DMG)
 	@echo "Built + notarized + stapled: $(DMG)"
 
-## install Install urunc-macos and vz-runner side by side in PREFIX.
-##         vz-runner is discovered next to urunc-macos, so both must be copied.
+## install Install hull and vz-runner side by side in PREFIX.
+##         vz-runner is discovered next to hull, so both must be copied.
 .PHONY: install
 install: macos
-	install -m0755 $(URUNC_MACOS_BIN)_$(ARCH) $(PREFIX)/urunc-macos
+	install -m0755 $(HULL_BIN)_$(ARCH) $(PREFIX)/hull
 	install -m0755 $(VZ_RUNNER_BIN) $(PREFIX)/vz-runner
 	codesign $(CODESIGN_FLAGS) --sign "$(CODESIGN_IDENTITY)" \
 		--entitlements $(VZ_ENTITLEMENTS) $(PREFIX)/vz-runner

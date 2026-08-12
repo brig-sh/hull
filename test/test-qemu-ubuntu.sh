@@ -23,7 +23,7 @@ cd "$PROJECT_DIR"
 echo "TEST 1: Boot Ubuntu with QEMU"
 echo "=============================="
 
-INSTANCE_ID=$(./dist/urunc-macos_arm64 run --detach --hypervisor qemu --mem 512 --cpus 2 "$BUNDLE_DIR" 2>&1)
+INSTANCE_ID=$(./dist/hull_arm64 run --detach --hypervisor qemu --mem 512 --cpus 2 "$BUNDLE_DIR" 2>&1)
 echo "✓ Instance started: $INSTANCE_ID"
 
 sleep 8  # Wait for boot and init sequence
@@ -33,7 +33,7 @@ echo ""
 echo "TEST 2: Check instance status"
 echo "============================="
 
-INSTANCE_STATUS=$(./dist/urunc-macos_arm64 ps 2>&1 | grep "^$INSTANCE_ID")
+INSTANCE_STATUS=$(./dist/hull_arm64 ps 2>&1 | grep "^$INSTANCE_ID")
 echo "$INSTANCE_STATUS"
 
 if echo "$INSTANCE_STATUS" | grep -q "running"; then
@@ -74,7 +74,7 @@ echo ""
 echo "TEST 4: Check logs"
 echo "=================="
 
-LOG_FILE="$HOME/.urunc-macos/instances/$INSTANCE_ID/log"
+LOG_FILE="$HOME/.hull/instances/$INSTANCE_ID/log"
 if [ -f "$LOG_FILE" ]; then
     LOG_SIZE=$(stat -f%z "$LOG_FILE" 2>/dev/null || stat -c%s "$LOG_FILE" 2>/dev/null || echo "0")
 
@@ -124,7 +124,7 @@ echo ""
 echo "TEST 7: Graceful shutdown"
 echo "========================="
 
-./dist/urunc-macos_arm64 stop "$INSTANCE_ID" 2>/dev/null || true
+./dist/hull_arm64 stop "$INSTANCE_ID" 2>/dev/null || true
 sleep 3
 
 if ps -p $PID > /dev/null 2>&1; then
@@ -148,13 +148,13 @@ TEST_DIR="/tmp/urunc-test-9pfs-$$"
 mkdir -p "$TEST_DIR"
 echo "test data from host" > "$TEST_DIR/test.txt"
 
-INSTANCE_ID_2=$(./dist/urunc-macos_arm64 run --detach --hypervisor qemu --mem 512 --cpus 2 --shared-dir "$TEST_DIR:/mnt/host" "$BUNDLE_DIR" 2>&1)
+INSTANCE_ID_2=$(./dist/hull_arm64 run --detach --hypervisor qemu --mem 512 --cpus 2 --shared-dir "$TEST_DIR:/mnt/host" "$BUNDLE_DIR" 2>&1)
 echo "✓ Started instance with 9pfs: $INSTANCE_ID_2"
 
 sleep 5
 
 # Cleanup
-./dist/urunc-macos_arm64 stop "$INSTANCE_ID_2" 2>/dev/null || true
+./dist/hull_arm64 stop "$INSTANCE_ID_2" 2>/dev/null || true
 rm -rf "$TEST_DIR"
 
 echo "✓ 9pfs test completed"

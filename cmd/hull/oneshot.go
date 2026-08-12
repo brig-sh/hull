@@ -42,8 +42,8 @@ import (
 	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/urunc-dev/urunc/pkg/agentproto"
 
-	"github.com/nofireai/urunc-macos/internal/compose"
-	"github.com/nofireai/urunc-macos/pkg/store"
+	"github.com/brig-sh/hull/internal/compose"
+	"github.com/brig-sh/hull/pkg/store"
 )
 
 // The transport sentinel errAgentTransport is shared with the exec layer

@@ -1,6 +1,6 @@
 # Telemetry
 
-urunc-macos, urunc-claude and urunc-claude-desktop collect anonymous usage
+hull, urunc-claude and urunc-claude-desktop collect anonymous usage
 events and crash reports to help us understand what people run and fix what
 breaks. This page is the canonical reference for exactly what is sent. If a
 field is not listed here, it is not collected.
@@ -14,16 +14,16 @@ one command.
 Any one of these disables all telemetry (usage and crash reports):
 
 ```
-urunc-macos telemetry off        # persisted; `on` re-enables, `status` shows state
-urunc-macos --dnt ...            # flag twin of DO_NOT_TRACK
-export URUNC_TELEMETRY_DISABLED=1
+hull telemetry off        # persisted; `on` re-enables, `status` shows state
+hull --dnt ...            # flag twin of DO_NOT_TRACK
+export HULL_TELEMETRY_DISABLED=1
 export DO_NOT_TRACK=1            # honored per consoledonottrack.com
 ```
 
 To see every payload instead of sending it:
 
 ```
-export URUNC_TELEMETRY_DEBUG=1
+export HULL_TELEMETRY_DEBUG=1
 ```
 
 ## The consent prompt
@@ -40,7 +40,7 @@ Docs: https://github.com/NOFireAI/homebrew-nofire/blob/main/TELEMETRY.md
 Enable telemetry? [Y/n]
 ```
 
-(`<product>` is the tool the user installed: urunc-macos, urunc-claude or
+(`<product>` is the tool the user installed: hull, urunc-claude or
 urunc-claude-desktop. The docs URL is the public mirror of this page; final
 location tracked in NOFireAI/engineering#1001.)
 
@@ -56,8 +56,8 @@ as non-interactive even on a pty, so test harnesses never see the
 prompt. For scripted setups:
 
 ```
-urunc-macos --unattended ...        # skip the y/n even on a TTY; telemetry on
-urunc-macos --unattended --dnt ...  # skip the y/n and record the opt-out
+hull --unattended ...        # skip the y/n even on a TTY; telemetry on
+hull --unattended --dnt ...  # skip the y/n and record the opt-out
 ```
 
 The env vars above work everywhere, no flags needed.
@@ -70,11 +70,11 @@ All events share a common envelope:
 |---|---|---|
 | `schema_version` | `1` | bumped on any schema change, with this page updated |
 | `event` | `command` | one of `command`, `start`, `end`, `metrics`, `crash` |
-| `product` | `urunc-claude` | set by the wrapper scripts; defaults to `urunc-macos` |
+| `product` | `urunc-claude` | set by the wrapper scripts; defaults to `hull` |
 | `version` | `0.1.0-rc14` | tool version |
 | `os` | `26.0` | macOS major.minor only |
 | `arch` | `arm64` | |
-| `install_id` | random UUID | generated locally on first run; not derived from the machine; delete `~/.urunc-macos/telemetry.json` to rotate it |
+| `install_id` | random UUID | generated locally on first run; not derived from the machine; delete `~/.hull/telemetry.json` to rotate it |
 | `uname` | `Darwin 25.3.0 <kernel build> arm64` | full uname, explicitly excluding the hostname |
 | `captured_at` | RFC 3339 timestamp | when the event happened (for crash reports: the crash, not the upload) |
 | `checksum` | hex SHA-256 | integrity checksum over `event\|product\|version\|install_id\|captured_at` with a fixed salt; ingestion drops payloads whose checksum does not match -- a soft guard against naive forgery, not a security boundary |
@@ -137,7 +137,7 @@ almost no CPU or memory of its own.
 | `panic_type` | the Go type of the panic value (eg. `*errors.errorString`); never the panic message, which can embed paths |
 | `stack` | Go stack trace, file paths trimmed to module-relative form |
 
-Crash reports are written to `~/.urunc-macos/crashes/` when a panic happens
+Crash reports are written to `~/.hull/crashes/` when a panic happens
 and uploaded on the next invocation. You can inspect or delete the files at
 any time; the directory is the full queue.
 

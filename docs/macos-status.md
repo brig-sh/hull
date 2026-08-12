@@ -14,13 +14,13 @@ are implemented, both targeting Apple Silicon (darwin/arm64):
 
 | Binary | Source | Language | Notes |
 |--------|--------|----------|-------|
-| `urunc-macos` | `cmd/urunc-macos/` | Go | CLI: pull, run, ps, stop, rm, logs, inspect, images |
+| `hull` | `cmd/hull/` | Go | CLI: pull, run, ps, stop, rm, logs, inspect, images |
 | `vz-runner` | `cmd/vz-runner/` | Swift | Virtualization.framework helper, requires code-signing |
 
 Both target `darwin/arm64`. After building, both must be signed:
 
 ```bash
-codesign --force --sign - --entitlements Entitlements.plist urunc-macos
+codesign --force --sign - --entitlements Entitlements.plist hull
 codesign --force --sign - --entitlements Entitlements.plist vz-runner
 ```
 
@@ -66,33 +66,33 @@ crane push /tmp/image.tar harbor.nbfc.io/nubificus/urunc-ubuntu-vz:aarch64
 
 ```bash
 # Vz backend (recommended — faster networking, native Apple framework)
-./urunc-macos run --hypervisor vz --mem 2048 --cpus 2 --net shared \
+./hull run --hypervisor vz --mem 2048 --cpus 2 --net shared \
     harbor.nbfc.io/nubificus/urunc-ubuntu-vz:aarch64
 
 # QEMU+HVF backend
-./urunc-macos run --hypervisor qemu --mem 2048 --cpus 2 --net shared \
+./hull run --hypervisor qemu --mem 2048 --cpus 2 --net shared \
     harbor.nbfc.io/nubificus/urunc-ubuntu-vz:aarch64
 
 # Block device rootfs (ext4 disk image instead of virtiofs/9pfs)
-./urunc-macos run --hypervisor vz --rootfs-type block --mem 2048 --cpus 2 --net shared \
+./hull run --hypervisor vz --rootfs-type block --mem 2048 --cpus 2 --net shared \
     harbor.nbfc.io/nubificus/urunc-ubuntu-vz:aarch64
 
 # Detached mode
-./urunc-macos run --detach --hypervisor vz --mem 2048 --cpus 2 --net shared \
+./hull run --detach --hypervisor vz --mem 2048 --cpus 2 --net shared \
     harbor.nbfc.io/nubificus/urunc-ubuntu-vz:aarch64
 
 # Management
-./urunc-macos ps
-./urunc-macos logs <instance-id>
-./urunc-macos stop <instance-id>
-./urunc-macos rm <instance-id>
+./hull ps
+./hull logs <instance-id>
+./hull stop <instance-id>
+./hull rm <instance-id>
 ```
 
 ## Architecture
 
 ### Boot Flow (Vz — virtiofs)
 
-1. `urunc-macos` pulls OCI image, extracts rootfs to `~/.urunc-macos/images/<digest>/rootfs/`
+1. `hull` pulls OCI image, extracts rootfs to `~/.hull/images/<digest>/rootfs/`
 2. APFS clonefile (`cp -c -a`) creates per-instance copy (copy-on-write, nearly instant)
 3. Generates `.vz-init` wrapper in rootfs (overlay setup, devtmpfs, devpts, DNS)
 4. Generates `urunit.conf` (env vars, UID/GID, working directory)
@@ -206,7 +206,7 @@ High write speeds are from page cache write-back (both backends).
 ### QEMU hangs in foreground mode (fixed 2026-06-18)
 
 **Symptom**: QEMU boots when run directly from terminal, but hangs with no output when
-spawned by `urunc-macos`.
+spawned by `hull`.
 
 **Root cause**: `SysProcAttr{Setpgid: true}` puts QEMU in a background process group.
 QEMU's `-serial stdio` calls `tcsetattr()` to set raw mode, which triggers `SIGTTOU`
@@ -220,14 +220,14 @@ CI, Claude Code's Bash tool), since POSIX process group restrictions don't apply
 
 ### Stale image cache
 
-**Symptom**: After pushing a new version of an image, `urunc-macos run` uses the old cached
+**Symptom**: After pushing a new version of an image, `hull run` uses the old cached
 rootfs. Bunny-injected layers (`/.boot/kernel`, `/urunit`, `/urunc.json`) may be missing
 if the cache was populated by an earlier, incomplete pull.
 
 **Fix**: Clear and re-pull:
 ```bash
-rm -rf ~/.urunc-macos/images/sha256:<digest>
-./urunc-macos pull <image-ref>
+rm -rf ~/.hull/images/sha256:<digest>
+./hull pull <image-ref>
 ```
 
 ### macOS virtiofs mode-000 write bug

@@ -8,7 +8,7 @@
 
 ## Context
 
-The conformance report (ADR-0002/0003) scores urunc-macos at 9.3% of
+The conformance report (ADR-0002/0003) scores hull at 9.3% of
 in-scope capabilities. A cluster of misses blames the same gap: the manifest
 says "there is no guest exec facility" for `cli.exec` and exec-form
 `service.healthcheck`, and the lifecycle hooks (`post_start`, `pre_start`,
@@ -16,7 +16,7 @@ says "there is no guest exec facility" for `cli.exec` and exec-form
 
 Two facts complicate the simple story:
 
-1. **Instance-level exec already exists on main.** `urunc-macos exec` talks
+1. **Instance-level exec already exists on main.** `hull exec` talks
    agentproto to `/urunit-agent` in the guest (vsock port 1024 on Vz,
    virtio-serial `io.urunc.agent.0` on QEMU), with `--tty/--cwd/--user/--env`.
    The manifest notes predate it and are stale. What is genuinely missing is
@@ -31,7 +31,7 @@ Two facts complicate the simple story:
    race fix, hostname via the kernel `ip=` parameter, and directory volume
    copies. It took upstream critest from ~nothing to 45/49 conformance specs.
    But it builds on the pre-review exec commit, is explicitly not PR-ready
-   upstream, and urunc-macos pins the fork's `darwin-integration` branch —
+   upstream, and hull pins the fork's `darwin-integration` branch —
    compatibility of the two trees is unproven. The only agent-bearing
    published image (`busybox-agent-qemu-linux-raw`) is x86_64/QEMU, which on
    Apple Silicon means TCG emulation.
@@ -84,7 +84,7 @@ the deliverable is a measured before/after conformance delta.
 - `compose top` if trivial on the agent (`ps` via exec); otherwise left.
 - Manifest + conformance cases updated on the branch for every capability
   that moves; runtime-tier cases for exec paths, gated on an agent-bearing
-  image (`URUNC_EXEC_TEST_IMAGE`), skipping with explicit reasons otherwise.
+  image (`HULL_EXEC_TEST_IMAGE`), skipping with explicit reasons otherwise.
 
 ### 3. The measurement — the actual deliverable
 
@@ -120,7 +120,7 @@ on the exec-support branch.
   executable claims, not inherited ones.
 - **Skip the compose layer, only bump the dependency.** The dependency bump
   alone moves zero manifest entries: every missing capability is missing in
-  cmd/urunc-macos, not in the library. The bump buys reliability
+  cmd/hull, not in the library. The bump buys reliability
   (multiplexer), not coverage.
 
 ## Consequences

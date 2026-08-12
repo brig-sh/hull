@@ -2,14 +2,14 @@
 
 **Status**: Accepted
 **Date**: 2026-08-04
-**Context**: What urunc-macos, urunc-claude and urunc-claude-desktop report
+**Context**: What hull, urunc-claude and urunc-claude-desktop report
 about usage and crashes, to whom, and how users turn it off
 
 ---
 
 ## Context
 
-We are launching urunc-macos together with the urunc-claude and
+We are launching hull together with the urunc-claude and
 urunc-claude-desktop wrappers, and at the moment we have zero visibility on
 usage and crashes. We want to answer concrete release questions: which
 backend people select (qemu vs vz) and whether boots succeed, which commands
@@ -43,7 +43,7 @@ itself. The conditions, which this ADR adopts wholesale:
 Five event types. The full field-by-field reference lives in
 [docs/telemetry.md](../telemetry.md); the ADR-level summary:
 
-- **command**: schema version, product (`urunc-macos` | `urunc-claude` |
+- **command**: schema version, product (`hull` | `urunc-claude` |
   `urunc-claude-desktop`), tool version, macOS major.minor, arch, top-level
   command name (eg. `run`, `compose`; never arguments), outcome (`ok` |
   `error`), and a coarse error class on failure. Never the error message
@@ -75,7 +75,7 @@ binary, so it is deliberately not treated as a security boundary.
 ### 2. Identifier: a random install UUID
 
 We keep one random UUID, generated locally on first run and stored in
-`~/.urunc-macos/telemetry.json`. It is not derived from hardware, username
+`~/.hull/telemetry.json`. It is not derived from hardware, username
 or anything else about the machine, and deleting the file rotates it.
 
 Homebrew goes further and sends no identifier at all. We considered that,
@@ -96,7 +96,7 @@ consent ask (text in [docs/telemetry.md](../telemetry.md)) and waits for an
 answer: `[Y/n]`, so a single enter approves. The answer is persisted in
 `telemetry.json` together with a consent version, and nothing is sent
 before the user answers. The prompt names the product the user actually
-installed (the wrappers set `URUNC_TELEMETRY_PRODUCT`).
+installed (the wrappers set `HULL_TELEMETRY_PRODUCT`).
 
 Non-interactive invocations never block on a prompt: telemetry defaults to
 on, which is what unattended setups (eg. an agent installing us from the
@@ -120,13 +120,13 @@ expansion, not to being asked again.
 
 Any one of the following disables all telemetry, usage and crash alike:
 
-- `urunc-macos telemetry off` (persisted in `telemetry.json`; `on` and
+- `hull telemetry off` (persisted in `telemetry.json`; `on` and
   `status` complete the subcommand)
 - the `--dnt` flag
-- `URUNC_TELEMETRY_DISABLED=1`
+- `HULL_TELEMETRY_DISABLED=1`
 - `DO_NOT_TRACK=1` (the consoledonottrack.com convention)
 
-`URUNC_TELEMETRY_DEBUG=1` prints every payload to stderr instead of
+`HULL_TELEMETRY_DEBUG=1` prints every payload to stderr instead of
 sending it.
 
 ### 5. Transport: fire-and-forget, never in the way
@@ -145,11 +145,11 @@ and command events when a cold TLS POST to the CDN-fronted endpoint ran
 long. Only a 2xx response counts as delivered. Telemetry must never
 slow down, block, or break a user command, and must never print errors.
 
-Crash reports are written locally to `~/.urunc-macos/crashes/` at panic
+Crash reports are written locally to `~/.hull/crashes/` at panic
 time and uploaded in the background on the next invocation; a report
 leaves the queue only on a 2xx response, so rejected or interrupted
 uploads retry later. This sidesteps flushing on the
-exit path (urunc-macos has exit paths that bypass defers) and works even
+exit path (hull has exit paths that bypass defers) and works even
 when the crash killed networking. The local queue is capped; oldest files
 are dropped first.
 
@@ -162,7 +162,7 @@ self-exec) suppress their own events via an internal env var, so one
 Events and crash reports are retained for 365 days; only aggregates
 survive beyond that. The schema page is the canonical disclosure and every
 schema change bumps `schema_version` and updates it; changes that expand
-what we collect also bump the consent version (§3). urunc-macos is a
+what we collect also bump the consent version (§3). hull is a
 private repo, so the schema page will be mirrored somewhere public --
 the homebrew-nofire tap is the natural home once it opens
 (NOFireAI/engineering#1001 tracks the final location).

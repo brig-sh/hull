@@ -2,17 +2,17 @@
 
 **Status**: Accepted
 **Date**: 2026-07-29
-**Context**: Which compose-spec capabilities urunc-macos will never pursue, so the conformance score measures intent instead of the whole spec
+**Context**: Which compose-spec capabilities hull will never pursue, so the conformance score measures intent instead of the whole spec
 
 ---
 
 ## Context
 
-ADR-0002's conformance suite scores urunc-macos against the full compose-spec
+ADR-0002's conformance suite scores hull against the full compose-spec
 surface: 134 capabilities, 7.8% today. That denominator includes capabilities
 we will never build, for structural reasons, not effort reasons:
 
-- urunc-macos is a single-host macOS dev tool. There is no swarm, no
+- hull is a single-host macOS dev tool. There is no swarm, no
   orchestrator, and no plan for one.
 - Every service is its own VM. Cross-container namespace sharing (ipc:,
   pid:, network_mode: service:/container:/host) cannot exist across VMs.

@@ -1,6 +1,6 @@
-# Compose on urunc-macos
+# Compose on hull
 
-`urunc-macos compose` runs a multi-service Compose file where **each
+`hull compose` runs a multi-service Compose file where **each
 service is its own lightweight VM** (not a container), wired together on a
 private virtual network. It targets the common shape of a dev stack —
 a few services that talk to each other by name and expose a port or two to
@@ -13,10 +13,10 @@ reference for what ships today.
 ## Commands
 
 ```
-urunc-macos compose [-f FILE] [-p NAME] up   [--subnet CIDR]
-urunc-macos compose [-f FILE] [-p NAME] down
-urunc-macos compose [-f FILE] [-p NAME] ps
-urunc-macos compose [-f FILE] [-p NAME] logs [-f] [SERVICE]
+hull compose [-f FILE] [-p NAME] up   [--subnet CIDR]
+hull compose [-f FILE] [-p NAME] down
+hull compose [-f FILE] [-p NAME] ps
+hull compose [-f FILE] [-p NAME] logs [-f] [SERVICE]
 ```
 
 - `-f, --file` — Compose file (env `COMPOSE_FILE`; default:
@@ -30,8 +30,8 @@ urunc-macos compose [-f FILE] [-p NAME] logs [-f] [SERVICE]
   Ctrl-C during `up` tears down whatever was created.
 - `logs -f` follows a single named service.
 
-Instances are ordinary urunc-macos instances underneath, so
-`urunc-macos ps` / `logs` / `stop` also see them; `compose ps` filters to
+Instances are ordinary hull instances underneath, so
+`hull ps` / `logs` / `stop` also see them; `compose ps` filters to
 the project.
 
 ## Networking model
@@ -120,8 +120,8 @@ command, or with `COMPOSE_PROFILES` as a comma-separated list. The value `*`
 activates every profile the file declares.
 
 ```console
-$ urunc-macos compose --profile debug up
-$ COMPOSE_PROFILES=debug,tools urunc-macos compose up
+$ hull compose --profile debug up
+$ COMPOSE_PROFILES=debug,tools hull compose up
 ```
 
 `compose config` applies the same selection, so it prints exactly the
@@ -169,7 +169,7 @@ whatever its profiles say, together with the services it declares in
 `depends_on`, and nothing else.
 
 ```console
-$ urunc-macos compose up db-migrations
+$ hull compose up db-migrations
 ```
 
 This starts `db-migrations` and the `db` it depends on. It does not activate
@@ -263,14 +263,14 @@ poll interval rather than instantly; `on-failure` **degrades to `always`**
 with a load-time warning (a plain service reports no exit code, so a clean
 exit cannot be told from a failure — the `:N` attempt cap is still honored);
 `always` and `unless-stopped` are indistinguishable here; and a job is never
-restarted whatever its policy says. An explicit `urunc-macos stop` outranks
+restarted whatever its policy says. An explicit `hull stop` outranks
 every policy: a service you stop **stays stopped**.
 
 Only a job records an exit code. A plain service whose VM ended on its own
-reports `-` in `urunc-macos ps`'s EXIT column — an honest "ended without a
+reports `-` in `hull ps`'s EXIT column — an honest "ended without a
 reportable status", and exactly the gap the ADR's Phase B closes. `compose
 ps` shows the state word only; a recorded code is visible through
-`urunc-macos ps` and `urunc-macos inspect`.
+`hull ps` and `hull inspect`.
 
 ## Example
 
@@ -301,11 +301,11 @@ services:
 ```
 
 ```bash
-urunc-macos compose up          # boots db, waits for :5432, then api
-urunc-macos compose ps
+hull compose up          # boots db, waits for :5432, then api
+hull compose ps
 curl localhost:8080             # forwarded to api:8080 through the gateway
-urunc-macos compose logs -f api
-urunc-macos compose down        # stops both VMs and the gateway
+hull compose logs -f api
+hull compose down        # stops both VMs and the gateway
 ```
 
 Here `api` reaches the database at `db:5432` by name, `up` blocks on the

@@ -28,7 +28,7 @@ import (
 	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/urfave/cli/v3"
 
-	"github.com/nofireai/urunc-macos/internal/compose"
+	"github.com/brig-sh/hull/internal/compose"
 )
 
 // writeComposeFile drops src in a fresh temp directory and returns its path.
@@ -432,7 +432,7 @@ func TestValidateProject(t *testing.T) {
 		// A bare guest-only entry ("/data") is compose-go's anonymous-volume
 		// short form: Type=volume, Source="". checkConsistency deliberately
 		// does not validate it (docker mints a fresh unnamed volume per
-		// container), but urunc-macos has no such mechanism and would
+		// container), but hull has no such mechanism and would
 		// silently alias every anonymous volume in a project onto the same
 		// "<volRoot>/<project>_" path.
 		{
@@ -618,7 +618,7 @@ func TestLoadProjectFromCLIUsesComposeFileDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The invariant this test depends on: the process's actual cwd (wherever
-	// `go test` runs from, cmd/urunc-macos/) must differ from dir. t.TempDir()
+	// `go test` runs from, cmd/hull/) must differ from dir. t.TempDir()
 	// is never nested under the package directory, so this always holds; the
 	// explicit check just makes a silently-vacuous test impossible.
 	if cwd, err := os.Getwd(); err != nil || cwd == dir {
@@ -626,7 +626,7 @@ func TestLoadProjectFromCLIUsesComposeFileDirectory(t *testing.T) {
 	}
 
 	root := &cli.Command{
-		Name: "urunc-macos",
+		Name: "hull",
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "file", Aliases: []string{"f"}},
 			&cli.StringFlag{Name: "project-name", Aliases: []string{"p"}},
@@ -654,7 +654,7 @@ func TestLoadProjectFromCLIUsesComposeFileDirectory(t *testing.T) {
 	// invocation's --file resolves once findComposeFile hands it onward —
 	// this is deliberately not a path relative to dir, so the test cannot
 	// pass by accident of the default-file-discovery fallback instead.
-	if err := root.Run(context.Background(), []string{"urunc-macos", "--file", path}); err != nil {
+	if err := root.Run(context.Background(), []string{"hull", "--file", path}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -691,7 +691,7 @@ func TestWarnUnmatchedProfilesIsWired(t *testing.T) {
 	// (composeConfig itself hardcodes os.Stderr, which a unit test should
 	// not have to redirect to prove this).
 	root := &cli.Command{
-		Name: "urunc-macos",
+		Name: "hull",
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "file", Aliases: []string{"f"}},
 			&cli.StringFlag{Name: "project-name", Aliases: []string{"p"}},
@@ -705,7 +705,7 @@ func TestWarnUnmatchedProfilesIsWired(t *testing.T) {
 		Writer: io.Discard,
 	}
 	t.Setenv("COMPOSE_PROFILES", "")
-	if err := root.Run(context.Background(), []string{"urunc-macos", "--file", path, "--profile", "nope"}); err != nil {
+	if err := root.Run(context.Background(), []string{"hull", "--file", path, "--profile", "nope"}); err != nil {
 		t.Fatal(err)
 	}
 	if loadErr != nil {
@@ -750,7 +750,7 @@ func TestComposeConfigValidatesPorts(t *testing.T) {
 	var out []byte
 	var callErr error
 	root := &cli.Command{
-		Name: "urunc-macos",
+		Name: "hull",
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "file", Aliases: []string{"f"}},
 			&cli.StringFlag{Name: "project-name", Aliases: []string{"p"}},
@@ -764,7 +764,7 @@ func TestComposeConfigValidatesPorts(t *testing.T) {
 		Writer: io.Discard,
 	}
 	t.Setenv("COMPOSE_PROFILES", "")
-	if err := root.Run(context.Background(), []string{"urunc-macos", "--file", path, "--project-name", "proj"}); err != nil {
+	if err := root.Run(context.Background(), []string{"hull", "--file", path, "--project-name", "proj"}); err != nil {
 		t.Fatal(err)
 	}
 	if callErr == nil {
@@ -787,7 +787,7 @@ func runComposeConfigYAML(t *testing.T, storeDir, src string) ([]byte, error) {
 	var out []byte
 	var callErr error
 	root := &cli.Command{
-		Name: "urunc-macos",
+		Name: "hull",
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "file", Aliases: []string{"f"}},
 			&cli.StringFlag{Name: "project-name", Aliases: []string{"p"}},
@@ -803,7 +803,7 @@ func runComposeConfigYAML(t *testing.T, storeDir, src string) ([]byte, error) {
 	}
 	t.Setenv("COMPOSE_PROFILES", "")
 	if err := root.Run(context.Background(),
-		[]string{"urunc-macos", "--file", path, "--project-name", "proj", "--store-dir", storeDir}); err != nil {
+		[]string{"hull", "--file", path, "--project-name", "proj", "--store-dir", storeDir}); err != nil {
 		t.Fatal(err)
 	}
 	return out, callErr

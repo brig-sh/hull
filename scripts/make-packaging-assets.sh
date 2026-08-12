@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.."
 # urunc mark: the official CNCF artwork color icon
 # (github.com/cncf/artwork/projects/urunc), vendored under packaging/sources.
 NOFIRE_LOGO="${NOFIRE_LOGO:-packaging/sources/nofire-logo-black.png}"
-URUNC_LOGO="${URUNC_LOGO:-packaging/sources/urunc-icon-color.png}"
+HULL_LOGO="${HULL_LOGO:-packaging/sources/urunc-icon-color.png}"
 OUT=packaging
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
@@ -35,7 +35,7 @@ magick \( -size 1024x1024 gradient:'#ffffff'-'#e7e7ee' \) \
   \( -size 1024x1024 xc:black -fill white -draw "roundrectangle 0,0,1023,1023,185,185" \) \
   -alpha off -compose CopyOpacity -composite "$TMP/bg.png"
 magick "$TMP/bg.png" \
-  \( "$URUNC_LOGO" -resize 700x700 \) -gravity center -composite \
+  \( "$HULL_LOGO" -resize 700x700 \) -gravity center -composite \
   "$TMP/appicon_1024.png"
 make_icns "$TMP/appicon_1024.png" "$OUT/AppIcon.icns"
 

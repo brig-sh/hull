@@ -37,7 +37,7 @@ import (
 )
 
 // TestMain resolves the black-box binary once for the whole package (honoring
-// URUNC_MACOS_BIN, else building on darwin) and removes any temp build dir on
+// HULL_BIN, else building on darwin) and removes any temp build dir on
 // teardown. It must live in a _test.go file for the test runner to recognize
 // it; the locate/build logic itself is resolveBinary in harness.go.
 func TestMain(m *testing.M) {
@@ -45,7 +45,7 @@ func TestMain(m *testing.M) {
 	var err error
 	binPath, skipReason, buildDir, err = resolveBinary()
 	if err != nil {
-		// A failed build or a broken URUNC_MACOS_BIN is a failure, never a
+		// A failed build or a broken HULL_BIN is a failure, never a
 		// skip: green-by-skip on a non-compiling SUT is the worst outcome.
 		fmt.Fprintln(os.Stderr, "conformance: ", err)
 		os.Exit(1)
@@ -59,7 +59,7 @@ func TestMain(m *testing.M) {
 
 // TestSourcesAreCacheInputs reads every source file of the binary under test
 // so the go test cache records them as inputs. This package imports nothing
-// from cmd/urunc-macos — the binary is built by shelling out — so without
+// from cmd/hull — the binary is built by shelling out — so without
 // these reads a cached PASS would survive changes to the very parser the
 // suite exists to test. The reads must happen inside a test function: the
 // testing framework only records cache inputs during m.Run, so doing this in
@@ -185,7 +185,7 @@ func caseProfiles(t *testing.T) {
 
 	// Divergence, per the manifest notes: a dependency no active profile
 	// enables is an error, not an automatic activation. compose-go's own
-	// consistency check (run inside compose.Load, before urunc-macos's code
+	// consistency check (run inside compose.Load, before hull's code
 	// ever sees the project) raises this, in its own wording — the disabled
 	// target is invisible to GetService, so it reads exactly like a
 	// depends_on target that does not exist at all, which is the structural
@@ -291,7 +291,7 @@ func caseProfiles(t *testing.T) {
 	// (loader.go), so a profile-disabled service is invisible to it —
 	// 'broken' below has no image and stays disabled, and load succeeds.
 	// This is compose-go's (and so docker's) own load order, not a gap
-	// urunc-macos introduces; the assertion is pinned so a future
+	// hull introduces; the assertion is pinned so a future
 	// compose-go bump that reorders this is caught rather than silently
 	// passing.
 	invalid := runConfig(t, writeFixture(t, `services:
@@ -921,7 +921,7 @@ func caseNamedVolumeDeclarations(t *testing.T) {
 	requireNoWarnings(t, res)
 
 	// compose-go's own consistency check catches an undeclared named volume
-	// before urunc-macos's code ever sees it, in its own wording.
+	// before hull's code ever sees it, in its own wording.
 	undeclared := write("undeclared.yaml", "services:\n  web:\n    image: alpine:3.19\n    volumes:\n      - vdata:/data\n")
 	u := runConfig(t, undeclared)
 	requireExitNonZero(t, u)
@@ -1021,7 +1021,7 @@ func caseInclude(t *testing.T) {
 // caseLabelFile pins a behavior change the generic unsupportedServiceCase
 // probe cannot: compose-go reads and parses a declared label_file during
 // load (to populate the service's resolved Labels), even though nothing in
-// urunc-macos's runtime path ever reads svc.Labels — the key still warns as
+// hull's runtime path ever reads svc.Labels — the key still warns as
 // unsupported, but a label file that does not exist now fails the load
 // instead of being silently unreachable decoration.
 func caseLabelFile(t *testing.T) {
@@ -1093,9 +1093,9 @@ func cliAbsentCase(verb string) staticCase {
 
 // serviceKeyValue returns a type-appropriate YAML value for a probed service
 // key. The warning walker never recurses into an unsupported service key, so
-// urunc-macos itself never reads the value — but compose-go validates every
+// hull itself never reads the value — but compose-go validates every
 // recognized key's SHAPE against the compose-spec JSON schema before urunc
-// ever sees it, even keys urunc-macos ignores. A shape mismatch (e.g. a bare
+// ever sees it, even keys hull ignores. A shape mismatch (e.g. a bare
 // string for a key the schema models as an object) makes compose-go fail the
 // load with a schema error, which would mask the "ignoring unsupported key"
 // warning this test exists to prove. The value therefore must be schema-valid
@@ -1141,7 +1141,7 @@ func serviceKeyValue(key string) string {
 // topLevelKeyValue returns a type-appropriate YAML value for a probed
 // top-level key (a mapping for the collection elements, a scalar otherwise).
 // As with serviceKeyValue, compose-go schema-validates every recognized
-// top-level key regardless of whether urunc-macos reads it, so the probe
+// top-level key regardless of whether hull reads it, so the probe
 // value must satisfy that key's shape. secrets/configs/models go further:
 // compose-go additionally requires a resource-declaration block to name a
 // source (file|environment[|content], or the model name itself), so a bare

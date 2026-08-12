@@ -25,14 +25,14 @@ not apply, rather than deleting or rewording them. Keep the reasoning in
 Summary or Changes, not here.
 
 `make test` runs the Go unit suite and the static conformance tier;
-`make macos` builds and ad-hoc signs urunc-macos + vz-runner. The PTY and
+`make macos` builds and ad-hoc signs hull + vz-runner. The PTY and
 shared-folder harnesses under test/ boot real VMs and need an Apple Silicon
 host with working HVF. See CONTRIBUTING.md.
 -->
 
 - [ ] `make test` passes (unit + static conformance)
 - [ ] `make conformance-report` leaves `docs/compose-conformance.md` unchanged
-- [ ] `make macos` builds urunc-macos + vz-runner, if Go or Swift code changed
+- [ ] `make macos` builds hull + vz-runner, if Go or Swift code changed
 - [ ] I have added or updated tests covering the change
 - [ ] I have run the PTY / shared-folder e2e harnesses (`test/*.py`) for changes touching boot, console, or the run path
 - [ ] I have updated the affected docs (README, `docs/`)

@@ -43,7 +43,7 @@ hooks already had.
 
 ## What made the runtime verification possible
 
-The published agent image is x86_64-only and urunc-macos launches
+The published agent image is x86_64-only and hull launches
 `qemu-system-aarch64`/HVF exclusively, so it cannot boot here. The fixture
 used instead: the Bunny-built `urunc-ubuntu-vz:aarch64` base (its
 `urunc.json` identity rides the rootfs) plus `/urunit-agent` cross-built
@@ -76,7 +76,7 @@ policies, and run-path spec application (entrypoint, user, working_dir).
 One indirect payoff exceeds the score motion: the `darwin-exec`
 reconciliation brought `ProcessConfig` (uid/gid/cwd) and guest-hostname
 plumbing into the shared library (`buildExecContext` on the linux path;
-urunc-macos reaches the same plumbing through `BuildUrunitConfig`, which it
+hull reaches the same plumbing through `BuildUrunitConfig`, which it
 already calls). That is exactly the foundation `service.user`,
 `service.working_dir`, `service.entrypoint` and `service.hostname` need —
 four more capabilities, without new upstream work. That is the

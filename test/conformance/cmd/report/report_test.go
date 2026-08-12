@@ -20,7 +20,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	conformance "github.com/nofireai/urunc-macos/test/conformance"
+	conformance "github.com/brig-sh/hull/test/conformance"
 )
 
 // update regenerates the golden file instead of comparing against it.

@@ -13,7 +13,7 @@ Measured against the pinned compose-spec schema snapshot (commit `0123456789abcd
 
 Full-spec coverage: **30.0%** of all 5 capabilities; 1 are declared out of scope by [ADR-0003](adr/0003-compose-out-of-scope.md) (structurally foreclosed: orchestration, cross-VM namespace sharing, Windows-only, Docker-platform machinery, device passthrough). Out-of-scope keys still warn loudly and stay tested.
 
-**Tier** — `static` entries are verified in CI without booting a VM; `runtime` entries are verified only where the runtime suite runs (`URUNC_CONFORMANCE_RUNTIME=1`, self-hosted runner or a developer Mac).
+**Tier** — `static` entries are verified in CI without booting a VM; `runtime` entries are verified only where the runtime suite runs (`HULL_CONFORMANCE_RUNTIME=1`, self-hosted runner or a developer Mac).
 
 ## Scores by area
 

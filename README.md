@@ -14,16 +14,16 @@ Team installs go through the private tap
 which serves the signed + notarized binaries from GitHub releases:
 
 ```bash
-# one-time: a fine-grained PAT with contents:read on NOFireAI/urunc-macos,
+# one-time: a fine-grained PAT with contents:read on brig-sh/hull,
 # used by brew to download release assets from the private repo
 export HOMEBREW_GITHUB_API_TOKEN=github_pat_...
 
 brew tap nofireai/nofire git@github.com:NOFireAI/homebrew-nofire.git
 brew trust nofireai/nofire   # newer brew refuses untrusted third-party taps
-brew install urunc-macos
+brew install hull
 ```
 
-The formula installs `urunc-macos` and `vz-runner` side by side (the CLI
+The formula installs `hull` and `vz-runner` side by side (the CLI
 discovers the runner next to its own executable) and pulls in `e2fsprogs`
 for block-rootfs mode. The [QEMU](https://www.qemu.org/) backend stays
 optional: `brew install qemu`.
@@ -31,7 +31,7 @@ optional: `brew install qemu`.
 Check it works:
 
 ```bash
-urunc-macos --help
+hull --help
 ```
 
 ## Quick start
@@ -56,28 +56,28 @@ docker build -t ttl.sh/my-nginx:1h .
 docker push ttl.sh/my-nginx:1h
 
 # Run with Virtualization.framework
-urunc-macos run --hypervisor vz --mem 512 --cpus 2 --net shared ttl.sh/my-nginx:1h
+hull run --hypervisor vz --mem 512 --cpus 2 --net shared ttl.sh/my-nginx:1h
 
 # Run with QEMU
-urunc-macos run --hypervisor qemu --mem 512 --cpus 2 --net shared ttl.sh/my-nginx:1h
+hull run --hypervisor qemu --mem 512 --cpus 2 --net shared ttl.sh/my-nginx:1h
 ```
 
 ### Instance Management
 
 ```bash
 # Run detached
-ID=$(urunc-macos run -d --hypervisor vz --net shared ttl.sh/my-nginx:1h)
+ID=$(hull run -d --hypervisor vz --net shared ttl.sh/my-nginx:1h)
 
 # List instances
-urunc-macos ps
+hull ps
 
 # View logs
-urunc-macos logs $ID
-urunc-macos logs -f $ID   # follow
+hull logs $ID
+hull logs -f $ID   # follow
 
 # Stop and remove
-urunc-macos stop $ID
-urunc-macos rm $ID
+hull stop $ID
+hull rm $ID
 ```
 
 ## Supported backends
@@ -102,7 +102,7 @@ the manifest in `test/conformance/`; ADR
 
 ## Building from source
 
-Only needed to work on urunc-macos itself — to *use* it, install from the tap
+Only needed to work on hull itself — to *use* it, install from the tap
 above.
 
 ### Requirements
@@ -169,7 +169,7 @@ Once darwin support lands upstream, drop the `replace` and require a released
 
 ### The app bundle and installer
 
-`make app` wraps both binaries into `urunc-macos.app` (urunc CNCF mark as the
+`make app` wraps both binaries into `hull.app` (urunc CNCF mark as the
 app icon; vz-runner rides inside `Contents/MacOS`, so sibling discovery
 works from `/Applications`). `make dmg` produces the drag-to-Applications
 installer: styled background, NOFire volume icon, `/Applications` drop link,
@@ -177,7 +177,7 @@ signed + notarized + stapled. After dragging to Applications, put the CLI on
 your PATH with:
 
 ```bash
-ln -s /Applications/urunc-macos.app/Contents/MacOS/urunc-macos ~/.local/bin/urunc-macos
+ln -s /Applications/hull.app/Contents/MacOS/hull ~/.local/bin/hull
 ```
 
 Packaging assets live in `packaging/` and are regenerated from the vendored
@@ -206,18 +206,18 @@ It needs five repository secrets:
 Set them with:
 
 ```bash
-gh secret set MACOS_CERT_P12 --repo NOFireAI/urunc-macos < cert.p12.b64
-gh secret set MACOS_CERT_PASSWORD --repo NOFireAI/urunc-macos
-gh secret set NOTARY_KEY_P8 --repo NOFireAI/urunc-macos < AuthKey_XXXX.p8
-gh secret set NOTARY_KEY_ID --repo NOFireAI/urunc-macos
-gh secret set NOTARY_ISSUER_ID --repo NOFireAI/urunc-macos
+gh secret set MACOS_CERT_P12 --repo brig-sh/hull < cert.p12.b64
+gh secret set MACOS_CERT_PASSWORD --repo brig-sh/hull
+gh secret set NOTARY_KEY_P8 --repo brig-sh/hull < AuthKey_XXXX.p8
+gh secret set NOTARY_KEY_ID --repo brig-sh/hull
+gh secret set NOTARY_ISSUER_ID --repo brig-sh/hull
 ```
 
 urunc on macOS consists of three binaries:
 
 | Binary | Language | Description |
 |--------|----------|-------------|
-| `urunc-macos` | Go | CLI for pulling OCI images and orchestrating VM lifecycle |
+| `hull` | Go | CLI for pulling OCI images and orchestrating VM lifecycle |
 | `vz-runner` | Swift | Virtualization.framework backend (launches VZVirtualMachine) |
 | `containerd-shim-urunc-v2` | Go | containerd shim (for containerd integration) |
 
@@ -230,15 +230,15 @@ brew install go qemu e2fsprogs
 ### Build All (quick)
 
 ```bash
-# Build urunc-macos + vz-runner and sign both with your Apple signing identity.
+# Build hull + vz-runner and sign both with your Apple signing identity.
 # Find the identity name with: security find-identity -v -p codesigning
 make macos CODESIGN_IDENTITY="Apple Development: Your Name (TEAMID)"
 
 # Verify what got signed (authority chain + entitlements)
 make codesign_verify
 
-# Symlink into the current directory (vz-runner must sit next to urunc-macos)
-ln -sf dist/urunc-macos_arm64 ./urunc-macos
+# Symlink into the current directory (vz-runner must sit next to hull)
+ln -sf dist/hull_arm64 ./hull
 ln -sf cmd/vz-runner/.build/arm64-apple-macosx/release/vz-runner ./vz-runner
 ```
 
@@ -250,7 +250,7 @@ disabled AMFI (see [System Configuration](#system-configuration)).
 
 `make sign` (invoked by `make macos`) signs `vz-runner` with the
 virtualization-only entitlements plist (`cmd/vz-runner/Entitlements-novmnet.plist`),
-signs `urunc-macos`, and strips the quarantine attribute from both.
+signs `hull`, and strips the quarantine attribute from both.
 
 **Keychain prerequisite.** Signing with an Apple identity needs the full trust
 chain in your keychain: your leaf certificate **plus** the *Apple Worldwide
@@ -272,7 +272,7 @@ AirDrop, a download, or file sharing, macOS tags them with
 built binaries are not quarantined. `make sign` strips it; to do it by hand:
 
 ```bash
-xattr -dr com.apple.quarantine ./urunc-macos ./vz-runner
+xattr -dr com.apple.quarantine ./hull ./vz-runner
 ```
 
 An *Apple Development* certificate is enough for local use once quarantine is
@@ -282,15 +282,15 @@ a **Developer ID Application** certificate and notarize (see
 
 Or build each component individually:
 
-### 1. urunc-macos (Go CLI)
+### 1. hull (Go CLI)
 
 ```bash
 # Using make
 make urunc_macos
-# Output: dist/urunc-macos_arm64
+# Output: dist/hull_arm64
 
 # Or directly with go build
-go build -o urunc-macos ./cmd/urunc-macos/
+go build -o hull ./cmd/hull/
 ```
 
 ### 2. vz-runner (Swift — Virtualization.framework)
@@ -375,12 +375,12 @@ Then configure urunc to use the signed binary (see [urunc configuration](#urunc-
 
 ### Installation
 
-Place the binaries where urunc-macos can find them. `vz-runner` must be in
-the same directory as `urunc-macos` (it is located via `os.Executable()`):
+Place the binaries where hull can find them. `vz-runner` must be in
+the same directory as `hull` (it is located via `os.Executable()`):
 
 ```bash
 # Option A: install to /usr/local/bin
-sudo cp dist/urunc-macos_arm64 /usr/local/bin/urunc-macos
+sudo cp dist/hull_arm64 /usr/local/bin/hull
 sudo cp cmd/vz-runner/.build/arm64-apple-macosx/release/vz-runner /usr/local/bin/vz-runner
 
 # Re-sign vz-runner after copying (entitlements are stripped on copy)
@@ -389,15 +389,15 @@ sudo codesign --force --sign - \
   /usr/local/bin/vz-runner
 
 # Option B: run from the build directory
-ln -sf dist/urunc-macos_arm64 ./urunc-macos
+ln -sf dist/hull_arm64 ./hull
 ln -sf cmd/vz-runner/.build/arm64-apple-macosx/release/vz-runner ./vz-runner
 ```
 
 ### Verify Installation
 
 ```bash
-# Check urunc-macos
-./urunc-macos --help
+# Check hull
+./hull --help
 
 # Check vz-runner entitlements
 codesign -d --entitlements :- ./vz-runner 2>/dev/null | grep -c virtualization
@@ -409,8 +409,8 @@ qemu-system-aarch64 --version
 
 ### urunc Configuration
 
-urunc-macos looks for the QEMU binary in a config file or uses the system
-default. To point it at a signed QEMU binary, create `~/.urunc-macos/config.json`:
+hull looks for the QEMU binary in a config file or uses the system
+default. To point it at a signed QEMU binary, create `~/.hull/config.json`:
 
 ```json
 {
@@ -431,11 +431,11 @@ binary (`vz-runner`). It provides the best network throughput and tightest
 macOS integration.
 
 ```bash
-./urunc-macos run --hypervisor vz --mem 2048 --cpus 4 --net shared <image>
+./hull run --hypervisor vz --mem 2048 --cpus 4 --net shared <image>
 ```
 
 **How it works:**
-- `urunc-macos` prepares the rootfs and kernel command line
+- `hull` prepares the rootfs and kernel command line
 - Launches `vz-runner` with `--kernel`, `--cmdline`, `--share` (virtiofs) or `--rootfs` (block)
 - `vz-runner` creates a `VZVirtualMachine`, attaches serial console to stdin/stdout
 - Guest kernel boots with `root=rootfs rootfstype=virtiofs` (virtiofs mode) or `root=/dev/vda` (block mode)
@@ -450,11 +450,11 @@ The QEMU backend uses `qemu-system-aarch64` with `-accel hvf` for
 hardware-accelerated virtualization.
 
 ```bash
-./urunc-macos run --hypervisor qemu --mem 2048 --cpus 4 --net shared <image>
+./hull run --hypervisor qemu --mem 2048 --cpus 4 --net shared <image>
 ```
 
 **How it works:**
-- `urunc-macos` builds the QEMU command line with HVF, vmnet-shared, and 9pfs/block device
+- `hull` builds the QEMU command line with HVF, vmnet-shared, and 9pfs/block device
 - Guest kernel boots with `root=rootfs rootfstype=9p rootflags=trans=virtio,version=9p2000.L` (9pfs mode) or `root=/dev/vda` (block mode)
 
 **Requirements:**
@@ -482,7 +482,7 @@ overlayfs layer with a tmpfs upper dir is mounted on top to handle writes
 and work around macOS virtiofs limitations (mode-000 files).
 
 ```bash
-./urunc-macos run --hypervisor vz <image>
+./hull run --hypervisor vz <image>
 ```
 
 ### 9pfs (QEMU default)
@@ -491,7 +491,7 @@ The container rootfs directory is shared via QEMU's built-in 9p filesystem
 with `security_model=none`. No overlay needed.
 
 ```bash
-./urunc-macos run --hypervisor qemu <image>
+./hull run --hypervisor qemu <image>
 ```
 
 ### ext4 block device
@@ -502,8 +502,8 @@ without the limitations of virtiofs or 9pfs.
 
 ```bash
 # Works with both backends
-./urunc-macos run --hypervisor vz --rootfs-type block <image>
-./urunc-macos run --hypervisor qemu --rootfs-type block <image>
+./hull run --hypervisor vz --rootfs-type block <image>
+./hull run --hypervisor qemu --rootfs-type block <image>
 ```
 
 Requires: `brew install e2fsprogs`
@@ -511,11 +511,11 @@ Requires: `brew install e2fsprogs`
 ## CLI Reference
 
 ```
-urunc-macos [global flags] <command> [flags] [args]
+hull [global flags] <command> [flags] [args]
 
 Global Flags:
   --debug         Enable debug logging
-  --store-dir     State directory (default: ~/.urunc-macos)
+  --store-dir     State directory (default: ~/.hull)
 
 Commands:
   run             Create and run a unikernel
@@ -590,7 +590,7 @@ sub-100ms boot times.
 
 ```
 ┌──────────────────────────────────────────────────┐
-│  urunc-macos CLI (Go)                            │
+│  hull CLI (Go)                            │
 │  Pull OCI image → prepare rootfs → build cmdline │
 └──────────┬───────────────────────┬───────────────┘
            │                       │
@@ -614,7 +614,7 @@ sub-100ms boot times.
 
 ### Init Wrappers
 
-urunc-macos injects a small shell script as `init=` to set up the guest
+hull injects a small shell script as `init=` to set up the guest
 environment before handing off to `urunit` (or the user's entrypoint):
 
 | Wrapper | Backend | What it does |
@@ -657,7 +657,7 @@ The binary carries a `com.apple.quarantine` attribute (set when it was
 AirDropped, downloaded, or file-shared). Strip it:
 
 ```bash
-xattr -dr com.apple.quarantine ./urunc-macos ./vz-runner
+xattr -dr com.apple.quarantine ./hull ./vz-runner
 ```
 
 `make sign` does this automatically. Locally built binaries are never
@@ -667,7 +667,7 @@ quarantined.
 
 Foreground `run` makes vz-runner's controlling terminal your stdin, which fails
 (`ENODEV`) when stdin is not a real TTY (e.g. run from a script, pipe, or `nohup`).
-Use `--detach` and read output with `urunc-macos logs`, or run from an
+Use `--detach` and read output with `hull logs`, or run from an
 interactive terminal.
 
 ### "cannot create vmnet interface: general failure"
@@ -761,8 +761,8 @@ team — not available on a free account.
    `git tag v$(cat VERSION) && git push origin v$(cat VERSION)`.
 2. The *Sign and Notarize* workflow runs on the tag: it builds, signs with
    Developer ID, notarizes, and creates the GitHub release with the dmg and
-   the Homebrew tarball (`urunc-macos-<version>-arm64.tar.gz` + sha256).
-3. Update `Formula/urunc-macos.rb` in the tap with the new version URL and
+   the Homebrew tarball (`hull-<version>-arm64.tar.gz` + sha256).
+3. Update `Formula/hull.rb` in the tap with the new version URL and
    the sha256 printed in the workflow's job summary.
 
 ## License

@@ -73,7 +73,7 @@ import (
 	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/urfave/cli/v3"
 
-	"github.com/nofireai/urunc-macos/pkg/store"
+	"github.com/brig-sh/hull/pkg/store"
 )
 
 // restartMode is a compose 'restart:' value.
@@ -622,7 +622,7 @@ func (ps *projectSupervisor) restart(t supervisedService) error {
 	if st, err := ps.store.GetInstance(t.instance); err == nil {
 		// A deliberate 'stop' outranks the restart policy, for every policy
 		// and not just unless-stopped: docker's restart manager makes the
-		// same call, and without it 'urunc-macos stop' on a supervised
+		// same call, and without it 'hull stop' on a supervised
 		// service is undone within one poll.
 		if st.StoppedByUser {
 			return nil

@@ -30,7 +30,7 @@ import (
 
 const fakeStack = `goroutine 1 [running]:
 main.runInstance(0x14000..., 0x1)
-	/Users/somebody/develop/urunc-macos/cmd/urunc-macos/run.go:412 +0x1a4
+	/Users/somebody/develop/hull/cmd/hull/run.go:412 +0x1a4
 github.com/sirupsen/logrus.(*Entry).Debugf(...)
 	/Users/somebody/go/pkg/mod/github.com/sirupsen/logrus@v1.9.4/entry.go:314 +0x88
 runtime.main()
@@ -45,7 +45,7 @@ func TestScrubStackRemovesLocalPaths(t *testing.T) {
 		}
 	}
 	for _, keep := range []string{
-		"urunc-macos/cmd/urunc-macos/run.go:412",
+		"hull/cmd/hull/run.go:412",
 		"pkg/mod/github.com/sirupsen/logrus@v1.9.4/entry.go:314",
 		"src/runtime/proc.go:283",
 	} {
@@ -175,14 +175,14 @@ func TestUploadKeepsQueueOnFailure(t *testing.T) {
 }
 
 func TestScrubStackHandlesSpacesInPaths(t *testing.T) {
-	stack := "goroutine 1 [running]:\nmain.runInstance(...)\n\t/Users/John Doe/develop/urunc-macos/cmd/urunc-macos/run.go:412 +0x1a4\n"
+	stack := "goroutine 1 [running]:\nmain.runInstance(...)\n\t/Users/John Doe/develop/hull/cmd/hull/run.go:412 +0x1a4\n"
 	scrubbed := scrubStack(stack)
 	for _, leak := range []string{"John", "/Users/"} {
 		if strings.Contains(scrubbed, leak) {
 			t.Errorf("scrubbed stack leaks %q:\n%s", leak, scrubbed)
 		}
 	}
-	if !strings.Contains(scrubbed, "urunc-macos/cmd/urunc-macos/run.go:412") {
+	if !strings.Contains(scrubbed, "hull/cmd/hull/run.go:412") {
 		t.Errorf("scrubbed stack lost the frame:\n%s", scrubbed)
 	}
 }

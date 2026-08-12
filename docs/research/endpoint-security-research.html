@@ -577,7 +577,7 @@
 
 <div class="card card-accent">
 <h3>Can ES Monitor Container-Like Workloads?</h3>
-<p><strong>Yes, with caveats.</strong> EndpointSecurity operates at the system level and sees all processes on the host, regardless of whether they run inside a VM, a sandbox, or a container-like construct. For your urunc-macos use case (Virtualization.framework VMs and QEMU+HVF VMs):</p>
+<p><strong>Yes, with caveats.</strong> EndpointSecurity operates at the system level and sees all processes on the host, regardless of whether they run inside a VM, a sandbox, or a container-like construct. For your hull use case (Virtualization.framework VMs and QEMU+HVF VMs):</p>
 
 <ul>
   <li><strong>Host-side process monitoring</strong>: ES can observe the VM hypervisor process itself (qemu, vz-runner), its file access patterns, mount operations, and any child processes it spawns on the host</li>
@@ -603,7 +603,7 @@
 <div class="card card-warn">
 <h3>sandbox-exec vs ES for Container Isolation</h3>
 <p>An <a href="https://github.com/apple/containerization/issues/737">open issue in Apple's containerization repo</a> highlights the tension: <code>sandbox-exec</code> (Seatbelt) remains the only documented way to apply declarative sandbox profiles to arbitrary processes without App Store enrollment, but it is deprecated with no formal removal timeline. ES provides observation and authorization callbacks but not declarative per-process sandbox profiles.</p>
-<p>For urunc-macos, a combined approach could work: use ES AUTH events to monitor and gate host-side operations performed by the hypervisor process, while relying on the VM boundary itself for guest isolation.</p>
+<p>For hull, a combined approach could work: use ES AUTH events to monitor and gate host-side operations performed by the hypervisor process, while relying on the VM boundary itself for guest isolation.</p>
 </div>
 
 <!-- 11. Limitations -->

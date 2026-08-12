@@ -2,14 +2,14 @@
 
 **Status**: Accepted
 **Date**: 2026-07-29
-**Context**: How to measure and publish, continuously and honestly, how much of the docker-compose spec `urunc-macos compose` supports, what diverges, and what the security tradeoffs of each supported capability are
+**Context**: How to measure and publish, continuously and honestly, how much of the docker-compose spec `hull compose` supports, what diverges, and what the security tradeoffs of each supported capability are
 
 ---
 
 ## Context
 
-`urunc-macos compose` implements a deliberate subset of the compose spec: a
-hand-rolled YAML parser (`cmd/urunc-macos/compose.go`) with an 11-key service
+`hull compose` implements a deliberate subset of the compose spec: a
+hand-rolled YAML parser (`cmd/hull/compose.go`) with an 11-key service
 allowlist, one flat network per project, bind mounts only, TCP-only port
 publishing, and urunc-specific extensions (`x-hypervisor`,
 `x-healthcheck-tcp`). That subset is documented prose-style in
@@ -89,11 +89,11 @@ Two tiers, selected by environment:
   `compose config` subcommand (validate + print effective config), which this
   epic adds. Most of the matrix — key acceptance, rejection messages,
   divergent value normalization — is verifiable here.
-- **Runtime tier** (`URUNC_CONFORMANCE_RUNTIME=1`, self-hosted runner or a
+- **Runtime tier** (`HULL_CONFORMANCE_RUNTIME=1`, self-hosted runner or a
   developer Mac): boots real VMs to verify behavior that parsing can't —
   port publishing, DNS/service discovery, healthcheck gating, depends_on
-  ordering, volume writes. Uses the existing `URUNC_TEST_IMAGE` /
-  `URUNC_STORE_DIR` env contract from `test/share-test.py`.
+  ordering, volume writes. Uses the existing `HULL_TEST_IMAGE` /
+  `HULL_STORE_DIR` env contract from `test/share-test.py`.
 
 To make the "unsupported = loud" invariant true, the epic also fixes the
 silent top-level key drop: `warnIgnoredKeys` (or its replacement) must warn on

@@ -64,7 +64,7 @@ services:
 		"secrets":        `warning: compose: ignoring unsupported key "secrets": secrets are not implemented; pass the value through the service's 'environment' instead`,
 		"configs":        `warning: compose: ignoring unsupported key "configs": configs are not implemented; bind-mount the file through the service's 'volumes' list instead`,
 		"models":         `warning: compose: ignoring unsupported key "models": model definitions are not implemented`,
-		"bogus":          `warning: compose: ignoring unsupported key "bogus": urunc-macos compose reads only the top-level 'services' key`,
+		"bogus":          `warning: compose: ignoring unsupported key "bogus": hull compose reads only the top-level 'services' key`,
 		"x-anchors":      `warning: compose: ignoring unsupported key "x-anchors": top-level extension keys are not interpreted; a YAML anchor defined here still merges where it is referenced`,
 	}
 
@@ -121,9 +121,9 @@ services:
 		"deploy":            `warning: compose: ignoring unsupported key "services.web.deploy": deploy (replicas, resource reservations, placement) is not implemented; one service is exactly one VM`,
 		"entrypoint":        `warning: compose: ignoring unsupported key "services.web.entrypoint": the image entrypoint cannot be overridden; put the whole command line in 'command'`,
 		"networks":          `warning: compose: ignoring unsupported key "services.web.networks": every service joins the single flat project network; per-service network selection is ignored`,
-		"healthcheck.bogus": `warning: compose: ignoring unsupported key "services.web.healthcheck.bogus": not supported by urunc-macos compose; the exec probe reads test, interval, timeout, retries, start_period and disable`,
-		"labels":            `warning: compose: ignoring unsupported key "services.web.labels": not supported by urunc-macos compose (see docs/compose.md for the supported service keys)`,
-		"x-unknown":         `warning: compose: ignoring unsupported key "services.web.x-unknown": unknown extension key; urunc-macos compose defines only x-hypervisor and x-healthcheck-tcp`,
+		"healthcheck.bogus": `warning: compose: ignoring unsupported key "services.web.healthcheck.bogus": not supported by hull compose; the exec probe reads test, interval, timeout, retries, start_period and disable`,
+		"labels":            `warning: compose: ignoring unsupported key "services.web.labels": not supported by hull compose (see docs/compose.md for the supported service keys)`,
+		"x-unknown":         `warning: compose: ignoring unsupported key "services.web.x-unknown": unknown extension key; hull compose defines only x-hypervisor and x-healthcheck-tcp`,
 		// The same unsupported key on a second service must warn again: a
 		// regression that deduped by bare key name across services would
 		// otherwise pass.
@@ -131,7 +131,7 @@ services:
 		// Nested mappings the parser looks inside are checked too.
 		"depends_on.restart":        `warning: compose: ignoring unsupported key "services.web.depends_on.db.restart": restarting a dependent when its dependency restarts is not implemented`,
 		"x-healthcheck-tcp.timeout": `warning: compose: ignoring unsupported key "services.web.x-healthcheck-tcp.timeout": there is no per-probe timeout; size the wait with 'retries' and 'start_period'`,
-		"x-healthcheck-tcp.bogus":   `warning: compose: ignoring unsupported key "services.web.x-healthcheck-tcp.bogus": not supported by urunc-macos compose; the TCP probe reads port, interval, retries and start_period`,
+		"x-healthcheck-tcp.bogus":   `warning: compose: ignoring unsupported key "services.web.x-healthcheck-tcp.bogus": not supported by hull compose; the TCP probe reads port, interval, retries and start_period`,
 	}
 	// Note: the original bespoke fixture also asserts a warning for
 	// declaring both healthcheck forms ("both healthcheck and

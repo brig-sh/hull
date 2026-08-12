@@ -1,5 +1,5 @@
 // Package compose wraps compose-spec/compose-go's project loader with the
-// urunc-macos-specific behavior (file-size caps, the urunc x-* extensions)
+// hull-specific behavior (file-size caps, the urunc x-* extensions)
 // layered on top of the typed *types.Project model it returns.
 package compose
 
@@ -15,14 +15,14 @@ import (
 const (
 	// XHypervisorKey and XOneShotKey are exported so callers that need to
 	// synthesize these extensions (compose config's hydration of computed
-	// values, cmd/urunc-macos/compose.go) write the same key Hypervisor and
+	// values, cmd/hull/compose.go) write the same key Hypervisor and
 	// OneShot read, instead of duplicating the string literal.
 	XHypervisorKey = "x-hypervisor"
 	XOneShotKey    = "x-oneshot"
 	xHealthTCPKey  = "x-healthcheck-tcp"
 )
 
-// HealthTCP mirrors the bespoke healthTCP (cmd/urunc-macos/compose.go:453):
+// HealthTCP mirrors the bespoke healthTCP (cmd/hull/compose.go:453):
 // x-healthcheck-tcp accepts a bare port (x-healthcheck-tcp: 5432) or a
 // mapping with docker-style tuning: {port, interval, retries, start_period}.
 // The probe itself is a plain TCP connect: it proves a listener exists, not

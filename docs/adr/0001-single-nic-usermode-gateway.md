@@ -2,13 +2,13 @@
 
 **Status**: Accepted
 **Date**: 2026-07-08
-**Context**: How compose services on urunc-macos get service-to-service, egress, DNS, and port-forwarding networking without breaking guest parity with urunc on Linux
+**Context**: How compose services on hull get service-to-service, egress, DNS, and port-forwarding networking without breaking guest parity with urunc on Linux
 
 ---
 
 ## Context
 
-Compose on urunc-macos maps each service to one lightweight VM. Services must
+Compose on hull maps each service to one lightweight VM. Services must
 reach each other, reach the internet, and be reachable from the host — and the
 guest-visible environment should stay 1:1 with generic urunc deployments on
 Linux, where a guest sees **one interface, statically configured by the kernel**

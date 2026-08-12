@@ -13,13 +13,13 @@
 // limitations under the License.
 
 // This file holds the black-box harness for the static-tier conformance suite
-// (ADR 0002, issue #58). It locates or builds the real urunc-macos binary and
+// (ADR 0002, issue #58). It locates or builds the real hull binary and
 // runs `compose config` against fixture files, capturing stdout, stderr and
 // the exit code.
 //
 // The package deliberately carries NO darwin build tag, so the manifest guards
 // (manifest_test.go, schema_sync_test.go) and the coverage guard build and run
-// on every host. cmd/urunc-macos is //go:build darwin, so on a non-darwin host
+// on every host. cmd/hull is //go:build darwin, so on a non-darwin host
 // the binary cannot be built: the harness records a skip reason instead of
 // failing, and TestConformanceStatic skips cleanly.
 
@@ -42,40 +42,40 @@ import (
 const projectName = "conf"
 
 // binaryImportPath is the package `go build` compiles for the black-box binary.
-const binaryImportPath = "github.com/nofireai/urunc-macos/cmd/urunc-macos"
+const binaryImportPath = "github.com/brig-sh/hull/cmd/hull"
 
 var (
-	// binPath is the resolved urunc-macos binary under test, or "" when it
+	// binPath is the resolved hull binary under test, or "" when it
 	// could not be located or built (see skipReason).
 	binPath string
 	// skipReason explains why the static suite cannot run; empty when it can.
 	skipReason string
 )
 
-// resolveBinary locates or builds the urunc-macos binary for the black-box
-// suite: honor URUNC_MACOS_BIN if set, otherwise build cmd/urunc-macos into a
+// resolveBinary locates or builds the hull binary for the black-box
+// suite: honor HULL_BIN if set, otherwise build cmd/hull into a
 // fresh temp dir on darwin. TestMain (in conformance_test.go, where the test
 // runner recognizes it) calls this once and removes buildDir on teardown.
 //
 // Skipping is reserved for exactly one condition: a non-darwin host, where the
 // darwin-only sources make the binary impossible. Everything else — a broken
-// URUNC_MACOS_BIN, a failed build, a missing toolchain — is an error, and
+// HULL_BIN, a failed build, a missing toolchain — is an error, and
 // TestMain turns it into a package failure. A suite that silently skips when
 // the SUT does not compile would report green on a broken parser.
 func resolveBinary() (bin, skip, buildDir string, err error) {
-	if v := os.Getenv("URUNC_MACOS_BIN"); v != "" {
+	if v := os.Getenv("HULL_BIN"); v != "" {
 		info, statErr := os.Stat(v)
 		if statErr != nil {
-			return "", "", "", fmt.Errorf("URUNC_MACOS_BIN=%q: %w", v, statErr)
+			return "", "", "", fmt.Errorf("HULL_BIN=%q: %w", v, statErr)
 		}
 		if info.IsDir() || info.Mode()&0o111 == 0 {
-			return "", "", "", fmt.Errorf("URUNC_MACOS_BIN=%q is not an executable file", v)
+			return "", "", "", fmt.Errorf("HULL_BIN=%q is not an executable file", v)
 		}
 		return v, "", "", nil
 	}
 	if runtime.GOOS != "darwin" {
 		return "", fmt.Sprintf(
-			"urunc-macos is a darwin-only binary (cmd/urunc-macos is //go:build darwin); "+
+			"hull is a darwin-only binary (cmd/hull is //go:build darwin); "+
 				"it cannot be built or exercised on %s/%s, so the static conformance suite is skipped",
 			runtime.GOOS, runtime.GOARCH), "", nil
 	}
@@ -83,7 +83,7 @@ func resolveBinary() (bin, skip, buildDir string, err error) {
 	if mkErr != nil {
 		return "", "", "", fmt.Errorf("could not create a build directory: %w", mkErr)
 	}
-	out := filepath.Join(dir, "urunc-macos")
+	out := filepath.Join(dir, "hull")
 	build := exec.Command("go", "build", "-o", out, binaryImportPath)
 	if combined, buildErr := build.CombinedOutput(); buildErr != nil {
 		_ = os.RemoveAll(dir)
@@ -94,16 +94,16 @@ func resolveBinary() (bin, skip, buildDir string, err error) {
 
 // recordSourceDeps reads every source file of the binary under test so the go
 // test cache treats them as inputs. This package imports nothing from
-// cmd/urunc-macos — the binary is built by shelling out — so without these
+// cmd/hull — the binary is built by shelling out — so without these
 // reads the cache would keep serving a stale PASS after the parser under test
 // changed.
 func recordSourceDeps() error {
-	srcs, err := filepath.Glob(filepath.Join("..", "..", "cmd", "urunc-macos", "*.go"))
+	srcs, err := filepath.Glob(filepath.Join("..", "..", "cmd", "hull", "*.go"))
 	if err != nil {
 		return err
 	}
 	if len(srcs) == 0 {
-		return fmt.Errorf("no cmd/urunc-macos sources found; conformance must run from test/conformance in the repo")
+		return fmt.Errorf("no cmd/hull sources found; conformance must run from test/conformance in the repo")
 	}
 	for _, s := range srcs {
 		if _, err := os.ReadFile(s); err != nil {
@@ -137,7 +137,7 @@ func runBinary(t *testing.T, args ...string) runResult {
 func runBinaryEnv(t *testing.T, env []string, args ...string) runResult {
 	t.Helper()
 	if binPath == "" {
-		t.Fatalf("no urunc-macos binary available (%s); the parent test should have gated this", skipReason)
+		t.Fatalf("no hull binary available (%s); the parent test should have gated this", skipReason)
 	}
 	var stdout, stderr bytes.Buffer
 	cmd := exec.Command(binPath, args...)

@@ -34,7 +34,7 @@ const SchemaVersion = 1
 const ConsentVersion = 1
 
 // Endpoint is the ingestion endpoint URL, injected at build time via
-// -X github.com/nofireai/urunc-macos/internal/telemetry.Endpoint=...
+// -X github.com/brig-sh/hull/internal/telemetry.Endpoint=...
 // When empty (dev builds, or until the prod endpoint ships), nothing is
 // ever sent; the debug mode still prints payloads.
 var Endpoint = ""
@@ -43,24 +43,24 @@ var Endpoint = ""
 // disable usage and crash telemetry alike, everywhere, no flags needed.
 const (
 	// EnvDisabled is our own opt-out switch.
-	EnvDisabled = "URUNC_TELEMETRY_DISABLED"
+	EnvDisabled = "HULL_TELEMETRY_DISABLED"
 	// EnvDoNotTrack is the consoledonottrack.com convention.
 	EnvDoNotTrack = "DO_NOT_TRACK"
 	// EnvDebug prints every payload to stderr instead of sending it.
-	EnvDebug = "URUNC_TELEMETRY_DEBUG"
+	EnvDebug = "HULL_TELEMETRY_DEBUG"
 	// EnvProduct lets the urunc-claude and urunc-claude-desktop
 	// wrappers attribute events to the product the user installed.
-	EnvProduct = "URUNC_TELEMETRY_PRODUCT"
+	EnvProduct = "HULL_TELEMETRY_PRODUCT"
 	// EnvEndpoint overrides the build-time Endpoint (tests, staging).
-	EnvEndpoint = "URUNC_TELEMETRY_ENDPOINT"
+	EnvEndpoint = "HULL_TELEMETRY_ENDPOINT"
 	// EnvSuppress is internal: set on child invocations of our own
 	// binary (compose self-exec, the network-gateway daemon) so one
 	// user command counts once. Not a user-facing opt-out.
-	EnvSuppress = "URUNC_TELEMETRY_SUPPRESS"
+	EnvSuppress = "HULL_TELEMETRY_SUPPRESS"
 )
 
 // DefaultProduct is used when EnvProduct is not set.
-const DefaultProduct = "urunc-macos"
+const DefaultProduct = "hull"
 
 // checksumSalt seeds the envelope integrity checksum (see Checksum).
 // Overridable at build time next to Endpoint if we ever rotate it.

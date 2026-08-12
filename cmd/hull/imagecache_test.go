@@ -22,8 +22,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nofireai/urunc-macos/pkg/ociclient"
-	"github.com/nofireai/urunc-macos/pkg/store"
+	"github.com/brig-sh/hull/pkg/ociclient"
+	"github.com/brig-sh/hull/pkg/store"
 )
 
 const (
@@ -82,7 +82,7 @@ func TestCachedDigestHit(t *testing.T) {
 // The regression. Interrupting a pull could leave image.json with no rootfs.
 // resolveImageDigest used to return that digest anyway, so every later run
 // died with "failed to copy rootfs: no such file or directory" and the only
-// escape was rm -rf ~/.urunc-macos. A miss here means the caller re-pulls and
+// escape was rm -rf ~/.hull. A miss here means the caller re-pulls and
 // the store heals itself.
 func TestCachedDigestMissesImageWithoutRootfs(t *testing.T) {
 	s := newCacheTestStore(t)

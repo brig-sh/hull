@@ -36,7 +36,7 @@ if [ $? -eq 0 ]; then
     echo ""
     echo "2. Or run directly:"
     echo "   cd $PROJECT_DIR"
-    echo "   ./dist/urunc-macos_arm64 run --hypervisor qemu --mem 512 --cpus 2 localhost/ubuntu-qemu:aarch64"
+    echo "   ./dist/hull_arm64 run --hypervisor qemu --mem 512 --cpus 2 localhost/ubuntu-qemu:aarch64"
 else
     echo ""
     echo "❌ Build failed"

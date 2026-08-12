@@ -1,4 +1,4 @@
-# Contributing to urunc-macos
+# Contributing to hull
 
 This repository follows the NOFire AI engineering Git guidelines,
 reproduced in full below so the repo is self-contained. Repo-specific
@@ -6,12 +6,12 @@ notes come first.
 
 ## Repo specifics
 
-- Build: `make macos` builds and ad-hoc signs the `urunc-macos` CLI and
+- Build: `make macos` builds and ad-hoc signs the `hull` CLI and
   the Swift `vz-runner`. See the Makefile header for signing knobs
   (`CODESIGN_IDENTITY`, `VZ_ENTITLEMENTS`).
 - Test: `make test` runs the Go unit suite and the static conformance
   tier. The runtime conformance tier boots real VMs and is gated behind
-  `URUNC_CONFORMANCE_RUNTIME=1` (see `test/conformance/runtime_test.go`
+  `HULL_CONFORMANCE_RUNTIME=1` (see `test/conformance/runtime_test.go`
   for the env contract).
 - Conformance report: `docs/compose-conformance.md` is generated. After
   touching `test/conformance/capabilities.yaml` or the report tool, run

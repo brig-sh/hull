@@ -200,7 +200,7 @@ func (c *Client) InstallID() string {
 // documented in docs/telemetry.md. Delivery happens on a background
 // goroutine so an unreachable endpoint never stalls the user command;
 // exit paths call Flush for a bounded grace. Failure is never
-// reported. With URUNC_TELEMETRY_DEBUG=1 the payload is printed to
+// reported. With HULL_TELEMETRY_DEBUG=1 the payload is printed to
 // stderr instead of being sent.
 func (c *Client) Send(event string, fields map[string]string) {
 	if !c.Enabled() {

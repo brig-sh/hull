@@ -1,11 +1,11 @@
-# Supporting docker-compose recipes on urunc-macos
+# Supporting docker-compose recipes on hull
 
 > **Usage docs**: for how to use the shipped `compose` command, see
 > [`compose.md`](./compose.md). This document is the design/gap analysis
 > that informed it.
 
 Status: exploration (2026-07-08). Based on a code-level inventory of
-`cmd/urunc-macos`, `pkg/store`, `pkg/ociclient`, and the urunc darwin
+`cmd/hull`, `pkg/store`, `pkg/ociclient`, and the urunc darwin
 backends (`vz_darwin.go`, `qemu_darwin.go`, vz-runner).
 
 ## Model
@@ -203,7 +203,7 @@ primitives, block-mode guest-path mounts, fuller compose-spec fidelity
 
 ## Open questions
 
-1. Separate `urunc-compose` binary vs `urunc-macos compose` subcommand?
+1. Separate `urunc-compose` binary vs `hull compose` subcommand?
    (Subcommand keeps the vz-runner-beside-binary discovery trivial.)
 2. Should the compose supervisor run foreground-per-service (owns PIDs,
    reliable exit detection) or reuse detached mode + polling?

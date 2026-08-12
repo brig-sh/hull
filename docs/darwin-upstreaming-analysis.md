@@ -50,7 +50,7 @@ upstream cohesion.
 
 **Who drives `create`/`start`/`delete`/`kill` on macOS?** On Linux it is
 containerd via the shim. macOS has no containerd; the product CLI
-(`urunc-macos`, private repo) calls a `run` path directly. So implementing the
+(`hull`, private repo) calls a `run` path directly. So implementing the
 full OCI lifecycle on darwin has, today, **no consumer**. Two honest stances:
 
 - **(S1) Scope darwin to `run`** and say so — the binary is a launcher, not an

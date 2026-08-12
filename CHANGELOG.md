@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to urunc-macos. Generated from the Conventional-Commits
+All notable changes to hull. Generated from the Conventional-Commits
 history; each entry links to the PR that introduced it.
 ## [0.1.0-rc18] - 2026-08-09
 
@@ -185,7 +185,7 @@ history; each entry links to the PR that introduced it.
 
 ### Tests
 
-- Tolerate the job ending before ^C in job-control test ([#34](https://github.com/NOFireAI/urunc-macos/pull/34))
+- Tolerate the job ending before ^C in job-control test ([#34](https://github.com/brig-sh/hull/pull/34))
 
 ## [0.1.0-rc5] - 2026-07-17
 
@@ -268,7 +268,7 @@ history; each entry links to the PR that introduced it.
 - Guest IP discovery, env/command overrides, --add-host
 - Instance MAC/IP fields, duplicate-name check, store lock
 - Accept --mac for a deterministic NAT device address
-- Import urunc-macos CLI, vz-runner, docs, and tests
+- Import hull CLI, vz-runner, docs, and tests
 
 ### Miscellaneous
 

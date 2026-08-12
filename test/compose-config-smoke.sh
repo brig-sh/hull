@@ -1,7 +1,7 @@
 #!/bin/bash
 # Black-box smoke of the compose front-end against the real binary.
 #
-# Usage: test/compose-config-smoke.sh <path-to-urunc-macos-binary>
+# Usage: test/compose-config-smoke.sh <path-to-hull-binary>
 #
 # CI runs this in the build job right after `make macos`; run it locally the
 # same way against a fresh build. It asserts the contract of `compose config`:
@@ -11,7 +11,7 @@
 # Since ADR-0009 the document on stdout is compose-go's canonical form, the
 # same shape `docker compose config` prints: environment is a mapping rather
 # than a KEY=value list, byte quantities render as byte counts rather than
-# "<N>m", and keys urunc-macos ignores still appear (stderr names them).
+# "<N>m", and keys hull ignores still appear (stderr names them).
 # Values that the VM backend cannot honor as declared are the exception and
 # render as what it actually gets: cpus rounded up to whole vCPUs, mem_limit
 # floored to whole megabytes. The exhaustive per-capability checks live in the
@@ -48,7 +48,7 @@ printf '%s\n' "$out" | grep -Eq 'mem_limit: "1073741824"$' || fail "1g must rend
 printf '%s\n' "$out" | grep -Eq '^ +EMPTY: null$'    || fail "bare env key must render unresolved"
 # Ignored keys now render. The document is compose-go's canonical form, so it
 # shows the file as merged and interpolated; stderr is what says which keys
-# urunc-macos does not honor. Filtering them back out would mean rebuilding
+# hull does not honor. Filtering them back out would mean rebuilding
 # the hand-maintained key whitelist ADR-0009 deleted.
 printf '%s\n' "$out" | grep -q 'labels'              || fail "canonical output must render the declared document"
 grep -q 'ignoring unsupported key "services.web.labels"' "$WORK/base.err" \

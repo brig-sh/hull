@@ -84,7 +84,7 @@ networking, discovery, or lifecycle, which is the problem this stack actually
 solves. The only architectural comparable is Apple's `container`
 (VM-per-container, Containerization.framework, 1.0 in June 2026).
 
-| | urunc-macos (this stack) | Docker Desktop | Lima / Colima | Apple `container` 1.x |
+| | hull (this stack) | Docker Desktop | Lima / Colima | Apple `container` 1.x |
 |---|---|---|---|---|
 | Isolation model | **VM per service** (Vz or QEMU+HVF) | one shared VM | one shared VM | VM per container (Vz) |
 | Guest↔guest | gvisor-tap-vsock user-mode gateway; works on macOS 13+ class APIs, SIP on, no root | Linux bridges in-VM | Linux bridges in-VM | vmnet — **requires macOS 26**; isolated before that |

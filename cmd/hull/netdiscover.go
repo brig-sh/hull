@@ -23,7 +23,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nofireai/urunc-macos/pkg/store"
+	"github.com/brig-sh/hull/pkg/store"
 )
 
 // dhcpdLeasesPath is where macOS's bootpd records vmnet DHCP leases.

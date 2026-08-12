@@ -1,4 +1,4 @@
-# Compose-spec capability manifest for `urunc-macos compose`.
+# Compose-spec capability manifest for `hull compose`.
 #
 # Single source of truth for the conformance suite (ADR 0002). One entry per
 # capability, covering every top-level compose-spec element, every service-
@@ -6,7 +6,7 @@
 # extensions, and the docker compose v2 CLI verbs.
 #
 # Statuses reflect the implementation on `main`
-# (cmd/urunc-macos/compose.go + run.go), NOT aspiration:
+# (cmd/hull/compose.go + run.go), NOT aspiration:
 #   supported   - behaves per spec
 #   partial     - works with a documented divergence (see notes)
 #   unsupported - not honored; the binary must warn/error, never drop silently
@@ -310,7 +310,7 @@ capabilities:
     status: supported
     tier: static
     notes: >
-      compose-go resolves 'extends' during load, before urunc-macos sees the
+      compose-go resolves 'extends' during load, before hull sees the
       project: both the short form ('extends: SERVICE', same file) and the
       long form ('extends: {file, service}', a base service in another
       file) work. Scalar and list fields the extending service declares
@@ -320,7 +320,7 @@ capabilities:
       missing service.
     security: >
       An 'extends: {file: ...}' target is read like any other compose file
-      urunc-macos is pointed at, from wherever the path resolves to; it goes
+      hull is pointed at, from wherever the path resolves to; it goes
       through the same size cap and loud-warning walk as a directly named or
       included file (via compose-go's own "extends" load event, the same
       mechanism 'include:' uses), so an unsupported key declared only on the
@@ -357,7 +357,7 @@ capabilities:
       label_file stays unsupported: the key still warns as unsupported.
       Behavior changed under the hood: compose-go reads and parses the
       named file during load, to resolve the service's Labels, whether or
-      not urunc-macos does anything with them; a label_file that does not
+      not hull does anything with them; a label_file that does not
       exist now fails the load with compose-go's own error, where the
       bespoke loader never looked at the file at all. Previously-optional
       decoration is now a hard requirement for the file to exist and parse.
@@ -414,7 +414,7 @@ capabilities:
     status: unsupported
     tier: static
     notes: >
-      The hostname key is ignored; urunc-macos does not set a guest hostname
+      The hostname key is ignored; hull does not set a guest hostname
       (whatever the image/kernel chooses applies). Services are still
       reachable by their compose name via the gateway.
     test: TestConformanceStatic/service.hostname
@@ -560,7 +560,7 @@ capabilities:
       instantly; 'on-failure' degrades to 'always' with a load-time warning,
       because no exit code is observable for a plain service, so a clean
       exit cannot be told from a failure (the ':N' attempt cap is still
-      honored); an explicit 'urunc-macos stop' outranks EVERY policy through
+      honored); an explicit 'hull stop' outranks EVERY policy through
       the StoppedByUser marker (ADR-0007 section 2), so 'always' and
       'unless-stopped' are indistinguishable here and both behave like
       docker's 'unless-stopped' — docker's 'always' would bring a manually
@@ -1314,7 +1314,7 @@ capabilities:
       section 3), so restart policies keep acting after up has returned:
       TestConformanceRuntime/cli.up is where that is proven live — a killed
       'restart: always' service returns within a bounded wait, and a service
-      stopped with 'urunc-macos stop' stays stopped.
+      stopped with 'hull stop' stays stopped.
     security: >
       Runs unprivileged (no root, no vmnet entitlement). Ctrl-C during up
       tears down whatever was created, leaving no orphaned gateway. The
@@ -1345,7 +1345,7 @@ capabilities:
       column is the bare instance state word, so a service that ended reads
       'stopped' where docker prints 'Exited (N)'. A recorded exit code (only
       a one-shot job has one, ADR-0007 section 2) is visible through the
-      top-level 'urunc-macos ps' EXIT column and 'urunc-macos inspect', not
+      top-level 'hull ps' EXIT column and 'hull inspect', not
       here; TestConformanceRuntime/service.depends_on has a completed job to
       look at and pins both halves.
     security: none identified
@@ -1417,7 +1417,7 @@ capabilities:
     tier: static
     notes: >
       No 'compose stop' subcommand; use 'compose down'. (Top-level
-      'urunc-macos stop' targets a single instance.)
+      'hull stop' targets a single instance.)
     test: TestConformanceStatic/cli.stop
 
   - id: cli.restart
@@ -1434,7 +1434,7 @@ capabilities:
     tier: static
     notes: >
       No 'compose pull' subcommand; images are pulled during 'up'. (Top-level
-      'urunc-macos pull' exists.)
+      'hull pull' exists.)
     test: TestConformanceStatic/cli.pull
 
   - id: cli.push
@@ -1483,7 +1483,7 @@ capabilities:
     status: unsupported
     tier: static
     notes: >
-      No 'compose run' one-off subcommand. (Top-level 'urunc-macos run'
+      No 'compose run' one-off subcommand. (Top-level 'hull run'
       launches a single instance.)
     test: TestConformanceStatic/cli.run
 
@@ -1501,7 +1501,7 @@ capabilities:
     tier: static
     notes: >
       No 'compose rm' subcommand; 'compose down' removes stopped services.
-      (Top-level 'urunc-macos rm' exists.)
+      (Top-level 'hull rm' exists.)
     test: TestConformanceStatic/cli.rm
 
   - id: cli.top
@@ -1555,7 +1555,7 @@ capabilities:
     status: unsupported
     tier: static
     notes: >
-      No 'compose version' subcommand; 'urunc-macos --version' reports the
+      No 'compose version' subcommand; 'hull --version' reports the
       binary version.
     test: TestConformanceStatic/cli.version
 

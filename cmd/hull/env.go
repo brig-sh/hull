@@ -27,7 +27,7 @@ import (
 //	KEY         inherited from this process's own environment
 //
 // The bare form is what lets a caller pass a secret without it appearing in
-// urunc-macos's argv, where any process on the host can read it out of `ps`.
+// hull's argv, where any process on the host can read it out of `ps`.
 // The caller exports the variable and names it; the value travels through the
 // environment instead of the command line.
 //

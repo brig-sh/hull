@@ -35,7 +35,7 @@ import (
 // instance. The store root is created 0700, but MkdirAll does not tighten a
 // directory that already exists, and --store-dir can point somewhere shared.
 //
-// Only urunc-macos writes this file and only the guest reads it (over
+// Only hull writes this file and only the guest reads it (over
 // virtiofs), so 0600 costs nothing. This is a guard test rather than a
 // behavioural one: it pins the mode at every call site, including any added
 // later, without needing to boot a VM.

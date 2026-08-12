@@ -45,7 +45,7 @@ echo "========================"
 cd "$PROJECT_DIR"
 
 instance_id=$(
-    ./dist/urunc-macos_arm64 run --detach --hypervisor qemu \
+    ./dist/hull_arm64 run --detach --hypervisor qemu \
     --mem 512 --cpus 2 \
     --kernel "$KERNEL" \
     --rootfs "$ROOTFS" 2>&1 | tail -1
@@ -66,7 +66,7 @@ echo ""
 echo "TEST 2: Check instance state"
 echo "============================="
 
-state_file="$HOME/.urunc-macos/instances/$instance_id/state.json"
+state_file="$HOME/.hull/instances/$instance_id/state.json"
 
 if [ ! -f "$state_file" ]; then
     echo "❌ State file not found"
@@ -90,7 +90,7 @@ echo ""
 echo "TEST 3: Check console output"
 echo "============================"
 
-log_file="$HOME/.urunc-macos/instances/$instance_id/log"
+log_file="$HOME/.hull/instances/$instance_id/log"
 
 if [ -f "$log_file" ]; then
     size=$(stat -f%z "$log_file" 2>/dev/null || stat -c%s "$log_file" 2>/dev/null || echo "0")
@@ -133,7 +133,7 @@ echo "TEST 5: Graceful shutdown"
 echo "=========================="
 
 echo "Stopping instance..."
-./dist/urunc-macos_arm64 stop "$instance_id" 2>/dev/null || true
+./dist/hull_arm64 stop "$instance_id" 2>/dev/null || true
 
 sleep 2
 
@@ -159,7 +159,7 @@ mkdir -p "$test_dir"
 echo "test data from host" > "$test_dir/test.txt"
 
 instance_id_2=$(
-    ./dist/urunc-macos_arm64 run --detach --hypervisor qemu \
+    ./dist/hull_arm64 run --detach --hypervisor qemu \
     --mem 512 --cpus 2 \
     --kernel "$KERNEL" \
     --rootfs "$ROOTFS" \
@@ -171,7 +171,7 @@ if [ -n "$instance_id_2" ]; then
     sleep 5
 
     # Check if mounted
-    log2="$HOME/.urunc-macos/instances/$instance_id_2/log"
+    log2="$HOME/.hull/instances/$instance_id_2/log"
     if grep -i "9p" "$log2" 2>/dev/null; then
         echo "✓ 9pfs appears to be mounted"
     else
@@ -179,7 +179,7 @@ if [ -n "$instance_id_2" ]; then
     fi
 
     # Stop
-    ./dist/urunc-macos_arm64 stop "$instance_id_2" 2>/dev/null || true
+    ./dist/hull_arm64 stop "$instance_id_2" 2>/dev/null || true
 else
     echo "⚠ Could not start instance with 9pfs"
 fi
@@ -199,5 +199,5 @@ echo "⚠ Kernel console output not captured on macOS HVF (expected)"
 echo "⚠ But kernel DOES execute (process runs)"
 echo ""
 echo "Next: Test interactive shell"
-echo "  ./dist/urunc-macos_arm64 run --hypervisor qemu --mem 512 --cpus 2 --kernel $KERNEL --rootfs $ROOTFS"
+echo "  ./dist/hull_arm64 run --hypervisor qemu --mem 512 --cpus 2 --kernel $KERNEL --rootfs $ROOTFS"
 echo "  (Then try: uname -a, mount, exit)"

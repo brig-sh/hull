@@ -21,7 +21,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/nofireai/urunc-macos/pkg/ociclient"
+	"github.com/brig-sh/hull/pkg/ociclient"
 	"github.com/urfave/cli/v3"
 )
 

@@ -1,11 +1,11 @@
 # Emulates an interactive shell's job control: session leader with a ctty
-# spawns urunc-macos in its own process group, puts it in the foreground,
+# spawns hull in its own process group, puts it in the foreground,
 # and waits with WUNTRACED — exactly how zsh runs a job. A SIGTTOU-suspended
 # job is reported instead of silently hanging.
 import os, pty, sys, time, fcntl, termios, select, signal
 
 BIN = sys.argv[1]; hv = sys.argv[2]; name = sys.argv[3]
-STORE = os.environ.get("URUNC_STORE_DIR", "")
+STORE = os.environ.get("HULL_STORE_DIR", "")
 GLOBAL_ARGS = (["--store-dir", STORE] if STORE else [])
 IMG = "harbor.nbfc.io/nubificus/urunc-ubuntu-vz:aarch64"
 

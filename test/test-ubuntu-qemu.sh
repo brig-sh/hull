@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Comprehensive test suite for urunc-macos QEMU backend
+# Comprehensive test suite for hull QEMU backend
 
 set -e
 
@@ -21,7 +21,7 @@ echo "=========================================="
 
 instance_id=$(
     cd "$PROJECT_DIR" && \
-    ./dist/urunc-macos_arm64 run --detach --hypervisor qemu \
+    ./dist/hull_arm64 run --detach --hypervisor qemu \
     --mem 512 --cpus 2 \
     "$IMAGE" 2>&1 | tail -1
 )
@@ -41,7 +41,7 @@ sleep 3
 echo "TEST 2: Verify console output captured"
 echo "========================================"
 
-log_file="$HOME/.urunc-macos/instances/$instance_id/log"
+log_file="$HOME/.hull/instances/$instance_id/log"
 
 if [ ! -f "$log_file" ]; then
     echo "❌ Log file not found: $log_file"
@@ -70,7 +70,7 @@ echo ""
 echo "TEST 4: Check instance state"
 echo "============================="
 
-state_file="$HOME/.urunc-macos/instances/$instance_id/state.json"
+state_file="$HOME/.hull/instances/$instance_id/state.json"
 
 if [ -f "$state_file" ]; then
     echo "Instance state:"
@@ -103,7 +103,7 @@ echo "Attempting to run instance with 9pfs sharing..."
 
 instance_id_2=$(
     cd "$PROJECT_DIR" && \
-    ./dist/urunc-macos_arm64 run --detach --hypervisor qemu \
+    ./dist/hull_arm64 run --detach --hypervisor qemu \
     --mem 512 --cpus 2 \
     --shared-dir "$test_dir:/mnt/host" \
     "$IMAGE" 2>&1 | tail -1
@@ -114,7 +114,7 @@ if [ -n "$instance_id_2" ]; then
     sleep 5
 
     # Cleanup
-    "$PROJECT_DIR"/dist/urunc-macos_arm64 stop "$instance_id_2" 2>/dev/null || true
+    "$PROJECT_DIR"/dist/hull_arm64 stop "$instance_id_2" 2>/dev/null || true
 else
     echo "⚠ Could not start instance with 9pfs (may not be supported in current config)"
 fi
@@ -130,7 +130,7 @@ echo "==============="
 
 echo "Stopping instance: $instance_id"
 cd "$PROJECT_DIR" && \
-./dist/urunc-macos_arm64 stop "$instance_id" 2>/dev/null || true
+./dist/hull_arm64 stop "$instance_id" 2>/dev/null || true
 
 sleep 2
 
@@ -147,4 +147,4 @@ echo "✓ Logs captured"
 echo "✓ Instance state tracked"
 echo ""
 echo "To run an interactive session:"
-echo "  ./dist/urunc-macos_arm64 run --hypervisor qemu --mem 512 --cpus 2 $IMAGE"
+echo "  ./dist/hull_arm64 run --hypervisor qemu --mem 512 --cpus 2 $IMAGE"

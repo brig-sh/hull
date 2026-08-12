@@ -1,4 +1,4 @@
-# OCI Compatibility Plan for urunc-macos
+# OCI Compatibility Plan for hull
 
 ## Research Findings
 
@@ -34,7 +34,7 @@ macOS has no equivalent, but VM-level limits (vCPU count, memory) can be set at 
 
 Apple's `container` tool (WWDC 2025, v1.0.0 June 2026) takes a specific approach:
 
-| Aspect | Apple's approach | urunc-macos current |
+| Aspect | Apple's approach | hull current |
 |--------|-----------------|-------------------|
 | Image platform | `linux/arm64` (always Linux guests) | `linux/arm64` via Bunny |
 | Rootfs | **ext4 block device** (layers flattened) | virtiofs/9pfs + optional ext4 block |
@@ -45,15 +45,15 @@ Apple's `container` tool (WWDC 2025, v1.0.0 June 2026) takes a specific approach
 | containerd | Experimental CShim module | containerd-shim-urunc-v2 (Linux only) |
 
 **Critical finding**: Apple does NOT use `darwin` images. They pull standard `linux/arm64` images
-and run them in VMs. This validates the current urunc-macos approach.
+and run them in VMs. This validates the current hull approach.
 
 ### urunc Linux vs macOS Gap
 
-| Capability | Linux urunc | macOS urunc-macos |
+| Capability | Linux urunc | macOS hull |
 |-----------|-------------|-------------------|
 | OCI lifecycle | create/start/kill/delete/state | `run` only (combined) |
 | containerd shim | Yes (v2) | No |
-| State persistence | `/run/urunc/` | `~/.urunc-macos/instances/` (ad-hoc) |
+| State persistence | `/run/urunc/` | `~/.hull/instances/` (ad-hoc) |
 | Bundle input | Accepts pre-made OCI bundle | Pulls + generates bundle internally |
 | Signal handling | Full signal forwarding | SIGTERM + force kill |
 | Hypervisors | QEMU, Firecracker, Cloud Hypervisor, solo5 | QEMU+HVF, Vz |
@@ -177,7 +177,7 @@ Split the monolithic `run` command into proper OCI lifecycle operations.
 **1f. Keep `run` as sugar**
 - `run` = `create` + `start` + wait (same as `runc run`)
 
-**Impact**: This makes urunc-macos a proper OCI runtime that external tools (containerd, nerdctl)
+**Impact**: This makes hull a proper OCI runtime that external tools (containerd, nerdctl)
 could invoke.
 
 ### Phase 2: config.json Compatibility
@@ -214,7 +214,7 @@ could invoke.
 
 #### Option A: Single `linux/arm64` manifest (Apple's approach)
 
-- Both Linux urunc and macOS urunc-macos pull the **same** `linux/arm64` image
+- Both Linux urunc and macOS hull pull the **same** `linux/arm64` image
 - The rootfs contains a Linux filesystem (the guest IS Linux in both cases)
 - Platform-specific behavior is determined by the **runtime**, not the image
 - urunc annotations in the image carry hypervisor hints, but the runtime decides
@@ -241,29 +241,29 @@ image index
 
 #### Recommendation: Start with Option A, evolve to Option B
 
-- Option A is already how urunc-macos works today (pulls `linux/arm64` images)
+- Option A is already how hull works today (pulls `linux/arm64` images)
 - The runtime handles platform differences (Vz vs QEMU, virtiofs vs 9pfs)
 - Option B can be added later when there's a real need for platform-specific image content
 - Bunny could eventually produce both manifests in one build
 
 ### Phase 4: Bundle Generation from OCI Images
 
-Currently, urunc-macos has its own OCI client that pulls images and generates bundles internally.
+Currently, hull has its own OCI client that pulls images and generates bundles internally.
 To be OCI-runtime-compatible, it should also accept pre-made bundles (like `runc` does).
 
 **4a. Accept external bundles**
-- `urunc-macos create <id> --bundle <path>` — standard OCI runtime invocation
+- `hull create <id> --bundle <path>` — standard OCI runtime invocation
 - Parse config.json from the bundle directory
 - The bundle's rootfs/ already contains the extracted image layers
 
 **4b. Keep the pull+run convenience**
-- `urunc-macos run <image-ref>` — the current CLI flow, pulls and generates bundle
+- `hull run <image-ref>` — the current CLI flow, pulls and generates bundle
 - This is sugar on top of the OCI runtime operations
 - Internally: pull -> generate bundle -> create -> start
 
 **4c. containerd shim (future)**
 - The existing `containerd-shim-urunc-v2` has darwin stubs
-- Once create/start/kill/delete work, the shim can delegate to urunc-macos
+- Once create/start/kill/delete work, the shim can delegate to hull
 - This enables `nerdctl run --runtime urunc` on macOS
 
 ### Phase 5: Guest Init Improvements (inspired by Apple)
@@ -278,7 +278,7 @@ Apple's vminitd approach (gRPC over vsock) is more robust than shell init wrappe
 **5b. Medium term: vsock control channel — SHIPPED**
 - Implemented as the urunit-agent transport: agentproto frames over vsock
   port 1024 on Vz and virtio-serial `io.urunc.agent.0` on QEMU
-- `urunc-macos exec` runs commands in a running instance (tty, cwd, user,
+- `hull exec` runs commands in a running instance (tty, cwd, user,
   env), when the image ships `/urunit-agent`
 - Remaining from the original sketch: mount commands, signal forwarding
   beyond SIGINT/SIGTERM, and replacing the serial console as the primary

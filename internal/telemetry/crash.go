@@ -176,9 +176,9 @@ func scrubStack(stack string) string {
 // standard library, and file name plus one parent for anything else.
 func trimSourcePath(p string) string {
 	// First occurrence: a repo checked out under a directory that itself
-	// matches a marker (eg. .../urunc-macos/cmd/urunc-macos/...) must
+	// matches a marker (eg. .../hull/cmd/hull/...) must
 	// keep the full module-relative path.
-	for _, marker := range []string{"/urunc-macos/", "/pkg/mod/", "/go/src/", "/src/runtime/"} {
+	for _, marker := range []string{"/hull/", "/pkg/mod/", "/go/src/", "/src/runtime/"} {
 		if idx := strings.Index(p, marker); idx >= 0 {
 			return p[idx+1:]
 		}

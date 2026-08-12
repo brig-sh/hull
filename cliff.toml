@@ -1,4 +1,4 @@
-# git-cliff configuration for urunc-macos.
+# git-cliff configuration for hull.
 #
 # The changelog and the GitHub release notes are generated from the same
 # source: the Conventional-Commits history on main. Because PRs are
@@ -13,7 +13,7 @@
 header = """
 # Changelog
 
-All notable changes to urunc-macos. Generated from the Conventional-Commits
+All notable changes to hull. Generated from the Conventional-Commits
 history; each entry links to the PR that introduced it.
 """
 # Grouped, Keep-a-Changelog-ish body. Curated highlights (if any) are
@@ -37,7 +37,7 @@ footer = ""
 # the GitHub API (the repo is private, so an unauthenticated remote lookup
 # 404s). This keeps changelog generation token-free.
 postprocessors = [
-  { pattern = '\(#([0-9]+)\)', replace = "([#${1}](https://github.com/NOFireAI/urunc-macos/pull/${1}))" },
+  { pattern = '\(#([0-9]+)\)', replace = "([#${1}](https://github.com/brig-sh/hull/pull/${1}))" },
 ]
 
 [git]

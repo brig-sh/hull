@@ -23,7 +23,7 @@ The exact steps. Include the command line and any relevant knobs
 (--store-dir, --env-file, x-hypervisor, ...). For boot, console, or run-path
 bugs, the PTY harnesses under test/ (see test/pty-terminal-test.py) are the
 usual repro path; for compose loading bugs, a minimal compose file plus
-`urunc-macos compose config` output is ideal.
+`hull compose config` output is ideal.
 -->
 
 1.
@@ -44,9 +44,9 @@ usual repro path; for compose loading bugs, a minimal compose file plus
 - Component / scope: <!-- compose, run, exec, store, vz-runner, qemu, ... -->
 - Hypervisor: <!-- vz | qemu -->
 - macOS version and chip: <!-- e.g. macOS 26.0, M3 Pro -->
-- urunc-macos version / commit: <!-- urunc-macos --version, or git rev-parse HEAD -->
+- hull version / commit: <!-- hull --version, or git rev-parse HEAD -->
 - Guest image: <!-- e.g. harbor.nbfc.io/nubificus/urunc-ubuntu-vz:aarch64 -->
-- Store dir: <!-- default, or the --store-dir / URUNC_STORE_DIR in use -->
+- Store dir: <!-- default, or the --store-dir / HULL_STORE_DIR in use -->
 
 ## Logs and additional context
 

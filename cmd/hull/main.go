@@ -23,14 +23,14 @@ import (
 	"path/filepath"
 	"runtime/debug"
 
-	"github.com/nofireai/urunc-macos/pkg/store"
+	"github.com/brig-sh/hull/pkg/store"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v3"
 )
 
 var (
 	version string
-	log     = logrus.WithField("subsystem", "urunc-macos")
+	log     = logrus.WithField("subsystem", "hull")
 )
 
 func main() {
@@ -45,10 +45,10 @@ func main() {
 	if err != nil {
 		fatal(fmt.Errorf("failed to get home directory: %w", err))
 	}
-	defaultStoreDir := filepath.Join(homeDir, ".urunc-macos")
+	defaultStoreDir := filepath.Join(homeDir, ".hull")
 
 	app := &cli.Command{
-		Name:    "urunc-macos",
+		Name:    "hull",
 		Usage:   "native macOS container CLI for unikernels",
 		Version: version,
 		Flags: []cli.Flag{

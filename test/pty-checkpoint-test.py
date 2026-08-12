@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 # Checkpoint/restore e2e harness: boots a foreground Vz run on a PTY, starts
 # a tick counter in the guest shell, checkpoints the running VM (SIGUSR1
-# round trip via `urunc-macos checkpoint`), lets it keep ticking, stops it,
+# round trip via `hull checkpoint`), lets it keep ticking, stops it,
 # restores from the checkpoint, and asserts the counter CONTINUES from the
 # checkpointed value instead of restarting — i.e. guest memory state really
 # came back.
 #
-# Usage: URUNC_MACOS_BIN=dist/urunc-macos_arm64 \
+# Usage: HULL_BIN=dist/hull_arm64 \
 #        python3 test/pty-checkpoint-test.py <name>
 import os, pty, re, sys, time, subprocess, select, fcntl, termios, signal as sig
 
-BIN = os.environ.get("URUNC_MACOS_BIN", "dist/urunc-macos_arm64")
-STORE = os.environ.get("URUNC_STORE_DIR", "")
+BIN = os.environ.get("HULL_BIN", "dist/hull_arm64")
+STORE = os.environ.get("HULL_STORE_DIR", "")
 GLOBAL_ARGS = (["--store-dir", STORE] if STORE else [])
-IMAGE = os.environ.get("URUNC_TEST_IMAGE", "harbor.nbfc.io/nubificus/urunc-ubuntu-vz:aarch64")
-BOOT_TIMEOUT = int(os.environ.get("URUNC_TEST_BOOT_TIMEOUT", "180"))
+IMAGE = os.environ.get("HULL_TEST_IMAGE", "harbor.nbfc.io/nubificus/urunc-ubuntu-vz:aarch64")
+BOOT_TIMEOUT = int(os.environ.get("HULL_TEST_BOOT_TIMEOUT", "180"))
 name = sys.argv[1] if len(sys.argv) > 1 else "ckpt-e2e"
 
 child = None

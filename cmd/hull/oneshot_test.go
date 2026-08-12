@@ -23,7 +23,7 @@ import (
 
 	"github.com/compose-spec/compose-go/v2/types"
 
-	"github.com/nofireai/urunc-macos/pkg/store"
+	"github.com/brig-sh/hull/pkg/store"
 )
 
 // TestCheckCompletedDeps pins the ADR-0007 invariant directly: a dependent

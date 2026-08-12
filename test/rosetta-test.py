@@ -13,21 +13,21 @@
 # skips with a named reason when it is absent, exit 0, so non-Rosetta hosts
 # and CI runners stay green the way gated conformance cases do.
 #
-# Usage: URUNC_MACOS_BIN=dist/urunc-macos_arm64 \
+# Usage: HULL_BIN=dist/hull_arm64 \
 #        python3 test/rosetta-test.py <instance-name>
 import os
 import subprocess
 import sys
 import time
 
-BIN = os.environ.get("URUNC_MACOS_BIN", "dist/urunc-macos_arm64")
-STORE = os.environ.get("URUNC_STORE_DIR", "")
+BIN = os.environ.get("HULL_BIN", "dist/hull_arm64")
+STORE = os.environ.get("HULL_STORE_DIR", "")
 GLOBAL = (["--store-dir", STORE] if STORE else [])
 # ubuntu-rosetta is the published amd64-on-rosetta guest (rosetta-proof is
 # the local dev artifact and is deliberately not in the publish matrix).
 IMAGE = os.environ.get(
-    "URUNC_ROSETTA_TEST_IMAGE", "ghcr.io/nofireai/urunc-ubuntu-rosetta:amd64")
-BOOT_TIMEOUT = int(os.environ.get("URUNC_TEST_BOOT_TIMEOUT", "180"))
+    "HULL_ROSETTA_TEST_IMAGE", "ghcr.io/nofireai/urunc-ubuntu-rosetta:amd64")
+BOOT_TIMEOUT = int(os.environ.get("HULL_TEST_BOOT_TIMEOUT", "180"))
 
 name = sys.argv[1] if len(sys.argv) > 1 else "rosetta-e2e"
 

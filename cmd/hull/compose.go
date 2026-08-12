@@ -40,9 +40,9 @@ import (
 	"github.com/urfave/cli/v3"
 	"gopkg.in/yaml.v3"
 
-	"github.com/nofireai/urunc-macos/internal/compose"
-	"github.com/nofireai/urunc-macos/internal/telemetry"
-	"github.com/nofireai/urunc-macos/pkg/store"
+	"github.com/brig-sh/hull/internal/compose"
+	"github.com/brig-sh/hull/internal/telemetry"
+	"github.com/brig-sh/hull/pkg/store"
 )
 
 // namedVolumeRe is compose-spec's own JSON-schema pattern for a top-level
@@ -612,7 +612,7 @@ func validateProject(p *types.Project, volRoot string, warn io.Writer) error {
 			// side. checkConsistency deliberately skips validating it
 			// (compose-go/loader/validate.go's own "non anonymous volumes"
 			// comment) because docker mints a fresh, unnamed volume per
-			// container for this form. urunc-macos has no such mechanism:
+			// container for this form. hull has no such mechanism:
 			// resolveServiceVolume would join every anonymous volume in a
 			// project onto the same "<volRoot>/<project>_" directory (empty
 			// name), a bogus path nothing creates and every anonymous mount

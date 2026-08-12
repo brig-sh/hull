@@ -1,6 +1,6 @@
 name: Sign and Notarize
 
-# Manually-invoked release signing: builds urunc-macos + vz-runner, signs them
+# Manually-invoked release signing: builds hull + vz-runner, signs them
 # with the Developer ID Application identity, packages a .dmg, notarizes it
 # with Apple's notary service, staples the ticket, and uploads the result as a
 # workflow artifact.
@@ -118,15 +118,15 @@ jobs:
           NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
         run: |
           echo "$NOTARY_KEY_P8" > "$RUNNER_TEMP/notary-key.p8"
-          xcrun notarytool submit dist/urunc-macos.dmg \
+          xcrun notarytool submit dist/hull.dmg \
             --key "$RUNNER_TEMP/notary-key.p8" \
             --key-id "$NOTARY_KEY_ID" \
             --issuer "$NOTARY_ISSUER_ID" \
             --wait
           rm "$RUNNER_TEMP/notary-key.p8"
-          xcrun stapler staple dist/urunc-macos.dmg
-          xcrun stapler validate dist/urunc-macos.dmg
-          spctl -a -vv -t open --context context:primary-signature dist/urunc-macos.dmg
+          xcrun stapler staple dist/hull.dmg
+          xcrun stapler validate dist/hull.dmg
+          spctl -a -vv -t open --context context:primary-signature dist/hull.dmg
 
       # release_tarball re-signs the binaries as *standalone* Developer ID code
       # (the bundle main-exec seal is invalid once extracted -> AMFI "Killed: 9")
@@ -135,7 +135,7 @@ jobs:
       - name: Package the Homebrew release tarball
         run: |
           make release_tarball CODESIGN_IDENTITY="$IDENTITY" CODESIGN_KEYCHAIN="$KEYCHAIN"
-          codesign --verify --strict dist/tarball-stage/urunc-macos
+          codesign --verify --strict dist/tarball-stage/hull
           codesign --verify --strict dist/tarball-stage/vz-runner
           codesign -d --entitlements - --xml dist/tarball-stage/vz-runner \
             | grep -q com.apple.security.virtualization \
@@ -147,16 +147,16 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: urunc-macos-dmg
-          path: dist/urunc-macos.dmg
+          name: hull-dmg
+          path: dist/hull.dmg
           retention-days: 30
 
       - uses: actions/upload-artifact@v4
         with:
-          name: urunc-macos-brew-tarball
+          name: hull-brew-tarball
           path: |
-            dist/urunc-macos-*.tar.gz
-            dist/urunc-macos-*.tar.gz.sha256
+            dist/hull-*.tar.gz
+            dist/hull-*.tar.gz.sha256
           retention-days: 30
 
       - name: Create the GitHub release (tag builds only)
@@ -185,22 +185,22 @@ jobs:
           {
             printf '\n---\n'
             # shellcheck disable=SC2016  # backticks are literal markdown, not command substitution
-            printf 'Signed and notarized build. `urunc-macos-*.tar.gz` feeds the Homebrew tap (nofireai/nofire); the dmg is the drag-install image.\n'
+            printf 'Signed and notarized build. `hull-*.tar.gz` feeds the Homebrew tap (nofireai/nofire); the dmg is the drag-install image.\n'
           } >> "$NOTES"
 
           gh release create "$TAG" \
-            --title "urunc-macos $TAG" \
+            --title "hull $TAG" \
             --notes-file "$NOTES" \
-            dist/urunc-macos.dmg dist/urunc-macos-*.tar.gz dist/urunc-macos-*.tar.gz.sha256
+            dist/hull.dmg dist/hull-*.tar.gz dist/hull-*.tar.gz.sha256
 
       - name: Publish the tarball checksum in the job summary
         run: |
           {
             echo "### Homebrew tap update"
             echo '```'
-            cat dist/urunc-macos-*.tar.gz.sha256
+            cat dist/hull-*.tar.gz.sha256
             echo '```'
-            echo "Update \`Formula/urunc-macos.rb\` in NOFireAI/homebrew-nofire with this sha256 (and the new version URL)."
+            echo "Update \`Formula/hull.rb\` in NOFireAI/homebrew-nofire with this sha256 (and the new version URL)."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Delete ephemeral keychain

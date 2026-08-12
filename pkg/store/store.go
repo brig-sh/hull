@@ -26,7 +26,7 @@ import (
 	"time"
 )
 
-// Store manages persistent state for urunc-macos images and instances
+// Store manages persistent state for hull images and instances
 type Store struct {
 	rootDir string
 	mu      sync.RWMutex
@@ -66,7 +66,7 @@ type InstanceState struct {
 	// running or when the end was never observed.
 	ExitedAt time.Time `json:"exitedAt,omitempty"`
 	// StoppedByUser records that this instance was stopped deliberately
-	// (`urunc-macos stop`), as opposed to having died. A supervisor must not
+	// (`hull stop`), as opposed to having died. A supervisor must not
 	// restart it whatever its policy says: docker's restart manager makes the
 	// same distinction, and without it "stop" is undone within a poll.
 	StoppedByUser bool `json:"stoppedByUser,omitempty"`

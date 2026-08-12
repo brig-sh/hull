@@ -34,8 +34,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/nofireai/urunc-macos/pkg/ociclient"
-	"github.com/nofireai/urunc-macos/pkg/store"
+	"github.com/brig-sh/hull/pkg/ociclient"
+	"github.com/brig-sh/hull/pkg/store"
 	"github.com/urfave/cli/v3"
 	"github.com/urunc-dev/urunc/pkg/qmp"
 	"github.com/urunc-dev/urunc/pkg/unikontainers"
@@ -831,7 +831,7 @@ mount -t devpts devpts /dev/pts
 mount -t proc proc /proc 2>/dev/null
 if [ -f /proc/net/pnp ]; then cp /proc/net/pnp /etc/resolv.conf; fi
 umount /proc 2>/dev/null
-# Start the exec agent when the image ships one (see urunc-macos exec).
+# Start the exec agent when the image ships one (see hull exec).
 # Its log goes to the console: the overlay upper layer is a tmpfs, so a
 # file would not be reachable from the host.
 [ -x /urunit-agent ] && /urunit-agent >/dev/hvc0 2>&1 &
@@ -883,7 +883,7 @@ mount -t tmpfs tmpfs /tmp
 mount -t proc proc /proc 2>/dev/null
 if [ -f /proc/net/pnp ]; then cp /proc/net/pnp /etc/resolv.conf; fi
 umount /proc 2>/dev/null
-# Start the exec agent when the image ships one (see urunc-macos exec)
+# Start the exec agent when the image ships one (see hull exec)
 [ -x /urunit-agent ] && /urunit-agent >/urunit-agent.log 2>&1 &
 exec %s "$@"
 `, shareMounts, initBin)
@@ -1000,7 +1000,7 @@ exec %s "$@"
 		cmdArgs = append(cmdArgs, "--stop-grace", strconv.Itoa(int(cmd.Int("stop-grace"))))
 		// Every Vz instance is checkpoint-ready: the state dir persists the
 		// machine identifier (restore demands the identical identity) and
-		// receives `urunc-macos checkpoint` snapshots. vz-runner drops the
+		// receives `hull checkpoint` snapshots. vz-runner drops the
 		// never-driven memory balloon when a state dir is set, because
 		// balloon devices are not snapshottable.
 		cmdArgs = append(cmdArgs, "--state-dir", filepath.Join(instanceDir, "checkpoint"))

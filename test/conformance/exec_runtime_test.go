@@ -15,7 +15,7 @@
 // Runtime cases for the exec-dependent capabilities (ADR-0004): compose
 // exec, exec-form healthchecks, post_start/pre_stop hooks, and compose top
 // all need a guest that ships /urunit-agent. They gate on a SECOND image
-// variable, URUNC_EXEC_TEST_IMAGE, because the generic URUNC_TEST_IMAGE
+// variable, HULL_EXEC_TEST_IMAGE, because the generic HULL_TEST_IMAGE
 // fixture is not required to carry the agent; without it every case here
 // skips with an explicit fixture reason. The image must be a Bunny-built
 // urunc image like the rest of the runtime tier.
@@ -34,9 +34,9 @@ import (
 // execImage returns the agent-bearing guest image, or skips the case.
 func execImage(t *testing.T) string {
 	t.Helper()
-	img := os.Getenv("URUNC_EXEC_TEST_IMAGE")
+	img := os.Getenv("HULL_EXEC_TEST_IMAGE")
 	if img == "" {
-		t.Skip("fixture image unavailable: URUNC_EXEC_TEST_IMAGE is not set; exec-dependent " +
+		t.Skip("fixture image unavailable: HULL_EXEC_TEST_IMAGE is not set; exec-dependent " +
 			"cases need a Bunny-built urunc image that ships /urunit-agent")
 	}
 	return img

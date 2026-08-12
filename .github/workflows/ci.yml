@@ -1,6 +1,6 @@
 name: CI
 
-# Lint and build urunc-macos on every push and pull request.
+# Lint and build hull on every push and pull request.
 #
 # The module is darwin-only (it consumes urunc's darwin hypervisor backends
 # and Virtualization.framework via vz-runner), so everything runs on a macOS
@@ -76,18 +76,18 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Build and ad-hoc sign urunc-macos + vz-runner
+      - name: Build and ad-hoc sign hull + vz-runner
         run: make macos
 
       - name: Smoke-test the CLI binary
-        run: ./dist/urunc-macos_arm64 run --help
+        run: ./dist/hull_arm64 run --help
 
       # Black-box smoke of the compose front-end: the supported surface must
       # render deterministically, ignored keys must warn on stderr without
       # leaking into the document, and load-time validation must reject bad
       # input. Same script a developer runs against a local build.
       - name: Smoke-test compose config
-        run: test/compose-config-smoke.sh ./dist/urunc-macos_arm64
+        run: test/compose-config-smoke.sh ./dist/hull_arm64
 
       - name: Verify vz-runner entitlements
         run: |
@@ -98,9 +98,9 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: urunc-macos-adhoc
+          name: hull-adhoc
           path: |
-            dist/urunc-macos_arm64
+            dist/hull_arm64
             vz-runner/.build/arm64-apple-macosx/release/vz-runner
           retention-days: 7
 
@@ -174,9 +174,9 @@ jobs:
       - name: Runtime conformance tier (boots real VMs)
         if: runner.environment == 'self-hosted'
         env:
-          URUNC_CONFORMANCE_RUNTIME: "1"
-          URUNC_MACOS_BIN: ${{ github.workspace }}/dist/urunc-macos_arm64
-          URUNC_STORE_DIR: ${{ runner.temp }}/../urunc-ci-store
+          HULL_CONFORMANCE_RUNTIME: "1"
+          HULL_BIN: ${{ github.workspace }}/dist/hull_arm64
+          HULL_STORE_DIR: ${{ runner.temp }}/../urunc-ci-store
           # The conformance fixture from the urunc-images repo: a bunny base
           # with the patched init (urunit + urunit-agent) overlaid plus the
           # in-guest TCP listener tools (python3/nc/socat) the harness
@@ -184,17 +184,17 @@ jobs:
           # cases, the exec-dependent cases (cli.exec, cli.top,
           # service.healthcheck, post_start/pre_stop), and the
           # listener-dependent ones (service.ports, ext.x-healthcheck-tcp).
-          URUNC_TEST_IMAGE: ghcr.io/nofireai/urunc-ubuntu-conformance:aarch64
-          URUNC_EXEC_TEST_IMAGE: ghcr.io/nofireai/urunc-ubuntu-conformance:aarch64
+          HULL_TEST_IMAGE: ghcr.io/nofireai/urunc-ubuntu-conformance:aarch64
+          HULL_EXEC_TEST_IMAGE: ghcr.io/nofireai/urunc-ubuntu-conformance:aarch64
         run: go test -count=1 -v -run 'TestConformanceRuntime' ./test/conformance
 
       - name: PTY end-to-end matrix
         if: runner.environment == 'self-hosted'
         env:
-          URUNC_MACOS_BIN: ${{ github.workspace }}/dist/urunc-macos_arm64
+          HULL_BIN: ${{ github.workspace }}/dist/hull_arm64
           # Persistent store on the runner: the pulled image is cached
           # across runs; instances are uniquely named and cleaned up.
-          URUNC_STORE_DIR: ${{ runner.temp }}/../urunc-ci-store
+          HULL_STORE_DIR: ${{ runner.temp }}/../urunc-ci-store
         run: |
           set -e
           R=${GITHUB_RUN_ID}
@@ -204,15 +204,15 @@ jobs:
           python3 test/pty-terminal-test.py vz   ci-vs-$R  term
           python3 test/pty-terminal-test.py qemu ci-qt-$R  type
           python3 test/pty-terminal-test.py qemu ci-qi-$R  intr
-          python3 test/pty-jobcontrol-test.py "$URUNC_MACOS_BIN" vz   ci-jv-$R
-          python3 test/pty-jobcontrol-test.py "$URUNC_MACOS_BIN" qemu ci-jq-$R
+          python3 test/pty-jobcontrol-test.py "$HULL_BIN" vz   ci-jv-$R
+          python3 test/pty-jobcontrol-test.py "$HULL_BIN" qemu ci-jq-$R
           python3 test/pty-checkpoint-test.py ci-ck-$R
 
       - name: Shared-folder smoke matrix
         if: runner.environment == 'self-hosted'
         env:
-          URUNC_MACOS_BIN: ${{ github.workspace }}/dist/urunc-macos_arm64
-          URUNC_STORE_DIR: ${{ runner.temp }}/../urunc-ci-store
+          HULL_BIN: ${{ github.workspace }}/dist/hull_arm64
+          HULL_STORE_DIR: ${{ runner.temp }}/../urunc-ci-store
         run: |
           set -e
           R=${GITHUB_RUN_ID}
@@ -230,8 +230,8 @@ jobs:
       - name: Rosetta e2e (amd64 rootfs, boots real VMs)
         if: runner.environment == 'self-hosted'
         env:
-          URUNC_MACOS_BIN: ${{ github.workspace }}/dist/urunc-macos_arm64
-          URUNC_STORE_DIR: ${{ runner.temp }}/../urunc-ci-store
+          HULL_BIN: ${{ github.workspace }}/dist/hull_arm64
+          HULL_STORE_DIR: ${{ runner.temp }}/../urunc-ci-store
         run: python3 test/rosetta-test.py ci-rz-${GITHUB_RUN_ID}
 
       - name: Delete ephemeral keychain

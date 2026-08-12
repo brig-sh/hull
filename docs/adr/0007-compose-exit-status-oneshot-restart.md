@@ -34,7 +34,7 @@ process**. What the runtime has today:
   act on it even if the status were known.
 
 There **is** one channel that already carries an exact exit code: the
-urunit-agent's `agentproto` `Exit` frame, used by `urunc-macos exec` and
+urunit-agent's `agentproto` `Exit` frame, used by `hull exec` and
 by the compose exec layer (ADR-0004). It reports the code of a process the
 agent started — not of the guest's init.
 

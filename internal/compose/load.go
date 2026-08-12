@@ -30,7 +30,7 @@ type Options struct {
 	// file that cannot be opened: that entry (and the services it would
 	// have contributed) is dropped instead of failing the whole Load. A
 	// reload of a live project sets this — see reloadProject in
-	// cmd/urunc-macos and stripUnreadableIncludes's own doc comment for
+	// cmd/hull and stripUnreadableIncludes's own doc comment for
 	// why, and for the one-level scope limit. A command a user is waiting
 	// on (config, up) never sets it: there, a missing include is the whole
 	// point of the error.
@@ -42,12 +42,12 @@ type Options struct {
 // file or an env file is a document; without a cap, pointing one at an
 // endless stream like /dev/zero hangs the process while it consumes the
 // machine's memory. Matches maxTextFileBytes, the limit the bespoke loader
-// enforced in cmd/urunc-macos/compose.go.
+// enforced in cmd/hull/compose.go.
 const MaxUserFileBytes = 8 << 20 // 8 MiB
 
 // checkFileSize opens path and rejects it once more than MaxUserFileBytes
 // have been read. It reads MaxUserFileBytes+1 bytes through a LimitReader
-// and checks the count, the same pattern cmd/urunc-macos's readTextFile
+// and checks the count, the same pattern cmd/hull's readTextFile
 // uses, rather than trusting os.Stat: a stat-then-read has a TOCTOU gap
 // where the file can grow between the check and the point something reads
 // it, and here compose-go does its own read afterward. The bytes read here
@@ -123,7 +123,7 @@ func Load(ctx context.Context, opts Options) (*types.Project, error) {
 	envFiles := opts.EnvFiles
 	if len(envFiles) == 0 {
 		// The bespoke loader capped the default-discovered .env too
-		// (cmd/urunc-macos/compose.go's parseComposeFile falls back to
+		// (cmd/hull/compose.go's parseComposeFile falls back to
 		// readTextFile(srcDir/.env)); keep that hardening even though
 		// compose-go, not us, ends up reading this particular path.
 		if def := defaultEnvFile(opts.WorkingDir); def != "" {

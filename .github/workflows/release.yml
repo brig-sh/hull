@@ -40,7 +40,7 @@ jobs:
           app-id: ${{ vars.NOFIRE_BOT_APP_ID }}
           private-key: ${{ secrets.NOFIRE_BOT_PRIVATE_KEY }}
           owner: NOFireAI
-          repositories: urunc-macos
+          repositories: hull
 
       - uses: actions/checkout@v4
         with:
@@ -79,7 +79,7 @@ jobs:
             git commit -m "chore: bump VERSION to $VERSION [skip ci]"
             git push origin HEAD:main
           fi
-          git tag -a "$TAG" -m "urunc-macos $TAG"
+          git tag -a "$TAG" -m "hull $TAG"
           git push origin "$TAG"
 
   sign-notarize:
@@ -112,7 +112,7 @@ jobs:
           owner: NOFireAI
           repositories: homebrew-nofire
 
-      - name: Update Formula/urunc-macos.rb and open the PR
+      - name: Update Formula/hull.rb and open the PR
         env:
           GH_TOKEN: ${{ github.token }}
           BOT_TOKEN: ${{ steps.bot-token.outputs.token }}
@@ -136,12 +136,12 @@ jobs:
 
           export TAG VERSION SHA
           # Keep every formula anchored to this release in lockstep:
-          # urunc-macos (the tarball) and urunc-claude (wrapper, same
+          # hull (the tarball) and urunc-claude (wrapper, same
           # url anchor so upgrades roll out together).
-          for f in Formula/urunc-macos.rb Formula/urunc-claude.rb; do
+          for f in Formula/hull.rb Formula/urunc-claude.rb; do
             [ -f "$f" ] || continue
             perl -pi -e '
-              s|releases/download/v[^/]+/urunc-macos-[^"]+-arm64\.tar\.gz|releases/download/$ENV{TAG}/urunc-macos-$ENV{VERSION}-arm64.tar.gz|;
+              s|releases/download/v[^/]+/hull-[^"]+-arm64\.tar\.gz|releases/download/$ENV{TAG}/hull-$ENV{VERSION}-arm64.tar.gz|;
               s|version "[^"]+"|version "$ENV{VERSION}"|;
               s|sha256 "[0-9a-f]{64}"|sha256 "$ENV{SHA}"|;
             ' "$f"
@@ -149,7 +149,7 @@ jobs:
 
           git -c user.name="github-actions[bot]" \
               -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-              commit -am "feat: point urunc-macos at $TAG"
+              commit -am "feat: point hull at $TAG"
           git push -u origin "release/$TAG"
 
           # Cross-repo PR as the release bot; without the app configured,
@@ -157,8 +157,8 @@ jobs:
           if [ -n "${BOT_TOKEN:-}" ]; then
             GH_TOKEN="$BOT_TOKEN" gh pr create -R NOFireAI/homebrew-nofire \
               --base main --head "release/$TAG" \
-              --title "feat: point urunc-macos at $TAG" \
-              --body "Automated bump from the urunc-macos release workflow (run $GITHUB_RUN_ID)."
+              --title "feat: point hull at $TAG" \
+              --body "Automated bump from the hull release workflow (run $GITHUB_RUN_ID)."
           else
             echo "::warning::release bot app not configured (vars.NOFIRE_BOT_APP_ID); open the tap PR manually: https://github.com/NOFireAI/homebrew-nofire/pull/new/release/$TAG"
           fi

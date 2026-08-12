@@ -3,7 +3,7 @@
 Tracks the alternative approach from `docs/darwin-upstreaming-analysis.md`:
 bring the darwin port *into* upstream urunc rather than shipping a parallel
 one. Work happens on branch `darwin/converge`; the working
-`darwin-integration` branch and the private `urunc-macos` repo are left
+`darwin-integration` branch and the private `hull` repo are left
 intact. Each step keeps Linux behavior byte-identical (guarded by the
 existing hypervisor unit tests) and is boot-verified on macOS under SIP.
 
@@ -110,8 +110,8 @@ FirecrackerVmm]` directly — those entries are unchanged, so it still passes.
   pass; a QEMU guest boots under HVF through the registry-driven `NewVMM`.
 
 ## Downstream cost (private repo)
-The private `urunc-macos` CLI casts a monitor to `*hypervisors.QemuDarwin`
-in one place (`cmd/urunc-macos/run.go`) to reach `GetQMPSocket`. After
+The private `hull` CLI casts a monitor to `*hypervisors.QemuDarwin`
+in one place (`cmd/hull/run.go`) to reach `GetQMPSocket`. After
 convergence that becomes `*hypervisors.Qemu` — a one-line change, applied
 temporarily during boot verification and reverted so the private repo stays
 on the current pin until the convergence branch is adopted.

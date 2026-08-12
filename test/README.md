@@ -1,6 +1,6 @@
-# urunc-macos QEMU Backend Test Suite
+# hull QEMU Backend Test Suite
 
-Comprehensive tests for the QEMU backend of urunc-macos running Ubuntu unikernels.
+Comprehensive tests for the QEMU backend of hull running Ubuntu unikernels.
 
 ## Overview
 
@@ -56,7 +56,7 @@ This runs:
 
 ```bash
 cd ..
-./dist/urunc-macos_arm64 run --hypervisor qemu \
+./dist/hull_arm64 run --hypervisor qemu \
   --mem 512 --cpus 2 \
   localhost/ubuntu-qemu:aarch64
 ```
@@ -81,7 +81,7 @@ exit
 ### Scenario 1: Basic Boot (No 9pfs)
 
 ```bash
-./dist/urunc-macos_arm64 run --hypervisor qemu \
+./dist/hull_arm64 run --hypervisor qemu \
   --mem 512 --cpus 2 \
   localhost/ubuntu-qemu:aarch64
 ```
@@ -107,7 +107,7 @@ mkdir -p /tmp/test-data
 echo "Hello from host" > /tmp/test-data/hello.txt
 
 # Run with shared directory
-./dist/urunc-macos_arm64 run --hypervisor qemu \
+./dist/hull_arm64 run --hypervisor qemu \
   --mem 512 --cpus 2 \
   --shared-dir /tmp/test-data:/mnt/host \
   localhost/ubuntu-qemu:aarch64
@@ -128,7 +128,7 @@ cat /mnt/host/hello.txt
 
 ```bash
 # Interactive test
-./dist/urunc-macos_arm64 run --hypervisor qemu \
+./dist/hull_arm64 run --hypervisor qemu \
   --mem 512 --cpus 2 \
   localhost/ubuntu-qemu:aarch64
 
@@ -182,8 +182,8 @@ Rootfs: / → / (entire filesystem)
 Annotations: (from LABEL directives)
     ↓
 OCI Image: localhost/ubuntu-qemu:aarch64
-    ↓ (urunc-macos unpacks)
-Bundle: ~/.urunc-macos/instances/{ID}/
+    ↓ (hull unpacks)
+Bundle: ~/.hull/instances/{ID}/
 ├── rootfs/
 │   ├── /.boot/kernel (Linux kernel)
 │   ├── bin/
@@ -227,7 +227,7 @@ ps aux | grep qemu-system
 2. Try with fewer CPUs: `--cpus 1`
 3. Check logs for errors:
    ```bash
-   cat ~/.urunc-macos/instances/$(ls -t ~/.urunc-macos/instances | head -1)/log
+   cat ~/.hull/instances/$(ls -t ~/.hull/instances | head -1)/log
    ```
 
 ## Test Coverage Matrix
@@ -270,7 +270,7 @@ Typical metrics on M2 Max:
 ## References
 
 - [Bunny Documentation](https://github.com/nubificus/bunny)
-- [urunc-macos CLI](../cmd/urunc-macos/)
+- [hull CLI](../cmd/hull/)
 - [QEMU Backend](../pkg/unikontainers/hypervisors/qemu_darwin.go)
 - [9pfs (Plan 9 Filesystem)](https://wiki.qemu.org/Documentation/9pfs)
 

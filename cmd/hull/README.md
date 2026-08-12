@@ -1,6 +1,6 @@
-# urunc-macos — Native macOS CLI for Unikernels
+# hull — Native macOS CLI for Unikernels
 
-`urunc-macos` is a purpose-built command-line interface for running unikernels on macOS with Apple Silicon (M1/M2/M3/M4). It provides a familiar nerdctl/podman-like UX without requiring containerd or Linux VMs.
+`hull` is a purpose-built command-line interface for running unikernels on macOS with Apple Silicon (M1/M2/M3/M4). It provides a familiar nerdctl/podman-like UX without requiring containerd or Linux VMs.
 
 ## Features
 
@@ -16,16 +16,16 @@
 
 ```bash
 make urunc_macos
-# Binary placed at dist/urunc-macos_arm64
+# Binary placed at dist/hull_arm64
 
 # Make it available in PATH
-cp dist/urunc-macos_arm64 /usr/local/bin/urunc-macos
+cp dist/hull_arm64 /usr/local/bin/hull
 ```
 
 ### With Homebrew (planned)
 
 ```bash
-brew install nubificus/tap/urunc-macos
+brew install nubificus/tap/hull
 ```
 
 ## Quick Start
@@ -33,41 +33,41 @@ brew install nubificus/tap/urunc-macos
 ### Pull a Unikernel Image
 
 ```bash
-urunc-macos pull ghcr.io/nubificus/unikernels/alpine:arm64
+hull pull ghcr.io/nubificus/unikernels/alpine:arm64
 ```
 
 ### List Cached Images
 
 ```bash
-urunc-macos images
+hull images
 ```
 
 ### Run a Unikernel (Foreground)
 
 ```bash
-urunc-macos run ghcr.io/nubificus/unikernels/alpine:arm64
+hull run ghcr.io/nubificus/unikernels/alpine:arm64
 ```
 
 ### Run Detached
 
 ```bash
 # Run in background and get instance ID
-ID=$(urunc-macos run --detach --mem 256 --cpus 2 ghcr.io/nubificus/unikernels/nginx:arm64)
+ID=$(hull run --detach --mem 256 --cpus 2 ghcr.io/nubificus/unikernels/nginx:arm64)
 
 # Check status
-urunc-macos ps
+hull ps
 
 # View logs
-urunc-macos logs $ID
+hull logs $ID
 
 # Follow logs in real-time
-urunc-macos logs --follow $ID
+hull logs --follow $ID
 
 # Stop instance
-urunc-macos stop $ID
+hull stop $ID
 
 # Remove instance
-urunc-macos rm $ID
+hull rm $ID
 ```
 
 ## Command Reference
@@ -75,7 +75,7 @@ urunc-macos rm $ID
 ### Global Flags
 
 - `--debug` — Enable debug logging
-- `--store-dir DIR` — Directory for images and instance state (default: `~/.urunc-macos`)
+- `--store-dir DIR` — Directory for images and instance state (default: `~/.hull`)
 
 ### Commands
 
@@ -84,7 +84,7 @@ urunc-macos rm $ID
 Pull an OCI image and store it locally.
 
 ```bash
-urunc-macos pull ghcr.io/nubificus/unikernels/nginx:arm64
+hull pull ghcr.io/nubificus/unikernels/nginx:arm64
 ```
 
 **Note**: Images are always pulled with `platform=linux/arm64` for Apple Silicon compatibility.
@@ -104,13 +104,13 @@ Create and run a unikernel instance.
 
 ```bash
 # Foreground execution
-urunc-macos run --mem 1024 --cpus 4 ghcr.io/nubificus/unikernels/nginx:arm64
+hull run --mem 1024 --cpus 4 ghcr.io/nubificus/unikernels/nginx:arm64
 
 # Detached with custom name
-urunc-macos run --detach --name my-app --net shared my-image:arm64
+hull run --detach --name my-app --net shared my-image:arm64
 
 # With all options
-urunc-macos run --detach --name server --mem 2048 --cpus 8 --net shared nginx:arm64
+hull run --detach --name server --mem 2048 --cpus 8 --net shared nginx:arm64
 ```
 
 #### `ps`
@@ -118,7 +118,7 @@ urunc-macos run --detach --name server --mem 2048 --cpus 8 --net shared nginx:ar
 List all instances (running and stopped).
 
 ```bash
-urunc-macos ps
+hull ps
 ```
 
 Output columns:
@@ -140,7 +140,7 @@ Gracefully stop a running instance.
 3. Falls back to SIGKILL if timeout expires
 
 ```bash
-urunc-macos stop --timeout 15 my-app
+hull stop --timeout 15 my-app
 ```
 
 #### `rm [flags] <instance-id>`
@@ -151,8 +151,8 @@ Remove a stopped instance (deletes all state).
 - `--force, -f` — Force stop running instance before removal
 
 ```bash
-urunc-macos rm my-app           # Error if running
-urunc-macos rm --force my-app   # Stops and removes
+hull rm my-app           # Error if running
+hull rm --force my-app   # Stops and removes
 ```
 
 #### `logs [flags] <instance-id>`
@@ -164,9 +164,9 @@ View instance log output (QEMU stdout/stderr).
 - `--tail N` — Show last N lines (default: -1 for all)
 
 ```bash
-urunc-macos logs my-app           # Print all logs
-urunc-macos logs --tail 50 my-app # Last 50 lines
-urunc-macos logs --follow my-app  # Stream logs
+hull logs my-app           # Print all logs
+hull logs --tail 50 my-app # Last 50 lines
+hull logs --follow my-app  # Stream logs
 ```
 
 #### `inspect <instance-id>`
@@ -174,7 +174,7 @@ urunc-macos logs --follow my-app  # Stream logs
 Print full instance state as JSON (includes QEMU command line, PID, status, etc.).
 
 ```bash
-urunc-macos inspect my-app | jq .
+hull inspect my-app | jq .
 ```
 
 #### `images`
@@ -182,7 +182,7 @@ urunc-macos inspect my-app | jq .
 List all cached images.
 
 ```bash
-urunc-macos images
+hull images
 ```
 
 Output columns:
@@ -194,10 +194,10 @@ Output columns:
 
 ## State Storage
 
-Instance and image state is stored in `~/.urunc-macos/`:
+Instance and image state is stored in `~/.hull/`:
 
 ```
-~/.urunc-macos/
+~/.hull/
 ├── images/
 │   └── <digest>/
 │       ├── rootfs/           ← extracted OCI layers
@@ -224,7 +224,7 @@ Unikernel has no network access. Useful for testing, single-binary services.
 Unikernel gets network via QEMU's vmnet-shared backend (NAT mode):
 - Automatic DHCP from macOS
 - Outbound connectivity works immediately
-- Inbound requires port forwarding (not yet implemented in urunc-macos)
+- Inbound requires port forwarding (not yet implemented in hull)
 
 **Requirements:**
 - Requires `com.apple.vm.networking` entitlement OR root privilege
@@ -233,7 +233,7 @@ Unikernel gets network via QEMU's vmnet-shared backend (NAT mode):
 Example:
 
 ```bash
-sudo urunc-macos run --detach --net shared --name web nginx:arm64
+sudo hull run --detach --net shared --name web nginx:arm64
 ```
 
 ## Performance Notes
@@ -246,7 +246,7 @@ For production workloads, consider Apple's Virtualization.framework (Phase 2 fut
 
 ## Building Unikernel Images
 
-Unikernel images for urunc-macos must be:
+Unikernel images for hull must be:
 
 1. **Platform**: `linux/arm64` (native Apple Silicon)
    - Use Unikraft, MirageOS, OSv, or compatible framework
@@ -273,10 +273,10 @@ kraft build --plat qemu/arm64 -o container ghcr.io/myrepo/my-app:arm64
 
 ```bash
 # Check if QEMU process still exists
-urunc-macos ps
+hull ps
 
 # If PID shows but process is dead, force remove
-urunc-macos rm --force <instance-id>
+hull rm --force <instance-id>
 ```
 
 ### Network connectivity not working
@@ -285,10 +285,10 @@ Check entitlements:
 
 ```bash
 # Is the binary notarized/signed with vmnet entitlements?
-codesign -d --entitlements :- /usr/local/bin/urunc-macos
+codesign -d --entitlements :- /usr/local/bin/hull
 
 # For development, try with sudo (if SIP is enabled)
-sudo urunc-macos run --net shared my-app:arm64
+sudo hull run --net shared my-app:arm64
 ```
 
 ### Image pull fails with "platform not found"

@@ -29,7 +29,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/nofireai/urunc-macos/pkg/store"
+	"github.com/brig-sh/hull/pkg/store"
 	"github.com/urfave/cli/v3"
 	"github.com/urunc-dev/urunc/pkg/unikontainers/hypervisors"
 )
@@ -85,7 +85,7 @@ func checkpointInstance(_ context.Context, cmd *cli.Command) error {
 		return errors.New("checkpoint requires the Vz backend (vz-runner is not the instance's VMM)")
 	}
 	if !slices.Contains(state.CmdLine, "--state-dir") {
-		return fmt.Errorf("instance %s was started without a checkpoint state dir; re-run it with this version of urunc-macos", instanceID)
+		return fmt.Errorf("instance %s was started without a checkpoint state dir; re-run it with this version of hull", instanceID)
 	}
 	if err := requireBlockRootfs(state.CmdLine); err != nil {
 		return err
@@ -178,7 +178,7 @@ func restoreInstance(_ context.Context, cmd *cli.Command) error {
 	}
 	ckptDir := instanceCheckpointDir(s, instanceID)
 	if _, err := os.Stat(filepath.Join(ckptDir, ckptStateFile)); err != nil {
-		return fmt.Errorf("no checkpoint found for %s (run `urunc-macos checkpoint %s` while it is running)", instanceID, instanceID)
+		return fmt.Errorf("no checkpoint found for %s (run `hull checkpoint %s` while it is running)", instanceID, instanceID)
 	}
 	if len(state.CmdLine) == 0 || !strings.Contains(state.CmdLine[0], "vz-runner") {
 		return errors.New("restore requires the Vz backend")

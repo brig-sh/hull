@@ -249,7 +249,7 @@ services:
   web:
     image: nginx:latest
     environment:
-      - URUNC_TEST_UNRESOLVED_KEY
+      - HULL_TEST_UNRESOLVED_KEY
 `)
 	p, err := Load(context.Background(), Options{Files: []string{f}, ProjectName: "conf", WorkingDir: dir})
 	if err != nil {
@@ -259,12 +259,12 @@ services:
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, ok := svc.Environment["URUNC_TEST_UNRESOLVED_KEY"]
+	got, ok := svc.Environment["HULL_TEST_UNRESOLVED_KEY"]
 	if !ok {
-		t.Fatalf("environment key URUNC_TEST_UNRESOLVED_KEY absent from map, want present with nil value")
+		t.Fatalf("environment key HULL_TEST_UNRESOLVED_KEY absent from map, want present with nil value")
 	}
 	if got != nil {
-		t.Fatalf("environment URUNC_TEST_UNRESOLVED_KEY = %q, want nil (unresolved)", *got)
+		t.Fatalf("environment HULL_TEST_UNRESOLVED_KEY = %q, want nil (unresolved)", *got)
 	}
 }
 

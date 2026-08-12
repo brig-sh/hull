@@ -29,7 +29,7 @@ import (
 
 	"github.com/urfave/cli/v3"
 
-	"github.com/nofireai/urunc-macos/pkg/store"
+	"github.com/brig-sh/hull/pkg/store"
 	"github.com/urunc-dev/urunc/pkg/qmp"
 )
 

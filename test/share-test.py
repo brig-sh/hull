@@ -8,7 +8,7 @@
 # /urunit, so the init wrapper still mounts the share before the script runs,
 # and the script's stdout lands on the console (the detached instance log).
 #
-# Usage: URUNC_MACOS_BIN=dist/urunc-macos_arm64 \
+# Usage: HULL_BIN=dist/hull_arm64 \
 #        python3 test/share-test.py <vz|qemu> <instance-name> <mode>
 #   modes: readwrite | ownership | persist | multi | nested | negative
 import os
@@ -17,11 +17,11 @@ import time
 import shutil
 import subprocess
 
-BIN = os.environ.get("URUNC_MACOS_BIN", "dist/urunc-macos_arm64")
-STORE = os.environ.get("URUNC_STORE_DIR", "")
+BIN = os.environ.get("HULL_BIN", "dist/hull_arm64")
+STORE = os.environ.get("HULL_STORE_DIR", "")
 GLOBAL = (["--store-dir", STORE] if STORE else [])
-IMAGE = os.environ.get("URUNC_TEST_IMAGE", "harbor.nbfc.io/nubificus/urunc-ubuntu-vz:aarch64")
-BOOT_TIMEOUT = int(os.environ.get("URUNC_TEST_BOOT_TIMEOUT", "180"))
+IMAGE = os.environ.get("HULL_TEST_IMAGE", "harbor.nbfc.io/nubificus/urunc-ubuntu-vz:aarch64")
+BOOT_TIMEOUT = int(os.environ.get("HULL_TEST_BOOT_TIMEOUT", "180"))
 
 hv = sys.argv[1] if len(sys.argv) > 1 else "vz"
 name = sys.argv[2] if len(sys.argv) > 2 else "share-e2e"

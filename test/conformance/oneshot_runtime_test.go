@@ -20,12 +20,12 @@
 // Two halves with different fixture needs, so they gate separately:
 //
 //   - The job half runs the service's command through the guest agent, so it
-//     needs an agent-bearing image and gates on URUNC_EXEC_TEST_IMAGE exactly
+//     needs an agent-bearing image and gates on HULL_EXEC_TEST_IMAGE exactly
 //     like the ADR-0004 exec cases (exec_runtime_test.go). Without it the
 //     subtest skips with the fixture reason and proves nothing — never a
 //     silent pass.
 //   - The supervision half only needs a VM that stays up and can be killed,
-//     so it runs on the plain URUNC_TEST_IMAGE the rest of the runtime tier
+//     so it runs on the plain HULL_TEST_IMAGE the rest of the runtime tier
 //     uses. Gating it on the agent image would leave the restart policy
 //     unproven on every host that has no agent-bearing fixture, for no
 //     technical reason.
@@ -97,7 +97,7 @@ func waitInstance(e runtimeEnv, instance string, timeout time.Duration, cond fun
 // either alone is satisfied by a broken implementation — an "always release"
 // bug passes the success half, an "always fail" bug passes the failure half.
 func oneShotCompletionGate(t *testing.T, e runtimeEnv) {
-	e = execEnv(t, e) // skips unless URUNC_EXEC_TEST_IMAGE names an agent image
+	e = execEnv(t, e) // skips unless HULL_EXEC_TEST_IMAGE names an agent image
 
 	// Success: the job writes into a bind mount before exiting 0, so the host
 	// artifact proves the command really ran in the guest rather than the
@@ -202,7 +202,7 @@ const stopStaysStoppedWindow = 20 * time.Second
 //
 // The second half is the load-bearing one. A supervisor that restarts
 // everything it finds dead passes the first assertion and silently undoes
-// every 'urunc-macos stop' within a poll.
+// every 'hull stop' within a poll.
 func restartSupervision(t *testing.T, e runtimeEnv) {
 	const project = "prst"
 	instance := project + "-a"
@@ -281,7 +281,7 @@ func restartSupervision(t *testing.T, e runtimeEnv) {
 			// the intent (the marker is written only after the VMM exits),
 			// while one that kept the marker means the marker was read and
 			// ignored.
-			t.Fatalf("a service stopped with 'urunc-macos stop' is running again (pid %d, "+
+			t.Fatalf("a service stopped with 'hull stop' is running again (pid %d, "+
 				"stoppedByUser=%t); an explicit stop must outrank every restart policy",
 				st.PID, st.StoppedByUser)
 		}

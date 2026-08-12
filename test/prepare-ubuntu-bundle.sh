@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Prepare an Ubuntu Linux bundle for urunc-macos QEMU backend
+# Prepare an Ubuntu Linux bundle for hull QEMU backend
 # This manually extracts the kernel and creates an initrd (since Bunny is not available)
 
 set -e
@@ -132,10 +132,10 @@ echo "Initrd: $INITRD_SIZE"
 echo "Rootfs: $(du -sh $BUNDLE_DIR/rootfs | cut -f1)"
 echo ""
 
-echo "To test with urunc-macos:"
+echo "To test with hull:"
 echo "  cd $PROJECT_DIR"
-echo "  ./dist/urunc-macos_arm64 run --detach --hypervisor qemu --mem 512 --cpus 2 --bundle $BUNDLE_DIR"
+echo "  ./dist/hull_arm64 run --detach --hypervisor qemu --mem 512 --cpus 2 --bundle $BUNDLE_DIR"
 echo ""
 echo "Or to run interactively:"
-echo "  ./dist/urunc-macos_arm64 run --hypervisor qemu --mem 512 --cpus 2 --bundle $BUNDLE_DIR"
+echo "  ./dist/hull_arm64 run --hypervisor qemu --mem 512 --cpus 2 --bundle $BUNDLE_DIR"
 echo ""

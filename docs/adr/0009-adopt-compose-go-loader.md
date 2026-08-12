@@ -3,7 +3,7 @@
 **Status**: Accepted
 **Date**: 2026-08-12
 **Context**: Four hand-rolled parsing epics since ADR-0002 have pushed
-`cmd/urunc-macos/compose.go` to ~3,400 lines re-deriving compose-go behavior
+`cmd/hull/compose.go` to ~3,400 lines re-deriving compose-go behavior
 by hand; ADR-0002 deferred adopting compose-go as "a separate, much larger
 decision," and this ADR makes it
 
@@ -33,7 +33,7 @@ by hand:
 - Profiles (`eab7538`) and `include` (`3e210bb`, `50bd854`) added further
   hand-rolled directive handling with no ADR of their own.
 
-`cmd/urunc-macos/compose.go` plus `exec_compose.go` are now roughly 3,400
+`cmd/hull/compose.go` plus `exec_compose.go` are now roughly 3,400
 lines, most of it schema and validation logic that compose-go already
 implements and maintains against the spec. `docs/compose-support.md`'s open
 question 3 already names compose-go as the fidelity target, "at the cost of a
@@ -50,7 +50,7 @@ of the reasoning at the time; this ADR is where the reversal is recorded.
 Adopt `compose-go` v2.14.0 (`github.com/compose-spec/compose-go/v2`) as the
 only compose loader. A new `internal/compose` package wraps it; the runtime
 layer consumes its `types.Project` instead of the bespoke representation
-built by `cmd/urunc-macos/compose.go`. The bespoke loader is deleted once the
+built by `cmd/hull/compose.go`. The bespoke loader is deleted once the
 runtime is rewired (later tasks on this branch). Where compose-go's behavior
 differs from what the bespoke parser did, compose-go's behavior wins: the
 target is docker fidelity, not compatibility with our own parser's quirks.
@@ -109,7 +109,7 @@ this list as it finds more; it is a starting point, not a closed set.
   would contradict both that warning and what the VM gets: a declared
   3.5 MiB boots a 3 MB VM.
 
-- Keys urunc-macos ignores now appear in `compose config` output, where the
+- Keys hull ignores now appear in `compose config` output, where the
   bespoke renderer omitted them and printed only the honored surface.
   Warnings on stderr remain the authority on what is ignored. Suppressing
   them from the document would mean rebuilding by hand the whitelist of
@@ -208,7 +208,7 @@ moving to `supported` on real, passing tests.
 
 ## Consequences
 
-- `cmd/urunc-macos/compose.go`'s and `exec_compose.go`'s parsing and
+- `cmd/hull/compose.go`'s and `exec_compose.go`'s parsing and
   validation logic are deleted; the command and runtime layers are rewritten
   against `types.Project` (tasks 2 through 11 of this branch).
 - Behavior changes per the divergence list above. The most visible one: files

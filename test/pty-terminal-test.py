@@ -4,12 +4,12 @@
 # is left behind, no output lands on the tty after exit (the "mixed
 # terminal" symptom), and the instance state reads stopped.
 #
-# Usage: URUNC_MACOS_BIN=dist/urunc-macos_arm64 \
+# Usage: HULL_BIN=dist/hull_arm64 \
 #        python3 test/pty-terminal-test.py <vz|qemu> <name> <intr|double|term|type>
 import os, pty, sys, time, subprocess, select, fcntl, termios, signal as sig
 
-BIN = os.environ.get("URUNC_MACOS_BIN", "dist/urunc-macos_arm64")
-STORE = os.environ.get("URUNC_STORE_DIR", "")
+BIN = os.environ.get("HULL_BIN", "dist/hull_arm64")
+STORE = os.environ.get("HULL_STORE_DIR", "")
 GLOBAL_ARGS = (["--store-dir", STORE] if STORE else [])
 hv, name, mode = sys.argv[1], sys.argv[2], sys.argv[3]
 failures = []  # mode: intr | double | term
@@ -68,7 +68,7 @@ def wait_boot(marker, timeout):
             die(f"run exited during boot (rc={child.poll()})")
     die(f"boot marker {marker!r} not seen within {timeout}s")
 
-BOOT_TIMEOUT = int(os.environ.get("URUNC_TEST_BOOT_TIMEOUT", "180"))
+BOOT_TIMEOUT = int(os.environ.get("HULL_TEST_BOOT_TIMEOUT", "180"))
 # 'Run /.' is the init-wrapper exec line, common to all rootfs modes; the
 # interactive default command additionally reaches a shell prompt.
 wait_boot(b"Run /.", BOOT_TIMEOUT)

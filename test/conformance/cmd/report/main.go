@@ -38,7 +38,7 @@ import (
 	"sort"
 	"strings"
 
-	conformance "github.com/nofireai/urunc-macos/test/conformance"
+	conformance "github.com/brig-sh/hull/test/conformance"
 )
 
 func main() {
@@ -243,7 +243,7 @@ func render(m *conformance.Manifest, prov provenance) string {
 	// Tier legend.
 	b.WriteString("**Tier** — `static` entries are verified in CI without booting a VM; " +
 		"`runtime` entries are verified only where the runtime suite runs " +
-		"(`URUNC_CONFORMANCE_RUNTIME=1`, self-hosted runner or a developer Mac).\n\n")
+		"(`HULL_CONFORMANCE_RUNTIME=1`, self-hosted runner or a developer Mac).\n\n")
 
 	// Per-area score table.
 	b.WriteString("## Scores by area\n\n")

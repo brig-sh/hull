@@ -1,4 +1,4 @@
-module github.com/nofireai/urunc-macos
+module github.com/brig-sh/hull
 
 go 1.26.4
 

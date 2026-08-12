@@ -10,14 +10,14 @@ was instead of cold-booting. Built on Virtualization.framework's
 Checkpointable instances must use a **block rootfs** (see below):
 
 ```bash
-urunc-macos run --rootfs-type block --hypervisor vz --name demo -- <image>
+hull run --rootfs-type block --hypervisor vz --name demo -- <image>
 
 # while the instance is running: pause → save → resume (the guest keeps going)
-urunc-macos checkpoint demo
+hull checkpoint demo
 
 # later, with the instance stopped: boot from the checkpoint instead of cold
-urunc-macos restore demo            # foreground, console attached
-urunc-macos restore --detach demo   # background
+hull restore demo            # foreground, console attached
+hull restore --detach demo   # background
 ```
 
 `checkpoint` returns once the snapshot is on disk (typically a few hundred
@@ -64,7 +64,7 @@ Artifacts live in `<store>/instances/<name>/checkpoint/`:
   so the DHCP lease (and recorded IP) carries over.
 - Restoring requires the stored launch configuration to be identical —
   `restore` re-uses the instance's recorded command line, so this holds
-  automatically. Instances created by an older urunc-macos (no state dir)
+  automatically. Instances created by an older hull (no state dir)
   must be re-run once before they can be checkpointed.
 
 ## e2e coverage

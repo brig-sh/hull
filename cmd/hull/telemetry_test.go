@@ -24,7 +24,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nofireai/urunc-macos/pkg/store"
+	"github.com/brig-sh/hull/pkg/store"
 )
 
 func TestSendEndOnceIsIdempotent(t *testing.T) {

@@ -18,25 +18,25 @@
 // TCP healthcheck gating, volume writes, and the up/ps/logs/down lifecycle.
 //
 // It boots real VMs, so it is gated OFF by default: unless
-// URUNC_CONFORMANCE_RUNTIME=1 is set the parent test skips with an explicit
+// HULL_CONFORMANCE_RUNTIME=1 is set the parent test skips with an explicit
 // reason and the package still passes (the default in CI and on any host
 // without VZ). When gated on it follows the env contract from
 // test/share-test.py:
 //
-//	URUNC_MACOS_BIN         - the binary under test (resolved by TestMain).
-//	URUNC_STORE_DIR         - store root; a fresh temp store is used when unset
-//	                          so a run never touches ~/.urunc-macos.
-//	URUNC_TEST_IMAGE        - the guest image. MUST be a real urunc image
+//	HULL_BIN         - the binary under test (resolved by TestMain).
+//	HULL_STORE_DIR         - store root; a fresh temp store is used when unset
+//	                          so a run never touches ~/.hull.
+//	HULL_TEST_IMAGE        - the guest image. MUST be a real urunc image
 //	                          built with Bunny (com.urunc.unikernel.*
 //	                          annotations), e.g. a NOFireAI/urunc-images or
 //	                          harbor.nbfc.io/nubificus build; conformance
 //	                          against a generic OCI image proves nothing
 //	                          about urunc guest behavior and overstates the
 //	                          published percentage.
-//	URUNC_TEST_BOOT_TIMEOUT - per-boot budget in seconds (default 120); every
+//	HULL_TEST_BOOT_TIMEOUT - per-boot budget in seconds (default 120); every
 //	                          case polls against it and never fixed-sleeps.
 //
-// Exactly two conditions skip: URUNC_TEST_IMAGE unset, and the image
+// Exactly two conditions skip: HULL_TEST_IMAGE unset, and the image
 // genuinely reporting no in-guest TCP listener tool (the probe VM booted and
 // answered "none"). Everything else — a probe that failed to run, timed out,
 // or could not report, including on a shell-less unikernel flavor — is a hard
@@ -69,22 +69,22 @@ import (
 )
 
 // runtimeEnvVar gates the whole tier: only "1" runs it.
-const runtimeEnvVar = "URUNC_CONFORMANCE_RUNTIME"
+const runtimeEnvVar = "HULL_CONFORMANCE_RUNTIME"
 
 // doneMarker is echoed by every seeded guest script once its body has run, so
 // a case can poll `compose logs` for a deterministic completion sentinel
 // instead of sleeping. readyMarker is the same idea for scripts that background
 // a listener and then keep the VM alive.
 const (
-	doneMarker  = "URUNC_CONF_DONE"
-	readyMarker = "URUNC_CONF_READY"
+	doneMarker  = "HULL_CONF_DONE"
+	readyMarker = "HULL_CONF_READY"
 )
 
 // runtimeEnv is the resolved env contract for one runtime run.
 type runtimeEnv struct {
-	image       string        // URUNC_TEST_IMAGE
-	store       string        // --store-dir root (temp unless URUNC_STORE_DIR set)
-	bootTimeout time.Duration // URUNC_TEST_BOOT_TIMEOUT, default 120s
+	image       string        // HULL_TEST_IMAGE
+	store       string        // --store-dir root (temp unless HULL_STORE_DIR set)
+	bootTimeout time.Duration // HULL_TEST_BOOT_TIMEOUT, default 120s
 }
 
 // runtimeCase is one capability's check against a booted project.
@@ -104,7 +104,7 @@ func runtimeCases() map[string]runtimeCase {
 		"service.volumes":       caseVolumes,
 		"ext.x-healthcheck-tcp": caseHealthcheckTCP,
 		// exec-dependent capabilities (ADR-0004): gated on
-		// URUNC_EXEC_TEST_IMAGE, an agent-bearing Bunny-built image.
+		// HULL_EXEC_TEST_IMAGE, an agent-bearing Bunny-built image.
 		"cli.exec":            caseComposeExec,
 		"cli.top":             caseComposeTop,
 		"service.healthcheck": caseHealthcheckExec,
@@ -122,8 +122,8 @@ func TestConformanceRuntime(t *testing.T) {
 	}
 	if os.Getenv(runtimeEnvVar) != "1" {
 		t.Skipf("runtime tier gated off: set %s=1 on a macOS host with VZ and the "+
-			"test/share-test.py env contract (URUNC_TEST_IMAGE, optional URUNC_STORE_DIR / "+
-			"URUNC_TEST_BOOT_TIMEOUT) to run", runtimeEnvVar)
+			"test/share-test.py env contract (HULL_TEST_IMAGE, optional HULL_STORE_DIR / "+
+			"HULL_TEST_BOOT_TIMEOUT) to run", runtimeEnvVar)
 	}
 	// Gated on but the SUT cannot exist here (non-darwin): skip, don't fail.
 	if skipReason != "" {
@@ -196,17 +196,17 @@ func TestConformanceRuntimeCoverage(t *testing.T) {
 // -- env ---------------------------------------------------------------------
 
 // loadRuntimeEnv resolves the share-test.py env contract. A missing
-// URUNC_TEST_IMAGE is a skip, not a failure: the tier is opt-in and useless
+// HULL_TEST_IMAGE is a skip, not a failure: the tier is opt-in and useless
 // without a bootable image. The store defaults to a fresh temp dir so a run
-// never mutates the developer's real ~/.urunc-macos store.
+// never mutates the developer's real ~/.hull store.
 func loadRuntimeEnv(t *testing.T) runtimeEnv {
 	t.Helper()
-	img := os.Getenv("URUNC_TEST_IMAGE")
+	img := os.Getenv("HULL_TEST_IMAGE")
 	if img == "" {
-		t.Skip("fixture image unavailable: URUNC_TEST_IMAGE is not set; the runtime tier " +
+		t.Skip("fixture image unavailable: HULL_TEST_IMAGE is not set; the runtime tier " +
 			"needs a Bunny-built urunc guest image (see test/share-test.py)")
 	}
-	store := os.Getenv("URUNC_STORE_DIR")
+	store := os.Getenv("HULL_STORE_DIR")
 	if store == "" {
 		// The store root must stay short: the gateway binds unix sockets at
 		// <store>/compose/<project>.gateway.sock[.qemu] and instances at
@@ -226,10 +226,10 @@ func loadRuntimeEnv(t *testing.T) runtimeEnv {
 	// slip past the guard and hit bind failures again.
 	if sock := filepath.Join(store, "compose", strings.Repeat("p", 16)+".gateway.sock.qemu"); len(sock) >= 104 {
 		t.Fatalf("store dir %q is too deep: gateway socket paths (up to %d chars) would exceed "+
-			"darwin's 104-byte sun_path limit; use a shorter URUNC_STORE_DIR", store, len(sock))
+			"darwin's 104-byte sun_path limit; use a shorter HULL_STORE_DIR", store, len(sock))
 	}
 	bootTimeout := 120 * time.Second
-	if v := os.Getenv("URUNC_TEST_BOOT_TIMEOUT"); v != "" {
+	if v := os.Getenv("HULL_TEST_BOOT_TIMEOUT"); v != "" {
 		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
 			bootTimeout = time.Duration(n) * time.Second
 		}
@@ -275,7 +275,7 @@ func execRaw(timeout time.Duration, args ...string) (runResult, error) {
 func execBin(t *testing.T, timeout time.Duration, args ...string) runResult {
 	t.Helper()
 	if binPath == "" {
-		t.Fatalf("no urunc-macos binary available (%s); the parent test should have gated this", skipReason)
+		t.Fatalf("no hull binary available (%s); the parent test should have gated this", skipReason)
 	}
 	res, err := execRaw(timeout, args...)
 	if err != nil {
@@ -442,7 +442,7 @@ func detectTCPTool(t *testing.T, e runtimeEnv, capability string) string {
 	}
 	if tcpToolVal == "none" {
 		t.Skipf("fixture image unavailable: %s needs an in-guest TCP listener "+
-			"(python3/nc/ncat/socat); none present in URUNC_TEST_IMAGE", capability)
+			"(python3/nc/ncat/socat); none present in HULL_TEST_IMAGE", capability)
 	}
 	return tcpToolVal
 }
@@ -467,7 +467,7 @@ func probeTCPTool(e runtimeEnv) (string, error) {
 	if err := os.WriteFile(filepath.Join(dir, "probe.sh"), []byte(script), 0o755); err != nil {
 		return "", err
 	}
-	// PID-suffixed so concurrent runs sharing a URUNC_STORE_DIR cannot
+	// PID-suffixed so concurrent runs sharing a HULL_STORE_DIR cannot
 	// clobber each other's probe instance.
 	name := fmt.Sprintf("urc-probe-%d", os.Getpid())
 	rm := func() {
@@ -576,7 +576,7 @@ func caseCliPs(t *testing.T, e runtimeEnv) {
 }
 
 func caseCliLogs(t *testing.T, e runtimeEnv) {
-	const line = "URUNC_CONF_LOGLINE"
+	const line = "HULL_CONF_LOGLINE"
 	dir := t.TempDir()
 	writeGuestScript(t, dir, "echo "+line+"\n")
 	file := writeComposeFile(t, fmt.Sprintf(`services:
@@ -643,7 +643,7 @@ func caseDependsOn(t *testing.T, e runtimeEnv) {
 
 	// The completion condition needs a job, and a job needs an agent-bearing
 	// image, so it is a nested subtest: gating the whole case on
-	// URUNC_EXEC_TEST_IMAGE would vacate the service_started ordering proof
+	// HULL_EXEC_TEST_IMAGE would vacate the service_started ordering proof
 	// above on every host without one.
 	t.Run("service_completed_successfully", func(t *testing.T) { oneShotCompletionGate(t, e) })
 }

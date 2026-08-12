@@ -26,7 +26,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nofireai/urunc-macos/pkg/store"
+	"github.com/brig-sh/hull/pkg/store"
 )
 
 // TestRestartPolicyParsing pins the whole surface of 'restart:': every

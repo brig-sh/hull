@@ -189,7 +189,7 @@ func WarnUnsupportedKeys(w io.Writer, data []byte, origin string) {
 						}
 						warn(prefix+"depends_on."+dep.key+"."+sub.key,
 							nestedHint("depends_on."+sub.key,
-								"not supported by urunc-macos compose; only 'condition' is read"))
+								"not supported by hull compose; only 'condition' is read"))
 					}
 				}
 			case "x-healthcheck-tcp":
@@ -199,7 +199,7 @@ func WarnUnsupportedKeys(w io.Writer, data []byte, origin string) {
 					}
 					warn(prefix+"x-healthcheck-tcp."+sub.key,
 						nestedHint("x-healthcheck-tcp."+sub.key,
-							"not supported by urunc-macos compose; the TCP probe reads port, interval, retries and start_period"))
+							"not supported by hull compose; the TCP probe reads port, interval, retries and start_period"))
 				}
 			case "healthcheck":
 				for _, sub := range mappingEntries(key.value) {
@@ -208,7 +208,7 @@ func WarnUnsupportedKeys(w io.Writer, data []byte, origin string) {
 					}
 					warn(prefix+"healthcheck."+sub.key,
 						nestedHint("healthcheck."+sub.key,
-							"not supported by urunc-macos compose; the exec probe reads test, interval, timeout, retries, start_period and disable"))
+							"not supported by hull compose; the exec probe reads test, interval, timeout, retries, start_period and disable"))
 				}
 			case "post_start", "pre_stop":
 				// Hooks are a sequence of mappings; walk each entry.
@@ -219,7 +219,7 @@ func WarnUnsupportedKeys(w io.Writer, data []byte, origin string) {
 								continue
 							}
 							warn(fmt.Sprintf("%s%s[%d].%s", prefix, key.key, i, sub.key),
-								"not supported by urunc-macos compose; hooks read command, user and environment")
+								"not supported by hull compose; hooks read command, user and environment")
 						}
 					}
 				}
@@ -238,7 +238,7 @@ func topLevelHint(key string) string {
 	if strings.HasPrefix(key, "x-") {
 		return "top-level extension keys are not interpreted; a YAML anchor defined here still merges where it is referenced"
 	}
-	return "urunc-macos compose reads only the top-level 'services' key"
+	return "hull compose reads only the top-level 'services' key"
 }
 
 // serviceKeyHint explains a dropped service key. The x- case catches typos in
@@ -249,9 +249,9 @@ func serviceKeyHint(key string) string {
 		return h
 	}
 	if strings.HasPrefix(key, "x-") {
-		return "unknown extension key; urunc-macos compose defines only x-hypervisor and x-healthcheck-tcp"
+		return "unknown extension key; hull compose defines only x-hypervisor and x-healthcheck-tcp"
 	}
-	return "not supported by urunc-macos compose (see docs/compose.md for the supported service keys)"
+	return "not supported by hull compose (see docs/compose.md for the supported service keys)"
 }
 
 // nestedHint explains a dropped key inside a mapping the parser reads. The

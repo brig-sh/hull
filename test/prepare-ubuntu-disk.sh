@@ -160,6 +160,6 @@ fi
 echo "Rootfs: $(du -sh $BUNDLE_DIR/rootfs | cut -f1)"
 echo ""
 
-echo "To test with urunc-macos:"
-echo "  ./dist/urunc-macos_arm64 run --detach --hypervisor qemu --mem 512 --cpus 2 $BUNDLE_DIR"
+echo "To test with hull:"
+echo "  ./dist/hull_arm64 run --detach --hypervisor qemu --mem 512 --cpus 2 $BUNDLE_DIR"
 echo ""
