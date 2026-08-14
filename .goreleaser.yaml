@@ -1,0 +1,127 @@
+# hull's single release path, the same shape brig uses.
+#
+# GoReleaser builds and notarizes the Go binary, assembles the archive,
+# publishes the cask and writes the changelog. vz-runner is Swift, which
+# GoReleaser cannot build and cannot import in the open-source edition (the
+# prebuilt builder is a Pro feature), so the release workflow builds, signs
+# and notarizes it just before this runs, and it travels in the archive as an
+# extra file.
+#
+# The styled DMG is gone with the old workflow: notarizing an app bundle
+# inside a DMG is also Pro-only, and nobody installed that way -- the Homebrew
+# cask unpacks the archive below.
+version: 2
+
+project_name: hull
+
+env:
+  # Always define it, so the ldflag template below resolves even where the
+  # variable is absent (local snapshot, fork). Empty means the telemetry
+  # client stays inert -- that is the dev-build default, not a failure.
+  - TELEMETRY_ENDPOINT={{ if isEnvSet "TELEMETRY_ENDPOINT" }}{{ .Env.TELEMETRY_ENDPOINT }}{{ end }}
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: hull
+    main: ./cmd/hull
+    binary: hull
+    env: [CGO_ENABLED=0]
+    goos: [darwin]
+    goarch: [arm64]
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+      # The Makefile bakes this in but GoReleaser builds the released binary,
+      # so without it every published hull shipped with telemetry inert.
+      - -X github.com/brig-sh/hull/internal/telemetry.Endpoint={{ .Env.TELEMETRY_ENDPOINT }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+# Developer ID signing and notarization for the Go binary. vz-runner is
+# handled in the workflow because it needs the virtualization entitlement.
+notarize:
+  macos:
+    - enabled: '{{ isEnvSet "MACOS_SIGN_P12" }}'
+      ids: [hull]
+      sign:
+        certificate: "{{.Env.MACOS_SIGN_P12}}"
+        password: "{{.Env.MACOS_SIGN_PASSWORD}}"
+      notarize:
+        issuer_id: "{{.Env.MACOS_NOTARY_ISSUER_ID}}"
+        key_id: "{{.Env.MACOS_NOTARY_KEY_ID}}"
+        key: "{{.Env.MACOS_NOTARY_KEY}}"
+        wait: true
+        timeout: 20m
+
+archives:
+  - id: hull
+    ids: [hull]
+    # hull discovers vz-runner and hvi next to its own executable, so all
+    # three ship together.
+    name_template: "{{ .ProjectName }}-{{ .Version }}-{{ .Arch }}"
+    formats: [tar.gz]
+    files:
+      # Staged by the release workflow, signed and notarized with the
+      # virtualization and hypervisor entitlements respectively. Outside
+      # dist/, which --clean wipes. strip_parent, or the archive carries
+      # build/vz-runner and the cask's `binaries:` finds nothing to link.
+      - src: build/vz-runner
+        strip_parent: true
+        info: {mode: 0o755}
+      - src: build/hvi
+        strip_parent: true
+        info: {mode: 0o755}
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: checksums.txt
+
+signs:
+  - cmd: cosign
+    certificate: "${artifact}.pem"
+    args:
+      - sign-blob
+      - "--output-certificate=${certificate}"
+      - "--output-signature=${signature}"
+      - "${artifact}"
+      - --yes
+    artifacts: checksum
+    output: true
+
+sboms:
+  - artifacts: archive
+
+homebrew_casks:
+  - name: hull
+    ids: [hull]
+    binaries: [hull, vz-runner, hvi]
+    repository:
+      owner: brig-sh
+      name: homebrew-brig
+      branch: main
+      # Open a pull request rather than pushing to the tap. The cask is what
+      # people install; a bad one is worth a second pair of eyes, and the PR
+      # is a place to see the diff.
+      pull_request:
+        enabled: true
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: https://github.com/brig-sh/hull
+    description: Run unikernels and sandboxed Linux containers as microVMs on Apple Silicon
+    skip_upload: auto
+    caveats: |
+      hull boots VMs through Virtualization.framework. Block-rootfs mode wants
+      e2fsprogs:
+
+        brew install e2fsprogs
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude: ["^docs:", "^test:", "^chore:"]
+
+release:
+  draft: true
+  prerelease: auto

@@ -1,0 +1,352 @@
+name: Release
+
+# hull's only release path.
+#
+# vz-runner first, because GoReleaser cannot build a Swift binary and cannot
+# import one in the open-source edition. It is signed with the virtualization
+# entitlement and notarized here, then GoReleaser picks it up as an extra file
+# in the archive, notarizes the Go binary, publishes the cask and writes the
+# changelog.
+#
+# Runs on our own macOS runner: swift build and codesign need a Mac. Tag
+# builds only, so a fork can never reach it.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to release"
+        required: true
+
+concurrency:
+  # ci and release both import a Developer ID certificate and rewrite the
+  # user keychain search list, and every self-hosted runner here is the same
+  # physical Mac. Two jobs signing at once is errSecInternalComponent, so
+  # they queue rather than race. Never cancel-in-progress: cancelling a job
+  # mid-sign leaves the search list pointing at a keychain that is gone.
+  group: macos-signing
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  # Sigstore hands out the signing certificate against this token. Without it
+  # cosign finds no ambient OIDC credential and falls back to an interactive
+  # device flow -- which hangs the job waiting for a browser, and would sign
+  # with a personal identity rather than this workflow's, so the signature
+  # would fail the very check that makes it worth having.
+  id-token: write
+
+jobs:
+  release:
+    name: build, sign, notarize, publish
+    runs-on: [self-hosted, macOS, ARM64]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # GoReleaser derives the version and the changelog from the tag
+          # history, so a shallow clone gives it the wrong answer.
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      # hvi-vmm is a submodule and a shipped binary, so a release cannot be cut
+      # without it. It is a separate private repo, so this job's own token
+      # cannot read it. HVI_DEPLOY_KEY is a read-only deploy key scoped to that
+      # repo alone -- which is why the submodule is fetched here rather than by
+      # actions/checkout: checkout would use the key for this repository too,
+      # and a deploy key is valid for exactly one. Once hvi-vmm is public the
+      # secret can go away and the else branch is all that is left.
+      - name: Fetch the hvi-vmm submodule
+        env:
+          HVI_DEPLOY_KEY: ${{ secrets.HVI_DEPLOY_KEY }}
+        run: |
+          if [ -n "$HVI_DEPLOY_KEY" ]; then
+            KEY="$RUNNER_TEMP/hvi_deploy"
+            printf '%s\n' "$HVI_DEPLOY_KEY" > "$KEY"
+            chmod 600 "$KEY"
+            GIT_SSH_COMMAND="ssh -i $KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \
+              git submodule update --init hvi-vmm
+            rm -f "$KEY"
+          else
+            git submodule update --init hvi-vmm
+          fi
+
+      - name: Check the tag matches VERSION
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          [ "${{ github.event.inputs.tag }}" = "" ] || TAG="${{ github.event.inputs.tag }}"
+          TAG="${TAG#v}"
+          [ "$(cat VERSION)" = "$TAG" ] || {
+            echo "VERSION file ($(cat VERSION)) does not match tag $TAG" >&2; exit 1; }
+
+      - name: Import the Developer ID certificate into an ephemeral keychain
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          KEYCHAIN_PASSWORD=$(uuidgen)
+          KEYCHAIN="$RUNNER_TEMP/release.keychain-db"
+          echo "KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          echo "$MACOS_CERT_P12" | base64 -d > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+            -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN" \
+            | grep -o '"Developer ID Application: [^"]*"' | head -1 | tr -d '"')
+          [ -n "$IDENTITY" ] || { echo "no Developer ID identity" >&2; exit 1; }
+          echo "IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+
+      # vz-runner carries com.apple.security.virtualization and hvi carries
+      # com.apple.security.hypervisor. Without a Developer ID signature macOS
+      # refuses either entitlement under SIP and no VM starts, so this is not
+      # optional for either. The two are handled by one function rather than
+      # two copies of it: the only things that differ are the name, the
+      # entitlements plist and the key that must survive signing.
+      - name: Build, sign and notarize the VMMs
+        env:
+          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          make vz_runner hvi_vmm
+          # NOT dist/: goreleaser runs with --clean and wipes that directory
+          # before it builds, which would delete the binaries we just signed.
+          mkdir -p build
+          cp vz-runner/.build/arm64-apple-macosx/release/vz-runner build/vz-runner
+          cp hvi-vmm/target/release/hvi build/hvi
+          echo "$NOTARY_KEY_P8" > "$RUNNER_TEMP/notary-key.p8"
+
+          sign_and_notarize() {
+            name=$1; entitlements=$2; required=$3
+            codesign --force --options runtime --timestamp \
+              --keychain "$KEYCHAIN" --sign "$IDENTITY" \
+              --entitlements "$entitlements" "build/$name"
+            codesign --verify --strict "build/$name"
+            codesign -d --entitlements - --xml "build/$name" \
+              | grep -q "$required" \
+              || { echo "$name lost $required" >&2; exit 1; }
+
+            # A bare binary cannot have a ticket stapled to it, so notarize it
+            # in a zip and let Gatekeeper resolve the ticket online. Skipping
+            # this is what shipped "Unnotarized Developer ID" in rc19.
+            ditto -c -k "build/$name" "$RUNNER_TEMP/$name.zip"
+            SUBMIT=$(xcrun notarytool submit "$RUNNER_TEMP/$name.zip" \
+              --key "$RUNNER_TEMP/notary-key.p8" \
+              --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" \
+              --wait --output-format json)
+            echo "$SUBMIT"
+            SUB_ID=$(printf '%s' "$SUBMIT" | sed -n 's/.*"id" *: *"\([^"]*\)".*/\1/p' | head -1)
+            [ -n "$SUB_ID" ] || { echo "no notarization submission id" >&2; exit 1; }
+
+            # Assert the ticket rather than probe Gatekeeper. The online lookup
+            # a `codesign --test-requirement="=notarized"` performs can lag the
+            # submission by hours and is unreliable on a machine with custom
+            # boot-args, so it can neither pass nor fail us honestly. What Apple
+            # returns here is authoritative: the ticket it issued names the
+            # cdhash it covers, so comparing that to the binary we are about to
+            # ship proves the artifact is the notarized one.
+            xcrun notarytool log "$SUB_ID" \
+              --key "$RUNNER_TEMP/notary-key.p8" \
+              --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" \
+              > "$RUNNER_TEMP/notary-log.json"
+            rm "$RUNNER_TEMP/$name.zip"
+            cat "$RUNNER_TEMP/notary-log.json"
+
+            grep -q '"status" *: *"Accepted"' "$RUNNER_TEMP/notary-log.json" \
+              || { echo "Apple did not accept $name" >&2; exit 1; }
+            TICKET=$(sed -n 's/.*"cdhash" *: *"\([^"]*\)".*/\1/p' \
+              "$RUNNER_TEMP/notary-log.json" | head -1)
+            ACTUAL=$(codesign -dvvv "build/$name" 2>&1 | sed -n 's/^CDHash=//p')
+            [ -n "$TICKET" ] && [ "$TICKET" = "$ACTUAL" ] || {
+              echo "notarized cdhash $TICKET != shipped cdhash $ACTUAL" >&2; exit 1; }
+            echo "$name notarized; ticket covers cdhash $ACTUAL"
+          }
+
+          sign_and_notarize vz-runner vz-runner/Entitlements-novmnet.plist \
+            com.apple.security.virtualization
+          sign_and_notarize hvi hvi-vmm/hvi.entitlements \
+            com.apple.security.hypervisor
+          rm "$RUNNER_TEMP/notary-key.p8"
+
+      - uses: sigstore/cosign-installer@v3
+      - uses: anchore/sbom-action/download-syft@v0
+
+      - name: Stage the notary key for GoReleaser
+        env:
+          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
+        run: |
+          printf '%s' "$NOTARY_KEY_P8" > "$RUNNER_TEMP/notary-key.p8"
+          chmod 600 "$RUNNER_TEMP/notary-key.p8"
+
+      # A token for the tap, minted from the bot App rather than a long-lived
+      # PAT. continue-on-error because a release must not fail just because
+      # the App is not installed yet -- goreleaser then falls back to the PAT
+      # secret, and skips publishing the cask if neither exists.
+      - uses: actions/create-github-app-token@v3
+        id: tap-token
+        continue-on-error: true
+        with:
+          app-id: ${{ vars.NOFIRE_BOT_APP_ID }}
+          private-key: ${{ secrets.NOFIRE_BOT_PRIVATE_KEY }}
+          owner: brig-sh
+          repositories: homebrew-brig
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ steps.tap-token.outputs.token || secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          MACOS_SIGN_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_SIGN_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          MACOS_NOTARY_KEY: ${{ runner.temp }}/notary-key.p8
+          MACOS_NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+          # Baked into the binary by ldflags. Unset (forks) leaves the
+          # telemetry client inert rather than failing the build.
+          TELEMETRY_ENDPOINT: ${{ vars.TELEMETRY_ENDPOINT }}
+
+      # The cask links `binaries: [hull, vz-runner]` by name from the archive
+      # root. rc25 shipped vz-runner one directory down and the cask silently
+      # linked nothing, so assert the layout and the signatures here rather
+      # than discover it on someone's laptop.
+      - name: Verify the archive
+        run: |
+          TARBALL=$(ls dist/hull-*-arm64.tar.gz)
+          WORK=$(mktemp -d)
+          tar xzf "$TARBALL" -C "$WORK"
+          for b in hull vz-runner; do
+            [ -f "$WORK/$b" ] || {
+              echo "$b is not at the archive root:" >&2
+              tar tzf "$TARBALL" >&2; exit 1; }
+            codesign --verify --strict "$WORK/$b" \
+              || { echo "$b is not validly signed" >&2; exit 1; }
+            # --verbose=2, or codesign prints no Authority= lines at all and
+            # the Developer ID check below fails on every well-signed binary.
+            DESC=$(codesign -dv --verbose=2 "$WORK/$b" 2>&1)
+            printf '%s\n' "$DESC" | grep -q "flags=.*runtime" \
+              || { echo "$b is missing the hardened runtime" >&2; exit 1; }
+            printf '%s\n' "$DESC" | grep -q "Authority=Developer ID Application" \
+              || { echo "$b is not Developer ID signed" >&2; exit 1; }
+            echo "$b: at root, Developer ID signed, hardened runtime"
+          done
+          rm -rf "$WORK"
+
+      - name: Delete the ephemeral keychain
+        if: always()
+        run: |
+          if [ -n "$KEYCHAIN" ] && [ -f "$KEYCHAIN" ]; then
+            security delete-keychain "$KEYCHAIN"
+          fi
+          # The import replaced the user's search list wholesale; put the
+          # login keychain back whatever happened above.
+          security list-keychains -d user -s login.keychain-db
+
+  # The drag-to-Applications installer, built after the release exists and
+  # attached to it.
+  #
+  # Separate from the job above because GoReleaser's open-source edition can
+  # notarize bare binaries but not an app bundle inside a DMG -- that is a Pro
+  # feature. Rather than keep a second release path for it, this consumes the
+  # release the first job published and adds one artifact to it.
+  #
+  # The binaries inside the bundle are NOT the tarball's binaries: a bundle
+  # seals its nested code, so they are signed again here and their hashes
+  # differ by construction. The DMG is notarized and stapled as a whole, which
+  # is what makes it verifiable offline -- the tarball's bare binaries can only
+  # be checked online.
+  dmg:
+    name: installer image
+    needs: release
+    runs-on: [self-hosted, macOS, ARM64]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      # The app bundle carries hvi, so this job builds it too and needs the
+      # submodule for the same reason the release job does.
+      - name: Fetch the hvi-vmm submodule
+        env:
+          HVI_DEPLOY_KEY: ${{ secrets.HVI_DEPLOY_KEY }}
+        run: |
+          if [ -n "$HVI_DEPLOY_KEY" ]; then
+            KEY="$RUNNER_TEMP/hvi_deploy"
+            printf '%s\n' "$HVI_DEPLOY_KEY" > "$KEY"
+            chmod 600 "$KEY"
+            GIT_SSH_COMMAND="ssh -i $KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \
+              git submodule update --init hvi-vmm
+            rm -f "$KEY"
+          else
+            git submodule update --init hvi-vmm
+          fi
+
+      - name: Install create-dmg
+        run: test -x "$(brew --prefix)/bin/create-dmg" || brew install create-dmg
+
+      - name: Import the Developer ID certificate into an ephemeral keychain
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          KEYCHAIN_PASSWORD=$(uuidgen)
+          KEYCHAIN="$RUNNER_TEMP/dmg.keychain-db"
+          echo "KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          echo "$MACOS_CERT_P12" | base64 -d > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+            -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN" \
+            | grep -o '"Developer ID Application: [^"]*"' | head -1 | tr -d '"')
+          [ -n "$IDENTITY" ] || { echo "no Developer ID identity" >&2; exit 1; }
+          echo "IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+
+      - name: Build the signed app bundle and installer image
+        run: make dmg_image CODESIGN_IDENTITY="$IDENTITY" CODESIGN_KEYCHAIN="$KEYCHAIN"
+
+      - name: Notarize, staple and verify
+        env:
+          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          echo "$NOTARY_KEY_P8" > "$RUNNER_TEMP/notary-key.p8"
+          xcrun notarytool submit dist/hull.dmg \
+            --key "$RUNNER_TEMP/notary-key.p8" \
+            --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" --wait
+          rm "$RUNNER_TEMP/notary-key.p8"
+          # Stapling is the point of shipping a DMG at all: the ticket travels
+          # with the file, so it verifies with no network.
+          xcrun stapler staple dist/hull.dmg
+          xcrun stapler validate dist/hull.dmg
+          spctl -a -vv -t open --context context:primary-signature dist/hull.dmg
+
+      - name: Attach it to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          gh release upload "$TAG" dist/hull.dmg --repo "$GITHUB_REPOSITORY" --clobber
+
+      - name: Delete the ephemeral keychain
+        if: always()
+        run: |
+          if [ -n "$KEYCHAIN" ] && [ -f "$KEYCHAIN" ]; then
+            security delete-keychain "$KEYCHAIN"
+          fi
+          security list-keychains -d user -s login.keychain-db
