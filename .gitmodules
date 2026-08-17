@@ -1,0 +1,3 @@
+[submodule "hvi-vmm"]
+	path = hvi-vmm
+	url = git@github.com:NOFireAI/hvi-vmm.git

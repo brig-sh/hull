@@ -1,0 +1,10 @@
+.DS_Store
+dist/
+vz-runner/.build/
+*.dmg
+go.work
+go.work.sum
+.worktrees/
+
+# Staging for release artifacts built outside dist/ (see release.yml).
+/build/
