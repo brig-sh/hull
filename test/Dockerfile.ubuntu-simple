@@ -1,0 +1,26 @@
+FROM ubuntu:latest
+
+# Install kernel and tools
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    linux-image-generic \
+    procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create init script
+RUN echo '#!/bin/bash' > /init && \
+    echo 'mount -t proc proc /proc 2>/dev/null || true' >> /init && \
+    echo 'mount -t sysfs sysfs /sys 2>/dev/null || true' >> /init && \
+    echo 'mount -t devtmpfs devtmpfs /dev 2>/dev/null || true' >> /init && \
+    echo '' >> /init && \
+    echo 'echo "=== Linux VM Booted ===" ' >> /init && \
+    echo 'uname -a' >> /init && \
+    echo 'echo ""' >> /init && \
+    echo 'exec /bin/bash' >> /init && \
+    chmod +x /init
+
+LABEL com.urunc.unikernel.kernel="/.boot/kernel"
+LABEL com.urunc.unikernel.hypervisor="qemu"
+LABEL com.urunc.unikernel.cmdline="root=/dev/ram0 init=/init console=ttyS0"
+
+ENTRYPOINT ["/init"]
