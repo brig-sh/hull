@@ -1,0 +1,52 @@
+name: Build test image
+
+# Build the ubuntu test image from test/ and publish it to GHCR.
+#
+# The guest images (claude-code, claude-desktop) and the guest kernel now live
+# in https://github.com/NOFireAI/urunc-images. What stays here is this bunny
+# test image, because it is built from this repo's test/ fixtures and exists to
+# exercise the runtime.
+#
+# GHCR needs no extra secret: the built-in GITHUB_TOKEN authenticates with
+# packages: write, and the bunny BuildKit frontend is public.
+
+on:
+  pull_request:
+    paths:
+      - "test/**"
+      - ".github/workflows/build-images.yml"
+  workflow_dispatch:
+    inputs:
+      push:
+        description: "Push the image to ghcr.io/nofireai"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io/nofireai
+  PLATFORM: linux/arm64
+
+jobs:
+  test-image:
+    name: test image (bunny)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Build the ubuntu test image
+        run: |
+          DOCKER_BUILDKIT=1 docker build \
+            --platform "$PLATFORM" --provenance=false --sbom=false \
+            -f test/Dockerfile.ubuntu-qemu \
+            -t "$REGISTRY/urunc-ubuntu-test:aarch64" \
+            test/
+
+      - name: Push to GHCR
+        if: github.event_name == 'workflow_dispatch' && inputs.push
+        run: |
+          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "$REGISTRY/urunc-ubuntu-test:aarch64"
