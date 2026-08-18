@@ -47,11 +47,6 @@ func seedImage(t *testing.T, s *store.Store, withRootfs bool) {
 		if err := os.MkdirAll(filepath.Join(dir, "rootfs"), 0755); err != nil {
 			t.Fatalf("MkdirAll rootfs: %v", err)
 		}
-		// A cache hit also needs the layout stamp a current unpack leaves, or
-		// this is seeding the older layout rather than a good pull.
-		if err := store.WriteUnpackSchema(dir); err != nil {
-			t.Fatalf("WriteUnpackSchema: %v", err)
-		}
 	}
 }
 
@@ -238,9 +233,6 @@ func TestCachedDigestPrefersNewestPull(t *testing.T) {
 		if err := os.MkdirAll(filepath.Join(dir, "rootfs"), 0755); err != nil {
 			t.Fatalf("MkdirAll: %v", err)
 		}
-		if err := store.WriteUnpackSchema(dir); err != nil {
-			t.Fatalf("WriteUnpackSchema: %v", err)
-		}
 	}
 
 	digest, ok := cachedDigest(s, cacheTestRef, ociclient.DefaultPlatform)
@@ -266,9 +258,6 @@ func TestCachedDigestSkipsIncompleteNewerEntry(t *testing.T) {
 	}
 	if err := os.MkdirAll(filepath.Join(dir, "rootfs"), 0755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
-	}
-	if err := store.WriteUnpackSchema(dir); err != nil {
-		t.Fatalf("WriteUnpackSchema: %v", err)
 	}
 	// Newer, but its rootfs never landed.
 	if _, err := s.SaveImage(cacheTestDigest, &store.ImageMetadata{
@@ -313,9 +302,6 @@ func TestCachedDigestHonorsPlatform(t *testing.T) {
 	}
 	if err := os.MkdirAll(filepath.Join(dir, "rootfs"), 0755); err != nil {
 		t.Fatalf("MkdirAll rootfs: %v", err)
-	}
-	if err := store.WriteUnpackSchema(dir); err != nil {
-		t.Fatalf("WriteUnpackSchema: %v", err)
 	}
 
 	digest, ok := cachedDigest(s, cacheTestRef, "linux/amd64")

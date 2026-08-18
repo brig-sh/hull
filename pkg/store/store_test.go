@@ -90,9 +90,6 @@ func TestImageComplete(t *testing.T) {
 				if err := os.MkdirAll(filepath.Join(imageDir, "rootfs"), 0755); err != nil {
 					t.Fatalf("MkdirAll rootfs: %v", err)
 				}
-				if err := WriteUnpackSchema(imageDir); err != nil {
-					t.Fatalf("WriteUnpackSchema: %v", err)
-				}
 			}
 
 			if got := s.ImageComplete(testDigest); got != tt.want {
@@ -110,9 +107,6 @@ func TestImageCompleteAfterRootfsLoss(t *testing.T) {
 	imageDir := saveTestImage(t, s, "example.com/img:tag")
 	if err := os.MkdirAll(filepath.Join(imageDir, "rootfs"), 0755); err != nil {
 		t.Fatalf("MkdirAll rootfs: %v", err)
-	}
-	if err := WriteUnpackSchema(imageDir); err != nil {
-		t.Fatalf("WriteUnpackSchema: %v", err)
 	}
 	if !s.ImageComplete(testDigest) {
 		t.Fatal("freshly pulled image should be complete")
@@ -156,9 +150,6 @@ func TestWriteImageMetadataIsReadableByGetImage(t *testing.T) {
 	}
 	if err := WriteImageMetadata(staging, &ImageMetadata{Ref: "r", Digest: testDigest}); err != nil {
 		t.Fatalf("WriteImageMetadata: %v", err)
-	}
-	if err := WriteUnpackSchema(staging); err != nil {
-		t.Fatalf("WriteUnpackSchema: %v", err)
 	}
 	if err := os.Rename(staging, filepath.Join(s.RootDir(), "images", testDigest)); err != nil {
 		t.Fatalf("Rename: %v", err)

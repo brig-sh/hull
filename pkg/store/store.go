@@ -21,7 +21,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -247,54 +246,7 @@ func (s *Store) ImageComplete(digest string) bool {
 		return false
 	}
 	fi, err := os.Stat(filepath.Join(imageDir, "rootfs"))
-	if err != nil || !fi.IsDir() {
-		return false
-	}
-	// A rootfs unpacked by an older hull is present and readable but does not
-	// carry what the guest needs, and nothing about it looks wrong from here.
-	// Treat it as a miss so the next pull rewrites it.
-	return ReadUnpackSchema(imageDir) == UnpackSchema
-}
-
-// UnpackSchema is the version of the on-disk layout an image rootfs is
-// unpacked with. Bump it whenever unpack starts recording something the guest
-// depends on: a rootfs written by an older hull is then a cache miss and gets
-// rewritten, instead of being served silently with the old contents.
-//
-// 1 -> 2: unpack records each entry's tar mode/uid/gid in a guest-attr xattr
-// and restores the setuid/setgid bits that containerd's archive.Apply masks
-// off. A schema-1 rootfs carries no records at all, so a setuid binary like
-// sudo reaches the guest as a plain 0755 file owned by the host user, and
-// sudo cannot elevate.
-const UnpackSchema = 2
-
-const unpackSchemaFile = "unpack-schema"
-
-// WriteUnpackSchema stamps imageDir with the schema its rootfs was written by.
-// Call it on the staging directory, before the rename that publishes it, so a
-// published image always carries its own version.
-func WriteUnpackSchema(imageDir string) error {
-	p := filepath.Join(imageDir, unpackSchemaFile)
-	return os.WriteFile(p, []byte(fmt.Sprintf("%d\n", UnpackSchema)), 0600)
-}
-
-// ReadUnpackSchema returns the schema imageDir was written by, or 1 for an
-// image from before the stamp existed (which is exactly what schema 1 means).
-// An unreadable or malformed stamp reads as 0, which matches no schema, so a
-// damaged image is re-unpacked rather than trusted.
-func ReadUnpackSchema(imageDir string) int {
-	data, err := os.ReadFile(filepath.Join(imageDir, unpackSchemaFile))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return 1
-		}
-		return 0
-	}
-	n, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
-		return 0
-	}
-	return n
+	return err == nil && fi.IsDir()
 }
 
 // GetImage retrieves image metadata by digest

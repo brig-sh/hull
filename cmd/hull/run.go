@@ -746,7 +746,6 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 				containerRootfsDirect = true
 			} else {
 				rootfsDir = resolved
-				warnSetuidUnsupported(resolved)
 			}
 		} else if rootfsType == "block" {
 			// Block mode: an ext4 image built straight from the store's rootfs.
@@ -1372,45 +1371,6 @@ exec %s "$@"
 	started, err := launchVMM(cmd, s, state, cmdArgs, gatewayFiles, vmmType, detach, netMode, gatewayIP)
 	instanceStarted = started
 	return err
-}
-
-// setuidProbePaths are the binaries whose whole purpose is to elevate. If none
-// of these carries the setuid bit the image has nothing to lose from a share
-// that cannot express one, so the warning below stays quiet.
-var setuidProbePaths = []string{
-	"usr/bin/sudo",
-	"bin/su",
-	"usr/bin/su",
-	"usr/bin/passwd",
-	"usr/bin/newgrp",
-	"usr/bin/chsh",
-}
-
-// warnSetuidUnsupported says so when an image ships setuid binaries onto a
-// share that cannot carry them.
-//
-// Apple's virtio-fs reports every file as owned by the uid of the guest
-// process that asked, so a guest process never sees a file it does not already
-// own and setuid-exec is a no-op. Worse, the answer is order-dependent: the
-// same inode comes back root-owned to whichever caller looked it up first and
-// caller-owned to the next, so `ls -la /usr/bin` and `ls -la /usr/bin/sudo`
-// disagree about the same file. There is no attribute channel to fix this
-// with -- the daemon is Apple's -- so the only honest thing is to name the
-// two configurations that do work: hvi's virtio-fs, which reads the ownership
-// hull records at unpack, and a block rootfs, whose ext4 carries real modes.
-func warnSetuidUnsupported(rootfsDir string) {
-	for _, rel := range setuidProbePaths {
-		fi, err := os.Lstat(filepath.Join(rootfsDir, rel))
-		if err != nil || fi.Mode()&os.ModeSetuid == 0 {
-			continue
-		}
-		log.Warnf("%s is setuid, but the vz backend shares the root filesystem through "+
-			"Apple's virtio-fs, which reports every file as owned by the caller: sudo and "+
-			"friends will not elevate, and file ownership will look inconsistent between "+
-			"a directory listing and a direct stat. Use `--rootfs-type block`, or the hvi "+
-			"backend, if the guest needs to become root.", rel)
-		return
-	}
 }
 
 // cloneRootfsAPFS atomically replaces an instance bundle's rootfs symlink with
@@ -2328,14 +2288,7 @@ func cachedDigest(s *store.Store, ref, platform string) (string, bool) {
 			continue
 		}
 		if !s.ImageComplete(img.Digest) {
-			imageDir := filepath.Join(s.RootDir(), "images", img.Digest)
-			if schema := store.ReadUnpackSchema(imageDir); schema != store.UnpackSchema {
-				log.Warnf("cached image %s was unpacked by an older hull (layout %d, current %d), "+
-					"so it is missing the file ownership and setuid bits the guest needs; re-pulling",
-					img.Digest, schema, store.UnpackSchema)
-			} else {
-				log.Warnf("cached image %s is incomplete (no rootfs); re-pulling", img.Digest)
-			}
+			log.Warnf("cached image %s is incomplete (no rootfs); re-pulling", img.Digest)
 			continue
 		}
 		if best == nil || img.PulledAt.After(best.PulledAt) {

@@ -617,33 +617,6 @@ without the limitations of virtiofs or 9pfs.
 
 Requires: `brew install e2fsprogs`
 
-### sudo, setuid, and who owns a file in the guest
-
-A guest that has to become root needs the **hvi** backend or a **block**
-rootfs. It will not work on `vz` with a virtiofs root, and the failure is
-quiet rather than loud.
-
-Apple's virtio-fs reports every file as owned by the uid of the guest process
-that asked for it, so a setuid binary is one the caller already owns and
-`setuid`-exec does nothing. The same mechanism makes ownership look
-inconsistent: the answer is cached per inode, so whichever caller looked
-first wins, and `ls -la /usr/bin` and `ls -la /usr/bin/sudo` can disagree
-about the same file. There is no attribute channel to correct it through --
-the daemon is Apple's.
-
-The two paths that do carry real ownership:
-
-```bash
-# hvi reads the mode and uid/gid hull records at unpack time
-./hull run --hypervisor hvi <image>
-
-# ext4 carries them natively
-./hull run --hypervisor vz --rootfs-type block <image>
-```
-
-hull warns at boot when an image ships a setuid binary onto a share that
-cannot express one.
-
 ## CLI Reference
 
 ```

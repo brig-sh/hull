@@ -212,11 +212,6 @@ func (c *Client) PullPlatform(ctx context.Context, ref, platformStr string) (*Pu
 	if err := store.WriteImageMetadata(tmpDir, metadata); err != nil {
 		return nil, fmt.Errorf("failed to write image metadata: %w", err)
 	}
-	// Stamp the layout version alongside the metadata, so this rootfs is
-	// published with the schema it was actually written by.
-	if err := store.WriteUnpackSchema(tmpDir); err != nil {
-		return nil, fmt.Errorf("failed to stamp the unpack schema: %w", err)
-	}
 
 	// Commit by swapping directories, never by deleting in place. RemoveAll
 	// on a populated rootfs takes seconds and deletes in readdir order, so an
