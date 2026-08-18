@@ -1,0 +1,37 @@
+FROM ubuntu:22.04
+
+# Update and install kernel
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    linux-image-generic \
+    procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create init script that mounts filesystems and provides a shell
+RUN echo '#!/bin/sh' > /init && \
+    echo 'set -x' >> /init && \
+    echo 'echo "[INIT] Starting..." > /dev/console' >> /init && \
+    echo 'mount -t proc proc /proc' >> /init && \
+    echo 'mount -t sysfs sysfs /sys' >> /init && \
+    echo 'mount -t devtmpfs devtmpfs /dev' >> /init && \
+    echo 'echo "[INIT] Mounts done"' >> /init && \
+    echo '' >> /init && \
+    echo '# Try to mount 9pfs' >> /init && \
+    echo 'if grep -q 9p /proc/filesystems 2>/dev/null; then' >> /init && \
+    echo '  mkdir -p /mnt/host' >> /init && \
+    echo '  mount -t 9p -o trans=virtio fs0 /mnt/host 2>/dev/null && echo "[INIT] 9pfs mounted" || echo "[INIT] 9pfs mount failed"' >> /init && \
+    echo 'fi' >> /init && \
+    echo '' >> /init && \
+    echo 'echo "[INIT] System info:"' >> /init && \
+    echo 'uname -a' >> /init && \
+    echo 'echo "[INIT] Launching shell..."' >> /init && \
+    echo 'exec /bin/bash -i' >> /init && \
+    chmod +x /init
+
+# Configure kernel annotations
+LABEL com.urunc.unikernel.kernel="/.boot/kernel"
+LABEL com.urunc.unikernel.hypervisor="qemu"
+LABEL com.urunc.unikernel.unikernelType="linux"
+LABEL com.urunc.unikernel.cmdline="root=/dev/ram0 init=/init console=ttyS0"
+
+ENTRYPOINT ["/init"]
