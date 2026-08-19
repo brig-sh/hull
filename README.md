@@ -121,6 +121,35 @@ hull stop $ID
 hull rm $ID
 ```
 
+## Commands
+
+`hull <command> --help` prints the options for any of these.
+
+| command | what it does |
+| --- | --- |
+| `hull pull <image>` | pull an OCI image. `--platform` for the Rosetta path, e.g. `linux/amd64` |
+| `hull run <image>` | create and run an instance. `-d` detaches and prints the id |
+| `hull exec <id> <cmd…>` | run a command in a running instance. `-t` for a pty, `-u` for the guest user, `-e KEY=VALUE` or a bare `-e KEY` to inherit one from the host without putting it in argv |
+| `hull ps` | list running instances |
+| `hull logs <id>` | instance logs. `-f` follows |
+| `hull inspect <id>` | instance details |
+| `hull stop <id>` | stop a running instance |
+| `hull rm <id>` | remove a stopped instance |
+| `hull images` | list pulled images |
+| `hull checkpoint <id>` | pause a running Vz instance, save VM and disk state, resume it |
+| `hull restore <id>` | restore a stopped Vz instance from its checkpoint |
+| `hull compose up\|down\|ps\|logs\|config\|exec\|top` | run a multi-service compose file, one service per VM |
+| `hull assets show\|dir\|pull` | the boot assets used for images that carry no kernel of their own |
+| `hull store detach` | unmount the store volume, leaving its backing image on disk |
+| `hull telemetry on\|off\|status` | anonymous usage and crash telemetry |
+
+Global options apply to every command: `--debug`, `--store-dir` (default
+`~/.hull/store`), and the telemetry pair `--unattended` and `--dnt`.
+
+Checkpoint and restore are covered in [docs/checkpoint-restore.md](docs/checkpoint-restore.md),
+compose in [docs/compose.md](docs/compose.md), and what telemetry does and does
+not collect in [docs/telemetry.md](docs/telemetry.md).
+
 ## Supported backends
 
 hull supports two VMM backends:
