@@ -69,6 +69,13 @@ jobs:
         with:
           go-version: stable
           check-latest: true
+          # These jobs run on a self-hosted runner, where GOMODCACHE and
+          # GOCACHE already survive between runs. Uploading them to the
+          # Actions cache service as well buys nothing and costs minutes:
+          # measured on v0.1.0-rc20, "Post Run setup-go" (the cache save) took
+          # 239s here and the restore in the installer job took 215s, against
+          # about 110s of actual build, sign and notarize work.
+          cache: false
 
       # hvi-vmm is a submodule and a shipped binary, so a release cannot be cut
       # without it. It is a separate private repo, so this job's own token
@@ -305,6 +312,9 @@ jobs:
         with:
           go-version: stable
           check-latest: true
+          # Same reason as the release job above: the Go caches persist on this
+          # runner, so the Actions cache round-trip is pure overhead.
+          cache: false
 
       # The app bundle carries hvi, so this job builds it too and needs the
       # submodule for the same reason the release job does.
