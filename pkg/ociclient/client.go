@@ -111,14 +111,15 @@ func (c *Client) PullPlatform(ctx context.Context, ref, platformStr string) (*Pu
 	// but this way the index in front of a multi-arch image is visible: its
 	// digest is what a user pins, and crane.Pull hands back the platform
 	// child with no way to ask what it was selected from.
-	desc, err := crane.Get(ref, platform, registryTransport(),
+	desc, err := crane.Get(ref, platform, registryTransport(), crane.WithContext(ctx),
 		crane.WithAuthFromKeychain(authn.DefaultKeychain))
 	if err != nil && strings.Contains(err.Error(), "error getting credentials") {
 		// Docker's credential helper needs an unlocked keychain, which
 		// headless sessions (CI runners, ssh) don't have. Public images
 		// must not depend on it — retry anonymously.
 		log.Debugf("credential store unavailable, retrying pull anonymously: %v", err)
-		desc, err = crane.Get(ref, platform, registryTransport(), crane.WithAuth(authn.Anonymous))
+		desc, err = crane.Get(ref, platform, registryTransport(), crane.WithContext(ctx),
+			crane.WithAuth(authn.Anonymous))
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to pull image %s: %w", ref, err)
