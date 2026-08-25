@@ -44,6 +44,18 @@ type ImageMetadata struct {
 	// Platform is the os/arch[/variant] the image was pulled for. Empty on
 	// records from before the field existed, which were all default pulls.
 	Platform string `json:"platform,omitempty"`
+	// IndexDigest is the digest of the multi-arch index the reference
+	// resolved through, when it resolved through one. Digest above is the
+	// per-platform manifest digest, which is what the store is keyed by --
+	// but a user pinning a multi-arch image pins the index digest, and that
+	// digest names bytes the store never holds. Recording it here is what
+	// lets `hull run repo@sha256:<index digest>` find the platform variant
+	// on disk instead of going back to the registry.
+	//
+	// Empty for a single-arch image, and on records from before the field
+	// existed. Those keep resolving by tag and by manifest digest; only an
+	// index digest pin needs a re-pull to record one.
+	IndexDigest string `json:"indexDigest,omitempty"`
 }
 
 // InstanceState holds the state of a running or stopped instance
