@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -28,6 +29,7 @@ import (
 	"github.com/brig-sh/hull/pkg/store"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/crane"
+	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 )
@@ -282,16 +284,42 @@ func (c *Client) PullPlatform(ctx context.Context, ref, platformStr string) (*Pu
 // again.
 //
 // The two digests describe the same bytes, so an older record's index digest
-// stays true for a newer one.
+// stays true for a newer one -- as long as both pulls named the same
+// repository. A manifest can be pushed to two of them, and an index digest
+// carried across would let a pin be answered by a repository that never hosted
+// that index, which is what the lookup's repository check exists to prevent.
 func (c *Client) keepIndexDigest(metadata *store.ImageMetadata) {
 	if metadata.IndexDigest != "" {
 		return
 	}
 	previous, err := c.store.GetImage(metadata.Digest)
 	if err != nil {
+		// Not having pulled this image before is the ordinary case. Anything
+		// else means the stored metadata could not be read, which silently
+		// drops the recorded index digest, so say so.
+		if !errors.Is(err, store.ErrImageNotFound) {
+			log.Debugf("could not read the stored metadata for %s: %v", metadata.Digest, err)
+		}
+		return
+	}
+	if !sameRepository(previous.Ref, metadata.Ref) {
 		return
 	}
 	metadata.IndexDigest = previous.IndexDigest
+}
+
+// sameRepository reports whether two references name the same repository.
+// A reference that does not parse cannot be shown to match anything.
+func sameRepository(a, b string) bool {
+	first, err := name.ParseReference(a)
+	if err != nil {
+		return false
+	}
+	second, err := name.ParseReference(b)
+	if err != nil {
+		return false
+	}
+	return first.Context().Name() == second.Context().Name()
 }
 
 // ImageExists reports whether an image is cached AND usable. Metadata on its
