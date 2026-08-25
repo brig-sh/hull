@@ -2343,13 +2343,17 @@ func cachedDigest(s *store.Store, ref, platform string) (string, bool) {
 			continue
 		}
 		if !s.ImageComplete(img.Digest) {
+			// The rootfs is checked first because an interrupted pull leaves
+			// no layout stamp either, and reading the stamp first reported
+			// every half-written image as one an older hull had unpacked.
+			// Both are misses; only the diagnosis was wrong.
 			imageDir := filepath.Join(s.RootDir(), "images", img.Digest)
-			if schema := store.ReadUnpackSchema(imageDir); schema != store.UnpackSchema {
+			if fi, err := os.Stat(filepath.Join(imageDir, "rootfs")); err != nil || !fi.IsDir() {
+				log.Warnf("cached image %s is incomplete (no rootfs); re-pulling", img.Digest)
+			} else {
 				log.Warnf("cached image %s was unpacked by an older hull (layout %d, current %d), "+
 					"so it is missing the file ownership and setuid bits the guest needs; re-pulling",
-					img.Digest, schema, store.UnpackSchema)
-			} else {
-				log.Warnf("cached image %s is incomplete (no rootfs); re-pulling", img.Digest)
+					img.Digest, store.ReadUnpackSchema(imageDir), store.UnpackSchema)
 			}
 			continue
 		}
