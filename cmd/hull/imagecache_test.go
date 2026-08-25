@@ -31,28 +31,15 @@ const (
 	cacheTestDigest = "sha256:c408baae42f5c74c0661fbc20a289fd23d4322988e52c88cd54108e5c4c74893"
 )
 
-// seedImage writes an image into the store. withRootfs=false reproduces what an
-// interrupted pull leaves behind: metadata present, rootfs gone.
+// seedImage writes the default test image into the store. withRootfs=false
+// reproduces what an interrupted pull leaves behind: metadata present, rootfs
+// gone.
 func seedImage(t *testing.T, s *store.Store, withRootfs bool) {
 	t.Helper()
-	dir, err := s.SaveImage(cacheTestDigest, &store.ImageMetadata{
-		Ref:      cacheTestRef,
-		Digest:   cacheTestDigest,
-		PulledAt: time.Now(),
-	})
-	if err != nil {
-		t.Fatalf("SaveImage: %v", err)
-	}
-	if withRootfs {
-		if err := os.MkdirAll(filepath.Join(dir, "rootfs"), 0755); err != nil {
-			t.Fatalf("MkdirAll rootfs: %v", err)
-		}
-		// A cache hit also needs the layout stamp a current unpack leaves, or
-		// this is seeding the older layout rather than a good pull.
-		if err := store.WriteUnpackSchema(dir); err != nil {
-			t.Fatalf("WriteUnpackSchema: %v", err)
-		}
-	}
+	seedMetadata(t, s, &store.ImageMetadata{
+		Ref:    cacheTestRef,
+		Digest: cacheTestDigest,
+	}, withRootfs)
 }
 
 func newCacheTestStore(t *testing.T) *store.Store {
