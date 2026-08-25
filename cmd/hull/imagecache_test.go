@@ -327,3 +327,188 @@ func TestCachedDigestHonorsPlatform(t *testing.T) {
 		t.Fatalf("default lookup = %q,%v; must still resolve the arm64 record", digest, ok)
 	}
 }
+
+const (
+	cacheTestRepo        = "ghcr.io/nofireai/urunc-ubuntu"
+	cacheTestIndexDigest = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+)
+
+// seedMetadata writes one image record into the store, with the rootfs and the
+// layout stamp a good pull leaves behind unless withRootfs says otherwise.
+func seedMetadata(t *testing.T, s *store.Store, metadata *store.ImageMetadata, withRootfs bool) {
+	t.Helper()
+	if metadata.PulledAt.IsZero() {
+		metadata.PulledAt = time.Now()
+	}
+	dir, err := s.SaveImage(metadata.Digest, metadata)
+	if err != nil {
+		t.Fatalf("SaveImage: %v", err)
+	}
+	if !withRootfs {
+		return
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "rootfs"), 0755); err != nil {
+		t.Fatalf("MkdirAll rootfs: %v", err)
+	}
+	if err := store.WriteUnpackSchema(dir); err != nil {
+		t.Fatalf("WriteUnpackSchema: %v", err)
+	}
+}
+
+// The bug this file grew for: `hull run repo@sha256:<manifest digest>` never
+// matched anything. Ref holds the tag the image was pulled under and Digest
+// holds the bare digest, so a reference carrying its repository matched
+// neither, and the image was re-pulled (or refused under --pull=never) with
+// its rootfs already on disk.
+func TestCachedDigestHitByManifestDigestRef(t *testing.T) {
+	s := newCacheTestStore(t)
+	seedMetadata(t, s, &store.ImageMetadata{
+		Ref:    cacheTestRef,
+		Digest: cacheTestDigest,
+	}, true)
+
+	digest, ok := cachedDigest(s, cacheTestRepo+"@"+cacheTestDigest, ociclient.DefaultPlatform)
+	if !ok {
+		t.Fatal("a digest reference must resolve against the stored manifest digest")
+	}
+	if digest != cacheTestDigest {
+		t.Errorf("digest = %q, want %q", digest, cacheTestDigest)
+	}
+}
+
+// Pinning a multi-arch image pins the index digest, and the store is keyed by
+// the per-platform manifest digest -- so the pinned digest names bytes that are
+// never on disk. The recorded index digest is what closes that gap.
+func TestCachedDigestHitByIndexDigestRef(t *testing.T) {
+	s := newCacheTestStore(t)
+	seedMetadata(t, s, &store.ImageMetadata{
+		Ref:         cacheTestRef,
+		Digest:      cacheTestDigest,
+		IndexDigest: cacheTestIndexDigest,
+	}, true)
+
+	digest, ok := cachedDigest(s, cacheTestRepo+"@"+cacheTestIndexDigest, ociclient.DefaultPlatform)
+	if !ok {
+		t.Fatal("an index digest reference must resolve to the stored platform variant")
+	}
+	if digest != cacheTestDigest {
+		t.Errorf("digest = %q, want the manifest digest %q", digest, cacheTestDigest)
+	}
+}
+
+// Every platform variant of a multi-arch image shares one index digest, so the
+// platform filter is the only thing separating them. Without it an index digest
+// pin under --platform linux/amd64 could boot the arm64 rootfs.
+func TestCachedDigestIndexRefHonorsPlatform(t *testing.T) {
+	s := newCacheTestStore(t)
+	const amdDigest = "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+	seedMetadata(t, s, &store.ImageMetadata{
+		Ref:         cacheTestRef,
+		Digest:      cacheTestDigest,
+		Platform:    ociclient.DefaultPlatform,
+		IndexDigest: cacheTestIndexDigest,
+	}, true)
+	seedMetadata(t, s, &store.ImageMetadata{
+		Ref:         cacheTestRef,
+		Digest:      amdDigest,
+		Platform:    "linux/amd64",
+		IndexDigest: cacheTestIndexDigest,
+	}, true)
+
+	indexRef := cacheTestRepo + "@" + cacheTestIndexDigest
+	digest, ok := cachedDigest(s, indexRef, "linux/amd64")
+	if !ok || digest != amdDigest {
+		t.Fatalf("amd64 lookup = %q,%v; want %q", digest, ok, amdDigest)
+	}
+	digest, ok = cachedDigest(s, indexRef, ociclient.DefaultPlatform)
+	if !ok || digest != cacheTestDigest {
+		t.Fatalf("default lookup = %q,%v; want %q", digest, ok, cacheTestDigest)
+	}
+}
+
+// A digest names bytes, not an image, and the same manifest can be pushed to
+// several repositories. A pin must not be satisfied by an image the user did
+// not name, whichever of the two digests it matches.
+func TestCachedDigestDigestRefRequiresSameRepository(t *testing.T) {
+	s := newCacheTestStore(t)
+	seedMetadata(t, s, &store.ImageMetadata{
+		Ref:         cacheTestRef,
+		Digest:      cacheTestDigest,
+		IndexDigest: cacheTestIndexDigest,
+	}, true)
+
+	for _, ref := range []string{
+		"ghcr.io/someone-else/urunc-ubuntu@" + cacheTestDigest,
+		"ghcr.io/someone-else/urunc-ubuntu@" + cacheTestIndexDigest,
+		"ghcr.io/nofireai/other-image@" + cacheTestDigest,
+	} {
+		if _, ok := cachedDigest(s, ref, ociclient.DefaultPlatform); ok {
+			t.Errorf("%s must not be answered by an image from another repository", ref)
+		}
+	}
+}
+
+// The completeness rule applies to a digest reference like any other lookup:
+// metadata with no rootfs is a miss, so the caller re-pulls and heals it.
+func TestCachedDigestDigestRefMissesIncompleteImage(t *testing.T) {
+	s := newCacheTestStore(t)
+	seedMetadata(t, s, &store.ImageMetadata{
+		Ref:         cacheTestRef,
+		Digest:      cacheTestDigest,
+		IndexDigest: cacheTestIndexDigest,
+	}, false)
+
+	for _, ref := range []string{
+		cacheTestRepo + "@" + cacheTestDigest,
+		cacheTestRepo + "@" + cacheTestIndexDigest,
+	} {
+		if _, ok := cachedDigest(s, ref, ociclient.DefaultPlatform); ok {
+			t.Errorf("%s must not hit while the rootfs is missing", ref)
+		}
+	}
+}
+
+// An image pulled by digest records that reference in Ref, and running it again
+// must still hit.
+func TestCachedDigestHitWhenStoredRefIsADigestRef(t *testing.T) {
+	s := newCacheTestStore(t)
+	digestRef := cacheTestRepo + "@" + cacheTestIndexDigest
+	seedMetadata(t, s, &store.ImageMetadata{
+		Ref:         digestRef,
+		Digest:      cacheTestDigest,
+		IndexDigest: cacheTestIndexDigest,
+	}, true)
+
+	digest, ok := cachedDigest(s, digestRef, ociclient.DefaultPlatform)
+	if !ok {
+		t.Fatal("a stored digest reference must resolve on the next run")
+	}
+	if digest != cacheTestDigest {
+		t.Errorf("digest = %q, want %q", digest, cacheTestDigest)
+	}
+}
+
+// The offline half of the bug. --pull=never used to report a pinned image as
+// absent with its rootfs on disk; the nil client is the assertion that nothing
+// reaches the network.
+func TestResolveImageDigestNeverAcceptsDigestRef(t *testing.T) {
+	s := newCacheTestStore(t)
+	seedMetadata(t, s, &store.ImageMetadata{
+		Ref:         cacheTestRef,
+		Digest:      cacheTestDigest,
+		IndexDigest: cacheTestIndexDigest,
+	}, true)
+
+	for _, ref := range []string{
+		cacheTestRepo + "@" + cacheTestDigest,
+		cacheTestRepo + "@" + cacheTestIndexDigest,
+	} {
+		digest, err := resolveImageDigest(context.Background(), nil, s, ref, pullNever, ociclient.DefaultPlatform)
+		if err != nil {
+			t.Fatalf("resolveImageDigest(%s): %v", ref, err)
+		}
+		if digest != cacheTestDigest {
+			t.Errorf("digest = %q, want %q", digest, cacheTestDigest)
+		}
+	}
+}
