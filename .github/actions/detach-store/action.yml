@@ -1,0 +1,42 @@
+name: Detach the CI store
+description: >
+  Unmount the store's sparse image. Nothing else unmounts it, and this
+  runner is one long-lived Mac, so without this it collects a mounted
+  sparse image per run, forever. The image stays on disk, so the next run
+  remounts the same store with its cache intact -- this gives back the
+  mount, not the cache. Callers run this step with `if: always()` so a
+  failed job still detaches what it mounted.
+
+inputs:
+  hull-bin:
+    description: Path to the hull binary
+    required: true
+  store-dir:
+    description: HULL_STORE_DIR for this job
+    required: true
+  fail-on-error:
+    description: >
+      Whether a failed detach fails the step. true (default) surfaces a
+      detach failure as a real problem -- exactly the mount leak this step
+      exists to catch. Pass false to swallow it instead, when the caller
+      would rather keep an already-passed boot result than fail the job
+      over cleanup.
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Detach the CI store
+      shell: bash
+      env:
+        HULL_STORE_DIR: ${{ inputs.store-dir }}
+        FAIL_ON_ERROR: ${{ inputs.fail-on-error }}
+      run: |
+        test -x "${{ inputs.hull-bin }}" || exit 0
+        [ -n "$HULL_STORE_DIR" ] || { echo "::error::store-dir input is empty" >&2; exit 1; }
+        if [ "$FAIL_ON_ERROR" = "true" ]; then
+          "${{ inputs.hull-bin }}" --store-dir "$HULL_STORE_DIR" store detach --force
+        else
+          "${{ inputs.hull-bin }}" --store-dir "$HULL_STORE_DIR" store detach --force || true
+        fi
