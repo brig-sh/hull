@@ -32,6 +32,12 @@ func imagesCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "images",
 		Usage: "list pulled images",
+		Flags: []cli.Flag{
+			&cli.BoolFlag{
+				Name:  "json",
+				Usage: "print the store's records as JSON, with full digests",
+			},
+		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			return listImages(ctx, cmd)
 		},
@@ -49,12 +55,37 @@ func listImages(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
+	if cmd.Bool("json") {
+		return writeImageJSON(os.Stdout, images)
+	}
+
 	if len(images) == 0 {
 		fmt.Println("No images found")
 		return nil
 	}
 
 	return writeImageTable(os.Stdout, images, time.Now())
+}
+
+// writeImageJSON prints the stored records as they are, one per image, so a
+// reference that resolved to two platforms shows both.
+//
+// The table cuts the manifest digest short and never shows the index digest,
+// and the index digest is the one a caller comparing against a registry
+// needs: a multi-arch tag resolves to it, while the store is keyed by the
+// per-platform manifest digest, a different object. Here every digest is
+// whole. indexDigest and platform are left out of a record that has none
+// rather than printed empty, so "single-arch" and "pulled before it was
+// recorded" read differently from a record that says so.
+//
+// Labels come out of the image config, so this goes through printJSON, which
+// keeps a C1 control in one from reaching the terminal.
+func writeImageJSON(out io.Writer, images []*store.ImageMetadata) error {
+	if images == nil {
+		// A machine reading the listing gets a list either way.
+		images = []*store.ImageMetadata{}
+	}
+	return printJSON(out, images)
 }
 
 // writeImageTable prints one row per stored image.
