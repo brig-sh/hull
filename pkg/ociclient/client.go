@@ -29,7 +29,6 @@ import (
 	"github.com/brig-sh/hull/pkg/store"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/crane"
-	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 )
@@ -303,24 +302,10 @@ func (c *Client) keepIndexDigest(metadata *store.ImageMetadata) {
 		}
 		return
 	}
-	if !sameRepository(previous.Ref, metadata.Ref) {
+	if !store.SameRepository(previous.Ref, metadata.Ref) {
 		return
 	}
 	metadata.IndexDigest = previous.IndexDigest
-}
-
-// sameRepository reports whether two references name the same repository.
-// A reference that does not parse cannot be shown to match anything.
-func sameRepository(a, b string) bool {
-	first, err := name.ParseReference(a)
-	if err != nil {
-		return false
-	}
-	second, err := name.ParseReference(b)
-	if err != nil {
-		return false
-	}
-	return first.Context().Name() == second.Context().Name()
 }
 
 // ImageExists reports whether an image is cached AND usable. Metadata on its
