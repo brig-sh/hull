@@ -394,7 +394,7 @@ jobs:
         run: |
           set -e
           R=${GITHUB_RUN_ID}
-          for m in readwrite ownership persist multi nested negative; do
+          for m in readwrite ownership persist multi nested negative swap; do
             python3 test/share-test.py vz "ci-shv-$m-$R" "$m"
           done
           for m in readwrite ownership persist; do

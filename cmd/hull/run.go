@@ -89,6 +89,11 @@ func runCommand() *cli.Command {
 				Name:  "shared-dir",
 				Usage: "share a host directory with the guest: /host/path:/guest/path[:ro|rw] (repeatable)",
 			},
+			&cli.StringSliceFlag{
+				Name: "shared-dir-fd",
+				Usage: "share a directory the caller already holds open: FD:/guest/path[:ro|rw] (repeatable). " +
+					"The descriptor must be inherited across the exec, so clear FD_CLOEXEC on it first",
+			},
 			&cli.StringFlag{
 				Name:  "hypervisor",
 				Value: "",
@@ -176,6 +181,7 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	cpus := cmd.Int("cpus")
 	instanceName := cmd.String("name")
 	sharedDirs := cmd.StringSlice("shared-dir")
+	sharedDirFds := cmd.StringSlice("shared-dir-fd")
 	hypervisorOverride := cmd.String("hypervisor")
 	qemuPath := cmd.String("qemu-path")
 	rootfsTypeOverride := cmd.String("rootfs-type")
@@ -869,64 +875,22 @@ exec %s "$@"
 	// Parse shared directories: on Vz/HVI each gets its own virtiofs tag and is
 	// mounted at its guest path by the init wrapper; QEMU keeps the legacy 9pfs
 	// path. Access mode is carried independently for every virtiofs export.
-	type hostShare struct {
-		host, guest, tag string
-		readOnly         bool
-	}
-	var shares []hostShare
-	for i, sd := range sharedDirs {
-		readOnly := false
-		parts := strings.Split(sd, ":")
-		if len(parts) == 3 {
-			// Bind mode suffix (host:guest:ro|rw).
-			switch parts[2] {
-			case "ro":
-				// Vz and HVI can hold this read-only. QEMU shares over 9p
-				// here with no equivalent, and mounting read-write while the
-				// caller asked for read-only is the one outcome worth refusing
-				// outright -- a share you believe is protected and is not is
-				// worse than no share at all.
-				if vmmName == "qemu" {
-					return fmt.Errorf("shared-dir %q: read-only shares are not supported on the qemu backend; "+
-						"use --hypervisor vz, or drop the :ro suffix to mount it read-write", sd)
-				}
-				readOnly = true
-			case "rw":
-			default:
-				return fmt.Errorf("invalid shared-dir mode %q in %q (want ro or rw)", parts[2], sd)
-			}
-			parts = parts[:2]
+	shares, shareFiles, err := parseShares(sharedDirs, sharedDirFds, vmmName)
+	// The descriptors stay open until the VMM has been spawned, and are
+	// inherited by it: an open descriptor holds the inode, so the identity the
+	// share is named by cannot be freed and handed to another file while the
+	// machine is starting. vz-runner closes only what it opens itself, so an
+	// inherited descriptor lives as long as the machine does.
+	//
+	// A failed parse returns no descriptors -- it closes what it took before
+	// it reports -- so this runs over an empty list on the error path.
+	defer func() {
+		for _, f := range shareFiles {
+			_ = f.Close()
 		}
-		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-			return fmt.Errorf("invalid shared-dir %q, expected /host/path:/guest/path[:mode]", sd)
-		}
-		hostPath, guestPath := parts[0], parts[1]
-		if !strings.HasPrefix(hostPath, "/") && !strings.HasPrefix(hostPath, ".") && !strings.HasPrefix(hostPath, "~") {
-			return fmt.Errorf("named volumes are not supported (%q): only bind mounts of host paths", hostPath)
-		}
-		if strings.HasPrefix(hostPath, "~") {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				return fmt.Errorf("failed to expand home directory: %w", err)
-			}
-			hostPath = filepath.Join(home, hostPath[1:])
-		}
-		info, err := os.Stat(hostPath)
-		if err != nil {
-			return fmt.Errorf("shared directory not found: %s", hostPath)
-		}
-		if !info.IsDir() {
-			return fmt.Errorf("%s is a file: file bind mounts are not supported (virtiofs/9p share directories)", hostPath)
-		}
-		if !strings.HasPrefix(guestPath, "/") {
-			return fmt.Errorf("guest path %q must be absolute", guestPath)
-		}
-		if strings.ContainsAny(guestPath, " \t'\"") {
-			return fmt.Errorf("guest path %q must not contain spaces or quotes", guestPath)
-		}
-		shares = append(shares, hostShare{
-			host: hostPath, guest: guestPath, tag: fmt.Sprintf("share%d", i), readOnly: readOnly,
-		})
+	}()
+	if err != nil {
+		return err
 	}
 	shareMounts := ""
 	var containerMounts strings.Builder
@@ -1381,9 +1345,214 @@ exec %s "$@"
 		MAC:         mac,
 		Backend:     string(vmmType),
 	}
-	started, err := launchVMM(cmd, s, state, cmdArgs, gatewayFiles, vmmType, detach, netMode, gatewayIP)
+	started, err := launchVMM(cmd, s, state, cmdArgs, append(gatewayFiles, shareFiles...), vmmType, detach, netMode, gatewayIP)
 	instanceStarted = started
 	return err
+}
+
+// hostShare is one host directory exported to the guest: where it comes from,
+// where the init wrapper mounts it, the virtiofs or 9p tag that carries it and
+// whether the guest may write to it.
+type hostShare struct {
+	host, guest, tag string
+	readOnly         bool
+}
+
+// parseShares turns the --shared-dir and --shared-dir-fd flags into exports,
+// and returns the descriptors it took ownership of along with them.
+//
+// Both flags describe the same thing and differ only in how the directory is
+// named. A path is resolved here, by name, some time before the machine
+// starts. A descriptor is a directory the caller already holds open, and is
+// turned into a name for its identity instead -- see volfsPath.
+//
+// Tags number across both lists, so a share keeps a distinct tag whichever
+// flag named it.
+func parseShares(pathSpecs, fdSpecs []string, vmmName string) ([]hostShare, []*os.File, error) {
+	var shares []hostShare
+	var files []*os.File
+	closeAll := func() {
+		for _, f := range files {
+			_ = f.Close()
+		}
+	}
+
+	for _, spec := range pathSpecs {
+		parts, readOnly, err := splitShareSpec("shared-dir", spec, vmmName)
+		if err != nil {
+			return nil, nil, err
+		}
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return nil, nil, fmt.Errorf("invalid shared-dir %q, expected /host/path:/guest/path[:mode]", spec)
+		}
+		hostPath, guestPath := parts[0], parts[1]
+		if !strings.HasPrefix(hostPath, "/") && !strings.HasPrefix(hostPath, ".") && !strings.HasPrefix(hostPath, "~") {
+			return nil, nil, fmt.Errorf("named volumes are not supported (%q): only bind mounts of host paths", hostPath)
+		}
+		if strings.HasPrefix(hostPath, "~") {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to expand home directory: %w", err)
+			}
+			hostPath = filepath.Join(home, hostPath[1:])
+		}
+		info, err := os.Stat(hostPath)
+		if err != nil {
+			return nil, nil, fmt.Errorf("shared directory not found: %s", hostPath)
+		}
+		if !info.IsDir() {
+			return nil, nil, fmt.Errorf("%s is a file: file bind mounts are not supported (virtiofs/9p share directories)", hostPath)
+		}
+		if err := validateGuestPath(guestPath); err != nil {
+			return nil, nil, err
+		}
+		shares = append(shares, hostShare{
+			host: hostPath, guest: guestPath, tag: shareTag(len(shares)), readOnly: readOnly,
+		})
+	}
+
+	for _, spec := range fdSpecs {
+		parts, readOnly, err := splitShareSpec("shared-dir-fd", spec, vmmName)
+		if err != nil {
+			closeAll()
+			return nil, nil, err
+		}
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			closeAll()
+			return nil, nil, fmt.Errorf("invalid shared-dir-fd %q, expected FD:/guest/path[:mode]", spec)
+		}
+		fd, err := strconv.Atoi(parts[0])
+		if err != nil || fd < 3 {
+			// 0, 1 and 2 are the standard streams. A caller passing one of
+			// them means a descriptor it never set up, and taking it would
+			// share whatever the terminal happens to be.
+			closeAll()
+			return nil, nil, fmt.Errorf("invalid shared-dir-fd %q: %q is not a descriptor number of 3 or above",
+				spec, parts[0])
+		}
+		if err := validateGuestPath(parts[1]); err != nil {
+			closeAll()
+			return nil, nil, err
+		}
+		// Work on a copy rather than on the caller's descriptor itself.
+		//
+		// os.NewFile takes ownership of whatever number it is given, and the
+		// number here comes from the command line: it is not necessarily one
+		// this process inherited. Taking it directly meant hull closed a
+		// descriptor it did not own -- naming the same one twice closed it
+		// twice, where the second close lands on whatever opened that number
+		// in between, and naming a number hull uses for its own store or
+		// socket closed that instead, on an error path that then went on
+		// using it.
+		//
+		// A copy also answers the question os.NewFile cannot: dup fails with
+		// EBADF for a number the process does not hold, which is what a caller
+		// that forgot to clear FD_CLOEXEC has passed. os.NewFile returns a
+		// usable *os.File for it and the failure only surfaces later, as a
+		// stat error that names nothing the caller can act on.
+		dup, err := unix.Dup(fd)
+		if err != nil {
+			closeAll()
+			return nil, nil, fmt.Errorf("shared-dir-fd %q: %d is not a descriptor this process holds "+
+				"(the caller must clear FD_CLOEXEC on it): %w", spec, fd, err)
+		}
+		unix.CloseOnExec(dup)
+		f := os.NewFile(uintptr(dup), fmt.Sprintf("shared-dir-fd %d", fd))
+		files = append(files, f)
+		hostPath, err := volfsPath(f)
+		if err != nil {
+			closeAll()
+			return nil, nil, fmt.Errorf("shared-dir-fd %q: %w", spec, err)
+		}
+		shares = append(shares, hostShare{
+			host: hostPath, guest: parts[1], tag: shareTag(len(shares)), readOnly: readOnly,
+		})
+	}
+
+	return shares, files, nil
+}
+
+func shareTag(i int) string { return fmt.Sprintf("share%d", i) }
+
+// splitShareSpec pulls the optional access mode off a share and returns what
+// is left of it. Both flags come through here, so each carries its own name:
+// an error naming a flag the caller did not pass sends them looking in the
+// wrong place.
+func splitShareSpec(flag, spec, vmmName string) ([]string, bool, error) {
+	parts := strings.Split(spec, ":")
+	if len(parts) != 3 {
+		return parts, false, nil
+	}
+	switch parts[2] {
+	case "ro":
+		// Vz and HVI can hold this read-only. QEMU shares over 9p here with
+		// no equivalent, and mounting read-write while the caller asked for
+		// read-only is the one outcome worth refusing outright -- a share you
+		// believe is protected and is not is worse than no share at all.
+		if vmmName == "qemu" {
+			return nil, false, fmt.Errorf("%s %q: read-only shares are not supported on the qemu backend; "+
+				"use --hypervisor vz, or drop the :ro suffix to mount it read-write", flag, spec)
+		}
+		return parts[:2], true, nil
+	case "rw":
+		return parts[:2], false, nil
+	}
+	return nil, false, fmt.Errorf("invalid %s mode %q in %q (want ro or rw)", flag, parts[2], spec)
+}
+
+func validateGuestPath(guestPath string) error {
+	if !strings.HasPrefix(guestPath, "/") {
+		return fmt.Errorf("guest path %q must be absolute", guestPath)
+	}
+	if strings.ContainsAny(guestPath, " \t'\"") {
+		return fmt.Errorf("guest path %q must not contain spaces or quotes", guestPath)
+	}
+	return nil
+}
+
+// volfsPath names an open directory by its identity rather than by its path.
+//
+// A share given as a path is resolved by hull, in hull's own process, some
+// time after the caller handed it over -- on a cold image that gap covers a
+// manifest resolution, a pull and a VM start. Anything that can write to a
+// parent component of that path can change what it names inside that window,
+// and the caller cannot close it: the resolution that decides which directory
+// the guest gets is not the caller's to make.
+//
+// macOS can address a file by volume and inode, and every component of
+// /.vol/<device>/<inode> is fixed at the moment the descriptor was opened. The
+// name carries no components anyone can rename, so the whole pipeline --
+// hull, the VMM arguments, and the file server that finally opens it -- lands
+// on the directory the caller opened or on nothing at all.
+//
+// The stat below is not a check for the swap this exists to prevent. It
+// confirms that the volume answers to this addressing at all: a file system
+// that does not support it would otherwise turn a guarantee into a path that
+// silently names nothing.
+func volfsPath(dir *os.File) (string, error) {
+	info, err := dir.Stat()
+	if err != nil {
+		return "", fmt.Errorf("cannot read the shared descriptor: %w", err)
+	}
+	if !info.IsDir() {
+		return "", errors.New("the shared descriptor is not a directory")
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return "", errors.New("cannot read the identity of the shared descriptor")
+	}
+	path := fmt.Sprintf("/.vol/%d/%d", st.Dev, st.Ino)
+	check, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("this volume cannot address a directory by its identity, "+
+			"so the descriptor cannot be shared without resolving a path again (%w)", err)
+	}
+	cst, ok := check.Sys().(*syscall.Stat_t)
+	if !ok || cst.Dev != st.Dev || cst.Ino != st.Ino {
+		return "", errors.New("this volume answers its own identity paths with a different file, " +
+			"so the descriptor cannot be shared safely")
+	}
+	return path, nil
 }
 
 // setuidProbePaths are the binaries whose whole purpose is to elevate. If none
