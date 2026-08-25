@@ -38,6 +38,7 @@ import (
 	"github.com/brig-sh/hull/internal/bootassets"
 	"github.com/brig-sh/hull/pkg/ociclient"
 	"github.com/brig-sh/hull/pkg/store"
+	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/urfave/cli/v3"
 	"github.com/urunc-dev/urunc/pkg/qmp"
 	"github.com/urunc-dev/urunc/pkg/unikontainers"
@@ -2308,7 +2309,8 @@ func launchVMM(cmd *cli.Command, s *store.Store, state *store.InstanceState, cmd
 	}
 }
 
-// cachedDigest looks up a locally cached image by ref or digest.
+// cachedDigest looks up a locally cached image by tag, by store digest or by a
+// reference that pins a digest. See imageAnswersRef for how each is matched.
 //
 // A metadata hit only counts if the unpacked rootfs is there too. An
 // interrupted pull can leave image.json without one, and trusting the record
@@ -2323,9 +2325,10 @@ func cachedDigest(s *store.Store, ref, platform string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
+	wantRepo, wantDigest := digestReference(ref)
 	var best *store.ImageMetadata
 	for _, img := range images {
-		if img.Ref != ref && img.Digest != ref {
+		if !imageAnswersRef(img, ref, wantRepo, wantDigest) {
 			continue
 		}
 		// The store is digest-keyed so platform variants of a tag coexist;
@@ -2358,6 +2361,58 @@ func cachedDigest(s *store.Store, ref, platform string) (string, bool) {
 		return "", false
 	}
 	return best.Digest, true
+}
+
+// digestReference splits a reference that pins a digest into the repository it
+// names and the digest it pins. Everything else -- a tag, a bare `sha256:...`,
+// anything unparseable -- comes back empty and is matched as a plain string.
+//
+// A bare digest deliberately stays on the string path: it is how callers look
+// an image up by its store key, it names no repository to check, and it has
+// always meant the manifest digest.
+func digestReference(ref string) (repo, digest string) {
+	parsed, err := name.ParseReference(ref)
+	if err != nil {
+		return "", ""
+	}
+	pinned, ok := parsed.(name.Digest)
+	if !ok {
+		return "", ""
+	}
+	return pinned.Context().Name(), pinned.DigestStr()
+}
+
+// imageAnswersRef reports whether a stored image is what the reference asked
+// for.
+//
+// A digest reference cannot be compared as a string against either stored
+// field, which is what it used to be: Ref is the reference the image was
+// pulled under, normally a tag, and Digest is the bare digest without the
+// repository the reference carries in front of it. So `repo@sha256:...` missed
+// every time, re-pulling on each run under the default policy and failing
+// outright under --pull=never, with the bytes complete on disk.
+//
+// The digest is compared against both digests the store knows. The manifest
+// digest is the store key; the index digest is what a pin of a multi-arch
+// image names, and it never keys anything on disk.
+//
+// The repository has to match as well. A digest identifies bytes, not an
+// image, and the same manifest can be pushed to two repositories -- so without
+// this check a pin could be satisfied by an image the user did not name.
+// A stored reference that does not parse cannot be shown to match, so it is
+// a miss and the image is re-pulled.
+func imageAnswersRef(img *store.ImageMetadata, ref, wantRepo, wantDigest string) bool {
+	if wantDigest == "" {
+		return img.Ref == ref || img.Digest == ref
+	}
+	if wantDigest != img.Digest && wantDigest != img.IndexDigest {
+		return false
+	}
+	stored, err := name.ParseReference(img.Ref)
+	if err != nil {
+		return false
+	}
+	return stored.Context().Name() == wantRepo
 }
 
 // Pull policies, matching docker's vocabulary.
