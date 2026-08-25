@@ -18,12 +18,83 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/brig-sh/hull/pkg/store"
 )
+
+// The JSON form from #14: what the store knows, with nothing cut. The table
+// truncates the manifest digest and never shows the index digest, which is
+// the one a caller comparing against a registry needs.
+func TestImageJSONCarriesFullDigests(t *testing.T) {
+	pulled := time.Date(2026, 8, 25, 20, 1, 0, 0, time.UTC)
+	var buf bytes.Buffer
+	err := writeImageJSON(&buf, []*store.ImageMetadata{
+		{
+			Ref:         cacheTestRef,
+			Digest:      cacheTestDigest,
+			IndexDigest: cacheTestIndexDigest,
+			Platform:    "linux/arm64",
+			Size:        583_600_000,
+			PulledAt:    pulled,
+		},
+		// Single-arch, or pulled before the index digest was recorded.
+		{Ref: cacheTestRef, Digest: cacheTestDigest, PulledAt: pulled},
+	})
+	if err != nil {
+		t.Fatalf("writeImageJSON: %v", err)
+	}
+
+	var entries []map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &entries); err != nil {
+		t.Fatalf("output is not a JSON list: %v\n%s", err, buf.String())
+	}
+	if len(entries) != 2 {
+		t.Fatalf("got %d entries, want 2", len(entries))
+	}
+
+	with := entries[0]
+	for key, want := range map[string]any{
+		"ref":         cacheTestRef,
+		"digest":      cacheTestDigest,
+		"indexDigest": cacheTestIndexDigest,
+		"platform":    "linux/arm64",
+		"size":        float64(583_600_000),
+		"pulledAt":    pulled.Format(time.RFC3339),
+	} {
+		if got := with[key]; got != want {
+			t.Errorf("%s = %v, want %v", key, got, want)
+		}
+	}
+
+	// The key is absent, not empty, so a caller can tell "none recorded"
+	// from a record that says so.
+	without := entries[1]
+	if _, ok := without["indexDigest"]; ok {
+		t.Errorf("indexDigest must be omitted when none was recorded, got %v", without["indexDigest"])
+	}
+	if _, ok := without["platform"]; ok {
+		t.Errorf("platform must be omitted on a record from before the field existed, got %v", without["platform"])
+	}
+	if got := without["digest"]; got != cacheTestDigest {
+		t.Errorf("digest = %v, want the full %q", got, cacheTestDigest)
+	}
+}
+
+// A machine reading the listing gets a list either way; "No images found"
+// is for people.
+func TestImageJSONEmptyStoreIsAList(t *testing.T) {
+	var buf bytes.Buffer
+	if err := writeImageJSON(&buf, nil); err != nil {
+		t.Fatalf("writeImageJSON: %v", err)
+	}
+	if got := strings.TrimSpace(buf.String()); got != "[]" {
+		t.Errorf("empty store printed %q, want []", got)
+	}
+}
 
 // The listing split from #12. An image pulled by digest records
 // `repo@sha256:<hex>` as its reference, and the split used to scan backwards

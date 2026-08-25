@@ -135,7 +135,7 @@ hull rm $ID
 | `hull inspect <id>` | instance details |
 | `hull stop <id>` | stop a running instance |
 | `hull rm <id>` | remove a stopped instance |
-| `hull images` | list pulled images |
+| `hull images` | list pulled images. `--json` prints the store's records with full manifest and index digests |
 | `hull checkpoint <id>` | pause a running Vz instance, save VM and disk state, resume it |
 | `hull restore <id>` | restore a stopped Vz instance from its checkpoint |
 | `hull compose up\|down\|ps\|logs\|config\|exec\|top` | run a multi-service compose file, one service per VM |

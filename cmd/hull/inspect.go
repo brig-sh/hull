@@ -18,9 +18,9 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/urfave/cli/v3"
 )
@@ -53,15 +53,7 @@ func inspectInstance(ctx context.Context, cmd *cli.Command) error {
 		return fmt.Errorf("instance not found: %s", instanceID)
 	}
 
-	// Output as JSON
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal instance state: %w", err)
-	}
-
-	// json.Marshal escapes control bytes below 0x20 but leaves U+0080-U+009F
-	// alone, and those are the 8-bit spellings of CSI, OSC and DCS. An
-	// instance name carrying one reaches the terminal through this line.
-	fmt.Println(sanitizeGuestText(string(data)))
-	return nil
+	// An instance name can carry a C1 control; printJSON keeps it off the
+	// terminal.
+	return printJSON(os.Stdout, state)
 }
