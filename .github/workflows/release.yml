@@ -299,8 +299,25 @@ jobs:
   dmg:
     name: installer image
     needs: release
-    runs-on: [self-hosted, macOS, ARM64]
+    # create-dmg lays the installer window out by driving Finder over
+    # AppleScript, and Finder only answers inside a logged-in console (Aqua)
+    # session. A runner whose agent runs as a daemon or over ssh has none, and
+    # there osascript fails with "An error of type -10810 has occurred". The
+    # sip-enabled runner is set up that way, and with three runners sharing
+    # the bare macOS labels this job drew it for rc23 and rc24 both, failing
+    # each time until a rerun happened to land on a msuch Mac. So this job
+    # asks for the `gui` label, which only the runners with a console session
+    # carry, and the first step checks the claim rather than trusting the
+    # label: a runner re-registered without a session would otherwise fail
+    # twenty minutes in, at the dmg, instead of at once.
+    runs-on: [self-hosted, macOS, ARM64, gui]
     steps:
+      - name: Assert a console session, which Finder needs
+        run: |
+          [ "$(launchctl managername)" = Aqua ] || {
+            echo "this runner has no Aqua session ($(launchctl managername)); create-dmg cannot drive Finder here" >&2
+            exit 1; }
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
