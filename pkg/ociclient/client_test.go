@@ -272,3 +272,18 @@ func TestImageExistsRequiresRootfs(t *testing.T) {
 		t.Error("an image with no rootfs must not report as existing")
 	}
 }
+
+// A pull can move hundreds of megabytes, so cancelling it has to stop it.
+// PullPlatform took a context and never handed it to crane, which defaults to
+// context.Background(), so Ctrl-C left the transfer running.
+func TestPullHonorsContextCancellation(t *testing.T) {
+	ref := testRegistry(t, "hello from the test layer")
+	c, _ := newClient(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := c.PullPlatform(ctx, ref, DefaultPlatform); err == nil {
+		t.Fatal("a cancelled context must stop the pull")
+	}
+}
