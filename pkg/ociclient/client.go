@@ -104,15 +104,28 @@ func (c *Client) PullPlatform(ctx context.Context, ref, platformStr string) (*Pu
 		return nil, err
 	}
 	platform := crane.WithPlatform(p)
-	img, err := crane.Pull(ref, platform, registryTransport(),
+	// Fetch the manifest the reference names, then resolve it to the image,
+	// rather than going straight to the image with crane.Pull. Same requests,
+	// but this way the index in front of a multi-arch image is visible: its
+	// digest is what a user pins, and crane.Pull hands back the platform
+	// child with no way to ask what it was selected from.
+	desc, err := crane.Get(ref, platform, registryTransport(),
 		crane.WithAuthFromKeychain(authn.DefaultKeychain))
 	if err != nil && strings.Contains(err.Error(), "error getting credentials") {
 		// Docker's credential helper needs an unlocked keychain, which
 		// headless sessions (CI runners, ssh) don't have. Public images
 		// must not depend on it — retry anonymously.
 		log.Debugf("credential store unavailable, retrying pull anonymously: %v", err)
-		img, err = crane.Pull(ref, platform, registryTransport(), crane.WithAuth(authn.Anonymous))
+		desc, err = crane.Get(ref, platform, registryTransport(), crane.WithAuth(authn.Anonymous))
 	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to pull image %s: %w", ref, err)
+	}
+	indexDigest := ""
+	if desc.MediaType.IsIndex() {
+		indexDigest = desc.Digest.String()
+	}
+	img, err := desc.Image()
 	if err != nil {
 		return nil, fmt.Errorf("failed to pull image %s: %w", ref, err)
 	}
@@ -152,13 +165,15 @@ func (c *Client) PullPlatform(ctx context.Context, ref, platformStr string) (*Pu
 	// Store image metadata
 	digestStr := digest.String()
 	metadata := &store.ImageMetadata{
-		Ref:      ref,
-		Digest:   digestStr,
-		PulledAt: time.Now(),
-		Labels:   labels,
-		Size:     totalSize,
-		Platform: platformStr,
+		Ref:         ref,
+		Digest:      digestStr,
+		PulledAt:    time.Now(),
+		Labels:      labels,
+		Size:        totalSize,
+		Platform:    platformStr,
+		IndexDigest: indexDigest,
 	}
+	c.keepIndexDigest(metadata)
 
 	// Already have exactly this digest, complete on disk? Then the reference
 	// resolved to what we are already holding and there is nothing to fetch.
@@ -253,6 +268,30 @@ func (c *Client) PullPlatform(ctx context.Context, ref, platformStr string) (*Pu
 		Labels:    labels,
 		Platforms: platforms,
 	}, nil
+}
+
+// keepIndexDigest carries an index digest already recorded for this image over
+// into metadata that has none.
+//
+// Every pull rewrites image.json in full, and which digests a pull learns
+// depends on the reference it was given: pulling the tag of a multi-arch image
+// goes through the index and learns its digest, pulling that image again by its
+// manifest digest goes straight to the manifest and does not. Without this, the
+// second pull erases what the first recorded, and the index digest the user
+// pinned stops resolving until some later pull happens to go through the index
+// again.
+//
+// The two digests describe the same bytes, so an older record's index digest
+// stays true for a newer one.
+func (c *Client) keepIndexDigest(metadata *store.ImageMetadata) {
+	if metadata.IndexDigest != "" {
+		return
+	}
+	previous, err := c.store.GetImage(metadata.Digest)
+	if err != nil {
+		return
+	}
+	metadata.IndexDigest = previous.IndexDigest
 }
 
 // ImageExists reports whether an image is cached AND usable. Metadata on its
