@@ -41,6 +41,13 @@ concurrency:
   # physical Mac. Two jobs signing at once is errSecInternalComponent, so
   # they queue rather than race. Never cancel-in-progress: cancelling a job
   # mid-sign leaves the search list pointing at a keychain that is gone.
+  #
+  # This queues separate runs of this workflow (and of release) against each
+  # other, but a single run's own jobs are scheduled by their needs graph,
+  # not by this block -- so test and boot-sip, which only share a `needs:
+  # changes` dependency, can still land on the shared Mac at the same time.
+  # They carry their own job-level `concurrency: group:
+  # macos-signing-shared-mac` for that.
   group: macos-signing
   cancel-in-progress: false
 
@@ -144,26 +151,12 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       # hvi-vmm is a submodule that `make macos` builds and signs, and a
-      # separate private repo, so this job's own token cannot read it.
-      # HVI_DEPLOY_KEY is a read-only deploy key scoped to that repo alone --
-      # which is why the submodule is fetched here rather than by
-      # actions/checkout: checkout would use the key for this repository too,
-      # and a deploy key is valid for exactly one. Once hvi-vmm is public the
-      # secret can go away and the else branch is all that is left.
-      - name: Fetch the hvi-vmm submodule
-        env:
-          HVI_DEPLOY_KEY: ${{ secrets.HVI_DEPLOY_KEY }}
-        run: |
-          if [ -n "$HVI_DEPLOY_KEY" ]; then
-            KEY="$RUNNER_TEMP/hvi_deploy"
-            printf '%s\n' "$HVI_DEPLOY_KEY" > "$KEY"
-            chmod 600 "$KEY"
-            GIT_SSH_COMMAND="ssh -i $KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \
-              git submodule update --init hvi-vmm
-            rm -f "$KEY"
-          else
-            git submodule update --init hvi-vmm
-          fi
+      # separate private repo, so this job's own token cannot read it --
+      # see .github/actions/fetch-hvi-vmm for why it is fetched here rather
+      # than by actions/checkout.
+      - uses: ./.github/actions/fetch-hvi-vmm
+        with:
+          hvi-deploy-key: ${{ secrets.HVI_DEPLOY_KEY }}
 
       # Self-hosted runners provide their own Go toolchain; setup-go is only
       # needed on ephemeral GitHub-hosted runners.
@@ -185,12 +178,7 @@ jobs:
       - name: Smoke-test compose config
         run: test/compose-config-smoke.sh ./dist/hull_arm64
 
-      - name: Verify vz-runner entitlements
-        run: |
-          codesign -d --entitlements - --xml \
-            vz-runner/.build/arm64-apple-macosx/release/vz-runner \
-            | grep -q com.apple.security.virtualization
-          echo "virtualization entitlement present"
+      - uses: ./.github/actions/verify-vz-entitlement
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -206,6 +194,17 @@ jobs:
     # unless a maintainer dispatched the workflow by hand, which forces the run.
     needs: changes
     if: needs.changes.outputs.code == 'true' || github.event_name == 'workflow_dispatch'
+    # This job and boot-sip land on the same physical Mac (see the note on the
+    # workflow-level concurrency block) and both rewrite the user keychain
+    # search list. The workflow-level group only queues separate workflow
+    # runs -- it does nothing for two jobs racing within the SAME run -- so
+    # pin the two keychain-touching jobs to their own group here. Never
+    # cancel-in-progress, for the same reason as the workflow-level block:
+    # cancelling mid-sign leaves the search list pointing at a keychain that
+    # is gone.
+    concurrency:
+      group: macos-signing-shared-mac
+      cancel-in-progress: false
     # Fork pull requests run on a GitHub-hosted macOS runner; pushes and
     # same-repo (branch) PRs run on ours -- so a maintainer's branch PR
     # exercises the full build-and-boot path before merge, while a fork PR
@@ -236,26 +235,12 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       # hvi-vmm is a submodule that `make macos` builds and signs, and a
-      # separate private repo, so this job's own token cannot read it.
-      # HVI_DEPLOY_KEY is a read-only deploy key scoped to that repo alone --
-      # which is why the submodule is fetched here rather than by
-      # actions/checkout: checkout would use the key for this repository too,
-      # and a deploy key is valid for exactly one. Once hvi-vmm is public the
-      # secret can go away and the else branch is all that is left.
-      - name: Fetch the hvi-vmm submodule
-        env:
-          HVI_DEPLOY_KEY: ${{ secrets.HVI_DEPLOY_KEY }}
-        run: |
-          if [ -n "$HVI_DEPLOY_KEY" ]; then
-            KEY="$RUNNER_TEMP/hvi_deploy"
-            printf '%s\n' "$HVI_DEPLOY_KEY" > "$KEY"
-            chmod 600 "$KEY"
-            GIT_SSH_COMMAND="ssh -i $KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \
-              git submodule update --init hvi-vmm
-            rm -f "$KEY"
-          else
-            git submodule update --init hvi-vmm
-          fi
+      # separate private repo, so this job's own token cannot read it --
+      # see .github/actions/fetch-hvi-vmm for why it is fetched here rather
+      # than by actions/checkout.
+      - uses: ./.github/actions/fetch-hvi-vmm
+        with:
+          hvi-deploy-key: ${{ secrets.HVI_DEPLOY_KEY }}
 
       # Self-hosted runners provide their own Go toolchain; setup-go is only
       # needed on ephemeral GitHub-hosted runners.
@@ -349,34 +334,14 @@ jobs:
 
       # Seed this store's boot assets. They live under the store dir, so a
       # fresh store has none and the test below would skip rather than run --
-      # which is how it silently never ran at all until now.
-      - name: Fetch the boot assets for the CI store
+      # which is how it silently never ran at all until now. See
+      # .github/actions/fetch-boot-assets for why --force matters here.
+      - uses: ./.github/actions/fetch-boot-assets
         if: runner.environment == 'self-hosted'
-        env:
-          HULL_STORE_DIR: ${{ runner.temp }}/../urunc-ci-store
-          # Only needed while ghcr.io/nofireai/hull-assets is a private
-          # package. Anonymous is enough once it is public, as hull-kernel
-          # already is; until then this is how a runner authenticates without
-          # a login keychain it cannot unlock.
-          HULL_REGISTRY_TOKEN: ${{ secrets.HULL_ASSETS_TOKEN }}
-        # Not fatal. The HVI test below skips with a named reason when the
-        # assets are absent, and a skip is the honest outcome when this runner
-        # cannot reach the bundle -- better than a red build that says nothing
-        # about hull.
-        #
-        # --force matters on a self-hosted runner. The CI store survives between
-        # runs, and a plain `assets pull` is a no-op once anything is there:
-        #
-        #   boot assets are already present in .../assets (use --force to replace them)
-        #
-        # So the boot test kept booting whichever kernel this runner happened to
-        # fetch first. A newly published bundle was never exercised, and the run
-        # went green saying so -- which is worse than not testing it, because it
-        # reads as cover the bundle never had.
-        run: |
-          ./dist/hull_arm64 --store-dir "$HULL_STORE_DIR" assets pull --force || {
-            echo "::warning::could not fetch the boot assets; the HVI boot test will skip"
-          }
+        with:
+          hull-bin: ./dist/hull_arm64
+          store-dir: ${{ runner.temp }}/../urunc-ci-store
+          registry-token: ${{ secrets.HULL_ASSETS_TOKEN }}
 
       # HVI e2e: boots an unmodified OCI image on the hvi backend, which
       # exercises the signed VMM, the host kernel and initrd, and the
@@ -392,15 +357,13 @@ jobs:
       # The store is a mounted volume, and nothing unmounts it on its own. This
       # runner is one long-lived Mac, so without this it collects a mounted
       # sparse image per store, forever. always(): a job that failed still
-      # mounted one, and that is exactly when it is easiest to forget.
-      #
-      # The image stays on disk, so the next run remounts the same store with
-      # its pulled images intact -- this gives back the mount, not the cache.
-      - name: Detach the CI store
+      # mounted one, and that is exactly when it is easiest to forget. See
+      # .github/actions/detach-store.
+      - uses: ./.github/actions/detach-store
         if: always() && runner.environment == 'self-hosted'
-        env:
-          HULL_STORE_DIR: ${{ runner.temp }}/../urunc-ci-store
-        run: ./dist/hull_arm64 --store-dir "$HULL_STORE_DIR" store detach --force
+        with:
+          hull-bin: ./dist/hull_arm64
+          store-dir: ${{ runner.temp }}/../urunc-ci-store
 
       - name: Shared-folder smoke matrix
         if: runner.environment == 'self-hosted'
@@ -467,6 +430,11 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ["self-hosted", "macOS", "ARM64", "sip-enabled"]
+    # Same physical Mac as test, same keychain race -- see the note on
+    # test's concurrency block.
+    concurrency:
+      group: macos-signing-shared-mac
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -495,23 +463,11 @@ jobs:
         run: echo "HULL_STORE_DIR=$HOME/hull-ci-store" >> "$GITHUB_ENV"
 
       # hvi-vmm is a submodule that `make macos` builds and signs -- and this job
-      # boots the hvi backend, so it genuinely needs it. Same deploy-key dance as
-      # build/test: the key is scoped to that one private repo, so it cannot be
-      # handed to actions/checkout, which would reuse it for this repo too.
-      - name: Fetch the hvi-vmm submodule
-        env:
-          HVI_DEPLOY_KEY: ${{ secrets.HVI_DEPLOY_KEY }}
-        run: |
-          if [ -n "$HVI_DEPLOY_KEY" ]; then
-            KEY="$RUNNER_TEMP/hvi_deploy"
-            printf '%s\n' "$HVI_DEPLOY_KEY" > "$KEY"
-            chmod 600 "$KEY"
-            GIT_SSH_COMMAND="ssh -i $KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \
-              git submodule update --init hvi-vmm
-            rm -f "$KEY"
-          else
-            git submodule update --init hvi-vmm
-          fi
+      # boots the hvi backend, so it genuinely needs it. See
+      # .github/actions/fetch-hvi-vmm for the deploy-key dance.
+      - uses: ./.github/actions/fetch-hvi-vmm
+        with:
+          hvi-deploy-key: ${{ secrets.HVI_DEPLOY_KEY }}
 
       # The signed build is the whole point here: an ad-hoc signature boots fine
       # with SIP off and is refused the entitlement with SIP on. Sign with the
@@ -553,26 +509,15 @@ jobs:
       # not boot" into "the VM did not boot AND the entitlement was missing" when
       # something upstream drops it. The hvi boot below is itself the equivalent
       # check for hvi's hypervisor entitlement.
-      - name: Verify vz-runner entitlement
-        run: |
-          codesign -d --entitlements - --xml \
-            vz-runner/.build/arm64-apple-macosx/release/vz-runner \
-            | grep -q com.apple.security.virtualization
-          echo "virtualization entitlement present"
+      - uses: ./.github/actions/verify-vz-entitlement
 
-      # Seed the boot assets (host kernel and initrd) the hvi boot needs. --force
-      # matters on a self-hosted runner: the store survives between runs and a
-      # plain pull is a no-op once anything is there, so a newly published bundle
-      # would never be exercised. Not fatal -- the hvi test below skips with a
-      # named reason when the assets are absent, which is the honest outcome when
-      # this runner cannot reach the bundle.
-      - name: Fetch the boot assets for the CI store
-        env:
-          HULL_REGISTRY_TOKEN: ${{ secrets.HULL_ASSETS_TOKEN }}
-        run: |
-          ./dist/hull_arm64 --store-dir "$HULL_STORE_DIR" assets pull --force || {
-            echo "::warning::could not fetch the boot assets; the hvi boot will skip"
-          }
+      # Seed the boot assets (host kernel and initrd) the hvi boot needs. See
+      # .github/actions/fetch-boot-assets for why --force matters here.
+      - uses: ./.github/actions/fetch-boot-assets
+        with:
+          hull-bin: ./dist/hull_arm64
+          store-dir: ${{ env.HULL_STORE_DIR }}
+          registry-token: ${{ secrets.HULL_ASSETS_TOKEN }}
 
       # vz boot: one real microVM on the vz backend from a public image, driven
       # on a PTY so a hung guest console fails the job instead of hanging it. If
@@ -597,12 +542,15 @@ jobs:
       # The store is a mounted sparse image and nothing unmounts it on its own;
       # on a long-lived self-hosted Mac that would leave one mount per run behind.
       # The image stays on disk, so the next run remounts the same store with its
-      # pulled image intact -- this gives back the mount, not the cache.
-      - name: Detach the store
+      # pulled image intact -- this gives back the mount, not the cache. A failed
+      # detach here does not fail the job: this boot already passed or failed on
+      # its own merits, and cleanup hiccups should not overwrite that result.
+      - uses: ./.github/actions/detach-store
         if: always()
-        run: |
-          test -x ./dist/hull_arm64 || exit 0
-          ./dist/hull_arm64 --store-dir "$HULL_STORE_DIR" store detach --force || true
+        with:
+          hull-bin: ./dist/hull_arm64
+          store-dir: ${{ env.HULL_STORE_DIR }}
+          fail-on-error: "false"
 
       - name: Delete ephemeral keychain
         if: always()
@@ -658,23 +606,11 @@ jobs:
       - name: Choose a short store dir (macOS SUN_LEN)
         run: echo "HULL_STORE_DIR=$HOME/hull-ci-store" >> "$GITHUB_ENV"
 
-      # This job boots the hvi backend, so it needs the submodule. Same deploy-key
-      # dance as the other macOS jobs -- the key is scoped to that one private repo
-      # and cannot be handed to actions/checkout, which would reuse it here too.
-      - name: Fetch the hvi-vmm submodule
-        env:
-          HVI_DEPLOY_KEY: ${{ secrets.HVI_DEPLOY_KEY }}
-        run: |
-          if [ -n "$HVI_DEPLOY_KEY" ]; then
-            KEY="$RUNNER_TEMP/hvi_deploy"
-            printf '%s\n' "$HVI_DEPLOY_KEY" > "$KEY"
-            chmod 600 "$KEY"
-            GIT_SSH_COMMAND="ssh -i $KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \
-              git submodule update --init hvi-vmm
-            rm -f "$KEY"
-          else
-            git submodule update --init hvi-vmm
-          fi
+      # This job boots the hvi backend, so it needs the submodule. See
+      # .github/actions/fetch-hvi-vmm for the deploy-key dance.
+      - uses: ./.github/actions/fetch-hvi-vmm
+        with:
+          hvi-deploy-key: ${{ secrets.HVI_DEPLOY_KEY }}
 
       # Ad-hoc build, no keychain and no Developer ID: `make macos` with no
       # identity still embeds the entitlements (the build job's check proves it),
@@ -692,24 +628,15 @@ jobs:
       # may HOLD it, not whether the framework looks for it. Cheap to check, and
       # it catches a Makefile regression that drops the entitlement from an ad-hoc
       # build. The hvi boot below is the equivalent check for hvi's entitlement.
-      - name: Verify vz-runner entitlement
-        run: |
-          codesign -d --entitlements - --xml \
-            vz-runner/.build/arm64-apple-macosx/release/vz-runner \
-            | grep -q com.apple.security.virtualization
-          echo "virtualization entitlement present"
+      - uses: ./.github/actions/verify-vz-entitlement
 
-      # Seed the boot assets the hvi boot needs. --force matters on a self-hosted
-      # runner: the store survives between runs and a plain pull is a no-op once
-      # anything is there. Not fatal -- the hvi boot skips with a named reason when
-      # the assets are absent.
-      - name: Fetch the boot assets for the CI store
-        env:
-          HULL_REGISTRY_TOKEN: ${{ secrets.HULL_ASSETS_TOKEN }}
-        run: |
-          ./dist/hull_arm64 --store-dir "$HULL_STORE_DIR" assets pull --force || {
-            echo "::warning::could not fetch the boot assets; the hvi boot will skip"
-          }
+      # Seed the boot assets the hvi boot needs. See
+      # .github/actions/fetch-boot-assets for why --force matters here.
+      - uses: ./.github/actions/fetch-boot-assets
+        with:
+          hull-bin: ./dist/hull_arm64
+          store-dir: ${{ env.HULL_STORE_DIR }}
+          registry-token: ${{ secrets.HULL_ASSETS_TOKEN }}
 
       # vz boot: one real microVM on the vz backend, driven on a PTY so a hung
       # guest console fails the job instead of hanging it. With SIP off the ad-hoc
@@ -731,12 +658,14 @@ jobs:
       # The store is a mounted sparse image and nothing unmounts it on its own; on
       # a long-lived self-hosted Mac that would leave one mount per run behind. The
       # image stays on disk, so the next run remounts the same store with its
-      # pulled image intact -- this gives back the mount, not the cache.
-      - name: Detach the store
+      # pulled image intact -- this gives back the mount, not the cache. A failed
+      # detach here does not fail the job, same reasoning as boot-sip.
+      - uses: ./.github/actions/detach-store
         if: always()
-        run: |
-          test -x ./dist/hull_arm64 || exit 0
-          ./dist/hull_arm64 --store-dir "$HULL_STORE_DIR" store detach --force || true
+        with:
+          hull-bin: ./dist/hull_arm64
+          store-dir: ${{ env.HULL_STORE_DIR }}
+          fail-on-error: "false"
 
 # Both halves of the pair now exist. boot-sip pins sip-enabled (this SIP-on Mac);
 # boot-nosip pins sip-disabled (the msuch fleet, SIP off). Both labels are

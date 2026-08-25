@@ -1,0 +1,36 @@
+name: Fetch the boot assets for the CI store
+description: >
+  Pull the host kernel and initrd into the store, forcing a refresh because
+  the store persists between runs on a self-hosted Mac and a plain pull is a
+  no-op once anything is there -- so a newly published bundle would
+  otherwise never be exercised. Not fatal: the HVI boot test skips with a
+  named reason when the assets are unreachable, which is the honest outcome
+  when this runner cannot reach the bundle.
+
+inputs:
+  hull-bin:
+    description: Path to the hull binary
+    required: true
+  store-dir:
+    description: HULL_STORE_DIR for this job
+    required: true
+  registry-token:
+    description: >
+      Token for the private hull-assets registry (secrets.HULL_ASSETS_TOKEN).
+      Only needed while ghcr.io/nofireai/hull-assets is a private package.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch the boot assets for the CI store
+      shell: bash
+      env:
+        HULL_STORE_DIR: ${{ inputs.store-dir }}
+        HULL_REGISTRY_TOKEN: ${{ inputs.registry-token }}
+      run: |
+        [ -n "$HULL_STORE_DIR" ] || { echo "::error::store-dir input is empty" >&2; exit 1; }
+        "${{ inputs.hull-bin }}" --store-dir "$HULL_STORE_DIR" assets pull --force || {
+          echo "::warning::could not fetch the boot assets; the HVI boot test will skip"
+        }
