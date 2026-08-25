@@ -19,10 +19,12 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"text/tabwriter"
 	"time"
 
+	"github.com/brig-sh/hull/pkg/store"
 	"github.com/urfave/cli/v3"
 )
 
@@ -52,57 +54,58 @@ func listImages(ctx context.Context, cmd *cli.Command) error {
 		return nil
 	}
 
-	// Create table output
-	w := tabwriter.NewWriter(os.Stdout, 4, 8, 2, ' ', 0)
+	return writeImageTable(os.Stdout, images, time.Now())
+}
+
+// writeImageTable prints one row per stored image.
+//
+// The repository and tag come from the store's own split of the reference the
+// image was pulled under. Scanning the reference backwards for a colon, as
+// this used to, landed on the one inside `@sha256:` for an image pulled by
+// digest, and printed a repository ending in `@sha256` with the hex as its
+// tag. Such an image has no tag, and says so, the way docker does.
+func writeImageTable(out io.Writer, images []*store.ImageMetadata, now time.Time) error {
+	w := tabwriter.NewWriter(out, 4, 8, 2, ' ', 0)
 	_, _ = fmt.Fprintln(w, "REPOSITORY\tTAG\tDIGEST\tSIZE\tCREATED")
 
 	for _, img := range images {
-		// Parse repo and tag from reference
-		repo := img.Ref
-		tag := "latest"
-		if repo != "" && repo[len(repo)-1] != ':' {
-			// Try to extract tag
-			for i := len(repo) - 1; i >= 0; i-- {
-				if repo[i] == ':' {
-					tag = repo[i+1:]
-					repo = repo[:i]
-					break
-				}
-			}
+		ref := store.ParseReference(img.Ref)
+		tag := ref.Tag
+		switch {
+		case ref.Digest != "":
+			tag = "<none>"
+		case tag == "":
+			tag = "latest"
 		}
 
-		// Format size
-		sizeStr := formatSize(img.Size)
-
-		// Format digest
 		digestStr := img.Digest
 		if len(digestStr) > 19 {
 			digestStr = digestStr[:19]
 		}
 
-		// Format age
-		age := time.Since(img.PulledAt)
-		var ageStr string
-		if age < time.Minute {
-			ageStr = "just now"
-		} else if age < time.Hour {
-			ageStr = fmt.Sprintf("%dm ago", int(age.Minutes()))
-		} else if age < 24*time.Hour {
-			ageStr = fmt.Sprintf("%dh ago", int(age.Hours()))
-		} else {
-			ageStr = fmt.Sprintf("%dd ago", int(age.Hours()/24))
-		}
-
 		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
-			repo,
+			ref.Repository,
 			tag,
 			digestStr,
-			sizeStr,
-			ageStr,
+			formatSize(img.Size),
+			formatAge(now.Sub(img.PulledAt)),
 		)
 	}
 
 	return w.Flush()
+}
+
+func formatAge(age time.Duration) string {
+	switch {
+	case age < time.Minute:
+		return "just now"
+	case age < time.Hour:
+		return fmt.Sprintf("%dm ago", int(age.Minutes()))
+	case age < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(age.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(age.Hours()/24))
+	}
 }
 
 func formatSize(bytes int64) string {
