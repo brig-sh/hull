@@ -743,6 +743,7 @@ hull assets pull [REF]     # fetch them ahead of time
 | `--detach, -d` | false | Run in background |
 | `--name` | random | Instance name |
 | `--shared-dir` | — | Host path to share: `/host:/guest` |
+| `--shared-dir-fd` | — | Share a directory the caller already holds open: `FD:/guest` |
 
 ## Networking
 

@@ -205,11 +205,65 @@ def negative():
              "--shared-dir", f"{ws}:relative/path", IMAGE])
     if r.returncode == 0:
         die("run with a non-absolute guest path unexpectedly succeeded")
-    print(f"PASS [{hv}/negative]: bad --shared-dir args are rejected")
+    cli(["stop", name]); cli(["rm", name])
+    # A descriptor number nothing was passed on -> rejected before anything
+    # starts. This is what a caller that forgot to clear FD_CLOEXEC hits.
+    r = cli(["run", "--detach", "--hypervisor", hv, "--net", "none", "--name", name,
+             "--shared-dir-fd", "42:/mnt/share", IMAGE])
+    if r.returncode == 0:
+        die("run with a descriptor the process does not hold unexpectedly succeeded")
+    cli(["stop", name]); cli(["rm", name])
+    # A standard stream is not a share.
+    r = cli(["run", "--detach", "--hypervisor", hv, "--net", "none", "--name", name,
+             "--shared-dir-fd", "1:/mnt/share", IMAGE])
+    if r.returncode == 0:
+        die("run with a standard stream as the share descriptor unexpectedly succeeded")
+    print(f"PASS [{hv}/negative]: bad --shared-dir and --shared-dir-fd args are rejected")
+
+
+def swap():
+    """--shared-dir-fd names the directory the caller opened, not a path.
+
+    The caller opens its workspace and hands the descriptor over. Before the VM
+    starts, the name that workspace was created under is taken over by another
+    directory. The guest must still receive the directory that was opened.
+    """
+    ws = mkworkspace()
+    write(os.path.join(ws, "marker.txt"), "original")
+    seed_runtest(ws, 'echo "MARKER=[$(cat /mnt/share/marker.txt 2>/dev/null)]"')
+
+    fd = os.open(ws, os.O_RDONLY)
+    os.set_inheritable(fd, True)
+
+    # Take the name over: the opened directory moves aside, an impostor takes
+    # its place. It carries the same script, so resolving by name produces a
+    # booted guest with the wrong contents rather than a failure to start.
+    moved = ws + "-moved"
+    shutil.rmtree(moved, ignore_errors=True)
+    os.rename(ws, moved)
+    workspaces.append(moved)
+    os.makedirs(ws)
+    write(os.path.join(ws, "marker.txt"), "impostor")
+    seed_runtest(ws, 'echo "MARKER=[$(cat /mnt/share/marker.txt 2>/dev/null)]"')
+
+    cli(["stop", name]); cli(["rm", name])
+    args = ["run", "--detach", "--hypervisor", hv, "--net", "none", "--name", name,
+            "--shared-dir-fd", f"{fd}:/mnt/share", IMAGE, "/bin/sh", "/mnt/share/runtest.sh"]
+    r = subprocess.run([BIN] + GLOBAL + args, capture_output=True, text=True, pass_fds=(fd,))
+    os.close(fd)
+    if r.returncode != 0:
+        die(f"run with --shared-dir-fd failed: {r.stderr.strip() or r.stdout.strip()}")
+
+    log = wait_marker("SHARE_TEST_DONE")
+    if "MARKER=[impostor]" in log:
+        die("the guest received the directory that took the name, not the one the caller opened")
+    if "MARKER=[original]" not in log:
+        die("the guest did not see the shared directory at all")
+    print(f"PASS [{hv}/swap]: a shared descriptor survives a swap of the name it was opened under")
 
 
 MODES = {"readwrite": readwrite, "ownership": ownership, "persist": persist,
-         "multi": multi, "nested": nested, "negative": negative}
+         "multi": multi, "nested": nested, "negative": negative, "swap": swap}
 
 if mode not in MODES:
     print(f"unknown mode {mode!r}; choose from {', '.join(MODES)}")

@@ -195,6 +195,9 @@ func restoreInstance(_ context.Context, cmd *cli.Command) error {
 	if err := requireBlockRootfs(state.CmdLine); err != nil {
 		return err
 	}
+	if err := requireNoDescriptorShare(state.CmdLine); err != nil {
+		return err
+	}
 
 	cmdArgs := slices.Clone(state.CmdLine)
 	if !slices.Contains(cmdArgs, "--restore") {
@@ -234,6 +237,28 @@ func restoreInstance(_ context.Context, cmd *cli.Command) error {
 // guest's FUSE state in a new VMM process, so every inode goes stale at
 // restore and the guest effectively dies. A block rootfs (--rootfs-type
 // block) is cloned at checkpoint and restored consistently.
+// requireNoDescriptorShare rejects restoring an instance whose share was named
+// by a descriptor the caller held open.
+//
+// Restore replays the recorded command line, and for such a share that line
+// carries an identity path (/.vol/<device>/<inode>). The descriptor that made
+// the identity trustworthy died with the process that was given it, so what
+// the path names is no longer pinned: the directory can be gone, and on a
+// volume that reuses inode numbers the path can name a different one. Handing
+// the guest a directory nobody vouched for is the substitution --shared-dir-fd
+// exists to prevent, so restore says so and the caller starts the instance
+// again with a fresh descriptor. The gateway socket, another inherited
+// descriptor, is refused the same way a few lines below.
+func requireNoDescriptorShare(cmdLine []string) error {
+	for _, arg := range cmdLine {
+		if strings.HasPrefix(arg, "/.vol/") {
+			return errors.New("this instance shared a directory by descriptor (--shared-dir-fd), which does not " +
+				"survive the process it was passed to: run it again with a fresh descriptor rather than restoring it")
+		}
+	}
+	return nil
+}
+
 func requireBlockRootfs(cmdLine []string) error {
 	if !slices.Contains(cmdLine, "--rootfs") {
 		return errors.New("checkpoint/restore needs a block rootfs: start the instance with `run --rootfs-type block` (a virtiofs root goes stale across restore)")
