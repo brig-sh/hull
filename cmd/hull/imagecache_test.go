@@ -512,3 +512,25 @@ func TestResolveImageDigestNeverAcceptsDigestRef(t *testing.T) {
 		}
 	}
 }
+
+// Records written before the index digest was tracked carry none, so an image
+// pulled under an index digest reference has only that reference to be found
+// by. Matching the stored reference as a string is what keeps it findable;
+// without it the image is a permanent miss, re-pulled on every run and refused
+// outright under --pull=never.
+func TestCachedDigestHitForLegacyDigestRefRecord(t *testing.T) {
+	s := newCacheTestStore(t)
+	ref := cacheTestRepo + "@" + cacheTestIndexDigest
+	seedMetadata(t, s, &store.ImageMetadata{
+		Ref:    ref,
+		Digest: cacheTestDigest,
+	}, true)
+
+	digest, ok := cachedDigest(s, ref, ociclient.DefaultPlatform)
+	if !ok {
+		t.Fatal("a record with no index digest must still answer the reference it was pulled under")
+	}
+	if digest != cacheTestDigest {
+		t.Errorf("digest = %q, want %q", digest, cacheTestDigest)
+	}
+}

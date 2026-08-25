@@ -2401,9 +2401,20 @@ func digestReference(ref string) (repo, digest string) {
 // this check a pin could be satisfied by an image the user did not name.
 // A stored reference that does not parse cannot be shown to match, so it is
 // a miss and the image is re-pulled.
+//
+// The plain string comparison stays in front of all of it. An image records
+// the reference it was pulled under, so a stored reference equal to the one
+// asked for is the same image by definition, whatever shape it has. Records
+// written before the index digest was tracked depend on it: one pulled under
+// `repo@sha256:<index digest>` carries no index digest to compare, and
+// dropping the string comparison would turn it into a permanent miss -- a
+// re-pull on every run, or a hard failure under --pull=never.
 func imageAnswersRef(img *store.ImageMetadata, ref, wantRepo, wantDigest string) bool {
+	if img.Ref == ref || img.Digest == ref {
+		return true
+	}
 	if wantDigest == "" {
-		return img.Ref == ref || img.Digest == ref
+		return false
 	}
 	if wantDigest != img.Digest && wantDigest != img.IndexDigest {
 		return false
