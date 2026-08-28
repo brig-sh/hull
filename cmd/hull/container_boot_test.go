@@ -1,6 +1,6 @@
 //go:build darwin
 
-// Copyright (c) 2023-2026, Nubificus LTD
+// Copyright (c) 2026, NOFire AI
 // SPDX-License-Identifier: Apache-2.0
 
 package main
