@@ -23,7 +23,7 @@ func recordAttr(t *testing.T, path string, mode, uid, gid uint32) {
 	binary.LittleEndian.PutUint32(v[0:4], mode)
 	binary.LittleEndian.PutUint32(v[4:8], uid)
 	binary.LittleEndian.PutUint32(v[8:12], gid)
-	if err := unix.Setxattr(path, "com.nubificus.hvi.linux-attr", v[:], 0); err != nil {
+	if err := unix.Setxattr(path, "com.nofire.hvi.linux-attr", v[:], 0); err != nil {
 		t.Skipf("cannot record guest attributes here: %v", err)
 	}
 }
@@ -131,7 +131,7 @@ func recordLinkAttr(t *testing.T, path string, mode, uid, gid uint32) {
 	binary.LittleEndian.PutUint32(v[0:4], mode)
 	binary.LittleEndian.PutUint32(v[4:8], uid)
 	binary.LittleEndian.PutUint32(v[8:12], gid)
-	if err := unix.Setxattr(path, "com.nubificus.hvi.linux-attr", v[:], unix.XATTR_NOFOLLOW); err != nil {
+	if err := unix.Setxattr(path, "com.nofire.hvi.linux-attr", v[:], unix.XATTR_NOFOLLOW); err != nil {
 		t.Skipf("cannot record guest attributes here: %v", err)
 	}
 }

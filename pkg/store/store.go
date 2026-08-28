@@ -278,7 +278,7 @@ func (s *Store) ImageComplete(digest string) bool {
 // off. A schema-1 rootfs carries no records at all, so a setuid binary like
 // sudo reaches the guest as a plain 0755 file owned by the host user, and
 // sudo cannot elevate.
-const UnpackSchema = 2
+const UnpackSchema = 3
 
 const unpackSchemaFile = "unpack-schema"
 

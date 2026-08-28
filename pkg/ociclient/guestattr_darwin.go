@@ -36,7 +36,7 @@ import (
 // little-endian, mode then uid then gid. Changing either side alone silently
 // stops the other from reading it, which is why this comment names the file to
 // change with it.
-const guestAttrXattr = "com.nubificus.hvi.linux-attr"
+const guestAttrXattr = "com.nofire.hvi.linux-attr"
 
 // recordsOwnership says the manual extractor has to run on every layer, not
 // only on the ones archive.Apply could not finish.
