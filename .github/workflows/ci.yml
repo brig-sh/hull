@@ -428,7 +428,16 @@ jobs:
     # uses gates this one too -- unless a maintainer dispatched the workflow by
     # hand, which forces the boot regardless of the diff.
     needs: changes
-    if: needs.changes.outputs.code == 'true' || github.event_name == 'workflow_dispatch'
+    # The second clause withholds these from fork pull requests. Unlike build
+    # and test above, which reroute to a hosted runner, a boot needs a real Mac
+    # with a known SIP state, so there is nowhere to reroute to: a fork skips
+    # the job instead. These are persistent machines, so untrusted code that
+    # ran on them would outlive its own job.
+    if: >-
+      (needs.changes.outputs.code == 'true'
+       || github.event_name == 'workflow_dispatch')
+      && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ["self-hosted", "macOS", "ARM64", "sip-enabled"]
     # Same physical Mac as test, same keychain race -- see the note on
     # test's concurrency block.
@@ -581,7 +590,16 @@ jobs:
   boot-nosip:
     name: microVM boot (SIP-disabled)
     needs: changes
-    if: needs.changes.outputs.code == 'true' || github.event_name == 'workflow_dispatch'
+    # The second clause withholds these from fork pull requests. Unlike build
+    # and test above, which reroute to a hosted runner, a boot needs a real Mac
+    # with a known SIP state, so there is nowhere to reroute to: a fork skips
+    # the job instead. These are persistent machines, so untrusted code that
+    # ran on them would outlive its own job.
+    if: >-
+      (needs.changes.outputs.code == 'true'
+       || github.event_name == 'workflow_dispatch')
+      && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ["self-hosted", "macOS", "ARM64", "sip-disabled"]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
