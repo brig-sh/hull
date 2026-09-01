@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/checksum"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 )
 
@@ -282,4 +283,85 @@ func TestGuestToGuestIsNotEgress(t *testing.T) {
 		return len(got) == len(frame) && string(got) == string(frame)
 	})
 	expectNoDial(t, dials)
+}
+
+func icmpEcho4(t *testing.T, m *member, dst string) []byte {
+	t.Helper()
+	const payload = 8
+	frame := ethernet(t, m, header.IPv4MinimumSize+header.ICMPv4MinimumSize+payload, header.IPv4ProtocolNumber)
+	ip := header.IPv4(frame[header.EthernetMinimumSize:])
+	ip.Encode(&header.IPv4Fields{
+		TotalLength: uint16(header.IPv4MinimumSize + header.ICMPv4MinimumSize + payload),
+		TTL:         64,
+		Protocol:    uint8(header.ICMPv4ProtocolNumber),
+		SrcAddr:     tcpip.AddrFrom4Slice(m.ip),
+		DstAddr:     tcpip.AddrFrom4Slice(net.ParseIP(dst).To4()),
+	})
+	ip.SetChecksum(^ip.CalculateChecksum())
+
+	echo := header.ICMPv4(frame[header.EthernetMinimumSize+header.IPv4MinimumSize:])
+	echo.SetType(header.ICMPv4Echo)
+	echo.SetCode(header.ICMPv4UnusedCode)
+	echo.SetIdent(1)
+	echo.SetSequence(1)
+	echo.SetChecksum(0)
+	echo.SetChecksum(^checksum.Checksum(echo, 0))
+	return frame
+}
+
+// A guest's ping is answered by the gateway itself: the netstack takes the
+// destination as one of its own addresses and replies, so nothing leaves the
+// host. Under deny-default that means a ping to a blocked address still
+// succeeds, and it still tells the guest nothing about the outside world.
+func TestICMPEchoIsAnsweredNotForwarded(t *testing.T) {
+	n, dials := filteredNetwork(t, mustPolicy(t, "deny", nil, nil))
+	m := join(t, n)
+	m.send(t, icmpEcho4(t, m, testDst4))
+
+	m.await(t, "an ICMP echo reply", func(frame []byte) bool {
+		if len(frame) < header.EthernetMinimumSize+header.IPv4MinimumSize+header.ICMPv4MinimumSize {
+			return false
+		}
+		if header.Ethernet(frame).Type() != header.IPv4ProtocolNumber {
+			return false
+		}
+		ip := header.IPv4(frame[header.EthernetMinimumSize:])
+		if ip.Protocol() != uint8(header.ICMPv4ProtocolNumber) || ip.SourceAddress().String() != testDst4 {
+			return false
+		}
+		return header.ICMPv4(frame[header.EthernetMinimumSize+int(ip.HeaderLength()):]).Type() == header.ICMPv4EchoReply
+	})
+	expectNoDial(t, dials)
+}
+
+// The policy sees the source address in the packet, and a guest picks its own.
+// One guest can therefore use another's pinned answers by claiming its
+// address, which the shared switch makes possible in the first place.
+//
+// It widens nothing: a gateway carries one policy for every guest on it, so
+// the addresses a guest reaches by borrowing another's pins are the ones its
+// own queries would have been answered with. Separating guests is a network
+// per sandbox, not a rule here.
+func TestPinsFollowTheSourceAddressNotTheMember(t *testing.T) {
+	policy := mustPolicy(t, "deny", []string{"host=*.example.com"}, nil)
+	n, dials := filteredNetwork(t, policy)
+	second := joinAs(t, n, "5a:94:ef:e4:0c:ef", "10.87.0.3")
+	// Another guest resolved the name, so the pin is held against its
+	// address.
+	policy.Pin(netip.MustParseAddr(testGuestIP), []netip.Addr{netip.MustParseAddr(testDst4)}, false)
+
+	// The second guest has no pins of its own.
+	second.send(t, tcpSYN4(t, second, testDst4, 443))
+	expectNoDial(t, dials)
+
+	// Claiming the first guest's address is enough to use its pins.
+	spoofed := tcpSYN4(t, second, testDst4, 443)
+	ip := header.IPv4(spoofed[header.EthernetMinimumSize:])
+	ip.SetSourceAddress(tcpip.AddrFrom4Slice(net.ParseIP(testGuestIP).To4()))
+	ip.SetChecksum(0)
+	ip.SetChecksum(^ip.CalculateChecksum())
+	second.send(t, spoofed)
+	if got := awaitDial(t, dials); got.address != testDst4+":443" {
+		t.Fatalf("dialed %v", got)
+	}
 }
