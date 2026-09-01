@@ -34,10 +34,10 @@ import (
 	"strings"
 
 	"github.com/containers/gvisor-tap-vsock/pkg/services/dhcp"
-	"github.com/containers/gvisor-tap-vsock/pkg/services/dns"
 	"github.com/containers/gvisor-tap-vsock/pkg/services/forwarder"
 	"github.com/containers/gvisor-tap-vsock/pkg/tap"
 	gvntypes "github.com/containers/gvisor-tap-vsock/pkg/types"
+	"github.com/miekg/dns"
 	log "github.com/sirupsen/logrus"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
@@ -77,6 +77,9 @@ type Config struct {
 	// dial opens the host-side connection. Tests replace it; nil means
 	// net.Dial.
 	dial dialFunc
+	// resolve is the host-side resolver the gateway forwards to. Tests
+	// replace it; nil means the host's own.
+	resolve resolver
 }
 
 // Network is a running user-mode network. Members join it by handing over a
@@ -224,20 +227,24 @@ func dnsServer(cfg Config, s *stack.Stack) error {
 	if err != nil {
 		return err
 	}
-	server, err := dns.New(udpConn, tcpLn, cfg.DNSZones)
-	if err != nil {
-		return err
+
+	upstream := cfg.resolve
+	if upstream == nil {
+		upstream = &net.Resolver{PreferGo: false}
 	}
-	go func() {
-		if err := server.Serve(); err != nil {
-			log.Error(err)
-		}
-	}()
-	go func() {
-		if err := server.ServeTCP(); err != nil {
-			log.Error(err)
-		}
-	}()
+	handler := &dnsHandler{zones: cfg.DNSZones, upstream: upstream}
+	serve := func(srv *dns.Server, maxSize int) {
+		mux := dns.NewServeMux()
+		mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) { handler.handle(w, r, maxSize) })
+		srv.Handler = mux
+		go func() {
+			if err := srv.ActivateAndServe(); err != nil {
+				log.Errorf("dns: %v", err)
+			}
+		}()
+	}
+	serve(&dns.Server{PacketConn: udpConn}, dns.MinMsgSize)
+	serve(&dns.Server{Listener: tcpLn}, dns.MaxMsgSize)
 	return nil
 }
 
