@@ -54,6 +54,10 @@ func mustMAC(t *testing.T, s string) tcpip.LinkAddress {
 // continuous: the switch holds its write lock while sending, so a member that
 // stops reading wedges the whole network.
 func join(t *testing.T, n *Network) *member {
+	return joinAs(t, n, testGuestMA, testGuestIP)
+}
+
+func joinAs(t *testing.T, n *Network, mac, ip string) *member {
 	t.Helper()
 	ours, theirs := net.Pipe()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -62,8 +66,8 @@ func join(t *testing.T, n *Network) *member {
 	m := &member{
 		conn:   ours,
 		frames: make(chan []byte, 64),
-		mac:    mustMAC(t, testGuestMA),
-		ip:     net.ParseIP(testGuestIP).To4(),
+		mac:    mustMAC(t, mac),
+		ip:     net.ParseIP(ip).To4(),
 	}
 	go func() {
 		buf := make([]byte, 65536)
