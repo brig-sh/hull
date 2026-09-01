@@ -17,6 +17,7 @@ package netgw
 import (
 	"context"
 	"net"
+	"net/netip"
 	"strings"
 
 	gvntypes "github.com/containers/gvisor-tap-vsock/pkg/types"
@@ -42,13 +43,14 @@ type resolver interface {
 type dnsHandler struct {
 	zones    []gvntypes.Zone
 	upstream resolver
+	policy   *Policy
 }
 
 func (h *dnsHandler) handle(w dns.ResponseWriter, r *dns.Msg, maxSize int) {
 	m := new(dns.Msg)
 	m.SetReply(r)
 	m.RecursionAvailable = true
-	h.addAnswers(m)
+	h.addAnswers(m, guestAddr(w.RemoteAddr()))
 	if edns0 := r.IsEdns0(); edns0 != nil {
 		maxSize = int(edns0.UDPSize())
 	}
@@ -58,13 +60,64 @@ func (h *dnsHandler) handle(w dns.ResponseWriter, r *dns.Msg, maxSize int) {
 	}
 }
 
-func (h *dnsHandler) addAnswers(m *dns.Msg) {
+// addAnswers fills in the reply. Under a deny-default policy a name no allow
+// glob covers is refused outright: an address the guest never learns is an
+// address it cannot reach, which is what makes direct-to-IP, DNS-over-HTTPS
+// and DNS-over-TLS dead ends rather than cases to special-case.
+func (h *dnsHandler) addAnswers(m *dns.Msg, guest netip.Addr) {
 	for _, q := range m.Question {
 		if h.addLocalAnswers(m, q) {
 			continue
 		}
-		h.addUpstreamAnswers(m, q)
+		if !h.policy.AllowsQuery(q.Name) {
+			log.Warnf("egress: refused the query %s from %s", q.Name, guest)
+			m.Answer = nil
+			m.Rcode = dns.RcodeRefused
+			return
+		}
+		h.addUpstreamAnswers(m, q, guest)
 	}
+}
+
+// guestAddr is the address of whoever sent the query, which is the guest the
+// answer is pinned for.
+func guestAddr(a net.Addr) netip.Addr {
+	var ip net.IP
+	switch v := a.(type) {
+	case *net.UDPAddr:
+		ip = v.IP
+	case *net.TCPAddr:
+		ip = v.IP
+	default:
+		return netip.Addr{}
+	}
+	addr, _ := netip.AddrFromSlice(ip)
+	return addr.Unmap()
+}
+
+// pin puts the addresses of an answer in the asking guest's set, so a rule
+// written against a name is enforceable against a packet. Only the gateway's
+// own answers are pinned, which is what ties the two together.
+func (h *dnsHandler) pin(guest netip.Addr, name string, ips []net.IP) {
+	if h.policy == nil || !guest.IsValid() {
+		return
+	}
+	addrs := make([]netip.Addr, 0, len(ips))
+	for _, ip := range ips {
+		if addr, ok := netip.AddrFromSlice(ip); ok {
+			addrs = append(addrs, addr.Unmap())
+		}
+	}
+	h.policy.Pin(guest, addrs, h.policy.DeniesQuery(name))
+}
+
+// answerTTL is both what the gateway tells the guest and how long it honours
+// the answer for. They are the same number on purpose.
+func (h *dnsHandler) answerTTL() uint32 {
+	if !h.policy.HasHostRules() {
+		return 0
+	}
+	return uint32(pinTTL.Seconds())
 }
 
 // addLocalAnswers serves the records the gateway was given. It reports
@@ -118,8 +171,9 @@ func (h *dnsHandler) addLocalAnswers(m *dns.Msg, q dns.Question) bool {
 	return false
 }
 
-func (h *dnsHandler) addUpstreamAnswers(m *dns.Msg, q dns.Question) {
+func (h *dnsHandler) addUpstreamAnswers(m *dns.Msg, q dns.Question, guest netip.Addr) {
 	ctx := context.TODO()
+	ttl := h.answerTTL()
 	switch q.Qtype {
 	case dns.TypeA:
 		addrs, err := h.upstream.LookupIPAddr(ctx, q.Name)
@@ -127,20 +181,23 @@ func (h *dnsHandler) addUpstreamAnswers(m *dns.Msg, q dns.Question) {
 			m.Rcode = dns.RcodeNameError
 			return
 		}
+		var pinned []net.IP
 		for _, a := range addrs {
 			v4 := a.IP.To4()
 			if v4 == nil {
 				continue
 			}
-			m.Answer = append(m.Answer, &dns.A{Hdr: rrHeader(q.Name, dns.TypeA, 0), A: v4})
+			pinned = append(pinned, v4)
+			m.Answer = append(m.Answer, &dns.A{Hdr: rrHeader(q.Name, dns.TypeA, ttl), A: v4})
 		}
+		h.pin(guest, q.Name, pinned)
 	case dns.TypeCNAME:
 		cname, err := h.upstream.LookupCNAME(ctx, q.Name)
 		if err != nil {
 			m.Rcode = dns.RcodeNameError
 			return
 		}
-		m.Answer = append(m.Answer, &dns.CNAME{Hdr: rrHeader(q.Name, dns.TypeCNAME, 0), Target: cname})
+		m.Answer = append(m.Answer, &dns.CNAME{Hdr: rrHeader(q.Name, dns.TypeCNAME, ttl), Target: cname})
 	case dns.TypeMX:
 		records, err := h.upstream.LookupMX(ctx, q.Name)
 		if err != nil {
@@ -148,7 +205,7 @@ func (h *dnsHandler) addUpstreamAnswers(m *dns.Msg, q dns.Question) {
 			return
 		}
 		for _, mx := range records {
-			m.Answer = append(m.Answer, &dns.MX{Hdr: rrHeader(q.Name, dns.TypeMX, 0), Mx: mx.Host, Preference: mx.Pref})
+			m.Answer = append(m.Answer, &dns.MX{Hdr: rrHeader(q.Name, dns.TypeMX, ttl), Mx: mx.Host, Preference: mx.Pref})
 		}
 	case dns.TypeNS:
 		records, err := h.upstream.LookupNS(ctx, q.Name)
@@ -157,7 +214,7 @@ func (h *dnsHandler) addUpstreamAnswers(m *dns.Msg, q dns.Question) {
 			return
 		}
 		for _, ns := range records {
-			m.Answer = append(m.Answer, &dns.NS{Hdr: rrHeader(q.Name, dns.TypeNS, 0), Ns: ns.Host})
+			m.Answer = append(m.Answer, &dns.NS{Hdr: rrHeader(q.Name, dns.TypeNS, ttl), Ns: ns.Host})
 		}
 	case dns.TypeSRV:
 		_, records, err := h.upstream.LookupSRV(ctx, "", "", q.Name)
@@ -167,7 +224,7 @@ func (h *dnsHandler) addUpstreamAnswers(m *dns.Msg, q dns.Question) {
 		}
 		for _, srv := range records {
 			m.Answer = append(m.Answer, &dns.SRV{
-				Hdr:      rrHeader(q.Name, dns.TypeSRV, 0),
+				Hdr:      rrHeader(q.Name, dns.TypeSRV, ttl),
 				Port:     srv.Port,
 				Priority: srv.Priority,
 				Target:   srv.Target,
@@ -181,12 +238,13 @@ func (h *dnsHandler) addUpstreamAnswers(m *dns.Msg, q dns.Question) {
 			return
 		}
 		for _, txt := range txts {
-			m.Answer = append(m.Answer, &dns.TXT{Hdr: rrHeader(q.Name, dns.TypeTXT, 0), Txt: splitTXT(txt)})
+			m.Answer = append(m.Answer, &dns.TXT{Hdr: rrHeader(q.Name, dns.TypeTXT, ttl), Txt: splitTXT(txt)})
 		}
 	}
 	// Every other type, AAAA among them, is answered with no records. IPv6
 	// forwarding is not wired up, so handing a guest an IPv6 address would
-	// only send it down a path the netstack drops.
+	// only send it down a path the netstack drops, and there is nothing to
+	// pin. Pinning already holds both families for the day it is.
 }
 
 func rrHeader(name string, rrtype uint16, ttl uint32) dns.RR_Header {

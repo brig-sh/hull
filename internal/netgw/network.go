@@ -232,7 +232,7 @@ func dnsServer(cfg Config, s *stack.Stack) error {
 	if upstream == nil {
 		upstream = &net.Resolver{PreferGo: false}
 	}
-	handler := &dnsHandler{zones: cfg.DNSZones, upstream: upstream}
+	handler := &dnsHandler{zones: cfg.DNSZones, upstream: upstream, policy: cfg.Egress}
 	serve := func(srv *dns.Server, maxSize int) {
 		mux := dns.NewServeMux()
 		mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) { handler.handle(w, r, maxSize) })
