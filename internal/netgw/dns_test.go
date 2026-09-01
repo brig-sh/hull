@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"testing"
 
 	gvntypes "github.com/containers/gvisor-tap-vsock/pkg/types"
@@ -75,11 +76,15 @@ func v4addrs(ips ...string) []net.IPAddr {
 }
 
 func ask(h *dnsHandler, name string, qtype uint16) *dns.Msg {
+	return askAs(h, netip.MustParseAddr(testGuestIP), name, qtype)
+}
+
+func askAs(h *dnsHandler, guest netip.Addr, name string, qtype uint16) *dns.Msg {
 	m := new(dns.Msg)
 	m.SetQuestion(dns.Fqdn(name), qtype)
 	reply := new(dns.Msg)
 	reply.SetReply(m)
-	h.addAnswers(reply)
+	h.addAnswers(reply, guest)
 	return reply
 }
 
@@ -249,5 +254,144 @@ func TestDNSOverTheVirtualNetwork(t *testing.T) {
 	m.send(t, dnsQueryFrame(t, m, "example.com", dns.TypeA))
 	if got := answerIPs(dnsReply(t, m)); len(got) != 1 || got[0] != "93.184.216.34" {
 		t.Fatalf("A example.com over the network = %v", got)
+	}
+}
+
+// Egress filtering at the resolver.
+
+func TestDNSRefusesUnlistedNamesUnderDenyDefault(t *testing.T) {
+	h := &dnsHandler{
+		upstream: newFakeResolver(map[string][]net.IPAddr{"evil.test": v4addrs("93.184.216.34")}),
+		policy:   mustPolicy(t, "deny", []string{"host=*.example.com"}, nil),
+	}
+	reply := ask(h, "evil.test", dns.TypeA)
+	if reply.Rcode != dns.RcodeRefused {
+		t.Fatalf("rcode = %s, want REFUSED", dns.RcodeToString[reply.Rcode])
+	}
+	if len(reply.Answer) != 0 {
+		t.Fatalf("a refused query still carried answers: %v", reply.Answer)
+	}
+}
+
+// The names a project's own services answer to are the gateway's own records
+// and stay resolvable, whatever the egress rules say about the outside world.
+func TestDNSServesLocalRecordsUnderDenyDefault(t *testing.T) {
+	h := &dnsHandler{
+		zones:    []gvntypes.Zone{{Name: ".", Records: []gvntypes.Record{{Name: "web", IP: net.ParseIP("10.87.0.5")}}}},
+		upstream: newFakeResolver(nil),
+		policy:   mustPolicy(t, "deny", nil, nil),
+	}
+	if got := answerIPs(ask(h, "web", dns.TypeA)); len(got) != 1 || got[0] != "10.87.0.5" {
+		t.Fatalf("A web = %v", got)
+	}
+}
+
+func TestDNSPinsTheAnswerForTheGuestThatAsked(t *testing.T) {
+	policy := mustPolicy(t, "deny", []string{"host=*.example.com"}, nil)
+	h := &dnsHandler{
+		upstream: newFakeResolver(map[string][]net.IPAddr{"api.example.com": v4addrs("93.184.216.34")}),
+		policy:   policy,
+	}
+	asker, other := netip.MustParseAddr(testGuestIP), netip.MustParseAddr("10.87.0.3")
+	dst := netip.MustParseAddr("93.184.216.34")
+
+	if got := answerIPs(askAs(h, asker, "api.example.com", dns.TypeA)); len(got) != 1 {
+		t.Fatalf("A api.example.com = %v", got)
+	}
+	if !policy.AllowsConnection(asker, dst) {
+		t.Fatal("the guest cannot reach the answer it was given")
+	}
+	if policy.AllowsConnection(other, dst) {
+		t.Fatal("the answer was pinned for a guest that never asked")
+	}
+}
+
+// Under allow-default a deny glob is best effort: the name still resolves,
+// and what came back is pinned as unreachable.
+func TestDNSPinsDeniedNamesUnderAllowDefault(t *testing.T) {
+	policy := mustPolicy(t, "allow", nil, []string{"host=*.tracker.test"})
+	h := &dnsHandler{
+		upstream: newFakeResolver(map[string][]net.IPAddr{"a.tracker.test": v4addrs("93.184.216.34")}),
+		policy:   policy,
+	}
+	guest, dst := netip.MustParseAddr(testGuestIP), netip.MustParseAddr("93.184.216.34")
+
+	if got := answerIPs(ask(h, "a.tracker.test", dns.TypeA)); len(got) != 1 {
+		t.Fatalf("A a.tracker.test = %v", got)
+	}
+	if policy.AllowsConnection(guest, dst) {
+		t.Fatal("an address a deny glob resolved to was still reachable")
+	}
+}
+
+// What the gateway tells the guest and what it honours are the same number.
+func TestDNSAnswerTTLMatchesThePin(t *testing.T) {
+	withHostRules := &dnsHandler{
+		upstream: newFakeResolver(map[string][]net.IPAddr{"api.example.com": v4addrs("93.184.216.34")}),
+		policy:   mustPolicy(t, "deny", []string{"host=*.example.com"}, nil),
+	}
+	reply := ask(withHostRules, "api.example.com", dns.TypeA)
+	if len(reply.Answer) != 1 {
+		t.Fatalf("answers = %v", reply.Answer)
+	}
+	if got := reply.Answer[0].Header().Ttl; got != uint32(pinTTL.Seconds()) {
+		t.Fatalf("TTL = %d, want %d", got, uint32(pinTTL.Seconds()))
+	}
+
+	// With no rule written against a name there is nothing to pin, so the
+	// answer keeps the TTL the gateway has always given out.
+	unfiltered := &dnsHandler{upstream: newFakeResolver(map[string][]net.IPAddr{"example.com": v4addrs("93.184.216.34")})}
+	reply = ask(unfiltered, "example.com", dns.TypeA)
+	if got := reply.Answer[0].Header().Ttl; got != 0 {
+		t.Fatalf("unfiltered TTL = %d, want 0", got)
+	}
+}
+
+// The whole path, over the wire: the guest resolves an allowed name, then
+// connects to the address it was given, and the connection leaves. A name
+// that was never resolved does not.
+func TestEgressHostGlobEndToEnd(t *testing.T) {
+	policy := mustPolicy(t, "deny", []string{"host=*.example.com"}, nil)
+	dials := make(chan dialed, 16)
+	n, err := New(Config{
+		MTU:               1500,
+		Subnet:            testSubnet,
+		GatewayIP:         testGatewayIP,
+		GatewayMacAddress: testGatewayMA,
+		Egress:            policy,
+		resolve:           newFakeResolver(map[string][]net.IPAddr{"api.example.com": v4addrs(testDst4)}),
+		dial: func(network, address string) (net.Conn, error) {
+			select {
+			case dials <- dialed{network, address}:
+			default:
+			}
+			return nil, fmt.Errorf("test dialer never connects")
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	m := join(t, n)
+
+	// Before the lookup the address means nothing to the policy.
+	m.send(t, tcpSYN4(t, m, testDst4, 443))
+	expectNoDial(t, dials)
+
+	// The gateway's own resolver stays reachable under deny-default.
+	m.send(t, dnsQueryFrame(t, m, "api.example.com", dns.TypeA))
+	if got := answerIPs(dnsReply(t, m)); len(got) != 1 || got[0] != testDst4 {
+		t.Fatalf("A api.example.com = %v", got)
+	}
+
+	m.send(t, tcpSYN4(t, m, testDst4, 443))
+	if got := awaitDial(t, dials); got.address != testDst4+":443" {
+		t.Fatalf("dialed %v", got)
+	}
+
+	// A name outside the allow globs is refused, so its address is never
+	// learned from here.
+	m.send(t, dnsQueryFrame(t, m, "evil.test", dns.TypeA))
+	if reply := dnsReply(t, m); reply.Rcode != dns.RcodeRefused {
+		t.Fatalf("rcode for evil.test = %s, want REFUSED", dns.RcodeToString[reply.Rcode])
 	}
 }
