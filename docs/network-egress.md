@@ -98,6 +98,19 @@ this (brig-sh/brig#15).
 **Ingress.** `--forward` exposes a guest's port on the host. It is a host
 exposure, it is not egress, and no egress rule applies to it.
 
+**ICMP.** A guest's ping is answered by the gateway itself: the netstack
+treats the destination as one of its own addresses and replies, so an echo
+request never leaves the host. A ping to a blocked address still succeeds and
+still tells the guest nothing about the outside world.
+
+**Source addresses.** The policy reads the source address out of the packet,
+and a guest picks its own. One guest can therefore borrow another's resolved
+answers by claiming its address, which the shared switch makes possible in the
+first place. It widens nothing: a gateway carries one policy for every guest
+on it, so those addresses are the ones the borrower's own queries would have
+been answered with anyway. Binding an address to a member belongs with a
+network per sandbox, not with a rule here.
+
 **IPv6.** The netstack does not forward IPv6 yet: it registers no IPv6
 protocol, so a guest's IPv6 frame is counted as an unsupported protocol and
 discarded, with or without a policy. The gateway also hands out no `AAAA`
