@@ -54,6 +54,34 @@ func networkGatewayCommand() *cli.Command {
 		Name:   "network-gateway",
 		Usage:  "run the user-mode network gateway (used by compose)",
 		Hidden: true,
+		Description: strings.TrimSpace(`
+Egress filtering is off unless --egress-default is given. With it, every
+connection a guest opens to the outside world is checked: deny rules beat
+allow rules beat the default.
+
+A cidr rule is matched against the address the connection is opened to. A
+host rule is a glob matched against the name the guest asks this gateway's
+resolver for, and is enforced on the addresses that resolver hands back.
+
+Under --egress-default deny the resolver answers only names an allow glob
+covers, and refuses the rest. A guest can then reach nothing it did not
+resolve here, which is also why traffic sent straight to an IP,
+DNS-over-HTTPS and DNS-over-TLS do not get out.
+
+Under --egress-default allow, a host deny is best effort: traffic sent
+straight to an IP never asks for a name, so it is not covered. A cidr deny
+is airtight.
+
+Rules are checked at startup and the gateway refuses to start on one it
+cannot parse, rather than enforce part of what was asked for.
+
+Two things this does not do. It does not separate one guest from another:
+guests share a switch, and traffic between them never reaches the filter.
+And --forward is ingress, not egress; it exposes a guest port on the host
+and no egress rule applies to it.
+
+IPv6 is dropped outright. The netstack does not forward IPv6 yet, so no
+guest reaches the outside world over it, with or without a policy.`),
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "socket", Required: true, Usage: "control socket path"},
 			&cli.StringFlag{Name: "api", Usage: "HTTP API socket path (probe endpoint)"},
@@ -62,10 +90,19 @@ func networkGatewayCommand() *cli.Command {
 			&cli.StringFlag{Name: "gateway-ip", Value: "10.87.0.1", Usage: "gateway IP on the subnet"},
 			&cli.StringSliceFlag{Name: "forward", Usage: "host port forward, hostaddr:port=guestip:port (repeatable)"},
 			&cli.StringSliceFlag{Name: "host", Usage: "static DNS A record served by the gateway, name=ip (repeatable)"},
+			&cli.StringFlag{Name: "egress-default", Usage: "verdict for a connection no egress rule matches, allow or deny; without it egress is unfiltered"},
+			&cli.StringSliceFlag{Name: "egress-allow", Usage: "egress allow rule, host=<glob> or cidr=<cidr> (repeatable)"},
+			&cli.StringSliceFlag{Name: "egress-deny", Usage: "egress deny rule, host=<glob> or cidr=<cidr> (repeatable)"},
 			&cli.StringFlag{Name: "project", Usage: "compose project to supervise (enables restart policies)"},
 			&cli.DurationFlag{Name: "supervise-interval", Value: supervisorPollInterval, Usage: "liveness poll interval of the supervision loop"},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
+			// Parse the policy before anything else starts: a rule the
+			// gateway cannot make sense of has to stop it, not degrade it.
+			policy, err := netgw.ParseEgressPolicy(cmd.String("egress-default"), cmd.StringSlice("egress-allow"), cmd.StringSlice("egress-deny"))
+			if err != nil {
+				return err
+			}
 			forwards := map[string]string{}
 			for _, f := range cmd.StringSlice("forward") {
 				parts := strings.SplitN(f, "=", 2)
@@ -84,7 +121,7 @@ func networkGatewayCommand() *cli.Command {
 				}
 				sup = s
 			}
-			return runGateway(ctx, cmd.String("socket"), cmd.String("api"), cmd.String("qemu-socket"), cmd.String("subnet"), cmd.String("gateway-ip"), forwards, cmd.StringSlice("host"), sup)
+			return runGateway(ctx, cmd.String("socket"), cmd.String("api"), cmd.String("qemu-socket"), cmd.String("subnet"), cmd.String("gateway-ip"), forwards, cmd.StringSlice("host"), policy, sup)
 		},
 	}
 }
@@ -95,7 +132,7 @@ func networkGatewayCommand() *cli.Command {
 // rather than waited out, because the caller has its own deadline.
 const gatewayShutdownGrace = 20 * time.Second
 
-func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, gatewayIP string, forwards map[string]string, hosts []string, sup *supervisor) error {
+func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, gatewayIP string, forwards map[string]string, hosts []string, policy *netgw.Policy, sup *supervisor) error {
 	// Serve service names from the gateway's DNS in addition to the
 	// /etc/hosts injection: guests that resolve via plain DNS (unikernel
 	// flavors without an nsswitch) get name resolution for free, and images
@@ -125,6 +162,7 @@ func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, ga
 		GatewayMacAddress: "5a:94:ef:e4:0c:dd",
 		Forwards:          forwards,
 		DNSZones:          dns,
+		Egress:            policy,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create virtual network: %w", err)
@@ -135,7 +173,7 @@ func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, ga
 		return err
 	}
 	defer func() { _ = l.Close(); _ = os.Remove(sockPath) }()
-	log.Infof("network-gateway on %s (subnet %s, gw %s, %d forwards)", sockPath, subnet, gatewayIP, len(forwards))
+	log.Infof("network-gateway on %s (subnet %s, gw %s, %d forwards, %s)", sockPath, subnet, gatewayIP, len(forwards), policy.Summary())
 
 	// Probe API: the gateway is the only process that can dial into the
 	// virtual network, so TCP healthchecks run here.
