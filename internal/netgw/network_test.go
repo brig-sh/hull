@@ -78,6 +78,12 @@ func joinAs(t *testing.T, n *Network, mac, ip string) *member {
 			}
 			frame := make([]byte, n)
 			copy(frame, buf[:n])
+			// A real guest answers ARP, and the stack will not send a reply
+			// to a member whose MAC it cannot resolve.
+			if reply := m.arpReplyTo(frame); reply != nil {
+				go func() { _, _ = ours.Write(reply) }()
+				continue
+			}
 			select {
 			case m.frames <- frame:
 			default:
@@ -89,6 +95,36 @@ func joinAs(t *testing.T, n *Network, mac, ip string) *member {
 		_ = ours.Close()
 	})
 	return m
+}
+
+// arpReplyTo answers an ARP request for this member's address, and returns
+// nil for anything else.
+func (m *member) arpReplyTo(frame []byte) []byte {
+	if len(frame) < header.EthernetMinimumSize+header.ARPSize {
+		return nil
+	}
+	if header.Ethernet(frame).Type() != header.ARPProtocolNumber {
+		return nil
+	}
+	request := header.ARP(frame[header.EthernetMinimumSize:])
+	if request.Op() != header.ARPRequest || !net.IP(request.ProtocolAddressTarget()).Equal(m.ip) {
+		return nil
+	}
+
+	reply := make([]byte, header.EthernetMinimumSize+header.ARPSize)
+	header.Ethernet(reply).Encode(&header.EthernetFields{
+		SrcAddr: m.mac,
+		DstAddr: header.Ethernet(frame).SourceAddress(),
+		Type:    header.ARPProtocolNumber,
+	})
+	a := header.ARP(reply[header.EthernetMinimumSize:])
+	a.SetIPv4OverEthernet()
+	a.SetOp(header.ARPReply)
+	copy(a.HardwareAddressSender(), m.mac)
+	copy(a.ProtocolAddressSender(), m.ip)
+	copy(a.HardwareAddressTarget(), request.HardwareAddressSender())
+	copy(a.ProtocolAddressTarget(), request.ProtocolAddressSender())
+	return reply
 }
 
 func (m *member) send(t *testing.T, frame []byte) {
