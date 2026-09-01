@@ -147,8 +147,10 @@ Global options apply to every command: `--debug`, `--store-dir` (default
 `~/.hull/store`), and the telemetry pair `--unattended` and `--dnt`.
 
 Checkpoint and restore are covered in [docs/checkpoint-restore.md](docs/checkpoint-restore.md),
-compose in [docs/compose.md](docs/compose.md), and what telemetry does and does
-not collect in [docs/telemetry.md](docs/telemetry.md).
+compose in [docs/compose.md](docs/compose.md), what a guest behind the network
+gateway is allowed to reach in
+[docs/network-egress.md](docs/network-egress.md), and what telemetry does and
+does not collect in [docs/telemetry.md](docs/telemetry.md).
 
 ## Supported backends
 
