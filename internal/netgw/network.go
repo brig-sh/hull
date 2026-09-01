@@ -32,7 +32,6 @@ import (
 	"net"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/containers/gvisor-tap-vsock/pkg/services/dhcp"
 	"github.com/containers/gvisor-tap-vsock/pkg/services/dns"
@@ -71,6 +70,13 @@ type Config struct {
 	Forwards map[string]string
 	// DNSZones are records the gateway's own resolver answers from.
 	DNSZones []gvntypes.Zone
+	// Egress is the policy every connection out of the virtual network is
+	// checked against. A nil policy forwards everything.
+	Egress *Policy
+
+	// dial opens the host-side connection. Tests replace it; nil means
+	// net.Dial.
+	dial dialFunc
 }
 
 // Network is a running user-mode network. Members join it by handing over a
@@ -191,11 +197,13 @@ func createStack(cfg Config, endpoint stack.LinkEndpoint) (*stack.Stack, error) 
 }
 
 func addServices(cfg Config, s *stack.Stack, ipPool *tap.IPPool) error {
-	var natLock sync.Mutex
-	tcpForwarder := forwarder.TCP(s, nil, &natLock, false)
-	s.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpForwarder.HandlePacket)
-	udpForwarder := forwarder.UDP(s, nil, &natLock, false)
-	s.SetTransportProtocolHandler(udp.ProtocolNumber, udpForwarder.HandlePacket)
+	dial := cfg.dial
+	if dial == nil {
+		dial = net.Dial
+	}
+	rejects := newRejectLog()
+	s.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpForwarder(s, cfg.Egress, dial, rejects).HandlePacket)
+	s.SetTransportProtocolHandler(udp.ProtocolNumber, udpForwarder(s, cfg.Egress, dial, rejects).HandlePacket)
 
 	if err := dnsServer(cfg, s); err != nil {
 		return err
