@@ -25,8 +25,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/brig-sh/hull/internal/netgw"
+
 	gvntypes "github.com/containers/gvisor-tap-vsock/pkg/types"
-	"github.com/containers/gvisor-tap-vsock/pkg/virtualnetwork"
 	"github.com/urfave/cli/v3"
 	"golang.org/x/sys/unix"
 )
@@ -117,17 +118,14 @@ func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, ga
 		dns = append(dns, gvntypes.Zone{Name: ".", Records: records})
 	}
 
-	config := &gvntypes.Configuration{
-		Debug:             false,
+	vn, err := netgw.New(netgw.Config{
 		MTU:               1500,
 		Subnet:            subnet,
 		GatewayIP:         gatewayIP,
 		GatewayMacAddress: "5a:94:ef:e4:0c:dd",
-		Protocol:          gvntypes.VfkitProtocol,
 		Forwards:          forwards,
-		DNS:               dns,
-	}
-	vn, err := virtualnetwork.New(config)
+		DNSZones:          dns,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to create virtual network: %w", err)
 	}
@@ -251,7 +249,7 @@ func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, ga
 // handleGatewayMember receives the member's datagram socket via SCM_RIGHTS
 // and serves it as a vfkit-protocol endpoint (one Ethernet frame per
 // datagram) until the member disappears.
-func handleGatewayMember(ctx context.Context, vn *virtualnetwork.VirtualNetwork, conn *net.UnixConn) {
+func handleGatewayMember(ctx context.Context, vn *netgw.Network, conn *net.UnixConn) {
 	defer func() { _ = conn.Close() }()
 
 	dataFD, err := recvFD(conn)
