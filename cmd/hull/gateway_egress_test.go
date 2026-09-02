@@ -73,6 +73,16 @@ func TestGatewayRefusesBadEgressRules(t *testing.T) {
 			args: []string{"--egress-allow", "host=*.example.com"},
 			want: "--egress-default",
 		},
+		{
+			name: "unusable member name",
+			args: []string{"--egress-default", "deny", "--egress-allow", "web server:host=example.com"},
+			want: "not a usable member name",
+		},
+		{
+			name: "bad rule behind a member prefix",
+			args: []string{"--egress-default", "deny", "--egress-allow", "web:cidr=10.0.0.0/33"},
+			want: "10.0.0.0/33",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
