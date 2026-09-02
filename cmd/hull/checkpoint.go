@@ -211,7 +211,15 @@ func restoreInstance(_ context.Context, cmd *cli.Command) error {
 		if gatewaySock == "" {
 			return errors.New("this instance ran on the network gateway; pass --gateway-sock to re-join it")
 		}
-		dataF, ctlConn, err := joinGateway(gatewaySock)
+		// A restored instance re-joins under the same identity it had, or
+		// rules naming it would stop applying across a restore.
+		// Re-join under the name this instance had, or the rules naming it
+		// would stop applying the moment it was restored.
+		memberName := state.GatewayMember
+		if memberName == "" {
+			memberName = instanceID
+		}
+		dataF, ctlConn, err := joinGateway(gatewaySock, gatewayMember(memberName, cmd.String("gateway-cidr"), state.MAC))
 		if err != nil {
 			return err
 		}

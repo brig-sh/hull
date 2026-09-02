@@ -71,6 +71,11 @@ type InstanceState struct {
 	BundleDir   string    `json:"bundleDir"`
 	MAC         string    `json:"mac,omitempty"`
 	IP          string    `json:"ip,omitempty"`
+	// GatewayMember is the name this instance answers to in the network
+	// gateway's per-member egress rules. It is kept because a restore has to
+	// re-join under the same name, or the rules that name it stop applying
+	// to it. Empty for an instance that is not on a gateway.
+	GatewayMember string `json:"gatewayMember,omitempty"`
 	// ExitCode is the guest process's exit status when one could be
 	// observed, nil otherwise. A stopped instance with a nil code ended
 	// without a reportable status: today only one-shot jobs, which run

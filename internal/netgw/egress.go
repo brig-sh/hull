@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net/netip"
 	"path"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -107,15 +108,20 @@ type Policy struct {
 	def   EgressDefault
 	allow ruleSet
 	deny  ruleSet
+	// Rules written against one member. A member with rules of its own is
+	// judged by those and by the rules that name no member; a member with
+	// none is judged by the unscoped rules alone.
+	perMember map[string]*memberRules
 
 	mu   sync.Mutex
 	pins map[netip.Addr]*guestPins
 	// Addresses learned by resolving the literal host rules on a timer,
-	// rather than from an answer a guest was given. They are not tied to a
-	// guest: the operator named the host in the policy, so it is reachable
-	// for everyone the policy covers.
-	resolvedAllow map[netip.Addr]time.Time
-	resolvedDeny  map[netip.Addr]time.Time
+	// rather than from an answer a guest was given. They are keyed by the
+	// scope of the rule that produced them: the empty scope for a rule that
+	// names no member, and the member's name for one that does. A member's
+	// resolved address must not widen what another member can reach.
+	resolvedAllow map[scopedAddr]time.Time
+	resolvedDeny  map[scopedAddr]time.Time
 }
 
 // guestPins holds one guest's pinned addresses and when each stops counting.
@@ -143,20 +149,61 @@ func ParseEgressPolicy(def string, allowRules, denyRules []string) (*Policy, err
 
 	p := &Policy{
 		def:           d,
+		perMember:     map[string]*memberRules{},
 		pins:          map[netip.Addr]*guestPins{},
-		resolvedAllow: map[netip.Addr]time.Time{},
-		resolvedDeny:  map[netip.Addr]time.Time{},
+		resolvedAllow: map[scopedAddr]time.Time{},
+		resolvedDeny:  map[scopedAddr]time.Time{},
 	}
-	var err error
-	if p.allow, err = parseRules("--egress-allow", allowRules); err != nil {
+	if err := p.addRules("--egress-allow", allowRules, false); err != nil {
 		return nil, err
 	}
-	if p.deny, err = parseRules("--egress-deny", denyRules); err != nil {
+	if err := p.addRules("--egress-deny", denyRules, true); err != nil {
 		return nil, err
 	}
 	// Deny-default with no allow rules is not an error: a sandbox that should
 	// reach nothing is something an operator asks for on purpose.
 	return p, nil
+}
+
+// addRules parses each rule and files it under the member it names, or under
+// the policy when it names none.
+func (p *Policy) addRules(flag string, rules []string, deny bool) error {
+	for _, rule := range rules {
+		member, rest := splitMemberRule(rule)
+		set, err := parseRules(flag, []string{rest})
+		if err != nil {
+			return err
+		}
+		if member == "" {
+			if deny {
+				p.deny.merge(set)
+			} else {
+				p.allow.merge(set)
+			}
+			continue
+		}
+		// A name that could never belong to a member is a typo, and a typo
+		// here is a rule that silently never applies.
+		if !validMemberName(member) {
+			return fmt.Errorf("invalid %s %q: %q is not a usable member name", flag, rule, member)
+		}
+		own, ok := p.perMember[member]
+		if !ok {
+			own = &memberRules{}
+			p.perMember[member] = own
+		}
+		if deny {
+			own.deny.merge(set)
+		} else {
+			own.allow.merge(set)
+		}
+	}
+	return nil
+}
+
+func (r *ruleSet) merge(other ruleSet) {
+	r.cidrs = append(r.cidrs, other.cidrs...)
+	r.hosts = append(r.hosts, other.hosts...)
 }
 
 func parseRules(flag string, rules []string) (ruleSet, error) {
@@ -216,21 +263,24 @@ func (p *Policy) HasHostRules() bool {
 //
 // Under allow-default every query is answered. A deny glob is still applied
 // to the answer, by pinning what came back into the guest's deny set.
-func (p *Policy) AllowsQuery(name string) bool {
+func (p *Policy) AllowsQuery(member, name string) bool {
 	if p == nil || p.def == EgressAllow {
 		return true
 	}
 	name = normalizeName(name)
-	if p.deny.matchesHost(name) {
+	if p.deniesHost(member, name) {
 		return false
 	}
-	return p.allow.matchesHost(name)
+	return p.allowsHost(member, name)
 }
 
 // DeniesQuery reports whether name matches a deny glob, so its answers are
 // pinned as unreachable.
-func (p *Policy) DeniesQuery(name string) bool {
-	return p != nil && p.deny.matchesHost(normalizeName(name))
+func (p *Policy) DeniesQuery(member, name string) bool {
+	if p == nil {
+		return false
+	}
+	return p.deniesHost(member, normalizeName(name))
 }
 
 // Pin records the addresses an answer carried, for the guest that asked.
@@ -300,29 +350,45 @@ func (p *Policy) pinned(guest, dst netip.Addr, deny bool) bool {
 // beats allow beats the default. A CIDR rule, an address resolved from a
 // literal host rule, and an address pinned from an answer this guest was given
 // all count the same on their side.
-func (p *Policy) AllowsConnection(guest, dst netip.Addr) bool {
+func (p *Policy) AllowsConnection(member string, guest, dst netip.Addr) bool {
 	if p == nil {
 		return true
 	}
 	guest, dst = guest.Unmap(), dst.Unmap()
-	if p.deny.matchesAddr(dst) || p.resolved(dst, true) || p.pinned(guest, dst, true) {
+	if p.deniesAddr(member, dst) || p.resolved(member, dst, true) || p.pinned(guest, dst, true) {
 		return false
 	}
-	if p.allow.matchesAddr(dst) || p.resolved(dst, false) || p.pinned(guest, dst, false) {
+	if p.allowsAddr(member, dst) || p.resolved(member, dst, false) || p.pinned(guest, dst, false) {
 		return true
 	}
 	return p.def == EgressAllow
 }
 
-func (p *Policy) resolved(dst netip.Addr, deny bool) bool {
+// scopedAddr is an address together with the rule scope that resolved it.
+type scopedAddr struct {
+	scope string
+	addr  netip.Addr
+}
+
+func (p *Policy) resolved(member string, dst netip.Addr, deny bool) bool {
+	dst = dst.Unmap()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	set := p.resolvedAllow
 	if deny {
 		set = p.resolvedDeny
 	}
-	expiry, ok := set[dst.Unmap()]
-	return ok && time.Now().Before(expiry)
+	now := time.Now()
+	// A rule naming no member covers every member, so the shared scope is
+	// always consulted. A member's own scope covers only itself.
+	if expiry, ok := set[scopedAddr{addr: dst}]; ok && now.Before(expiry) {
+		return true
+	}
+	if member == "" {
+		return false
+	}
+	expiry, ok := set[scopedAddr{scope: member, addr: dst}]
+	return ok && now.Before(expiry)
 }
 
 // Summary describes the policy for the gateway's startup line.
@@ -330,8 +396,12 @@ func (p *Policy) Summary() string {
 	if p == nil {
 		return "egress unfiltered"
 	}
-	return fmt.Sprintf("egress default %s (%d allow, %d deny)",
+	shared := fmt.Sprintf("egress default %s (%d allow, %d deny",
 		p.def, len(p.allow.cidrs)+len(p.allow.hosts), len(p.deny.cidrs)+len(p.deny.hosts))
+	if names := p.MemberNames(); len(names) > 0 {
+		return fmt.Sprintf("%s, plus rules for %s)", shared, strings.Join(names, ", "))
+	}
+	return shared + ")"
 }
 
 // Keeping literal host rules resolved.
@@ -363,7 +433,7 @@ func (p *Policy) WatchHosts(ctx context.Context, res resolver, interval time.Dur
 	if p == nil || interval <= 0 {
 		return
 	}
-	if len(p.allow.literalHosts())+len(p.deny.literalHosts()) == 0 {
+	if p.literalHostCount() == 0 {
 		return
 	}
 	retention := time.Duration(hostRefreshRetentionFactor) * interval
@@ -384,35 +454,58 @@ func (p *Policy) WatchHosts(ctx context.Context, res resolver, interval time.Dur
 	}
 }
 
+// literalHostCount counts the host rules that name one host, across every
+// scope. Nothing needs a timer when there are none.
+func (p *Policy) literalHostCount() int {
+	n := len(p.allow.literalHosts()) + len(p.deny.literalHosts())
+	for _, own := range p.perMember {
+		n += len(own.allow.literalHosts()) + len(own.deny.literalHosts())
+	}
+	return n
+}
+
 // RefreshHosts resolves every literal host rule once and records what came
-// back. A name that fails to resolve keeps the addresses it had: dropping them
-// on a transient failure would take a sandbox's egress down for as long as the
-// resolver is unwell.
+// back, under the scope of the rule that named it. A name that fails to
+// resolve keeps the addresses it had: dropping them on a transient failure
+// would take a sandbox's egress down for as long as the resolver is unwell.
 func (p *Policy) RefreshHosts(ctx context.Context, res resolver, retention time.Duration) {
 	if p == nil {
 		return
 	}
-	allow := resolveHosts(ctx, res, p.allow.literalHosts())
-	deny := resolveHosts(ctx, res, p.deny.literalHosts())
+	type resolved struct {
+		scope string
+		addrs []netip.Addr
+		deny  bool
+	}
+	var found []resolved
+	found = append(found,
+		resolved{addrs: resolveHosts(ctx, res, p.allow.literalHosts())},
+		resolved{addrs: resolveHosts(ctx, res, p.deny.literalHosts()), deny: true})
+	for _, name := range p.MemberNames() {
+		own := p.perMember[name]
+		found = append(found,
+			resolved{scope: name, addrs: resolveHosts(ctx, res, own.allow.literalHosts())},
+			resolved{scope: name, addrs: resolveHosts(ctx, res, own.deny.literalHosts()), deny: true})
+	}
 	expiry := time.Now().Add(retention)
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	for _, addr := range allow {
-		p.resolvedAllow[addr] = expiry
-	}
-	for _, addr := range deny {
-		p.resolvedDeny[addr] = expiry
-	}
-	now := time.Now()
-	for addr, at := range p.resolvedAllow {
-		if now.After(at) {
-			delete(p.resolvedAllow, addr)
+	for _, r := range found {
+		set := p.resolvedAllow
+		if r.deny {
+			set = p.resolvedDeny
+		}
+		for _, addr := range r.addrs {
+			set[scopedAddr{scope: r.scope, addr: addr}] = expiry
 		}
 	}
-	for addr, at := range p.resolvedDeny {
-		if now.After(at) {
-			delete(p.resolvedDeny, addr)
+	now := time.Now()
+	for _, set := range []map[scopedAddr]time.Time{p.resolvedAllow, p.resolvedDeny} {
+		for key, at := range set {
+			if now.After(at) {
+				delete(set, key)
+			}
 		}
 	}
 }
@@ -432,4 +525,119 @@ func resolveHosts(ctx context.Context, res resolver, hosts []string) []netip.Add
 		}
 	}
 	return out
+}
+
+// Rules that name one member.
+//
+// A rule may be written as `<member>:host=<glob>` or `<member>:cidr=<cidr>`,
+// and then applies to that member alone. A rule with no member applies to
+// every member, which is what every rule did before this existed.
+//
+// The member name is trusted because the gateway pins it to a socket and drops
+// frames that do not carry that member's addresses. Without that guard a guest
+// could take another member's rules by writing its address, so the two belong
+// together.
+
+// memberRules holds one member's own allow and deny sets.
+type memberRules struct {
+	allow ruleSet
+	deny  ruleSet
+}
+
+// splitMemberRule separates an optional `<member>:` prefix from a rule.
+//
+// The kinds are known, so a rule that starts with one has no member prefix.
+// That keeps `cidr=` unambiguous without escaping, and a member named "host"
+// or "cidr" is refused at parse time rather than silently misread.
+func splitMemberRule(rule string) (member, rest string) {
+	if strings.HasPrefix(rule, "host=") || strings.HasPrefix(rule, "cidr=") {
+		return "", rule
+	}
+	name, after, ok := strings.Cut(rule, ":")
+	if !ok {
+		return "", rule
+	}
+	return name, after
+}
+
+// validMemberName is what a rule may name. It is the instance-name shape hull
+// already enforces, so a rule cannot name something that could never join.
+func validMemberName(name string) bool {
+	if name == "" || len(name) > 128 {
+		return false
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-', r == '_', r == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// HasMemberRules reports whether any rule names a member, which is what makes
+// a member's identity worth having.
+func (p *Policy) HasMemberRules() bool {
+	return p != nil && len(p.perMember) > 0
+}
+
+// MemberNames lists the members the policy names, in order, for the startup
+// line and for error messages.
+func (p *Policy) MemberNames() []string {
+	if p == nil {
+		return nil
+	}
+	names := make([]string, 0, len(p.perMember))
+	for name := range p.perMember {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// ownRules returns the rules written against one member, or nil when it has
+// none. The shared rules are consulted separately, so nothing is copied to
+// make a decision: this runs once per connection on a busy gateway.
+func (p *Policy) ownRules(member string) *memberRules {
+	if member == "" || len(p.perMember) == 0 {
+		return nil
+	}
+	return p.perMember[member]
+}
+
+// deniesAddr reports whether any deny rule covers addr, shared or the
+// member's own.
+func (p *Policy) deniesAddr(member string, addr netip.Addr) bool {
+	if p.deny.matchesAddr(addr) {
+		return true
+	}
+	own := p.ownRules(member)
+	return own != nil && own.deny.matchesAddr(addr)
+}
+
+// allowsAddr reports whether any allow rule covers addr.
+func (p *Policy) allowsAddr(member string, addr netip.Addr) bool {
+	if p.allow.matchesAddr(addr) {
+		return true
+	}
+	own := p.ownRules(member)
+	return own != nil && own.allow.matchesAddr(addr)
+}
+
+func (p *Policy) deniesHost(member, name string) bool {
+	if p.deny.matchesHost(name) {
+		return true
+	}
+	own := p.ownRules(member)
+	return own != nil && own.deny.matchesHost(name)
+}
+
+func (p *Policy) allowsHost(member, name string) bool {
+	if p.allow.matchesHost(name) {
+		return true
+	}
+	own := p.ownRules(member)
+	return own != nil && own.allow.matchesHost(name)
 }

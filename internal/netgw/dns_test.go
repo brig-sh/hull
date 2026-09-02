@@ -298,10 +298,10 @@ func TestDNSPinsTheAnswerForTheGuestThatAsked(t *testing.T) {
 	if got := answerIPs(askAs(h, asker, "api.example.com", dns.TypeA)); len(got) != 1 {
 		t.Fatalf("A api.example.com = %v", got)
 	}
-	if !policy.AllowsConnection(asker, dst) {
+	if !policy.AllowsConnection("", asker, dst) {
 		t.Fatal("the guest cannot reach the answer it was given")
 	}
-	if policy.AllowsConnection(other, dst) {
+	if policy.AllowsConnection("", other, dst) {
 		t.Fatal("the answer was pinned for a guest that never asked")
 	}
 }
@@ -319,7 +319,7 @@ func TestDNSPinsDeniedNamesUnderAllowDefault(t *testing.T) {
 	if got := answerIPs(ask(h, "a.tracker.test", dns.TypeA)); len(got) != 1 {
 		t.Fatalf("A a.tracker.test = %v", got)
 	}
-	if policy.AllowsConnection(guest, dst) {
+	if policy.AllowsConnection("", guest, dst) {
 		t.Fatal("an address a deny glob resolved to was still reachable")
 	}
 }

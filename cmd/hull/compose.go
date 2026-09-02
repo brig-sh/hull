@@ -241,6 +241,7 @@ func serviceRunArgs(svcName, instance string, svc types.ServiceConfig, l service
 	args := []string{"run", "--detach", "--net", "shared", "--name", instance,
 		"--hypervisor", hv,
 		"--gateway-sock", l.gatewaySock,
+		"--gateway-member", svcName,
 		"--gateway-cidr", fmt.Sprintf("%s/%d", l.ip, l.maskBits)}
 	if svc.MemLimit > 0 {
 		// UnitBytes -> MB, plain floor division: matches the bespoke parser's

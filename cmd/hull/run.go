@@ -140,6 +140,10 @@ func runCommand() *cli.Command {
 				Usage: "join the user-mode network gateway at this control socket (Vz, HVI, or QEMU)",
 			},
 			&cli.StringFlag{
+				Name:  "gateway-member",
+				Usage: "name this instance answers to in the gateway's per-member egress rules (default: the instance name)",
+			},
+			&cli.StringFlag{
 				Name:  "gateway-cidr",
 				Usage: "static guest CIDR on the gateway subnet, e.g. 10.87.0.10/24 (requires --gateway-sock)",
 			},
@@ -1299,6 +1303,15 @@ exec %s "$@"
 		return fmt.Errorf("failed to perform pre-execution setup: %w", err)
 	}
 
+	// A compose service is named by its service name in the gateway's rules,
+	// not by the instance name compose derives from it, so the caller can say
+	// which name applies. It is recorded in the state because a restore has to
+	// re-join under the same name.
+	gatewayMemberName := cmd.String("gateway-member")
+	if gatewayMemberName == "" {
+		gatewayMemberName = instanceName
+	}
+
 	// Start VMM process
 	var gatewayFiles []*os.File
 
@@ -1306,7 +1319,9 @@ exec %s "$@"
 	// NIC (fd 3 in the child); the control connection (fd 4) stays open for
 	// the VMM's lifetime and its closure removes the gateway member.
 	if gatewaySock != "" && vmmType == hypervisors.VzVmm {
-		dataF, ctlConn, err := joinGateway(gatewaySock)
+		// Tell the gateway who is joining, so rules naming this instance
+		// apply to it and so it is held to these addresses.
+		dataF, ctlConn, err := joinGateway(gatewaySock, gatewayMember(gatewayMemberName, gatewayIP, mac))
 		if err != nil {
 			return err
 		}
@@ -1344,6 +1359,9 @@ exec %s "$@"
 		BundleDir:   bundleDir,
 		MAC:         mac,
 		Backend:     string(vmmType),
+	}
+	if gatewaySock != "" {
+		state.GatewayMember = gatewayMemberName
 	}
 	started, err := launchVMM(cmd, s, state, cmdArgs, append(gatewayFiles, shareFiles...), vmmType, detach, netMode, gatewayIP)
 	instanceStarted = started

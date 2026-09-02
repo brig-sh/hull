@@ -16,6 +16,7 @@ package netgw
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/netip"
 	"strings"
@@ -44,6 +45,7 @@ type dnsHandler struct {
 	zones    []gvntypes.Zone
 	upstream resolver
 	policy   *Policy
+	members  *memberTable
 }
 
 func (h *dnsHandler) handle(w dns.ResponseWriter, r *dns.Msg, maxSize int) {
@@ -69,13 +71,14 @@ func (h *dnsHandler) addAnswers(m *dns.Msg, guest netip.Addr) {
 		if h.addLocalAnswers(m, q) {
 			continue
 		}
-		if !h.policy.AllowsQuery(q.Name) {
-			log.Warnf("egress: refused the query %s from %s", q.Name, guest)
+		member := h.members.nameOf(guest)
+		if !h.policy.AllowsQuery(member, q.Name) {
+			log.Warnf("egress: refused the query %s from %s", q.Name, describeGuest(member, guest))
 			m.Answer = nil
 			m.Rcode = dns.RcodeRefused
 			return
 		}
-		h.addUpstreamAnswers(m, q, guest)
+		h.addUpstreamAnswers(m, q, guest, member)
 	}
 }
 
@@ -98,7 +101,7 @@ func guestAddr(a net.Addr) netip.Addr {
 // pin puts the addresses of an answer in the asking guest's set, so a rule
 // written against a name is enforceable against a packet. Only the gateway's
 // own answers are pinned, which is what ties the two together.
-func (h *dnsHandler) pin(guest netip.Addr, name string, ips []net.IP) {
+func (h *dnsHandler) pin(guest netip.Addr, member, name string, ips []net.IP) {
 	if h.policy == nil || !guest.IsValid() {
 		return
 	}
@@ -108,7 +111,15 @@ func (h *dnsHandler) pin(guest netip.Addr, name string, ips []net.IP) {
 			addrs = append(addrs, addr.Unmap())
 		}
 	}
-	h.policy.Pin(guest, addrs, h.policy.DeniesQuery(name))
+	h.policy.Pin(guest, addrs, h.policy.DeniesQuery(member, name))
+}
+
+// describeGuest names a guest by its member when the gateway knows it.
+func describeGuest(member string, guest netip.Addr) string {
+	if member == "" {
+		return guest.String()
+	}
+	return fmt.Sprintf("%s (%s)", member, guest)
 }
 
 // answerTTL is both what the gateway tells the guest and how long it honours
@@ -171,7 +182,7 @@ func (h *dnsHandler) addLocalAnswers(m *dns.Msg, q dns.Question) bool {
 	return false
 }
 
-func (h *dnsHandler) addUpstreamAnswers(m *dns.Msg, q dns.Question, guest netip.Addr) {
+func (h *dnsHandler) addUpstreamAnswers(m *dns.Msg, q dns.Question, guest netip.Addr, member string) {
 	ctx := context.TODO()
 	ttl := h.answerTTL()
 	switch q.Qtype {
@@ -190,7 +201,7 @@ func (h *dnsHandler) addUpstreamAnswers(m *dns.Msg, q dns.Question, guest netip.
 			pinned = append(pinned, v4)
 			m.Answer = append(m.Answer, &dns.A{Hdr: rrHeader(q.Name, dns.TypeA, ttl), A: v4})
 		}
-		h.pin(guest, q.Name, pinned)
+		h.pin(guest, member, q.Name, pinned)
 	case dns.TypeCNAME:
 		cname, err := h.upstream.LookupCNAME(ctx, q.Name)
 		if err != nil {

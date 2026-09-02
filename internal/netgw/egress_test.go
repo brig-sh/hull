@@ -52,10 +52,10 @@ func TestParseEgressPolicyOffByDefault(t *testing.T) {
 		t.Fatalf("no flags should mean no policy, got %v", p)
 	}
 	guest, dst := addr(t, "10.87.0.2"), addr(t, "93.184.216.34")
-	if !p.AllowsConnection(guest, dst) {
+	if !p.AllowsConnection("", guest, dst) {
 		t.Fatal("a nil policy must forward everything")
 	}
-	if !p.AllowsQuery("anything.example.com") {
+	if !p.AllowsQuery("", "anything.example.com") {
 		t.Fatal("a nil policy must answer every query")
 	}
 }
@@ -130,7 +130,7 @@ func TestPolicyCIDRPrecedence(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			p := mustPolicy(t, tc.def, tc.allow, tc.deny)
-			if got := p.AllowsConnection(guest, addr(t, tc.dst)); got != tc.want {
+			if got := p.AllowsConnection("", guest, addr(t, tc.dst)); got != tc.want {
 				t.Fatalf("AllowsConnection(%s) = %v, want %v", tc.dst, got, tc.want)
 			}
 		})
@@ -160,10 +160,10 @@ func TestPolicyQueryGating(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			p := mustPolicy(t, tc.def, tc.allow, tc.deny)
-			if got := p.AllowsQuery(tc.query); got != tc.allowed {
+			if got := p.AllowsQuery("", tc.query); got != tc.allowed {
 				t.Fatalf("AllowsQuery(%q) = %v, want %v", tc.query, got, tc.allowed)
 			}
-			if got := p.DeniesQuery(tc.query); got != tc.denied {
+			if got := p.DeniesQuery("", tc.query); got != tc.denied {
 				t.Fatalf("DeniesQuery(%q) = %v, want %v", tc.query, got, tc.denied)
 			}
 		})
@@ -176,10 +176,10 @@ func TestPolicyPinsAreForOneGuest(t *testing.T) {
 	dst := addr(t, "93.184.216.34")
 
 	p.Pin(first, []netip.Addr{dst}, false)
-	if !p.AllowsConnection(first, dst) {
+	if !p.AllowsConnection("", first, dst) {
 		t.Fatal("the guest that asked cannot reach the answer it was given")
 	}
-	if p.AllowsConnection(second, dst) {
+	if p.AllowsConnection("", second, dst) {
 		t.Fatal("a pin leaked to a guest that never asked")
 	}
 }
@@ -191,7 +191,7 @@ func TestPolicyPinsBothFamilies(t *testing.T) {
 
 	p.Pin(guest, []netip.Addr{v4, v6}, false)
 	for _, dst := range []netip.Addr{v4, v6} {
-		if !p.AllowsConnection(guest, dst) {
+		if !p.AllowsConnection("", guest, dst) {
 			t.Fatalf("pinned %s is not reachable", dst)
 		}
 	}
@@ -203,7 +203,7 @@ func TestPolicyDenyPinBeatsAllowPin(t *testing.T) {
 
 	p.Pin(guest, []netip.Addr{dst}, false)
 	p.Pin(guest, []netip.Addr{dst}, true)
-	if p.AllowsConnection(guest, dst) {
+	if p.AllowsConnection("", guest, dst) {
 		t.Fatal("an address pinned by both a deny and an allow glob was admitted")
 	}
 }
@@ -218,7 +218,7 @@ func TestPolicyPinsExpire(t *testing.T) {
 	p.pins[guest].allow[dst] = time.Now().Add(-time.Second)
 	p.mu.Unlock()
 
-	if p.AllowsConnection(guest, dst) {
+	if p.AllowsConnection("", guest, dst) {
 		t.Fatal("an expired pin still admitted the connection")
 	}
 }
@@ -295,7 +295,7 @@ func TestRefreshHostsFollowsRotatingRecords(t *testing.T) {
 
 	policy.RefreshHosts(context.Background(), res, time.Minute)
 	for _, ip := range []string{"93.184.216.34", "93.184.216.35"} {
-		if !policy.AllowsConnection(guest, addr(t, ip)) {
+		if !policy.AllowsConnection("", guest, addr(t, ip)) {
 			t.Fatalf("%s is not reachable after the first refresh", ip)
 		}
 	}
@@ -305,7 +305,7 @@ func TestRefreshHostsFollowsRotatingRecords(t *testing.T) {
 	// puts us in.
 	res.set("93.184.216.40")
 	policy.RefreshHosts(context.Background(), res, time.Minute)
-	if !policy.AllowsConnection(guest, addr(t, "93.184.216.40")) {
+	if !policy.AllowsConnection("", guest, addr(t, "93.184.216.40")) {
 		t.Fatal("the address the name rotated to is not reachable")
 	}
 }
@@ -318,18 +318,18 @@ func TestRefreshHostsExpiresDepartedAddresses(t *testing.T) {
 	guest, gone := addr(t, testGuestIP), addr(t, "93.184.216.34")
 
 	policy.RefreshHosts(context.Background(), res, time.Minute)
-	if !policy.AllowsConnection(guest, gone) {
+	if !policy.AllowsConnection("", guest, gone) {
 		t.Fatal("the resolved address is not reachable")
 	}
 
 	res.set("93.184.216.40")
 	// Age the first answer out rather than wait for the retention window.
 	policy.mu.Lock()
-	policy.resolvedAllow[gone] = time.Now().Add(-time.Second)
+	policy.resolvedAllow[scopedAddr{addr: gone}] = time.Now().Add(-time.Second)
 	policy.mu.Unlock()
 	policy.RefreshHosts(context.Background(), res, time.Minute)
 
-	if policy.AllowsConnection(guest, gone) {
+	if policy.AllowsConnection("", guest, gone) {
 		t.Fatal("an address the name no longer answers with is still reachable")
 	}
 }
@@ -346,7 +346,7 @@ func TestRefreshHostsKeepsAddressesWhenTheResolverFails(t *testing.T) {
 	res.now = nil
 	policy.RefreshHosts(context.Background(), res, time.Minute)
 
-	if !policy.AllowsConnection(guest, dst) {
+	if !policy.AllowsConnection("", guest, dst) {
 		t.Fatal("a failed refresh dropped an address that was working")
 	}
 }
@@ -358,11 +358,11 @@ func TestRefreshHostsResolvesDenyRules(t *testing.T) {
 	res := newRotatingResolver("93.184.216.34")
 	guest, dst := addr(t, testGuestIP), addr(t, "93.184.216.34")
 
-	if !policy.AllowsConnection(guest, dst) {
+	if !policy.AllowsConnection("", guest, dst) {
 		t.Fatal("allow-default should admit the address before the refresh")
 	}
 	policy.RefreshHosts(context.Background(), res, time.Minute)
-	if policy.AllowsConnection(guest, dst) {
+	if policy.AllowsConnection("", guest, dst) {
 		t.Fatal("the resolved address of a denied host is still reachable")
 	}
 }
@@ -380,7 +380,7 @@ func TestRefreshHostsSkipsGlobs(t *testing.T) {
 	if calls != 0 {
 		t.Fatalf("the refresher tried to resolve a glob (%d lookups)", calls)
 	}
-	if policy.AllowsConnection(addr(t, testGuestIP), addr(t, "93.184.216.34")) {
+	if policy.AllowsConnection("", addr(t, testGuestIP), addr(t, "93.184.216.34")) {
 		t.Fatal("a glob was admitted without a guest ever asking for the name")
 	}
 }
@@ -397,7 +397,7 @@ func TestWatchHostsResolvesBeforeTheFirstTick(t *testing.T) {
 
 	guest, dst := addr(t, testGuestIP), addr(t, "93.184.216.34")
 	deadline := time.Now().Add(3 * time.Second)
-	for !policy.AllowsConnection(guest, dst) {
+	for !policy.AllowsConnection("", guest, dst) {
 		if time.Now().After(deadline) {
 			t.Fatal("WatchHosts did not resolve before its first tick")
 		}

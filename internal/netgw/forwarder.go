@@ -55,6 +55,14 @@ func linkLocal() tcpip.Subnet {
 	return subnet
 }
 
+// tcpipAddr converts a netip address for the stack, which speaks tcpip.
+func tcpipAddr(a netip.Addr) tcpip.Address {
+	if a.Is4() {
+		return tcpip.AddrFrom4(a.As4())
+	}
+	return tcpip.AddrFrom16(a.As16())
+}
+
 // toNetip converts a stack address for the policy, which speaks netip.
 func toNetip(a tcpip.Address) netip.Addr {
 	addr, _ := netip.AddrFromSlice(a.AsSlice())
@@ -74,7 +82,7 @@ const rejectLogInterval = 30 * time.Second
 
 func newRejectLog() *rejectLog { return &rejectLog{seen: map[string]time.Time{}} }
 
-func (l *rejectLog) report(protocol string, guest netip.Addr, dst netip.Addr, port uint16) {
+func (l *rejectLog) report(protocol, member string, guest netip.Addr, dst netip.Addr, port uint16) {
 	key := fmt.Sprintf("%s|%s|%s|%d", protocol, guest, dst, port)
 	now := time.Now()
 
@@ -92,12 +100,16 @@ func (l *rejectLog) report(protocol string, guest netip.Addr, dst netip.Addr, po
 	}
 	l.mu.Unlock()
 
-	log.Warnf("egress: rejected %s from %s to %s", protocol, guest, net.JoinHostPort(dst.String(), strconv.Itoa(int(port))))
+	who := guest.String()
+	if member != "" {
+		who = fmt.Sprintf("%s (%s)", member, guest)
+	}
+	log.Warnf("egress: rejected %s from %s to %s", protocol, who, net.JoinHostPort(dst.String(), strconv.Itoa(int(port))))
 }
 
 // tcpForwarder handles every TCP segment that matches no endpoint on the
 // stack, which is every connection a guest opens to the outside world.
-func tcpForwarder(s *stack.Stack, policy *Policy, dial dialFunc, rejects *rejectLog) *tcp.Forwarder {
+func tcpForwarder(s *stack.Stack, policy *Policy, members *memberTable, dial dialFunc, rejects *rejectLog) *tcp.Forwarder {
 	linkLocal := linkLocal()
 	return tcp.NewForwarder(s, 0, 10, func(r *tcp.ForwarderRequest) {
 		dst, port := r.ID().LocalAddress, r.ID().LocalPort
@@ -107,8 +119,11 @@ func tcpForwarder(s *stack.Stack, policy *Policy, dial dialFunc, rejects *reject
 			r.Complete(true)
 			return
 		}
-		if !policy.AllowsConnection(toNetip(guest), toNetip(dst)) {
-			rejects.report("tcp", toNetip(guest), toNetip(dst), port)
+		// The guard has already dropped any frame whose source address is not
+		// the sender's own, so the address identifies the member.
+		src := toNetip(guest)
+		if !policy.AllowsConnection(members.nameOf(src), src, toNetip(dst)) {
+			rejects.report("tcp", members.nameOf(src), src, toNetip(dst), port)
 			r.Complete(true)
 			return
 		}
@@ -143,7 +158,7 @@ func tcpForwarder(s *stack.Stack, policy *Policy, dial dialFunc, rejects *reject
 // udpForwarder does for datagrams what tcpForwarder does for connections. The
 // policy is applied per forwarder request, which is once per flow rather than
 // once per datagram.
-func udpForwarder(s *stack.Stack, policy *Policy, dial dialFunc, rejects *rejectLog) *udp.Forwarder {
+func udpForwarder(s *stack.Stack, policy *Policy, members *memberTable, dial dialFunc, rejects *rejectLog) *udp.Forwarder {
 	linkLocal := linkLocal()
 	return udp.NewForwarder(s, func(r *udp.ForwarderRequest) {
 		dst, port := r.ID().LocalAddress, r.ID().LocalPort
@@ -152,8 +167,9 @@ func udpForwarder(s *stack.Stack, policy *Policy, dial dialFunc, rejects *reject
 		if linkLocal.Contains(dst) || dst == header.IPv4Broadcast {
 			return
 		}
-		if !policy.AllowsConnection(toNetip(guest), toNetip(dst)) {
-			rejects.report("udp", toNetip(guest), toNetip(dst), port)
+		src := toNetip(guest)
+		if !policy.AllowsConnection(members.nameOf(src), src, toNetip(dst)) {
+			rejects.report("udp", members.nameOf(src), src, toNetip(dst), port)
 			return
 		}
 

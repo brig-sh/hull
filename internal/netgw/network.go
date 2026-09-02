@@ -94,6 +94,7 @@ type Network struct {
 	egress        *Policy
 	resolver      resolver
 	egressRefresh time.Duration
+	members       *memberTable
 }
 
 func New(cfg Config) (*Network, error) {
@@ -120,7 +121,8 @@ func New(cfg Config) (*Network, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot create network stack: %w", err)
 	}
-	if err := addServices(cfg, s, ipPool); err != nil {
+	members := newMemberTable()
+	if err := addServices(cfg, s, ipPool, members); err != nil {
 		return nil, fmt.Errorf("cannot add network services: %w", err)
 	}
 
@@ -130,6 +132,7 @@ func New(cfg Config) (*Network, error) {
 		egress:        cfg.Egress,
 		resolver:      upstreamResolver(cfg),
 		egressRefresh: cfg.EgressRefresh,
+		members:       members,
 	}, nil
 }
 
@@ -142,14 +145,36 @@ func (n *Network) Start(ctx context.Context) {
 
 // AcceptVfkit serves a member that speaks the vfkit protocol: one Ethernet
 // frame per datagram.
-func (n *Network) AcceptVfkit(ctx context.Context, conn net.Conn) error {
-	return n.networkSwitch.Accept(ctx, conn, gvntypes.VfkitProtocol)
+func (n *Network) AcceptVfkit(ctx context.Context, conn net.Conn, m Member) error {
+	return n.accept(ctx, conn, m, gvntypes.VfkitProtocol, false)
 }
 
 // AcceptQemu serves a member that speaks the QEMU stream protocol:
 // length-prefixed Ethernet frames.
-func (n *Network) AcceptQemu(ctx context.Context, conn net.Conn) error {
-	return n.networkSwitch.Accept(ctx, conn, gvntypes.QemuProtocol)
+func (n *Network) AcceptQemu(ctx context.Context, conn net.Conn, m Member) error {
+	return n.accept(ctx, conn, m, gvntypes.QemuProtocol, true)
+}
+
+// accept registers a member and serves it until it disconnects. An identified
+// member is held to the addresses it declared: its socket is wrapped in a
+// guard that drops any frame carrying somebody else's.
+func (n *Network) accept(ctx context.Context, conn net.Conn, m Member, protocol gvntypes.Protocol, stream bool) error {
+	if !m.Identified() {
+		// A caller that says nothing gets the behaviour it always had. Rules
+		// naming a member cannot apply to it, and refusing the join outright
+		// would break an older hull against a newer gateway.
+		if n.egress.HasMemberRules() {
+			log.Warnf("gateway: a member joined without an identity; rules naming a member do not apply to it")
+		}
+		return n.networkSwitch.Accept(ctx, conn, protocol)
+	}
+	if err := n.members.claim(m); err != nil {
+		return fmt.Errorf("cannot admit member %q: %w", m.Name, err)
+	}
+	defer n.members.release(m)
+
+	log.Infof("gateway: member %s joined%s", m, memberRuleNote(n.egress, m.Name))
+	return n.networkSwitch.Accept(ctx, newGuard(conn, m, stream), protocol)
 }
 
 // DialContextTCP opens a TCP connection from inside the virtual network. The
@@ -219,16 +244,16 @@ func createStack(cfg Config, endpoint stack.LinkEndpoint) (*stack.Stack, error) 
 	return s, nil
 }
 
-func addServices(cfg Config, s *stack.Stack, ipPool *tap.IPPool) error {
+func addServices(cfg Config, s *stack.Stack, ipPool *tap.IPPool, members *memberTable) error {
 	dial := cfg.dial
 	if dial == nil {
 		dial = net.Dial
 	}
 	rejects := newRejectLog()
-	s.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpForwarder(s, cfg.Egress, dial, rejects).HandlePacket)
-	s.SetTransportProtocolHandler(udp.ProtocolNumber, udpForwarder(s, cfg.Egress, dial, rejects).HandlePacket)
+	s.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpForwarder(s, cfg.Egress, members, dial, rejects).HandlePacket)
+	s.SetTransportProtocolHandler(udp.ProtocolNumber, udpForwarder(s, cfg.Egress, members, dial, rejects).HandlePacket)
 
-	if err := dnsServer(cfg, s); err != nil {
+	if err := dnsServer(cfg, s, members); err != nil {
 		return err
 	}
 	if err := dhcpServer(cfg, s, ipPool); err != nil {
@@ -237,7 +262,7 @@ func addServices(cfg Config, s *stack.Stack, ipPool *tap.IPPool) error {
 	return forwardHostVM(cfg, s)
 }
 
-func dnsServer(cfg Config, s *stack.Stack) error {
+func dnsServer(cfg Config, s *stack.Stack, members *memberTable) error {
 	gatewayAddr := tcpip.AddrFrom4Slice(net.ParseIP(cfg.GatewayIP).To4())
 	udpConn, err := gonet.DialUDP(s, &tcpip.FullAddress{NIC: nicID, Addr: gatewayAddr, Port: 53}, nil, ipv4.ProtocolNumber)
 	if err != nil {
@@ -248,7 +273,7 @@ func dnsServer(cfg Config, s *stack.Stack) error {
 		return err
 	}
 
-	handler := &dnsHandler{zones: cfg.DNSZones, upstream: upstreamResolver(cfg), policy: cfg.Egress}
+	handler := &dnsHandler{zones: cfg.DNSZones, upstream: upstreamResolver(cfg), policy: cfg.Egress, members: members}
 	serve := func(srv *dns.Server, maxSize int) {
 		mux := dns.NewServeMux()
 		mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) { handler.handle(w, r, maxSize) })
@@ -262,6 +287,20 @@ func dnsServer(cfg Config, s *stack.Stack) error {
 	serve(&dns.Server{PacketConn: udpConn}, dns.MinMsgSize)
 	serve(&dns.Server{Listener: tcpLn}, dns.MaxMsgSize)
 	return nil
+}
+
+// memberRuleNote says whether the joining member has rules of its own, so the
+// log answers "are my rules applying?" at the moment it matters.
+func memberRuleNote(p *Policy, name string) string {
+	if !p.HasMemberRules() {
+		return ""
+	}
+	for _, n := range p.MemberNames() {
+		if n == name {
+			return ", with egress rules of its own"
+		}
+	}
+	return ", covered by the rules that name no member"
 }
 
 // upstreamResolver is the host-side resolver, or the one a test supplied.

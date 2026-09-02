@@ -59,9 +59,21 @@ func join(t *testing.T, n *Network) *member {
 
 func joinAs(t *testing.T, n *Network, mac, ip string) *member {
 	t.Helper()
+	return joinWith(t, n, mac, ip, Member{})
+}
+
+// joinMember attaches an identified member, so per-member rules and the guard
+// apply to it.
+func joinMember(t *testing.T, n *Network, m Member) *member {
+	t.Helper()
+	return joinWith(t, n, m.MAC.String(), m.IP.String(), m)
+}
+
+func joinWith(t *testing.T, n *Network, mac, ip string, identity Member) *member {
+	t.Helper()
 	ours, theirs := net.Pipe()
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() { _ = n.AcceptVfkit(ctx, theirs) }()
+	go func() { _ = n.AcceptVfkit(ctx, theirs, identity) }()
 
 	m := &member{
 		conn:   ours,

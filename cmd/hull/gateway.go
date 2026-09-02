@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strings"
@@ -30,6 +31,7 @@ import (
 	gvntypes "github.com/containers/gvisor-tap-vsock/pkg/types"
 	"github.com/urfave/cli/v3"
 	"golang.org/x/sys/unix"
+	"gvisor.dev/gvisor/pkg/tcpip"
 )
 
 // networkGatewayCommand runs a user-mode network gateway (gvisor netstack)
@@ -79,15 +81,23 @@ cannot be resolved ahead of a query and stays driven by what guests ask for.
 Rules are checked at startup and the gateway refuses to start on one it
 cannot parse, rather than enforce part of what was asked for.
 
-A policy belongs to this gateway, not to a guest. Every microVM behind it
-answers to all of these rules, and no rule can name one member. A sandbox
-that needs an egress policy of its own needs a gateway of its own, so run
-one gateway per sandbox.
+A rule with no prefix applies to every microVM behind this gateway. A rule
+written <member>:host=... or <member>:cidr=... applies to that member alone,
+where the member is the compose service name or the instance name. A member
+with rules of its own answers to those and to the unprefixed ones.
 
-Two things this does not do. It does not separate one guest from another:
-guests share a switch, and traffic between them never reaches the filter.
-And --forward is ingress, not egress; it exposes a guest port on the host
-and no egress rule applies to it.
+Per-member rules rest on the gateway knowing which guest sent a packet. It
+pins each member to the addresses its caller declared and drops any frame
+carrying another member's, so a guest cannot take another's rules by
+writing its address. A member that joins without an identity, which is what
+an older hull does, is covered by the unprefixed rules only.
+
+One thing this does not do. It does not separate one guest from another:
+guests share a switch, and traffic between them never reaches the filter,
+so a member denied egress can still reach a member that has it. Separating
+guests is a network per sandbox (brig-sh/brig#15). And --forward is
+ingress, not egress; it exposes a guest port on the host and no egress rule
+applies to it.
 
 IPv6 is dropped outright. The netstack does not forward IPv6 yet, so no
 guest reaches the outside world over it, with or without a policy.`),
@@ -100,8 +110,8 @@ guest reaches the outside world over it, with or without a policy.`),
 			&cli.StringSliceFlag{Name: "forward", Usage: "host port forward, hostaddr:port=guestip:port (repeatable)"},
 			&cli.StringSliceFlag{Name: "host", Usage: "static DNS A record served by the gateway, name=ip (repeatable)"},
 			&cli.StringFlag{Name: "egress-default", Usage: "verdict for a connection no egress rule matches, allow or deny; without it egress is unfiltered"},
-			&cli.StringSliceFlag{Name: "egress-allow", Usage: "egress allow rule, host=<glob> or cidr=<cidr> (repeatable)"},
-			&cli.StringSliceFlag{Name: "egress-deny", Usage: "egress deny rule, host=<glob> or cidr=<cidr> (repeatable)"},
+			&cli.StringSliceFlag{Name: "egress-allow", Usage: "egress allow rule, [<member>:]host=<glob> or [<member>:]cidr=<cidr> (repeatable)"},
+			&cli.StringSliceFlag{Name: "egress-deny", Usage: "egress deny rule, [<member>:]host=<glob> or [<member>:]cidr=<cidr> (repeatable)"},
 			&cli.DurationFlag{Name: "egress-refresh", Value: egressRefreshDefault, Usage: "how often to re-resolve the named hosts in the egress rules, so a name whose addresses rotate keeps working; 0 disables"},
 			&cli.StringFlag{Name: "project", Usage: "compose project to supervise (enables restart policies)"},
 			&cli.DurationFlag{Name: "supervise-interval", Value: supervisorPollInterval, Usage: "liveness poll interval of the supervision loop"},
@@ -250,7 +260,7 @@ func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, ga
 				go func(c net.Conn) {
 					defer func() { _ = c.Close() }()
 					log.Debug("gateway: qemu member joined")
-					if err := vn.AcceptQemu(ctx, c); err != nil && ctx.Err() == nil {
+					if err := vn.AcceptQemu(ctx, c, netgw.Member{}); err != nil && ctx.Err() == nil {
 						log.WithError(err).Debug("gateway: qemu member ended")
 					}
 					log.Debug("gateway: qemu member left")
@@ -313,9 +323,14 @@ func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, ga
 func handleGatewayMember(ctx context.Context, vn *netgw.Network, conn *net.UnixConn) {
 	defer func() { _ = conn.Close() }()
 
-	dataFD, err := recvFD(conn)
+	dataFD, identity, err := recvFD(conn)
 	if err != nil {
 		log.WithError(err).Warn("gateway: failed to receive member fd")
+		return
+	}
+	member, err := netgw.DecodeMember(identity)
+	if err != nil {
+		log.WithError(err).Warn("gateway: refusing a member with an unreadable identity")
 		return
 	}
 	f := os.NewFile(uintptr(dataFD), "vm-port")
@@ -341,34 +356,41 @@ func handleGatewayMember(ctx context.Context, vn *netgw.Network, conn *net.UnixC
 		cancel()
 	}()
 
-	if err := vn.AcceptVfkit(memberCtx, fileConn); err != nil && memberCtx.Err() == nil {
+	if err := vn.AcceptVfkit(memberCtx, fileConn, member); err != nil && memberCtx.Err() == nil {
 		log.WithError(err).Debug("gateway: member connection ended")
 	}
 	log.Debug("gateway: member left")
 }
 
-// recvFD reads one file descriptor passed via SCM_RIGHTS.
-func recvFD(conn *net.UnixConn) (int, error) {
-	buf := make([]byte, 1)
+// recvFD reads one file descriptor passed via SCM_RIGHTS, and the member
+// identity the joiner sent with it. An older hull sends a single zero byte
+// and no identity, which decodes to an unidentified member.
+func recvFD(conn *net.UnixConn) (int, []byte, error) {
+	buf := make([]byte, memberIdentityMax)
 	oob := make([]byte, unix.CmsgSpace(4))
-	_, oobn, flags, _, err := conn.ReadMsgUnix(buf, oob)
+	n, oobn, flags, _, err := conn.ReadMsgUnix(buf, oob)
 	if err != nil {
-		return -1, err
+		return -1, nil, err
 	}
 	if flags&unix.MSG_CTRUNC != 0 {
-		return -1, fmt.Errorf("control message truncated")
+		return -1, nil, fmt.Errorf("control message truncated")
 	}
 	msgs, err := unix.ParseSocketControlMessage(oob[:oobn])
 	if err != nil || len(msgs) == 0 {
-		return -1, fmt.Errorf("no control message: %v", err)
+		return -1, nil, fmt.Errorf("no control message: %v", err)
 	}
 	fds, err := unix.ParseUnixRights(&msgs[0])
 	if err != nil || len(fds) == 0 {
-		return -1, fmt.Errorf("no fd in control message: %v", err)
+		return -1, nil, fmt.Errorf("no fd in control message: %v", err)
 	}
 	syscall.CloseOnExec(fds[0])
-	return fds[0], nil
+	return fds[0], buf[:n], nil
 }
+
+// memberIdentityMax bounds the join message. The identity is three short
+// strings, so this is generous; it exists so a joiner cannot ask the gateway
+// for an unbounded read.
+const memberIdentityMax = 4096
 
 // claimUnixSocket listens on path, refusing to steal it from a live process:
 // if something answers a dial, another gateway owns it; only a refused
@@ -392,10 +414,36 @@ func qemuGatewaySock(controlSock string) string {
 	return controlSock + ".qemu"
 }
 
+// gatewayMember builds the identity a joining instance declares. cidr is the
+// --gateway-cidr form (an address with a prefix length); the gateway wants the
+// address alone. An unparseable value yields an unidentified member rather
+// than an error: the join still has to work, it simply cannot be named in a
+// rule.
+func gatewayMember(name, cidr, mac string) netgw.Member {
+	m := netgw.Member{Name: name, MAC: tcpip.LinkAddress(parseMAC(mac))}
+	if addr, err := netip.ParsePrefix(cidr); err == nil {
+		m.IP = addr.Addr().Unmap()
+	} else if addr, err := netip.ParseAddr(cidr); err == nil {
+		m.IP = addr.Unmap()
+	}
+	return m
+}
+
+// parseMAC turns the textual MAC hull generates into the wire bytes the
+// netstack compares against. An unparseable one leaves the member pinned to
+// whichever address it first uses.
+func parseMAC(mac string) string {
+	hw, err := net.ParseMAC(mac)
+	if err != nil {
+		return ""
+	}
+	return string(hw)
+}
+
 // joinGateway connects to a gateway's control socket, creates the datagram
 // socketpair, sends one end to the gateway, and returns the local end plus
 // the control connection (which must stay open for the member's lifetime).
-func joinGateway(sockPath string) (*os.File, *net.UnixConn, error) {
+func joinGateway(sockPath string, member netgw.Member) (*os.File, *net.UnixConn, error) {
 	raddr, err := net.ResolveUnixAddr("unix", sockPath)
 	if err != nil {
 		return nil, nil, err
@@ -419,8 +467,14 @@ func joinGateway(sockPath string) (*os.File, *net.UnixConn, error) {
 		syscall.CloseOnExec(fd)
 	}
 
+	// The identity travels with the fd, in the same message, so the gateway
+	// cannot end up holding one without the other.
+	identity := netgw.EncodeMember(member)
+	if len(identity) == 0 {
+		identity = []byte{0}
+	}
 	rights := unix.UnixRights(pair[1])
-	if _, _, err := conn.WriteMsgUnix([]byte{0}, rights, nil); err != nil {
+	if _, _, err := conn.WriteMsgUnix(identity, rights, nil); err != nil {
 		_ = conn.Close()
 		_ = syscall.Close(pair[0])
 		_ = syscall.Close(pair[1])
