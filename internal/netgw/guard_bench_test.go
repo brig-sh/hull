@@ -28,7 +28,7 @@ func benchGuard(b *testing.B) *guard {
 	m := Member{Name: "web", IP: netip.MustParseAddr(testGuestIP)}
 	hw, _ := netip.ParseAddr(testGuestIP)
 	_ = hw
-	g := newGuard(nil, m, false)
+	g := newGuard(nil, m, false, isolation{})
 	return g
 }
 

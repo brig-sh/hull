@@ -92,12 +92,16 @@ carrying another member's, so a guest cannot take another's rules by
 writing its address. A member that joins without an identity, which is what
 an older hull does, is covered by the unprefixed rules only.
 
-One thing this does not do. It does not separate one guest from another:
-guests share a switch, and traffic between them never reaches the filter,
-so a member denied egress can still reach a member that has it. Separating
-guests is a network per sandbox (brig-sh/brig#15). And --forward is
-ingress, not egress; it exposes a guest port on the host and no egress rule
-applies to it.
+Guests behind one gateway share a switch, so a member denied egress could
+otherwise ask a neighbour that has it to fetch on its behalf. Writing any
+rule that names a member therefore isolates the guests from each other:
+each one still reaches the gateway, its DNS and whatever its rules allow,
+and reaches no other guest. --isolate-peers asks for that without writing
+a rule. Services that have to talk to each other, which is what a compose
+project usually is, want neither.
+
+--forward is ingress, not egress; it exposes a guest port on the host and
+no egress rule applies to it.
 
 IPv6 is dropped outright. The netstack does not forward IPv6 yet, so no
 guest reaches the outside world over it, with or without a policy.`),
@@ -113,6 +117,7 @@ guest reaches the outside world over it, with or without a policy.`),
 			&cli.StringSliceFlag{Name: "egress-allow", Usage: "egress allow rule, [<member>:]host=<glob> or [<member>:]cidr=<cidr> (repeatable)"},
 			&cli.StringSliceFlag{Name: "egress-deny", Usage: "egress deny rule, [<member>:]host=<glob> or [<member>:]cidr=<cidr> (repeatable)"},
 			&cli.DurationFlag{Name: "egress-refresh", Value: egressRefreshDefault, Usage: "how often to re-resolve the named hosts in the egress rules, so a name whose addresses rotate keeps working; 0 disables"},
+			&cli.BoolFlag{Name: "isolate-peers", Usage: "stop guests exchanging traffic with each other, leaving the gateway the only thing they can reach (default: on when any egress rule names a member)"},
 			&cli.StringFlag{Name: "project", Usage: "compose project to supervise (enables restart policies)"},
 			&cli.DurationFlag{Name: "supervise-interval", Value: supervisorPollInterval, Usage: "liveness poll interval of the supervision loop"},
 		},
@@ -141,7 +146,14 @@ guest reaches the outside world over it, with or without a policy.`),
 				}
 				sup = s
 			}
-			return runGateway(ctx, cmd.String("socket"), cmd.String("api"), cmd.String("qemu-socket"), cmd.String("subnet"), cmd.String("gateway-ip"), forwards, cmd.StringSlice("host"), policy, cmd.Duration("egress-refresh"), sup)
+			// A rule that names one member says that member is not the same
+			// unit of trust as its neighbours. Guests that can reach each
+			// other can ask a neighbour to fetch what they may not, so the
+			// rule means little while they share a switch: isolation is the
+			// default as soon as one is written, and can be asked for
+			// without any rule at all.
+			isolate := cmd.Bool("isolate-peers") || policy.HasMemberRules()
+			return runGateway(ctx, cmd.String("socket"), cmd.String("api"), cmd.String("qemu-socket"), cmd.String("subnet"), cmd.String("gateway-ip"), forwards, cmd.StringSlice("host"), policy, cmd.Duration("egress-refresh"), isolate, sup)
 		},
 	}
 }
@@ -158,7 +170,7 @@ const gatewayShutdownGrace = 20 * time.Second
 // handful of rules is not a source of DNS traffic worth noticing.
 const egressRefreshDefault = 30 * time.Second
 
-func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, gatewayIP string, forwards map[string]string, hosts []string, policy *netgw.Policy, egressRefresh time.Duration, sup *supervisor) error {
+func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, gatewayIP string, forwards map[string]string, hosts []string, policy *netgw.Policy, egressRefresh time.Duration, isolatePeers bool, sup *supervisor) error {
 	// Serve service names from the gateway's DNS in addition to the
 	// /etc/hosts injection: guests that resolve via plain DNS (unikernel
 	// flavors without an nsswitch) get name resolution for free, and images
@@ -190,6 +202,7 @@ func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, ga
 		DNSZones:          dns,
 		Egress:            policy,
 		EgressRefresh:     egressRefresh,
+		IsolatePeers:      isolatePeers,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create virtual network: %w", err)
@@ -206,7 +219,11 @@ func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, ga
 		return err
 	}
 	defer func() { _ = l.Close(); _ = os.Remove(sockPath) }()
-	log.Infof("network-gateway on %s (subnet %s, gw %s, %d forwards, %s)", sockPath, subnet, gatewayIP, len(forwards), policy.Summary())
+	peers := "guests can reach each other"
+	if isolatePeers {
+		peers = "guests isolated from each other"
+	}
+	log.Infof("network-gateway on %s: subnet %s, gw %s, %d forwards, %s, %s", sockPath, subnet, gatewayIP, len(forwards), policy.Summary(), peers)
 
 	// Probe API: the gateway is the only process that can dial into the
 	// virtual network, so TCP healthchecks run here.

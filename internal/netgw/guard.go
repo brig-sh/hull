@@ -41,6 +41,15 @@ import (
 // This is where the gateway earns the right to say "this connection came from
 // that guest" at all. Without it, every per-member rule is a suggestion.
 
+// isolation is what a guard needs to keep a member away from its peers: the
+// gateway's own addresses, which are the only ones it may exchange frames
+// with. The zero value leaves the member on the shared switch as before.
+type isolation struct {
+	on         bool
+	gatewayMAC []byte
+	gatewayIP  tcpip.Address
+}
+
 // maxFrameSize bounds one frame read from a stream member. It is well above
 // the MTU the gateway hands out and exists so a corrupt length prefix cannot
 // ask for an unbounded allocation.
@@ -63,6 +72,12 @@ type guard struct {
 	addr     tcpip.Address
 	hasAddr  bool
 
+	// isolate stops this member exchanging frames with any other member, so
+	// the only thing it can talk to is the gateway.
+	isolate    bool
+	gatewayMAC []byte
+	gatewayIP  tcpip.Address
+
 	dropped atomic.Uint64
 	lastLog atomic.Int64
 
@@ -76,8 +91,11 @@ type guard struct {
 	pending []byte
 }
 
-func newGuard(conn net.Conn, m Member, stream bool) *guard {
-	g := &guard{conn: conn, member: m, mac: m.MAC, macBytes: []byte(m.MAC), stream: stream}
+func newGuard(conn net.Conn, m Member, stream bool, iso isolation) *guard {
+	g := &guard{
+		conn: conn, member: m, mac: m.MAC, macBytes: []byte(m.MAC), stream: stream,
+		isolate: iso.on, gatewayMAC: iso.gatewayMAC, gatewayIP: iso.gatewayIP,
+	}
 	if m.IP.IsValid() && m.IP.Is4() {
 		g.addr = tcpip.AddrFrom4(m.IP.As4())
 		g.hasAddr = true
@@ -143,7 +161,34 @@ func (g *guard) readStream(p []byte) (int, error) {
 	}
 }
 
-func (g *guard) Write(p []byte) (int, error)        { return g.conn.Write(p) }
+// Write delivers a frame to the member. An isolated member hears only the
+// gateway: the switch floods a broadcast to every member, so without this an
+// isolated member would still see its neighbours' DHCP and ARP and learn that
+// they exist. Frames the gateway itself sends carry its address, which is what
+// separates them.
+func (g *guard) Write(p []byte) (int, error) {
+	if g.isolate && len(p) >= header.EthernetMinimumSize {
+		if !bytes.Equal(g.frameSource(p), g.gatewayMAC) {
+			// Report the frame as written. It was not delivered, which is the
+			// point, and a short write would tear the member's connection
+			// down instead.
+			return len(p), nil
+		}
+	}
+	return g.conn.Write(p)
+}
+
+// frameSource is the source address of a frame, allowing for the length
+// prefix a stream member's frames carry.
+func (g *guard) frameSource(p []byte) []byte {
+	if g.stream {
+		if len(p) < 4+header.EthernetMinimumSize {
+			return nil
+		}
+		return p[4+6 : 4+12]
+	}
+	return p[6:12]
+}
 func (g *guard) Close() error                       { return g.conn.Close() }
 func (g *guard) LocalAddr() net.Addr                { return g.conn.LocalAddr() }
 func (g *guard) RemoteAddr() net.Addr               { return g.conn.RemoteAddr() }
@@ -170,6 +215,10 @@ func (g *guard) allow(frame []byte) bool {
 		return false
 	}
 
+	if g.isolate && !g.allowIsolatedDestination(frame) {
+		return false
+	}
+
 	payload := frame[header.EthernetMinimumSize:]
 	switch header.Ethernet(frame).Type() {
 	case header.IPv4ProtocolNumber:
@@ -181,6 +230,51 @@ func (g *guard) allow(frame []byte) bool {
 		// netstack registers no protocol for them and discards them, and the
 		// switch only ever forwards them to other members.
 		return true
+	}
+}
+
+// allowIsolatedDestination decides whether an isolated member may send this
+// frame at all, by where it is addressed.
+//
+// The gateway is the only thing an isolated member talks to. A frame to the
+// gateway's own address is therefore fine, and a frame to another member's is
+// not. Broadcast is the case that needs care: a guest legitimately broadcasts
+// to find the gateway and to ask for an address, and the switch floods a
+// broadcast to every member, so allowing it wholesale would hand an isolated
+// member both a way to reach its neighbours and a way to enumerate them.
+// Only the two broadcasts a guest cannot start without are allowed, and only
+// when they are directed at the gateway.
+func (g *guard) allowIsolatedDestination(frame []byte) bool {
+	dst := frame[0:6]
+	if bytes.Equal(dst, g.gatewayMAC) {
+		return true
+	}
+	if !bytes.Equal(dst, []byte(header.EthernetBroadcastAddress)) {
+		// Unicast to somebody who is not the gateway, or multicast. Either
+		// way it is not addressed to the one peer this member may talk to.
+		return false
+	}
+
+	payload := frame[header.EthernetMinimumSize:]
+	switch header.Ethernet(frame).Type() {
+	case header.ARPProtocolNumber:
+		// An ARP that asks for the gateway is how a guest finds its next hop.
+		// One that asks for anything else is how it finds its neighbours.
+		if len(payload) < header.ARPSize {
+			return false
+		}
+		arp := header.ARP(payload)
+		return arp.IsValid() && tcpip.AddrFromSlice(arp.ProtocolAddressTarget()) == g.gatewayIP
+	case header.IPv4ProtocolNumber:
+		// A DHCP request has to be broadcast: the guest has no address and
+		// does not know the server's.
+		if len(payload) < header.IPv4MinimumSize {
+			return false
+		}
+		ip := header.IPv4(payload)
+		return ip.IsValid(len(payload)) && isDHCPRequest(ip)
+	default:
+		return false
 	}
 }
 

@@ -38,7 +38,7 @@ func testMember(t *testing.T, name, ip, mac string) Member {
 func guardPipe(t *testing.T, m Member, stream bool, frames ...[]byte) [][]byte {
 	t.Helper()
 	ours, theirs := net.Pipe()
-	g := newGuard(theirs, m, stream)
+	g := newGuard(theirs, m, stream, isolation{})
 
 	go func() {
 		defer func() { _ = ours.Close() }()

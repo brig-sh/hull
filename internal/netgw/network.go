@@ -77,6 +77,10 @@ type Config struct {
 	// EgressRefresh is how often the literal host rules are re-resolved so
 	// the policy follows a name whose addresses rotate. Zero turns it off.
 	EgressRefresh time.Duration
+	// IsolatePeers stops members exchanging frames with each other, leaving
+	// the gateway as the only thing any of them can reach. Without it they
+	// share a switch, as they always have.
+	IsolatePeers bool
 
 	// dial opens the host-side connection. Tests replace it; nil means
 	// net.Dial.
@@ -95,6 +99,9 @@ type Network struct {
 	resolver      resolver
 	egressRefresh time.Duration
 	members       *memberTable
+	isolatePeers  bool
+	gatewayMAC    []byte
+	gatewayAddr   tcpip.Address
 }
 
 func New(cfg Config) (*Network, error) {
@@ -104,6 +111,11 @@ func New(cfg Config) (*Network, error) {
 	}
 	if cfg.MTU < 0 || cfg.MTU > math.MaxInt32 {
 		return nil, errors.New("mtu is out of range")
+	}
+
+	gatewayMAC, err := net.ParseMAC(cfg.GatewayMacAddress)
+	if err != nil {
+		return nil, fmt.Errorf("cannot parse the gateway MAC address: %w", err)
 	}
 
 	ipPool := tap.NewIPPool(subnet)
@@ -133,6 +145,9 @@ func New(cfg Config) (*Network, error) {
 		resolver:      upstreamResolver(cfg),
 		egressRefresh: cfg.EgressRefresh,
 		members:       members,
+		isolatePeers:  cfg.IsolatePeers,
+		gatewayMAC:    []byte(gatewayMAC),
+		gatewayAddr:   tcpip.AddrFrom4Slice(net.ParseIP(cfg.GatewayIP).To4()),
 	}, nil
 }
 
@@ -173,8 +188,9 @@ func (n *Network) accept(ctx context.Context, conn net.Conn, m Member, protocol 
 	}
 	defer n.members.release(m)
 
-	log.Infof("gateway: member %s joined%s", m, memberRuleNote(n.egress, m.Name))
-	return n.networkSwitch.Accept(ctx, newGuard(conn, m, stream), protocol)
+	iso := n.isolationFor(m)
+	log.Infof("gateway: member %s joined%s%s", m, memberRuleNote(n.egress, m.Name), isolationNote(iso))
+	return n.networkSwitch.Accept(ctx, newGuard(conn, m, stream, iso), protocol)
 }
 
 // DialContextTCP opens a TCP connection from inside the virtual network. The
@@ -287,6 +303,21 @@ func dnsServer(cfg Config, s *stack.Stack, members *memberTable) error {
 	serve(&dns.Server{PacketConn: udpConn}, dns.MinMsgSize)
 	serve(&dns.Server{Listener: tcpLn}, dns.MaxMsgSize)
 	return nil
+}
+
+// isolationFor says whether this member may exchange frames with its peers.
+func (n *Network) isolationFor(m Member) isolation {
+	if !n.isolatePeers {
+		return isolation{}
+	}
+	return isolation{on: true, gatewayMAC: n.gatewayMAC, gatewayIP: n.gatewayAddr}
+}
+
+func isolationNote(iso isolation) string {
+	if !iso.on {
+		return ""
+	}
+	return ", isolated from its peers"
 }
 
 // memberRuleNote says whether the joining member has rules of its own, so the
