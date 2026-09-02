@@ -99,7 +99,14 @@ hvi_vmm:
 	@test -f $(HVI_DIR)/Cargo.toml || { \
 		echo "error: $(HVI_DIR) is empty — the hvi submodule is not checked out." >&2; \
 		echo "       run: git submodule update --init hvi-vmm" >&2; exit 1; }
-	$(CARGO) build --release --manifest-path $(HVI_DIR)/Cargo.toml
+	@# Run from inside the submodule rather than passing --manifest-path.
+	@# rustup picks a toolchain from the working directory, not from the
+	@# manifest, so building from here silently ignored hvi-vmm's
+	@# rust-toolchain.toml: the pin exists to keep the build reproducible
+	@# against the committed lockfile, and it was not being applied. On a
+	@# runner with no default toolchain there is then nothing to fall back
+	@# to, and cargo refuses to choose one at all.
+	cd $(HVI_DIR) && $(CARGO) build --release
 
 ## sign Code-sign hull + vz-runner + hvi and strip quarantine.
 ##      Override the identity: make sign CODESIGN_IDENTITY="Apple Development: Name (TEAMID)"
