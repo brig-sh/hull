@@ -8,6 +8,26 @@ outside world already passes through, which is where egress filtering sits.
 Filtering is off unless `--egress-default` is given. Without it the gateway
 behaves as it always has and forwards everything.
 
+## Give each sandbox its own gateway
+
+**A policy belongs to a gateway, not to a guest.** The rules are flags on the
+gateway process, and every microVM behind that gateway answers to all of them.
+No rule can be written to apply to one member and not another.
+
+So a sandbox that needs an egress policy of its own needs a network of its
+own. Run one gateway per sandbox and the boundary lands where you want it: one
+gateway, one guest, one policy. That is the intended shape, and every claim on
+this page about what a guest can reach assumes it.
+
+Sharing a gateway shares the policy, in both directions. `hull compose up`
+starts one gateway per project, so every service in a project answers to the
+same rules, and `hull run --gateway-sock` joins an existing gateway and takes
+its policy. That suits a project whose services are one unit of trust. It does
+not suit two agents that must not reach the same things: put those on separate
+gateways.
+
+Per-sandbox networks are brig-sh/brig#15.
+
 ## The flags
 
 ```
@@ -122,8 +142,7 @@ is filtering.
 **Guest to guest.** Guests behind one gateway share a switch, and traffic
 between them is forwarded at layer 2 without reaching the netstack. No egress
 rule applies to it, and `--egress-default deny` does not separate one guest
-from another. Separation is a network per sandbox, which is brig's side of
-this (brig-sh/brig#15).
+from another. Separation is a network per sandbox, as above.
 
 **Ingress.** `--forward` exposes a guest's port on the host. It is a host
 exposure, it is not egress, and no egress rule applies to it.
