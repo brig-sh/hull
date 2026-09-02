@@ -70,7 +70,7 @@ What this does not give you is a separate failure domain. One gateway is one
 process holding one netstack: a fault in it is a fault for every guest behind
 it, and every guest shares its subnet, its DNS and its host-side forwards. For
 guests that are separate units of trust, a gateway each is still the stronger
-arrangement, and it costs about 29 MB of RSS per gateway.
+arrangement, and it costs roughly 30 MB of resident memory per gateway.
 
 Per-sandbox networks are brig-sh/brig#15.
 
