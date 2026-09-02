@@ -32,6 +32,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/containers/gvisor-tap-vsock/pkg/services/dhcp"
 	"github.com/containers/gvisor-tap-vsock/pkg/services/forwarder"
@@ -73,6 +74,9 @@ type Config struct {
 	// Egress is the policy every connection out of the virtual network is
 	// checked against. A nil policy forwards everything.
 	Egress *Policy
+	// EgressRefresh is how often the literal host rules are re-resolved so
+	// the policy follows a name whose addresses rotate. Zero turns it off.
+	EgressRefresh time.Duration
 
 	// dial opens the host-side connection. Tests replace it; nil means
 	// net.Dial.
@@ -87,6 +91,9 @@ type Config struct {
 type Network struct {
 	stack         *stack.Stack
 	networkSwitch *tap.Switch
+	egress        *Policy
+	resolver      resolver
+	egressRefresh time.Duration
 }
 
 func New(cfg Config) (*Network, error) {
@@ -117,7 +124,20 @@ func New(cfg Config) (*Network, error) {
 		return nil, fmt.Errorf("cannot add network services: %w", err)
 	}
 
-	return &Network{stack: s, networkSwitch: networkSwitch}, nil
+	return &Network{
+		stack:         s,
+		networkSwitch: networkSwitch,
+		egress:        cfg.Egress,
+		resolver:      upstreamResolver(cfg),
+		egressRefresh: cfg.EgressRefresh,
+	}, nil
+}
+
+// Start runs the network's background work until ctx is done. It is separate
+// from New so the caller owns the lifetime, and returns having started
+// nothing when the policy has no literal host rule to keep current.
+func (n *Network) Start(ctx context.Context) {
+	go n.egress.WatchHosts(ctx, n.resolver, n.egressRefresh)
 }
 
 // AcceptVfkit serves a member that speaks the vfkit protocol: one Ethernet
@@ -228,11 +248,7 @@ func dnsServer(cfg Config, s *stack.Stack) error {
 		return err
 	}
 
-	upstream := cfg.resolve
-	if upstream == nil {
-		upstream = &net.Resolver{PreferGo: false}
-	}
-	handler := &dnsHandler{zones: cfg.DNSZones, upstream: upstream, policy: cfg.Egress}
+	handler := &dnsHandler{zones: cfg.DNSZones, upstream: upstreamResolver(cfg), policy: cfg.Egress}
 	serve := func(srv *dns.Server, maxSize int) {
 		mux := dns.NewServeMux()
 		mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) { handler.handle(w, r, maxSize) })
@@ -246,6 +262,14 @@ func dnsServer(cfg Config, s *stack.Stack) error {
 	serve(&dns.Server{PacketConn: udpConn}, dns.MinMsgSize)
 	serve(&dns.Server{Listener: tcpLn}, dns.MaxMsgSize)
 	return nil
+}
+
+// upstreamResolver is the host-side resolver, or the one a test supplied.
+func upstreamResolver(cfg Config) resolver {
+	if cfg.resolve != nil {
+		return cfg.resolve
+	}
+	return &net.Resolver{PreferGo: false}
 }
 
 func dhcpServer(cfg Config, s *stack.Stack, ipPool *tap.IPPool) error {

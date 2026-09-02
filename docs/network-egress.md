@@ -64,6 +64,28 @@ The gateway tells the guest the same TTL it enforces, so what the guest caches
 and what the gateway honours cannot drift apart, and adds a short grace period
 for a guest that connects on an answer that has just expired.
 
+## Names whose addresses move
+
+Pinning covers a guest that asks again. Plenty of runtimes do not: a resolver
+that caches past the TTL, or an application that holds an address for the life
+of the process, will keep using an address the gateway has since forgotten,
+and a name behind a rotating record set will hand out an address that was
+never pinned. The name is allowed and the connection is refused anyway.
+
+So the gateway also resolves the named hosts in its rules on a timer,
+`--egress-refresh` (30s by default, `0` disables), and keeps whatever they
+currently answer with. An address that stops appearing loses its place after
+three rounds, so a resolver that fails once does not cut a sandbox's egress,
+and one that stays broken does not keep an address alive forever.
+
+This works for a rule that names one host, `host=api.example.com`. A glob
+cannot be resolved ahead of a query, because there is no way to enumerate what
+`*.example.com` stands for, so globs stay driven by what guests ask for.
+
+Resolving a `host` deny on the same timer is what makes it more than best
+effort under `--egress-default allow`: the addresses the name answers with are
+blocked whether or not the guest asked this resolver for them.
+
 Under `--egress-default deny` this has a second effect. A query for a name no
 allow glob covers is answered `REFUSED`, so a guest cannot learn an address
 here that it is not allowed to reach. Traffic sent straight to an IP,
@@ -77,7 +99,9 @@ want resolvable as host globs.
 
 Under `--egress-default allow`, a `host` deny is best effort. The guest is
 free to reach an address it learned somewhere else, and traffic sent straight
-to an IP never asks for a name. A `cidr` deny has no such gap.
+to an IP never asks for a name. Resolving the name on a timer closes most of
+that gap for a rule naming one host, but not for a glob. A `cidr` deny has no
+such gap at all.
 
 ## What the gateway refuses to start with
 
