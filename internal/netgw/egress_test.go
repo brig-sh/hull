@@ -15,8 +15,12 @@
 package netgw
 
 import (
+	"context"
+	"errors"
+	"net"
 	"net/netip"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -248,5 +252,170 @@ func TestPolicySummary(t *testing.T) {
 	p := mustPolicy(t, "deny", []string{"host=*.example.com", "cidr=10.0.0.0/8"}, []string{"cidr=169.254.0.0/16"})
 	if got := p.Summary(); got != "egress default deny (2 allow, 1 deny)" {
 		t.Fatalf("Summary() = %q", got)
+	}
+}
+
+// Keeping literal host rules resolved.
+
+// rotatingResolver answers with whatever addresses the test currently wants,
+// so a record set can be rotated under a running policy.
+type rotatingResolver struct {
+	fakeResolver
+	mu    sync.Mutex
+	now   []string
+	calls int
+}
+
+func newRotatingResolver(addrs ...string) *rotatingResolver {
+	return &rotatingResolver{now: addrs}
+}
+
+func (r *rotatingResolver) set(addrs ...string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.now = addrs
+}
+
+func (r *rotatingResolver) LookupIPAddr(_ context.Context, _ string) ([]net.IPAddr, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls++
+	if r.now == nil {
+		return nil, errors.New("resolver is unwell")
+	}
+	return v4addrs(r.now...), nil
+}
+
+// The point of the whole mechanism: a name in the rules keeps working when the
+// addresses behind it change, without the guest having to ask again.
+func TestRefreshHostsFollowsRotatingRecords(t *testing.T) {
+	policy := mustPolicy(t, "deny", []string{"host=api.example.com"}, nil)
+	res := newRotatingResolver("93.184.216.34", "93.184.216.35")
+	guest := addr(t, testGuestIP)
+
+	policy.RefreshHosts(context.Background(), res, time.Minute)
+	for _, ip := range []string{"93.184.216.34", "93.184.216.35"} {
+		if !policy.AllowsConnection(guest, addr(t, ip)) {
+			t.Fatalf("%s is not reachable after the first refresh", ip)
+		}
+	}
+
+	// The name now answers with a different set. Nothing asked the gateway's
+	// resolver in between, which is the case a guest holding a cached address
+	// puts us in.
+	res.set("93.184.216.40")
+	policy.RefreshHosts(context.Background(), res, time.Minute)
+	if !policy.AllowsConnection(guest, addr(t, "93.184.216.40")) {
+		t.Fatal("the address the name rotated to is not reachable")
+	}
+}
+
+// An address that leaves the rotation has to lose its allowance, or the set
+// only ever grows.
+func TestRefreshHostsExpiresDepartedAddresses(t *testing.T) {
+	policy := mustPolicy(t, "deny", []string{"host=api.example.com"}, nil)
+	res := newRotatingResolver("93.184.216.34")
+	guest, gone := addr(t, testGuestIP), addr(t, "93.184.216.34")
+
+	policy.RefreshHosts(context.Background(), res, time.Minute)
+	if !policy.AllowsConnection(guest, gone) {
+		t.Fatal("the resolved address is not reachable")
+	}
+
+	res.set("93.184.216.40")
+	// Age the first answer out rather than wait for the retention window.
+	policy.mu.Lock()
+	policy.resolvedAllow[gone] = time.Now().Add(-time.Second)
+	policy.mu.Unlock()
+	policy.RefreshHosts(context.Background(), res, time.Minute)
+
+	if policy.AllowsConnection(guest, gone) {
+		t.Fatal("an address the name no longer answers with is still reachable")
+	}
+}
+
+// A resolver that fails must not cut a sandbox's egress. The addresses stand
+// until they age out on their own.
+func TestRefreshHostsKeepsAddressesWhenTheResolverFails(t *testing.T) {
+	policy := mustPolicy(t, "deny", []string{"host=api.example.com"}, nil)
+	res := newRotatingResolver("93.184.216.34")
+	guest, dst := addr(t, testGuestIP), addr(t, "93.184.216.34")
+
+	policy.RefreshHosts(context.Background(), res, time.Minute)
+	res.set()
+	res.now = nil
+	policy.RefreshHosts(context.Background(), res, time.Minute)
+
+	if !policy.AllowsConnection(guest, dst) {
+		t.Fatal("a failed refresh dropped an address that was working")
+	}
+}
+
+// A deny rule naming one host is worth resolving too: it turns a best-effort
+// name deny into one that also covers traffic sent straight to the address.
+func TestRefreshHostsResolvesDenyRules(t *testing.T) {
+	policy := mustPolicy(t, "allow", nil, []string{"host=blocked.example.com"})
+	res := newRotatingResolver("93.184.216.34")
+	guest, dst := addr(t, testGuestIP), addr(t, "93.184.216.34")
+
+	if !policy.AllowsConnection(guest, dst) {
+		t.Fatal("allow-default should admit the address before the refresh")
+	}
+	policy.RefreshHosts(context.Background(), res, time.Minute)
+	if policy.AllowsConnection(guest, dst) {
+		t.Fatal("the resolved address of a denied host is still reachable")
+	}
+}
+
+// A glob names a set nobody can enumerate, so there is nothing to resolve
+// ahead of a query and the refresher must not try.
+func TestRefreshHostsSkipsGlobs(t *testing.T) {
+	policy := mustPolicy(t, "deny", []string{"host=*.example.com"}, nil)
+	res := newRotatingResolver("93.184.216.34")
+
+	policy.RefreshHosts(context.Background(), res, time.Minute)
+	res.mu.Lock()
+	calls := res.calls
+	res.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("the refresher tried to resolve a glob (%d lookups)", calls)
+	}
+	if policy.AllowsConnection(addr(t, testGuestIP), addr(t, "93.184.216.34")) {
+		t.Fatal("a glob was admitted without a guest ever asking for the name")
+	}
+}
+
+// WatchHosts is the loop the gateway runs. It has to resolve before its first
+// tick, or a guest connecting straight away waits a whole interval.
+func TestWatchHostsResolvesBeforeTheFirstTick(t *testing.T) {
+	policy := mustPolicy(t, "deny", []string{"host=api.example.com"}, nil)
+	res := newRotatingResolver("93.184.216.34")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go policy.WatchHosts(ctx, res, time.Hour)
+
+	guest, dst := addr(t, testGuestIP), addr(t, "93.184.216.34")
+	deadline := time.Now().Add(3 * time.Second)
+	for !policy.AllowsConnection(guest, dst) {
+		if time.Now().After(deadline) {
+			t.Fatal("WatchHosts did not resolve before its first tick")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestWatchHostsStopsWithTheContext(t *testing.T) {
+	policy := mustPolicy(t, "deny", []string{"host=api.example.com"}, nil)
+	res := newRotatingResolver("93.184.216.34")
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() { defer close(done); policy.WatchHosts(ctx, res, 10*time.Millisecond) }()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("WatchHosts outlived its context")
 	}
 }

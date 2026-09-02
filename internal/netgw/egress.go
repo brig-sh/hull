@@ -15,12 +15,15 @@
 package netgw
 
 import (
+	"context"
 	"fmt"
 	"net/netip"
 	"path"
 	"strings"
 	"sync"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // Egress policy: what a guest behind this gateway is allowed to reach.
@@ -77,6 +80,19 @@ func (r ruleSet) matchesAddr(addr netip.Addr) bool {
 	return false
 }
 
+// literalHosts returns the host rules that name one host rather than a set of
+// them. A glob cannot be resolved ahead of a query, because there is no way to
+// enumerate what "*.example.com" stands for, so only these can be kept warm.
+func (r ruleSet) literalHosts() []string {
+	var out []string
+	for _, glob := range r.hosts {
+		if !strings.ContainsAny(glob, "*?[") {
+			out = append(out, glob)
+		}
+	}
+	return out
+}
+
 func (r ruleSet) matchesHost(name string) bool {
 	for _, glob := range r.hosts {
 		if ok, err := path.Match(glob, name); err == nil && ok {
@@ -94,6 +110,12 @@ type Policy struct {
 
 	mu   sync.Mutex
 	pins map[netip.Addr]*guestPins
+	// Addresses learned by resolving the literal host rules on a timer,
+	// rather than from an answer a guest was given. They are not tied to a
+	// guest: the operator named the host in the policy, so it is reachable
+	// for everyone the policy covers.
+	resolvedAllow map[netip.Addr]time.Time
+	resolvedDeny  map[netip.Addr]time.Time
 }
 
 // guestPins holds one guest's pinned addresses and when each stops counting.
@@ -119,7 +141,12 @@ func ParseEgressPolicy(def string, allowRules, denyRules []string) (*Policy, err
 		return nil, fmt.Errorf("invalid --egress-default %q, expected allow or deny", def)
 	}
 
-	p := &Policy{def: d, pins: map[netip.Addr]*guestPins{}}
+	p := &Policy{
+		def:           d,
+		pins:          map[netip.Addr]*guestPins{},
+		resolvedAllow: map[netip.Addr]time.Time{},
+		resolvedDeny:  map[netip.Addr]time.Time{},
+	}
 	var err error
 	if p.allow, err = parseRules("--egress-allow", allowRules); err != nil {
 		return nil, err
@@ -270,20 +297,32 @@ func (p *Policy) pinned(guest, dst netip.Addr, deny bool) bool {
 }
 
 // AllowsConnection is the verdict for one connection from guest to dst. Deny
-// beats allow beats the default, and a pinned name counts the same as a CIDR
-// on its side.
+// beats allow beats the default. A CIDR rule, an address resolved from a
+// literal host rule, and an address pinned from an answer this guest was given
+// all count the same on their side.
 func (p *Policy) AllowsConnection(guest, dst netip.Addr) bool {
 	if p == nil {
 		return true
 	}
 	guest, dst = guest.Unmap(), dst.Unmap()
-	if p.deny.matchesAddr(dst) || p.pinned(guest, dst, true) {
+	if p.deny.matchesAddr(dst) || p.resolved(dst, true) || p.pinned(guest, dst, true) {
 		return false
 	}
-	if p.allow.matchesAddr(dst) || p.pinned(guest, dst, false) {
+	if p.allow.matchesAddr(dst) || p.resolved(dst, false) || p.pinned(guest, dst, false) {
 		return true
 	}
 	return p.def == EgressAllow
+}
+
+func (p *Policy) resolved(dst netip.Addr, deny bool) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	set := p.resolvedAllow
+	if deny {
+		set = p.resolvedDeny
+	}
+	expiry, ok := set[dst.Unmap()]
+	return ok && time.Now().Before(expiry)
 }
 
 // Summary describes the policy for the gateway's startup line.
@@ -293,4 +332,104 @@ func (p *Policy) Summary() string {
 	}
 	return fmt.Sprintf("egress default %s (%d allow, %d deny)",
 		p.def, len(p.allow.cidrs)+len(p.allow.hosts), len(p.deny.cidrs)+len(p.deny.hosts))
+}
+
+// Keeping literal host rules resolved.
+//
+// A host glob is enforced through the answers the gateway itself gave out, so
+// a name is only reachable once a guest has asked for it. That is enough while
+// the guest re-asks: the gateway advertises pinTTL, so a well-behaved resolver
+// comes back before the pin lapses and picks up whatever the name resolves to
+// now.
+//
+// It is not enough when the guest caches past the TTL, which plenty of runtimes
+// do, or holds an address across a rotation. The name is still allowed, the
+// address it now answers with was never pinned, and the connection is refused.
+// So the gateway also resolves the literal host rules on a timer and keeps the
+// addresses they currently answer with in a set of its own.
+//
+// Globs stay query-driven. There is no way to enumerate what "*.example.com"
+// stands for, so nothing can be resolved ahead of a guest asking.
+
+// hostRefreshRetentionFactor sets how long a resolved address outlives the
+// last refresh that saw it, as a multiple of the refresh interval. An address
+// has to go missing from several rounds before it loses its allowance, so a
+// resolver that fails once does not cut the guest's egress.
+const hostRefreshRetentionFactor = 3
+
+// WatchHosts keeps the addresses of the literal host rules current until ctx
+// is done. It returns immediately when there is nothing to resolve.
+func (p *Policy) WatchHosts(ctx context.Context, res resolver, interval time.Duration) {
+	if p == nil || interval <= 0 {
+		return
+	}
+	if len(p.allow.literalHosts())+len(p.deny.literalHosts()) == 0 {
+		return
+	}
+	retention := time.Duration(hostRefreshRetentionFactor) * interval
+
+	// Resolve once before the first tick so a guest that connects straight
+	// away is not held up for a whole interval.
+	p.RefreshHosts(ctx, res, retention)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			p.RefreshHosts(ctx, res, retention)
+		}
+	}
+}
+
+// RefreshHosts resolves every literal host rule once and records what came
+// back. A name that fails to resolve keeps the addresses it had: dropping them
+// on a transient failure would take a sandbox's egress down for as long as the
+// resolver is unwell.
+func (p *Policy) RefreshHosts(ctx context.Context, res resolver, retention time.Duration) {
+	if p == nil {
+		return
+	}
+	allow := resolveHosts(ctx, res, p.allow.literalHosts())
+	deny := resolveHosts(ctx, res, p.deny.literalHosts())
+	expiry := time.Now().Add(retention)
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, addr := range allow {
+		p.resolvedAllow[addr] = expiry
+	}
+	for _, addr := range deny {
+		p.resolvedDeny[addr] = expiry
+	}
+	now := time.Now()
+	for addr, at := range p.resolvedAllow {
+		if now.After(at) {
+			delete(p.resolvedAllow, addr)
+		}
+	}
+	for addr, at := range p.resolvedDeny {
+		if now.After(at) {
+			delete(p.resolvedDeny, addr)
+		}
+	}
+}
+
+func resolveHosts(ctx context.Context, res resolver, hosts []string) []netip.Addr {
+	var out []netip.Addr
+	for _, host := range hosts {
+		ips, err := res.LookupIPAddr(ctx, host)
+		if err != nil {
+			log.Warnf("egress: cannot resolve the allowed host %s, keeping its current addresses: %v", host, err)
+			continue
+		}
+		for _, ip := range ips {
+			if addr, ok := netip.AddrFromSlice(ip.IP); ok {
+				out = append(out, addr.Unmap())
+			}
+		}
+	}
+	return out
 }

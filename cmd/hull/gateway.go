@@ -72,6 +72,10 @@ Under --egress-default allow, a host deny is best effort: traffic sent
 straight to an IP never asks for a name, so it is not covered. A cidr deny
 is airtight.
 
+A rule naming one host is re-resolved every --egress-refresh, so a name whose
+addresses rotate keeps working for a guest that cached one of them. A glob
+cannot be resolved ahead of a query and stays driven by what guests ask for.
+
 Rules are checked at startup and the gateway refuses to start on one it
 cannot parse, rather than enforce part of what was asked for.
 
@@ -93,6 +97,7 @@ guest reaches the outside world over it, with or without a policy.`),
 			&cli.StringFlag{Name: "egress-default", Usage: "verdict for a connection no egress rule matches, allow or deny; without it egress is unfiltered"},
 			&cli.StringSliceFlag{Name: "egress-allow", Usage: "egress allow rule, host=<glob> or cidr=<cidr> (repeatable)"},
 			&cli.StringSliceFlag{Name: "egress-deny", Usage: "egress deny rule, host=<glob> or cidr=<cidr> (repeatable)"},
+			&cli.DurationFlag{Name: "egress-refresh", Value: egressRefreshDefault, Usage: "how often to re-resolve the named hosts in the egress rules, so a name whose addresses rotate keeps working; 0 disables"},
 			&cli.StringFlag{Name: "project", Usage: "compose project to supervise (enables restart policies)"},
 			&cli.DurationFlag{Name: "supervise-interval", Value: supervisorPollInterval, Usage: "liveness poll interval of the supervision loop"},
 		},
@@ -121,7 +126,7 @@ guest reaches the outside world over it, with or without a policy.`),
 				}
 				sup = s
 			}
-			return runGateway(ctx, cmd.String("socket"), cmd.String("api"), cmd.String("qemu-socket"), cmd.String("subnet"), cmd.String("gateway-ip"), forwards, cmd.StringSlice("host"), policy, sup)
+			return runGateway(ctx, cmd.String("socket"), cmd.String("api"), cmd.String("qemu-socket"), cmd.String("subnet"), cmd.String("gateway-ip"), forwards, cmd.StringSlice("host"), policy, cmd.Duration("egress-refresh"), sup)
 		},
 	}
 }
@@ -132,7 +137,13 @@ guest reaches the outside world over it, with or without a policy.`),
 // rather than waited out, because the caller has its own deadline.
 const gatewayShutdownGrace = 20 * time.Second
 
-func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, gatewayIP string, forwards map[string]string, hosts []string, policy *netgw.Policy, sup *supervisor) error {
+// egressRefreshDefault is how often a named host in the egress rules is
+// re-resolved. Short enough to follow a rotating record set well inside the
+// window a guest might hold an address for, long enough that a gateway with a
+// handful of rules is not a source of DNS traffic worth noticing.
+const egressRefreshDefault = 30 * time.Second
+
+func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, gatewayIP string, forwards map[string]string, hosts []string, policy *netgw.Policy, egressRefresh time.Duration, sup *supervisor) error {
 	// Serve service names from the gateway's DNS in addition to the
 	// /etc/hosts injection: guests that resolve via plain DNS (unikernel
 	// flavors without an nsswitch) get name resolution for free, and images
@@ -163,10 +174,17 @@ func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, ga
 		Forwards:          forwards,
 		DNSZones:          dns,
 		Egress:            policy,
+		EgressRefresh:     egressRefresh,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create virtual network: %w", err)
 	}
+
+	// Keep the named hosts in the rules resolved for as long as the gateway
+	// runs, so the policy follows a name whose addresses rotate.
+	netCtx, stopNet := context.WithCancel(ctx)
+	defer stopNet()
+	vn.Start(netCtx)
 
 	l, err := claimUnixSocket(sockPath)
 	if err != nil {
