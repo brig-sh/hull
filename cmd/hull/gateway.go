@@ -79,6 +79,11 @@ cannot be resolved ahead of a query and stays driven by what guests ask for.
 Rules are checked at startup and the gateway refuses to start on one it
 cannot parse, rather than enforce part of what was asked for.
 
+A policy belongs to this gateway, not to a guest. Every microVM behind it
+answers to all of these rules, and no rule can name one member. A sandbox
+that needs an egress policy of its own needs a gateway of its own, so run
+one gateway per sandbox.
+
 Two things this does not do. It does not separate one guest from another:
 guests share a switch, and traffic between them never reaches the filter.
 And --forward is ingress, not egress; it exposes a guest port on the host
