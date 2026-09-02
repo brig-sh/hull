@@ -8,34 +8,70 @@ outside world already passes through, which is where egress filtering sits.
 Filtering is off unless `--egress-default` is given. Without it the gateway
 behaves as it always has and forwards everything.
 
-## Give each sandbox its own gateway
+## Which guests a rule covers
 
-**A policy belongs to a gateway, not to a guest.** The rules are flags on the
-gateway process, and every microVM behind that gateway answers to all of them.
-No rule can be written to apply to one member and not another.
+A rule with no prefix covers every microVM behind the gateway. A rule written
+`<member>:host=...` or `<member>:cidr=...` covers that member alone:
 
-So a sandbox that needs an egress policy of its own needs a network of its
-own. Run one gateway per sandbox and the boundary lands where you want it: one
-gateway, one guest, one policy. That is the intended shape, and every claim on
-this page about what a guest can reach assumes it.
+```
+hull network-gateway --socket ... \
+  --egress-default deny \
+  --egress-allow 'host=*.githubusercontent.com' \
+  --egress-allow api:host=api.example.com \
+  --egress-deny  db:cidr=0.0.0.0/0
+```
 
-Sharing a gateway shares the policy, in both directions. `hull compose up`
-starts one gateway per project, so every service in a project answers to the
-same rules, and `hull run --gateway-sock` joins an existing gateway and takes
-its policy. That suits a project whose services are one unit of trust. It does
-not suit two agents that must not reach the same things: put those on separate
-gateways.
+Every guest may reach `*.githubusercontent.com`. Only `api` may reach
+`api.example.com`. `db` may reach nothing outside the subnet at all. A member
+with rules of its own answers to those and to the unprefixed ones, and deny
+still beats allow, so a member deny narrows a shared allow.
+
+The member is the compose service name, or the instance name for a `hull run`.
+Pass `--gateway-member` to a `run` to choose the name it answers to. A member
+that joins without a name, which is what an older hull does, is covered by the
+unprefixed rules only.
+
+## What makes a member name trustworthy
+
+A packet's source address is written by the guest, so a rule keyed on it would
+be a rule a guest could opt into by lying. The gateway does not read identity
+from the frame. Each member declares who it is when it joins, in the same
+message that hands over its socket, and the gateway then holds it to that:
+every frame arriving on that socket must carry that member's own IP and MAC,
+and any frame that does not is dropped.
+
+Both addresses matter. The IP source is what the policy reads, so a guest
+writing another member's address would inherit its rules. The MAC source is
+what the switch builds its forwarding table from, so a guest writing another
+member's MAC would take over its port and receive its traffic. ARP carries its
+own copy of both, so those are checked against the same member too.
+
+A guest that has no address yet may send DHCP from `0.0.0.0` and may send an
+ARP probe. Nothing else is allowed from an address the member does not hold.
+
+## Still give each sandbox its own gateway
+
+Per-member rules decide what a guest may reach outside. They do not separate
+guests from each other. Traffic between two guests on one gateway is switched
+at layer 2 and never reaches the filter, so a member denied all egress can
+still reach a member that has it, and use it. Nothing in a rule changes that.
+
+So an agent that must not reach what another agent reaches still needs a
+gateway of its own. Per-member rules are for guests that already trust each
+other and need different reach: the services of one project, where the
+database talks to nothing and the API to one vendor.
 
 Per-sandbox networks are brig-sh/brig#15.
 
 ## The flags
 
 ```
---egress-default allow|deny        the verdict for a connection no rule matches
---egress-allow host=<glob>         repeatable
---egress-allow cidr=<cidr>         repeatable
---egress-deny  host=<glob>         repeatable
---egress-deny  cidr=<cidr>         repeatable
+--egress-default allow|deny             the verdict for a connection no rule matches
+--egress-allow [<member>:]host=<glob>   repeatable
+--egress-allow [<member>:]cidr=<cidr>   repeatable
+--egress-deny  [<member>:]host=<glob>   repeatable
+--egress-deny  [<member>:]cidr=<cidr>   repeatable
+--egress-refresh <duration>             how often to re-resolve named hosts
 ```
 
 A sandbox that should reach two APIs and nothing else:
@@ -98,11 +134,11 @@ currently answer with. An address that stops appearing loses its place after
 three rounds, so a resolver that fails once does not cut a sandbox's egress,
 and one that stays broken does not keep an address alive forever.
 
-These addresses are not held per guest, and a pin is. The operator wrote the
-host into the policy, so it is reachable for every guest behind that gateway,
-whether or not the guest ever asked for the name. That grants nothing a guest
-could not already have had by resolving the name itself, because one gateway
-carries one policy for everything on it.
+These addresses are not held per guest, and a pin is. They are held under the
+scope of the rule that resolved them: an unprefixed rule makes them reachable
+for every member, and a `<member>:` rule for that member alone. A guest that
+never asked for the name still reaches what an unprefixed rule resolved, which
+grants nothing it could not have had by resolving the name itself.
 
 This works for a rule that names one host, `host=api.example.com`. A glob
 cannot be resolved ahead of a query, because there is no way to enumerate what
@@ -142,7 +178,8 @@ is filtering.
 **Guest to guest.** Guests behind one gateway share a switch, and traffic
 between them is forwarded at layer 2 without reaching the netstack. No egress
 rule applies to it, and `--egress-default deny` does not separate one guest
-from another. Separation is a network per sandbox, as above.
+from another, whether the rule names a member or not. Separation is a network
+per sandbox, as above.
 
 **Ingress.** `--forward` exposes a guest's port on the host. It is a host
 exposure, it is not egress, and no egress rule applies to it.
@@ -151,14 +188,6 @@ exposure, it is not egress, and no egress rule applies to it.
 treats the destination as one of its own addresses and replies, so an echo
 request never leaves the host. A ping to a blocked address still succeeds and
 still tells the guest nothing about the outside world.
-
-**Source addresses.** The policy reads the source address out of the packet,
-and a guest picks its own. One guest can therefore borrow another's resolved
-answers by claiming its address, which the shared switch makes possible in the
-first place. It widens nothing: a gateway carries one policy for every guest
-on it, so those addresses are the ones the borrower's own queries would have
-been answered with anyway. Binding an address to a member belongs with a
-network per sandbox, not with a rule here.
 
 **IPv6.** The netstack does not forward IPv6 yet: it registers no IPv6
 protocol, so a guest's IPv6 frame is counted as an unsupported protocol and
