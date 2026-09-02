@@ -78,6 +78,12 @@ currently answer with. An address that stops appearing loses its place after
 three rounds, so a resolver that fails once does not cut a sandbox's egress,
 and one that stays broken does not keep an address alive forever.
 
+These addresses are not held per guest, and a pin is. The operator wrote the
+host into the policy, so it is reachable for every guest behind that gateway,
+whether or not the guest ever asked for the name. That grants nothing a guest
+could not already have had by resolving the name itself, because one gateway
+carries one policy for everything on it.
+
 This works for a rule that names one host, `host=api.example.com`. A glob
 cannot be resolved ahead of a query, because there is no way to enumerate what
 `*.example.com` stands for, so globs stay driven by what guests ask for.
