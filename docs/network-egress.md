@@ -49,17 +49,28 @@ own copy of both, so those are checked against the same member too.
 A guest that has no address yet may send DHCP from `0.0.0.0` and may send an
 ARP probe. Nothing else is allowed from an address the member does not hold.
 
-## Still give each sandbox its own gateway
+## Guests are kept apart from each other
 
-Per-member rules decide what a guest may reach outside. They do not separate
-guests from each other. Traffic between two guests on one gateway is switched
-at layer 2 and never reaches the filter, so a member denied all egress can
-still reach a member that has it, and use it. Nothing in a rule changes that.
+A rule saying `db` may reach nothing is worth little if `db` can ask `api` to
+fetch on its behalf. Guests behind one gateway share a switch, so without
+something more the rule holds only while the neighbours decline to help.
 
-So an agent that must not reach what another agent reaches still needs a
-gateway of its own. Per-member rules are for guests that already trust each
-other and need different reach: the services of one project, where the
-database talks to nothing and the API to one vendor.
+Writing any rule that names a member therefore isolates the guests from one
+another. Each still reaches the gateway, its DNS, and whatever its own rules
+allow. None reaches another guest, and none can find out that another exists:
+an ARP for a peer is dropped, and so is a peer's broadcast on the way in. A
+guest can still ask for an address and still ARP for the gateway, because
+nothing boots without those.
+
+`--isolate-peers` turns it on with no rule written. A project whose services
+talk to each other, which is what a compose project usually is, wants neither
+and gets neither.
+
+What this does not give you is a separate failure domain. One gateway is one
+process holding one netstack: a fault in it is a fault for every guest behind
+it, and every guest shares its subnet, its DNS and its host-side forwards. For
+guests that are separate units of trust, a gateway each is still the stronger
+arrangement, and it costs about 29 MB of RSS per gateway.
 
 Per-sandbox networks are brig-sh/brig#15.
 
@@ -72,6 +83,7 @@ Per-sandbox networks are brig-sh/brig#15.
 --egress-deny  [<member>:]host=<glob>   repeatable
 --egress-deny  [<member>:]cidr=<cidr>   repeatable
 --egress-refresh <duration>             how often to re-resolve named hosts
+--isolate-peers                         stop guests reaching each other
 ```
 
 A sandbox that should reach two APIs and nothing else:
@@ -175,11 +187,11 @@ is filtering.
 
 ## What this does not cover
 
-**Guest to guest.** Guests behind one gateway share a switch, and traffic
-between them is forwarded at layer 2 without reaching the netstack. No egress
-rule applies to it, and `--egress-default deny` does not separate one guest
-from another, whether the rule names a member or not. Separation is a network
-per sandbox, as above.
+**Guest to guest, when nothing isolates them.** Without a member rule and
+without `--isolate-peers`, guests behind one gateway share a switch and traffic
+between them is forwarded at layer 2 without reaching the filter. No egress
+rule applies to it, so `--egress-default deny` alone does not stop one guest
+reaching another. See above for what turns that off.
 
 **Ingress.** `--forward` exposes a guest's port on the host. It is a host
 exposure, it is not egress, and no egress rule applies to it.
