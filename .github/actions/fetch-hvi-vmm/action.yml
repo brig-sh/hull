@@ -1,33 +1,12 @@
 name: Fetch hvi-vmm submodule
 description: >
-  Fetch the hvi-vmm submodule with a repo-scoped deploy key when one is
-  available, falling back to an unauthenticated fetch once hvi-vmm is
-  public. hvi-vmm is a separate private repo, so this job's own checkout
-  token cannot read it -- and the deploy key is fetched here rather than by
-  actions/checkout, because checkout would reuse it for this repository too,
-  and a deploy key is valid for exactly one.
-
-inputs:
-  hvi-deploy-key:
-    description: Read-only deploy key for the hvi-vmm repo (secrets.HVI_DEPLOY_KEY)
-    required: false
-    default: ""
+  Fetch the hvi-vmm submodule. It is a public repository, so the checkout
+  needs no credentials; this stays a separate step, and a separate action,
+  so every job that builds or boots hvi asks for the submodule the same way.
 
 runs:
   using: composite
   steps:
     - name: Fetch the hvi-vmm submodule
       shell: bash
-      env:
-        HVI_DEPLOY_KEY: ${{ inputs.hvi-deploy-key }}
-      run: |
-        if [ -n "$HVI_DEPLOY_KEY" ]; then
-          KEY="$RUNNER_TEMP/hvi_deploy"
-          printf '%s\n' "$HVI_DEPLOY_KEY" > "$KEY"
-          chmod 600 "$KEY"
-          GIT_SSH_COMMAND="ssh -i $KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \
-            git submodule update --init hvi-vmm
-          rm -f "$KEY"
-        else
-          git submodule update --init hvi-vmm
-        fi
+      run: git submodule update --init hvi-vmm

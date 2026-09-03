@@ -78,12 +78,8 @@ jobs:
           cache: false
 
       # hvi-vmm is a submodule and a shipped binary, so a release cannot be cut
-      # without it. It is a separate private repo, so this job's own token
-      # cannot read it -- see .github/actions/fetch-hvi-vmm for why it is
-      # fetched here rather than by actions/checkout.
+      # without it.
       - uses: ./.github/actions/fetch-hvi-vmm
-        with:
-          hvi-deploy-key: ${{ secrets.HVI_DEPLOY_KEY }}
 
       - name: Check the tag matches VERSION
         # Through env, not interpolated into the script. A dispatch input that
@@ -322,8 +318,6 @@ jobs:
       # The app bundle carries hvi, so this job builds it too and needs the
       # submodule for the same reason the release job does.
       - uses: ./.github/actions/fetch-hvi-vmm
-        with:
-          hvi-deploy-key: ${{ secrets.HVI_DEPLOY_KEY }}
 
       - name: Install create-dmg
         run: test -x "$(brew --prefix)/bin/create-dmg" || brew install create-dmg
