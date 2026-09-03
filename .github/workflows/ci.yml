@@ -150,13 +150,9 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      # hvi-vmm is a submodule that `make macos` builds and signs, and a
-      # separate private repo, so this job's own token cannot read it --
-      # see .github/actions/fetch-hvi-vmm for why it is fetched here rather
-      # than by actions/checkout.
+      # hvi-vmm is a submodule that `make macos` builds and signs, so this
+      # job needs it checked out.
       - uses: ./.github/actions/fetch-hvi-vmm
-        with:
-          hvi-deploy-key: ${{ secrets.HVI_DEPLOY_KEY }}
 
       # Self-hosted runners provide their own Go toolchain; setup-go is only
       # needed on ephemeral GitHub-hosted runners.
@@ -234,13 +230,9 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      # hvi-vmm is a submodule that `make macos` builds and signs, and a
-      # separate private repo, so this job's own token cannot read it --
-      # see .github/actions/fetch-hvi-vmm for why it is fetched here rather
-      # than by actions/checkout.
+      # hvi-vmm is a submodule that `make macos` builds and signs, so this
+      # job needs it checked out.
       - uses: ./.github/actions/fetch-hvi-vmm
-        with:
-          hvi-deploy-key: ${{ secrets.HVI_DEPLOY_KEY }}
 
       # Self-hosted runners provide their own Go toolchain; setup-go is only
       # needed on ephemeral GitHub-hosted runners.
@@ -472,11 +464,8 @@ jobs:
         run: echo "HULL_STORE_DIR=$HOME/hull-ci-store" >> "$GITHUB_ENV"
 
       # hvi-vmm is a submodule that `make macos` builds and signs -- and this job
-      # boots the hvi backend, so it genuinely needs it. See
-      # .github/actions/fetch-hvi-vmm for the deploy-key dance.
+      # boots the hvi backend, so it genuinely needs it.
       - uses: ./.github/actions/fetch-hvi-vmm
-        with:
-          hvi-deploy-key: ${{ secrets.HVI_DEPLOY_KEY }}
 
       # The signed build is the whole point here: an ad-hoc signature boots fine
       # with SIP off and is refused the entitlement with SIP on. Sign with the
@@ -624,11 +613,8 @@ jobs:
       - name: Choose a short store dir (macOS SUN_LEN)
         run: echo "HULL_STORE_DIR=$HOME/hull-ci-store" >> "$GITHUB_ENV"
 
-      # This job boots the hvi backend, so it needs the submodule. See
-      # .github/actions/fetch-hvi-vmm for the deploy-key dance.
+      # This job boots the hvi backend, so it needs the submodule.
       - uses: ./.github/actions/fetch-hvi-vmm
-        with:
-          hvi-deploy-key: ${{ secrets.HVI_DEPLOY_KEY }}
 
       # Ad-hoc build, no keychain and no Developer ID: `make macos` with no
       # identity still embeds the entitlements (the build job's check proves it),
