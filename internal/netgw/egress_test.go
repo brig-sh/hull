@@ -419,3 +419,25 @@ func TestWatchHostsStopsWithTheContext(t *testing.T) {
 		t.Fatal("WatchHosts outlived its context")
 	}
 }
+
+// A host rule is enforced on the addresses the gateway resolved, so it admits
+// every name that answers on one of them. Under deny-default the resolver
+// refuses the second name and the guest reaches it anyway, because the filter
+// never sees a name. docs/network-egress.md says so, and this pins it.
+func TestHostRuleAuthorizesTheAddressNotTheName(t *testing.T) {
+	p := mustPolicy(t, "deny", []string{"host=api.example.com"}, nil)
+	guest := addr(t, "10.87.0.2")
+	shared := addr(t, "203.0.113.10")
+
+	// The gateway answered for the allowed name, so its address is pinned.
+	p.Pin(guest, []netip.Addr{shared}, false)
+
+	// Another name on that address is refused by the resolver.
+	if p.AllowsQuery("other.example.net") {
+		t.Fatal("a name no allow glob covers should be refused")
+	}
+	// And reachable regardless: the connection carries the address alone.
+	if !p.AllowsConnection(guest, shared) {
+		t.Fatal("a pinned address admits every name behind it")
+	}
+}

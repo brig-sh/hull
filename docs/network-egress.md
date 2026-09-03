@@ -38,7 +38,7 @@ Per-sandbox networks are brig-sh/brig#15.
 --egress-deny  cidr=<cidr>         repeatable
 ```
 
-A sandbox that should reach two APIs and nothing else:
+A sandbox that should reach two APIs:
 
 ```
 hull network-gateway --socket ... \
@@ -83,6 +83,21 @@ never asked never inherits another's.
 The gateway tells the guest the same TTL it enforces, so what the guest caches
 and what the gateway honours cannot drift apart, and adds a short grace period
 for a guest that connects on an answer that has just expired.
+
+## A host rule authorizes an address
+
+The filter sees addresses. A `host` rule is enforced on the addresses the
+gateway resolved for that name, so it admits whatever else answers on them.
+Two names behind one address are one destination here.
+
+That matters for shared front ends. If `api.example.com` sits behind a CDN or
+a reverse proxy, its address serves other names too, and a guest reaches them
+with its own `Host` header or SNI. The resolver refusing those names does not
+stop it, because the guest already holds an address that serves them.
+
+So a `host` rule is as narrow as the address behind the name. For an API on a
+dedicated address it is exact. For one on shared infrastructure it is not, and
+a `cidr` deny is what narrows it.
 
 ## Names whose addresses move
 
