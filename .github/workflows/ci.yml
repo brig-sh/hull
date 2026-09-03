@@ -226,7 +226,21 @@ jobs:
     # the only thing between a fork PR and a machine that holds the Developer
     # ID certificate, the Homebrew cache and the module cache that the release
     # job reuses.
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","macOS","ARM64"]') || fromJSON('["macos-15"]') }}
+    #
+    # The self-hosted side asks for `gui`, so this job only lands on a runner
+    # with a console session. The checkpoint case in the PTY matrix is the
+    # reason: it has never passed on a runner without one (0 for 4 on
+    # mac-dev-01, against 15 of 16 on msuch), and it fails as "checkpoint did
+    # not complete within 60s" while ordinary boots on the same machine pass.
+    # SIP is not the discriminator -- an EC2 Mac with SIP on checkpoints in
+    # about half a second, and it has a console session. The installer job in
+    # release.yml already pins itself the same way, for Finder.
+    #
+    # This narrows the pool to the msuch pair, so the job queues more than it
+    # did. If the failures stop, a console session was the cause and the next
+    # question is why VZ save needs one; if msuch still trips occasionally,
+    # what is left is load on the shared Mac.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","macOS","ARM64","gui"]') || fromJSON('["macos-15"]') }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
