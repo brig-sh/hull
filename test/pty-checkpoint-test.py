@@ -12,6 +12,7 @@ import os, pty, re, sys, time, subprocess, select, fcntl, termios, signal as sig
 
 BIN = os.environ.get("HULL_BIN", "dist/hull_arm64")
 STORE = os.environ.get("HULL_STORE_DIR", "")
+LOG_DIR = os.environ.get("HULL_TEST_LOG_DIR", "")
 GLOBAL_ARGS = (["--store-dir", STORE] if STORE else [])
 IMAGE = os.environ.get("HULL_TEST_IMAGE", "harbor.nbfc.io/nubificus/urunc-ubuntu-vz:aarch64")
 BOOT_TIMEOUT = int(os.environ.get("HULL_TEST_BOOT_TIMEOUT", "180"))
@@ -29,11 +30,49 @@ def cleanup():
         child.kill()
 
 
+def preserve_log(tag):
+    """Write the console transcript out, so a failure leaves evidence.
+
+    `hull logs` is not the source here. This harness boots a *foreground* run,
+    and launchVMM only opens the instance log file in the detached branch: in
+    the foreground it hands the VMM this process's stdout, which is the PTY.
+    So instances/<name>/log is never created, and asking for it got a "log file
+    not found" that read like the log had been deleted.
+
+    The transcript is the same bytes the instance log would have held, and it
+    is the one place vz-runner's reason for refusing a checkpoint appears --
+    checkpoint.go times out precisely because it cannot see that reason.
+    Writes <HULL_TEST_LOG_DIR>/<name>.log when that is set. Returns whether it
+    captured anything.
+    """
+    if not LOG_DIR:
+        return True
+    os.makedirs(LOG_DIR, exist_ok=True)
+    out = os.path.join(LOG_DIR, f"{name}.log")
+    if not all_output:
+        print(f"no console transcript to preserve ({tag})")
+        return False
+    with open(out, "wb") as f:
+        f.write(all_output)
+    print(f"console transcript preserved at {out} ({len(all_output)} bytes)")
+    return True
+
+
 def die(reason):
+    # Read whatever is still sitting in the PTY before reporting anything.
+    # `hull checkpoint` blocks for as long as it waits -- 60s on a timeout --
+    # and nothing drains the terminal meanwhile, so vz-runner's own account of
+    # what happened ("checkpoint: pausing VM", a pause or save failure, the
+    # disk-clone exit status) is buffered and unread at exactly the moment we
+    # want it. Without this the transcript stops at the last tick before the
+    # checkpoint and looks as though the guest froze.
+    if master is not None:
+        drain(2)
     print(f"FAIL: {reason}")
     print("---- console transcript ----")
     sys.stdout.buffer.write(all_output[-4000:]); sys.stdout.flush()
     print("\n----------------------------")
+    preserve_log("fail")
     cleanup()
     sys.exit(1)
 
@@ -139,5 +178,10 @@ if not (at_checkpoint - 1 <= first <= at_checkpoint + 3):
 
 # --- 5. teardown -------------------------------------------------------------
 stop_foreground_run()
+captured = preserve_log("pass")
 cleanup()
+if not captured:
+    print("FAIL: the instance log was not captured, so a failing run would "
+          "upload nothing")
+    sys.exit(1)
 print("PASS")

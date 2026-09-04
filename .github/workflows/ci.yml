@@ -325,6 +325,8 @@ jobs:
           # Persistent store on the runner: the pulled image is cached
           # across runs; instances are uniquely named and cleaned up.
           HULL_STORE_DIR: ${{ runner.temp }}/../urunc-ci-store
+          # Outside the store, which detach-store unmounts below.
+          HULL_TEST_LOG_DIR: ${{ runner.temp }}/hull-test-logs
         run: |
           set -e
           R=${GITHUB_RUN_ID}
@@ -337,6 +339,20 @@ jobs:
           python3 test/pty-jobcontrol-test.py "$HULL_BIN" vz   ci-jv-$R
           python3 test/pty-jobcontrol-test.py "$HULL_BIN" qemu ci-jq-$R
           python3 test/pty-checkpoint-test.py ci-ck-$R
+
+      # A checkpoint timeout used to say "see the instance log", and nobody
+      # could: the harness boots a foreground run, and launchVMM only opens
+      # that file when detached. The console the VMM actually writes to is the
+      # harness's PTY, so the harness now writes its own transcript to
+      # HULL_TEST_LOG_DIR and this carries it off the runner. That transcript
+      # is where vz-runner's reason for refusing a checkpoint appears.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: failure() && runner.environment == 'self-hosted'
+        with:
+          name: console-transcripts-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/hull-test-logs
+          if-no-files-found: warn
+          retention-days: 14
 
       # Seed this store's boot assets. They live under the store dir, so a
       # fresh store has none and the test below would skip rather than run --

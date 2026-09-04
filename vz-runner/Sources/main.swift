@@ -185,11 +185,14 @@ struct VMConfig {
     }
 
     // Checkpoint artifact layout inside stateDir. latest.json is written
-    // last and acts as the completion marker the CLI polls for.
+    // last and acts as the completion marker the CLI polls for; error is the
+    // other half of that signal, so a checkpoint that cannot be taken is
+    // reported at once rather than waited out.
     var machineIDPath: String { stateDir + "/machine-id" }
     var vmStatePath: String { stateDir + "/vm.vzstate" }
     var diskStatePath: String { stateDir + "/rootfs.img" }
     var manifestPath: String { stateDir + "/latest.json" }
+    var errorPath: String { stateDir + "/error" }
 }
 
 // MARK: - Shell Helper
@@ -1001,22 +1004,37 @@ class VZManager: NSObject, VZVirtualMachineDelegate {
     // of the rootfs disk into the state dir, and resumes. Triggered by
     // SIGUSR1. The manifest (latest.json) is written last, so its mtime is
     // the "checkpoint finished" signal for the CLI.
+    // failCheckpoint records why a checkpoint could not be taken, so the CLI
+    // does not sit out its whole timeout waiting for a manifest that is never
+    // coming. The console line stays: it is what a human reads.
+    func failCheckpoint(_ reason: String) {
+        print("VZRunner: checkpoint: \(reason)", to: &standardError)
+        fflush(stderr)
+        guard !config.stateDir.isEmpty else { return }
+        try? reason.write(toFile: config.errorPath, atomically: true, encoding: .utf8)
+    }
+
     func checkpoint() {
         guard !config.stateDir.isEmpty else {
+            // Nowhere to write a marker, so the console is all there is.
             print("VZRunner: checkpoint requested but no --state-dir configured", to: &standardError)
             return
         }
         guard let vm = self.vm, vm.state == .running, !isShuttingDown, !isCheckpointing else {
-            print("VZRunner: checkpoint requested but VM is not in a checkpointable state", to: &standardError)
+            failCheckpoint("requested but VM is not in a checkpointable state")
             return
         }
         isCheckpointing = true
         let started = Date()
+        // A marker from an earlier attempt describes an earlier attempt. The
+        // CLI also ignores a stale one by mtime, but leaving it would be a
+        // trap for anything else reading the directory.
+        try? FileManager.default.removeItem(atPath: config.errorPath)
         print("VZRunner: checkpoint: pausing VM", to: &standardError)
         fflush(stderr)
         vm.pause { pauseResult in
             if case .failure(let error) = pauseResult {
-                print("VZRunner: checkpoint: pause failed: \(error)", to: &standardError)
+                self.failCheckpoint("pause failed: \(error)")
                 self.isCheckpointing = false
                 return
             }
@@ -1024,7 +1042,7 @@ class VZManager: NSObject, VZVirtualMachineDelegate {
             vm.saveMachineStateTo(url: URL(fileURLWithPath: self.config.vmStatePath)) { saveError in
                 var diskCloned = false
                 if let saveError = saveError {
-                    print("VZRunner: checkpoint: state save failed: \(saveError)", to: &standardError)
+                    self.failCheckpoint("state save failed: \(saveError)")
                 } else if !self.config.rootfsPath.isEmpty {
                     // Clone the paused disk next to the machine state so the
                     // pair is consistent; cp -c is an APFS clonefile (CoW).
