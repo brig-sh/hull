@@ -38,6 +38,7 @@ const (
 	ckptStateFile = "vm.vzstate"
 	ckptDiskFile  = "rootfs.img"
 	ckptManifest  = "latest.json"
+	ckptError     = "error"
 )
 
 func instanceCheckpointDir(s *store.Store, id string) string {
@@ -115,14 +116,49 @@ func checkpointInstance(_ context.Context, cmd *cli.Command) error {
 				ckptStateFile, float64(stateSize)/(1024*1024), diskNote)
 			return nil
 		}
-		// The runner logs the reason when a checkpoint is refused or fails;
-		// it stays alive either way, so all we can do here is time out.
+		// A checkpoint the runner has already given up on. It writes the
+		// reason beside the state file, so report that instead of waiting out
+		// a timeout for a manifest that is not coming: a save refused in
+		// 200ms used to surface a minute later as "did not complete", which
+		// says nothing and reads like the machine is slow.
+		if reason, ok := freshCheckpointFailure(ckptDir, started); ok {
+			return fmt.Errorf("checkpoint failed: %s", reason)
+		}
+		// The runner stays alive whether or not it managed the checkpoint, so
+		// its exit is a separate failure. Where its reason lands depends on
+		// how the instance was started, and saying "the instance log"
+		// unconditionally sent people looking for a file that does not exist:
+		// launchVMM only opens the log in the detached branch, and a
+		// foreground run gives the VMM the terminal instead.
 		if err := syscall.Kill(state.PID, 0); err != nil {
-			return errors.New("vz-runner exited while checkpointing; see the instance log")
+			return errors.New("vz-runner exited while checkpointing; the reason is on the guest console (`hull logs` for a detached run, the terminal for a foreground one)")
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	return fmt.Errorf("checkpoint did not complete within %ds; see the instance log", cmd.Int("timeout"))
+	return fmt.Errorf("checkpoint did not complete within %ds; the reason, if the runner gave one, is on the guest console (`hull logs` for a detached run, the terminal for a foreground one)", cmd.Int("timeout"))
+}
+
+// freshCheckpointFailure reads the reason vz-runner records when it cannot
+// take a checkpoint.
+//
+// Only a marker written after this attempt began counts. The checkpoint
+// directory outlives a single attempt, so an older file describes an older
+// one, and reporting that would turn a slow checkpoint into a phantom
+// failure. This is the same mtime rule the manifest is read under.
+func freshCheckpointFailure(ckptDir string, started time.Time) (string, bool) {
+	info, err := os.Stat(filepath.Join(ckptDir, ckptError))
+	if err != nil || info.ModTime().Before(started) {
+		return "", false
+	}
+	data, err := os.ReadFile(filepath.Join(ckptDir, ckptError))
+	if err != nil {
+		return "", false
+	}
+	reason := strings.TrimSpace(string(data))
+	if reason == "" {
+		return "", false
+	}
+	return reason, true
 }
 
 func restoreCommand() *cli.Command {
