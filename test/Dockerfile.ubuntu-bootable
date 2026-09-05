@@ -1,0 +1,23 @@
+FROM ubuntu:latest
+
+# Install kernel
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends linux-image-generic && \
+    rm -rf /var/lib/apt/lists/*
+
+# Create init script  
+RUN echo '#!/bin/sh' > /init && \
+    echo 'echo "=== Linux Booting ===" ' >> /init && \
+    echo 'mount -t proc proc /proc' >> /init && \
+    echo 'mount -t sysfs sysfs /sys' >> /init && \
+    echo 'mount -t devtmpfs devtmpfs /dev' >> /init && \
+    echo 'echo "Linux kernel $(uname -r)"' >> /init && \
+    echo 'echo "Launching interactive shell..."' >> /init && \
+    echo 'exec /bin/bash' >> /init && \
+    chmod +x /init
+
+LABEL com.urunc.unikernel.kernel="/.boot/kernel"
+LABEL com.urunc.unikernel.hypervisor="qemu"
+LABEL com.urunc.unikernel.cmdline="root=/dev/nfs nfsroot=/ init=/init console=ttyS0 rw"
+
+ENTRYPOINT ["/init"]

@@ -1,0 +1,18 @@
+name: Verify vz-runner entitlement
+description: >
+  Assert the built vz-runner binary carries the virtualization entitlement.
+  The entitlement has to be on the binary before Virtualization.framework
+  can honor it, so this turns a bare "the VM did not boot" into "the VM did
+  not boot AND the entitlement was missing" when something upstream drops
+  it.
+
+runs:
+  using: composite
+  steps:
+    - name: Verify vz-runner entitlement
+      shell: bash
+      run: |
+        codesign -d --entitlements - --xml \
+          vz-runner/.build/arm64-apple-macosx/release/vz-runner \
+          | grep -q com.apple.security.virtualization
+        echo "virtualization entitlement present"

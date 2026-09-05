@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="hull">
+  <title>hull</title>
+  <rect width="256" height="256" fill="#0E2233"/>
+  <defs><clipPath id="hull-av-in"><circle cx="128" cy="128" r="70"/></clipPath></defs>
+  <circle cx="128" cy="128" r="72" fill="#071521"/>
+  <g clip-path="url(#hull-av-in)" fill="none" stroke="#E7A33E" stroke-width="20" stroke-linecap="round">
+  <path d="M46 132 C72 132 78 112 104 112 C130 112 138 132 164 132 C186 132 196 118 214 116"/><path d="M46 178 C72 178 78 158 104 158 C130 158 138 178 164 178 C186 178 196 164 214 162"/>
+  </g>
+  <circle cx="128" cy="128" r="84" fill="none" stroke="#F2EFE6" stroke-width="22"/>
+  <g fill="#0E2233">
+  <circle cx="212" cy="128" r="6"/>
+  <circle cx="187.396" cy="187.396" r="6"/>
+  <circle cx="128" cy="212" r="6"/>
+  <circle cx="68.6036" cy="187.396" r="6"/>
+  <circle cx="44" cy="128" r="6"/>
+  <circle cx="68.6036" cy="68.6036" r="6"/>
+  <circle cx="128" cy="44" r="6"/>
+  <circle cx="187.396" cy="68.6036" r="6"/>
+  </g>
+</svg>

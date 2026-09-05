@@ -1,0 +1,12 @@
+name: Fetch hvi-vmm submodule
+description: >
+  Fetch the hvi-vmm submodule. It is a public repository, so the checkout
+  needs no credentials; this stays a separate step, and a separate action,
+  so every job that builds or boots hvi asks for the submodule the same way.
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch the hvi-vmm submodule
+      shell: bash
+      run: git submodule update --init hvi-vmm

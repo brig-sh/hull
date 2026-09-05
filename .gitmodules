@@ -1,0 +1,3 @@
+[submodule "hvi-vmm"]
+	path = hvi-vmm
+	url = https://github.com/brig-sh/hvi-vmm.git

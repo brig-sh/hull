@@ -1,0 +1,710 @@
+name: CI
+
+# Lint and build hull on every push and pull request.
+#
+# The module is darwin-only (it consumes urunc's darwin hypervisor backends
+# and Virtualization.framework via vz-runner), so everything runs on a macOS
+# arm64 runner. Binaries built here are ad-hoc signed only — the signed and
+# notarized release artifacts come from the manually-invoked "Sign and
+# Notarize" workflow.
+#
+# The test job runs the unit suite and the PTY end-to-end harnesses, which
+# boot real VMs — possible only on a self-hosted Apple Silicon runner with
+# working HVF (GitHub-hosted macOS runners cannot nest virtualization).
+# Binaries are signed with the Developer ID from secrets so the
+# virtualization entitlement is honored under SIP.
+#
+# The macOS jobs target the self-hosted Apple Silicon runners (re-enabled
+# 2026-07-30; they had been parked on GitHub-hosted macos-15 while the
+# runner's VZ checkpoint/restore was broken). The VM-boot steps stay gated
+# on runner.environment == 'self-hosted', so parking the jobs back on
+# macos-15 degrades gracefully to the unit suite -- no other change needed
+# in either direction.
+
+on:
+  push:
+    branches: [main, exec-support]
+  pull_request:
+  # Maintainers can boot a branch's code on the self-hosted Mac before merging
+  # it. Clicking "Run workflow" (or hitting the dispatch API) requires write
+  # access, so this is maintainer-only with no extra gate. A dispatch is not a
+  # pull_request event, so the routing below sends it to the self-hosted runner,
+  # and the VM/boot tiers' `if` runs it even for a docs-only diff -- forcing a
+  # real boot is the whole point of dispatching. The "Run workflow" button only
+  # appears once this trigger is on the default branch, so it goes live after
+  # this change lands on main.
+  workflow_dispatch:
+
+concurrency:
+  # ci and release both import a Developer ID certificate and rewrite the
+  # user keychain search list, and every self-hosted runner here is the same
+  # physical Mac. Two jobs signing at once is errSecInternalComponent, so
+  # they queue rather than race. Never cancel-in-progress: cancelling a job
+  # mid-sign leaves the search list pointing at a keychain that is gone.
+  #
+  # This queues separate runs of this workflow (and of release) against each
+  # other, but a single run's own jobs are scheduled by their needs graph,
+  # not by this block -- so test and boot-sip, which only share a `needs:
+  # changes` dependency, can still land on the shared Mac at the same time.
+  # They carry their own job-level `concurrency: group:
+  # macos-signing-shared-mac` for that.
+  group: macos-signing
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # What kind of change is this? Booting VMs takes minutes and occupies a
+  # self-hosted Mac, and a README edit cannot break a boot. So the tier that
+  # boots real VMs runs when code changes and is skipped when it does not.
+  #
+  # Workflow files count as code: a change to CI has to be exercised by CI.
+  changes:
+    name: what changed
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - '**/*.go'
+              - '**/*.swift'
+              - 'go.mod'
+              - 'go.sum'
+              - 'Makefile'
+              - 'vz-runner/**'
+              # The hvi submodule is a VMM we build, sign and ship, so a bump to
+              # it is a code change like any other. It was not listed here, and
+              # the consequence was immediate: a bump carrying a virtio-fs fix
+              # went to main with "unit + e2e (boots real VMs): skipped",
+              # because the only files that changed were VERSION and a
+              # submodule pointer. The one job that boots hvi is the one that
+              # did not run.
+              #
+              # A gitlink shows up in a diff as the submodule's own path, so
+              # matching the directory is enough.
+              - 'hvi-vmm'
+              - 'hvi-vmm/**'
+              - '.gitmodules'
+              - 'packaging/**'
+              - 'scripts/**'
+              - 'test/**'
+              - '.github/workflows/**'
+
+  lint:
+    name: lint (golangci-lint)
+    # The module is darwin-only but pure Go -- the Virtualization.framework
+    # bits live in the Swift vz-runner, not here -- so it type-checks on Linux
+    # with GOOS/GOARCH set. No need to occupy a self-hosted macOS runner.
+    runs-on: ubuntu-latest
+    env:
+      GOOS: darwin
+      GOARCH: arm64
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+
+      - uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9 # v8
+        with:
+          # Pinned. "latest" means the linter gating every merge can change
+          # under us with no commit -- a reproducibility problem, and an
+          # unreviewed input to CI on a repository where CI is the gate.
+          version: v2.12.2
+
+  build:
+    name: build (go + swift, ad-hoc signed)
+    # Fork pull requests run on a GitHub-hosted macOS runner; pushes and
+    # same-repo (branch) PRs run on ours -- so a maintainer's branch PR
+    # exercises the full build-and-boot path before merge, while a fork PR
+    # stays on the disposable hosted runner (its self-hosted-gated boot steps
+    # then self-disable, leaving the unit suite).
+    #
+    # Read this as routing, NOT as a security boundary. For the pull_request
+    # event GitHub evaluates this workflow file from the PR head, so a fork can
+    # rewrite the line below and ask for the self-hosted label directly. An
+    # earlier version of this comment claimed fork PRs "therefore never reach
+    # it", which was not true and is the sort of claim that stops anyone
+    # checking the thing that is actually holding.
+    #
+    # What actually keeps a stranger off that machine, in order:
+    #
+    #   1. the fork-PR approval gate (Settings > Actions > "Require approval
+    #      for all external contributors"), which is a human clicking a button
+    #      on a page that does NOT show them this diff; and
+    #   2. the runner group's own restrictions -- visibility, whether public
+    #      repositories may use it, and the workflow allow-list.
+    #
+    # Both live in organisation settings, not here. If (2) is left open, (1) is
+    # the only thing between a fork PR and a machine that holds the Developer
+    # ID certificate, the Homebrew cache and the module cache that the release
+    # job reuses.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","macOS","ARM64"]') || fromJSON('["macos-15"]') }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # hvi-vmm is a submodule that `make macos` builds and signs, so this
+      # job needs it checked out.
+      - uses: ./.github/actions/fetch-hvi-vmm
+
+      # Self-hosted runners provide their own Go toolchain; setup-go is only
+      # needed on ephemeral GitHub-hosted runners.
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        if: runner.environment == 'github-hosted'
+        with:
+          go-version-file: go.mod
+
+      - name: Build and ad-hoc sign hull + vz-runner
+        run: make macos
+
+      - name: Smoke-test the CLI binary
+        run: ./dist/hull_arm64 run --help
+
+      # Black-box smoke of the compose front-end: the supported surface must
+      # render deterministically, ignored keys must warn on stderr without
+      # leaking into the document, and load-time validation must reject bad
+      # input. Same script a developer runs against a local build.
+      - name: Smoke-test compose config
+        run: test/compose-config-smoke.sh ./dist/hull_arm64
+
+      - uses: ./.github/actions/verify-vz-entitlement
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: hull-adhoc
+          path: |
+            dist/hull_arm64
+            vz-runner/.build/arm64-apple-macosx/release/vz-runner
+          retention-days: 7
+
+  test:
+    name: unit + e2e (boots real VMs)
+    # Docs-only changes skip this entirely: nothing it asserts can have moved --
+    # unless a maintainer dispatched the workflow by hand, which forces the run.
+    needs: changes
+    if: needs.changes.outputs.code == 'true' || github.event_name == 'workflow_dispatch'
+    # This job and boot-sip land on the same physical Mac (see the note on the
+    # workflow-level concurrency block) and both rewrite the user keychain
+    # search list. The workflow-level group only queues separate workflow
+    # runs -- it does nothing for two jobs racing within the SAME run -- so
+    # pin the two keychain-touching jobs to their own group here. Never
+    # cancel-in-progress, for the same reason as the workflow-level block:
+    # cancelling mid-sign leaves the search list pointing at a keychain that
+    # is gone.
+    concurrency:
+      group: macos-signing-shared-mac
+      cancel-in-progress: false
+    # Fork pull requests run on a GitHub-hosted macOS runner; pushes and
+    # same-repo (branch) PRs run on ours -- so a maintainer's branch PR
+    # exercises the full build-and-boot path before merge, while a fork PR
+    # stays on the disposable hosted runner (its self-hosted-gated boot steps
+    # then self-disable, leaving the unit suite).
+    #
+    # Read this as routing, NOT as a security boundary. For the pull_request
+    # event GitHub evaluates this workflow file from the PR head, so a fork can
+    # rewrite the line below and ask for the self-hosted label directly. An
+    # earlier version of this comment claimed fork PRs "therefore never reach
+    # it", which was not true and is the sort of claim that stops anyone
+    # checking the thing that is actually holding.
+    #
+    # What actually keeps a stranger off that machine, in order:
+    #
+    #   1. the fork-PR approval gate (Settings > Actions > "Require approval
+    #      for all external contributors"), which is a human clicking a button
+    #      on a page that does NOT show them this diff; and
+    #   2. the runner group's own restrictions -- visibility, whether public
+    #      repositories may use it, and the workflow allow-list.
+    #
+    # Both live in organisation settings, not here. If (2) is left open, (1) is
+    # the only thing between a fork PR and a machine that holds the Developer
+    # ID certificate, the Homebrew cache and the module cache that the release
+    # job reuses.
+    #
+    # The self-hosted side asks for `gui`, so this job only lands on a runner
+    # with a console session. The checkpoint case in the PTY matrix is the
+    # reason: it has never passed on a runner without one (0 for 4 on
+    # mac-dev-01, against 15 of 16 on msuch), and it fails as "checkpoint did
+    # not complete within 60s" while ordinary boots on the same machine pass.
+    # SIP is not the discriminator -- an EC2 Mac with SIP on checkpoints in
+    # about half a second, and it has a console session. The installer job in
+    # release.yml already pins itself the same way, for Finder.
+    #
+    # This narrows the pool to the msuch pair, so the job queues more than it
+    # did. If the failures stop, a console session was the cause and the next
+    # question is why VZ save needs one; if msuch still trips occasionally,
+    # what is left is load on the shared Mac.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","macOS","ARM64","gui"]') || fromJSON('["macos-15"]') }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # hvi-vmm is a submodule that `make macos` builds and signs, so this
+      # job needs it checked out.
+      - uses: ./.github/actions/fetch-hvi-vmm
+
+      # Self-hosted runners provide their own Go toolchain; setup-go is only
+      # needed on ephemeral GitHub-hosted runners.
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        if: runner.environment == 'github-hosted'
+        with:
+          go-version-file: go.mod
+
+      - name: Unit tests
+        run: go test ./...
+
+      # Everything below boots real VMs (or only exists to serve those
+      # steps), so it runs on the self-hosted runner only. On GitHub-hosted
+      # macos-15 the job stops at the unit suite.
+      - name: Import Developer ID certificate into ephemeral keychain
+        if: runner.environment == 'self-hosted'
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          KEYCHAIN_PASSWORD=$(uuidgen)
+          KEYCHAIN=$RUNNER_TEMP/ci-test.keychain-db
+          echo "KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          echo "$MACOS_CERT_P12" | base64 -d > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN"             -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple:             -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN"             | grep -o '"Developer ID Application: [^"]*"' | head -1 | tr -d '"')
+          [ -n "$IDENTITY" ] || { echo "no Developer ID identity" >&2; exit 1; }
+          echo "IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+
+      - name: Build signed binaries (entitlement honored under SIP)
+        if: runner.environment == 'self-hosted'
+        run: |
+          make macos CODESIGN_IDENTITY="$IDENTITY"
+          # Both VMMs are discovered next to the hull executable, so they have
+          # to sit beside it in dist/ for the e2e steps below to find them.
+          cp -p vz-runner/.build/arm64-apple-macosx/release/vz-runner dist/vz-runner
+          cp -p hvi-vmm/target/release/hvi dist/hvi
+
+      - name: Ensure QEMU
+        if: runner.environment == 'self-hosted'
+        run: command -v qemu-system-aarch64 >/dev/null || brew install qemu
+
+      - name: Ensure e2fsprogs (block-rootfs e2e)
+        if: runner.environment == 'self-hosted'
+        run: test -x /opt/homebrew/opt/e2fsprogs/sbin/mke2fs || brew install e2fsprogs
+
+      # hull now mounts a case-sensitive APFS store at whatever --store-dir it
+      # is given, not just the default one. A store dir left over from before
+      # that change is a plain directory on the boot volume, and hull refuses
+      # to mount over a non-empty directory because doing so would hide what is
+      # there. Clear the old one once so it can be replaced by a real store.
+      #
+      # Safe to delete: this is a pull cache, uniquely-named instances and
+      # nothing a run depends on carrying forward. The next run repopulates it.
+      - name: Migrate the CI store to a case-sensitive volume
+        if: runner.environment == 'self-hosted'
+        env:
+          HULL_STORE_DIR: ${{ runner.temp }}/../urunc-ci-store
+        run: |
+          set -eu
+          if [ -d "$HULL_STORE_DIR" ] && [ ! -e "$HULL_STORE_DIR/.case-sensitive-apfs" ]; then
+            echo "clearing pre-case-sensitive store at $HULL_STORE_DIR"
+            rm -rf "$HULL_STORE_DIR"
+          fi
+
+      - name: PTY end-to-end matrix
+        if: runner.environment == 'self-hosted'
+        env:
+          HULL_BIN: ${{ github.workspace }}/dist/hull_arm64
+          # Persistent store on the runner: the pulled image is cached
+          # across runs; instances are uniquely named and cleaned up.
+          HULL_STORE_DIR: ${{ runner.temp }}/../urunc-ci-store
+          # Outside the store, which detach-store unmounts below.
+          HULL_TEST_LOG_DIR: ${{ runner.temp }}/hull-test-logs
+        run: |
+          set -e
+          R=${GITHUB_RUN_ID}
+          python3 test/pty-terminal-test.py vz   ci-vt-$R  type
+          python3 test/pty-terminal-test.py vz   ci-vi-$R  intr
+          python3 test/pty-terminal-test.py vz   ci-vd-$R  double
+          python3 test/pty-terminal-test.py vz   ci-vs-$R  term
+          python3 test/pty-terminal-test.py qemu ci-qt-$R  type
+          python3 test/pty-terminal-test.py qemu ci-qi-$R  intr
+          python3 test/pty-jobcontrol-test.py "$HULL_BIN" vz   ci-jv-$R
+          python3 test/pty-jobcontrol-test.py "$HULL_BIN" qemu ci-jq-$R
+          python3 test/pty-checkpoint-test.py ci-ck-$R
+
+      # A checkpoint timeout used to say "see the instance log", and nobody
+      # could: the harness boots a foreground run, and launchVMM only opens
+      # that file when detached. The console the VMM actually writes to is the
+      # harness's PTY, so the harness now writes its own transcript to
+      # HULL_TEST_LOG_DIR and this carries it off the runner. That transcript
+      # is where vz-runner's reason for refusing a checkpoint appears.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: failure() && runner.environment == 'self-hosted'
+        with:
+          name: console-transcripts-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/hull-test-logs
+          if-no-files-found: warn
+          retention-days: 14
+
+      # Seed this store's boot assets. They live under the store dir, so a
+      # fresh store has none and the test below would skip rather than run --
+      # which is how it silently never ran at all until now. See
+      # .github/actions/fetch-boot-assets for why --force matters here.
+      - uses: ./.github/actions/fetch-boot-assets
+        if: runner.environment == 'self-hosted'
+        with:
+          hull-bin: ./dist/hull_arm64
+          store-dir: ${{ runner.temp }}/../urunc-ci-store
+          registry-token: ${{ secrets.HULL_ASSETS_TOKEN }}
+
+      # HVI e2e: boots an unmodified OCI image on the hvi backend, which
+      # exercises the signed VMM, the host kernel and initrd, and the
+      # virtio-fs rootfs export in one go. The script skips with a named
+      # reason when the boot artifacts or the hvi binary are missing.
+      - name: HVI generic-container boot (boots a real VM)
+        if: runner.environment == 'self-hosted'
+        env:
+          HULL_BIN: ${{ github.workspace }}/dist/hull_arm64
+          HULL_STORE_DIR: ${{ runner.temp }}/../urunc-ci-store
+        run: python3 test/hvi-boot-test.py ci-hvi-${GITHUB_RUN_ID}
+
+      # The store is a mounted volume, and nothing unmounts it on its own. This
+      # runner is one long-lived Mac, so without this it collects a mounted
+      # sparse image per store, forever. always(): a job that failed still
+      # mounted one, and that is exactly when it is easiest to forget. See
+      # .github/actions/detach-store.
+      - uses: ./.github/actions/detach-store
+        if: always() && runner.environment == 'self-hosted'
+        with:
+          hull-bin: ./dist/hull_arm64
+          store-dir: ${{ runner.temp }}/../urunc-ci-store
+
+      - name: Shared-folder smoke matrix
+        if: runner.environment == 'self-hosted'
+        env:
+          HULL_BIN: ${{ github.workspace }}/dist/hull_arm64
+          HULL_STORE_DIR: ${{ runner.temp }}/../urunc-ci-store
+        run: |
+          set -e
+          R=${GITHUB_RUN_ID}
+          for m in readwrite ownership persist multi nested negative swap; do
+            python3 test/share-test.py vz "ci-shv-$m-$R" "$m"
+          done
+          for m in readwrite ownership persist; do
+            python3 test/share-test.py qemu "ci-shq-$m-$R" "$m"
+          done
+
+      # Rosetta e2e: boots an unmodified amd64 rootfs under the arm64 guest
+      # kernel with the translator attached, and proves translation by
+      # running the rootfs's own x86_64 binaries through the agent. The
+      # script skips with a named reason on hosts without Rosetta.
+      - name: Rosetta e2e (amd64 rootfs, boots real VMs)
+        if: runner.environment == 'self-hosted'
+        env:
+          HULL_BIN: ${{ github.workspace }}/dist/hull_arm64
+          HULL_STORE_DIR: ${{ runner.temp }}/../urunc-ci-store
+        run: python3 test/rosetta-test.py ci-rz-${GITHUB_RUN_ID}
+
+      - name: Delete ephemeral keychain
+        if: always() && runner.environment == 'self-hosted'
+        run: |
+          if [ -n "$KEYCHAIN" ] && [ -f "$KEYCHAIN" ]; then
+            security delete-keychain "$KEYCHAIN"
+          fi
+          # Put the login keychain back in the search list unconditionally.
+          # The import step replaced the list wholesale, so a job that dies
+          # between the two leaves this user with no login keychain in scope
+          # -- which breaks signing, and more besides, for the person whose
+          # Mac this is. Cheap to reassert, expensive to discover.
+          security list-keychains -d user -s login.keychain-db
+
+  # A microVM on Apple Silicon boots through one of two signed VMMs, and SIP is
+  # what makes that signature load-bearing. vz-runner drives
+  # Virtualization.framework and needs com.apple.security.virtualization; hvi
+  # drives Hypervisor.framework and needs com.apple.security.hypervisor. Under
+  # SIP either entitlement is honored only for a binary signed with a real
+  # identity, never an ad-hoc one -- so "does hull boot a VM under SIP" is a
+  # genuine, separate question from the rest of CI, asked of BOTH backends, and
+  # it can only be answered on a machine that actually has SIP enabled. That is
+  # why this job exists and why it pins the sip-enabled label. It is the SIP half
+  # of a pair; the non-SIP half is a sibling on a sip-disabled host (see the note
+  # at the end of the file on why the absence of a label cannot express it).
+  #
+  # There is no GitHub-hosted equivalent -- a hosted macOS runner cannot nest
+  # virtualization, and none run with a SIP posture we control -- so unlike
+  # build/test this job has no macos-15 fallback and always asks for the
+  # self-hosted runner. The protections the test job documents apply unchanged:
+  # the fork-PR approval gate and the runner group's own restrictions, both in
+  # org settings, are what keep a stranger off the machine, not this line.
+  boot-sip:
+    name: microVM boot (SIP-enabled)
+    # Docs-only changes cannot move a boot, so the same code filter the VM tier
+    # uses gates this one too -- unless a maintainer dispatched the workflow by
+    # hand, which forces the boot regardless of the diff.
+    needs: changes
+    # The second clause withholds these from fork pull requests. Unlike build
+    # and test above, which reroute to a hosted runner, a boot needs a real Mac
+    # with a known SIP state, so there is nowhere to reroute to: a fork skips
+    # the job instead. These are persistent machines, so untrusted code that
+    # ran on them would outlive its own job.
+    if: >-
+      (needs.changes.outputs.code == 'true'
+       || github.event_name == 'workflow_dispatch')
+      && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ["self-hosted", "macOS", "ARM64", "sip-enabled"]
+    # Same physical Mac as test, same keychain race -- see the note on
+    # test's concurrency block.
+    concurrency:
+      group: macos-signing-shared-mac
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # Prove the environment before trusting the result. A green boot on a Mac
+      # whose SIP had quietly been turned off is a boot we never meant to
+      # certify, and the label is a promise, not a check -- so read the actual
+      # kernel state and fail loudly when the two disagree.
+      - name: Assert SIP is enabled
+        run: |
+          status=$(csrutil status)
+          echo "$status"
+          echo "$status" | grep -q "enabled" || {
+            echo "::error::runner is labelled sip-enabled but SIP is not enabled"
+            exit 1
+          }
+
+      # macOS caps a unix socket path at 104 bytes (SUN_LEN), and hull's per-boot
+      # agent socket lives at <store>/instances/<name>/agent.sock. This runner's
+      # own path is already long (/Users/githubrunner/actions-runner-2/_work/...),
+      # so the store has to sit somewhere short or the hvi boot cannot bind the
+      # socket and fails with "path must be shorter than SUN_LEN". $HOME is short
+      # and stable across runs, so the image and boot assets stay cached. Set once
+      # here so every step below shares it; kept separate from the test job's
+      # store so the two never race on the same mount.
+      - name: Choose a short store dir (macOS SUN_LEN)
+        run: echo "HULL_STORE_DIR=$HOME/hull-ci-store" >> "$GITHUB_ENV"
+
+      # hvi-vmm is a submodule that `make macos` builds and signs -- and this job
+      # boots the hvi backend, so it genuinely needs it.
+      - uses: ./.github/actions/fetch-hvi-vmm
+
+      # The signed build is the whole point here: an ad-hoc signature boots fine
+      # with SIP off and is refused the entitlement with SIP on. Sign with the
+      # Developer ID from an ephemeral keychain, as the test job does, so what we
+      # boot is what a release would ship.
+      - name: Import Developer ID certificate into ephemeral keychain
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          KEYCHAIN_PASSWORD=$(uuidgen)
+          KEYCHAIN=$RUNNER_TEMP/ci-sip.keychain-db
+          echo "KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          echo "$MACOS_CERT_P12" | base64 -d > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+            -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN" \
+            | grep -o '"Developer ID Application: [^"]*"' | head -1 | tr -d '"')
+          [ -n "$IDENTITY" ] || { echo "no Developer ID identity" >&2; exit 1; }
+          echo "IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+
+      - name: Build signed binaries (entitlements honored under SIP)
+        run: |
+          make macos CODESIGN_IDENTITY="$IDENTITY"
+          # Both VMMs are discovered next to the hull executable, so they have to
+          # sit beside it in dist/ for the boots below to find them.
+          cp -p vz-runner/.build/arm64-apple-macosx/release/vz-runner dist/vz-runner
+          cp -p hvi-vmm/target/release/hvi dist/hvi
+
+      # Belt and braces: the entitlement has to be on the binary before the
+      # framework can honor it. Cheap to check, and it turns a bare "the VM did
+      # not boot" into "the VM did not boot AND the entitlement was missing" when
+      # something upstream drops it. The hvi boot below is itself the equivalent
+      # check for hvi's hypervisor entitlement.
+      - uses: ./.github/actions/verify-vz-entitlement
+
+      # Seed the boot assets (host kernel and initrd) the hvi boot needs. See
+      # .github/actions/fetch-boot-assets for why --force matters here.
+      - uses: ./.github/actions/fetch-boot-assets
+        with:
+          hull-bin: ./dist/hull_arm64
+          store-dir: ${{ env.HULL_STORE_DIR }}
+          registry-token: ${{ secrets.HULL_ASSETS_TOKEN }}
+
+      # vz boot: one real microVM on the vz backend from a public image, driven
+      # on a PTY so a hung guest console fails the job instead of hanging it. If
+      # the virtualization entitlement were not honored under SIP the framework
+      # would refuse the VM device and this step would fail.
+      - name: Boot a microVM on vz (real VM under SIP)
+        env:
+          HULL_BIN: ${{ github.workspace }}/dist/hull_arm64
+        run: python3 test/pty-terminal-test.py vz ci-sip-vz-${GITHUB_RUN_ID} type
+
+      # hvi boot: boots an unmodified OCI image on the hvi backend, exercising
+      # the signed hvi VMM, the host kernel and initrd, and the virtio-fs rootfs
+      # export in one go -- the SIP check for the hvi side. Skips with a named
+      # reason (exit 0) when the boot assets or the hvi binary are missing, so a
+      # runner that cannot reach the private bundle reports a skip rather than a
+      # false red.
+      - name: Boot a microVM on hvi (real VM under SIP)
+        env:
+          HULL_BIN: ${{ github.workspace }}/dist/hull_arm64
+        run: python3 test/hvi-boot-test.py ci-sip-hvi-${GITHUB_RUN_ID}
+
+      # The store is a mounted sparse image and nothing unmounts it on its own;
+      # on a long-lived self-hosted Mac that would leave one mount per run behind.
+      # The image stays on disk, so the next run remounts the same store with its
+      # pulled image intact -- this gives back the mount, not the cache. A failed
+      # detach here does not fail the job: this boot already passed or failed on
+      # its own merits, and cleanup hiccups should not overwrite that result.
+      - uses: ./.github/actions/detach-store
+        if: always()
+        with:
+          hull-bin: ./dist/hull_arm64
+          store-dir: ${{ env.HULL_STORE_DIR }}
+          fail-on-error: "false"
+
+      - name: Delete ephemeral keychain
+        if: always()
+        run: |
+          if [ -n "$KEYCHAIN" ] && [ -f "$KEYCHAIN" ]; then
+            security delete-keychain "$KEYCHAIN"
+          fi
+          # Restore the login keychain in the search list no matter what: the
+          # import replaced the list wholesale, and a job that died mid-way would
+          # otherwise leave this user's Mac with no login keychain in scope.
+          security list-keychains -d user -s login.keychain-db
+
+  # The non-SIP half of the pair. Same question -- does hull boot a real microVM
+  # on both backends -- asked of the other posture: an ad-hoc-signed binary on a
+  # host with SIP turned off. That is the local-contributor reality, a build with
+  # no Developer ID booting on a Mac where the entitlement is not enforced, and it
+  # is the one boot case nothing else covers: build never boots, and boot-sip and
+  # test both boot a signed binary. It pins sip-disabled -- a positive label,
+  # because runs-on matches the labels a runner HAS and cannot ask for the ABSENCE
+  # of sip-enabled -- on a genuinely SIP-off Mac, and asserts csrutil actually says
+  # so, mirroring boot-sip's honesty check.
+  #
+  # No keychain and no certificate: an ad-hoc `make macos` already embeds the
+  # virtualization and hypervisor entitlements (the build job's entitlement check
+  # proves it), and with SIP off those are honored without a real signature. So
+  # this job is cheaper than boot-sip, and it runs on a different Mac (the msuch
+  # fleet), so the two boot jobs overlap rather than queue.
+  boot-nosip:
+    name: microVM boot (SIP-disabled)
+    needs: changes
+    # The second clause withholds these from fork pull requests. Unlike build
+    # and test above, which reroute to a hosted runner, a boot needs a real Mac
+    # with a known SIP state, so there is nowhere to reroute to: a fork skips
+    # the job instead. These are persistent machines, so untrusted code that
+    # ran on them would outlive its own job.
+    if: >-
+      (needs.changes.outputs.code == 'true'
+       || github.event_name == 'workflow_dispatch')
+      && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ["self-hosted", "macOS", "ARM64", "sip-disabled"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # The mirror of boot-sip's assertion: prove the label is honest before
+      # trusting the result. A sip-disabled runner whose SIP had quietly been
+      # turned back on would boot the ad-hoc binary only because the entitlement
+      # got a free pass it should not have -- so read the kernel state and fail
+      # loudly when the label and the machine disagree.
+      - name: Assert SIP is disabled
+        run: |
+          status=$(csrutil status)
+          echo "$status"
+          echo "$status" | grep -q "disabled" || {
+            echo "::error::runner is labelled sip-disabled but SIP is not disabled"
+            exit 1
+          }
+
+      # Same SUN_LEN dance as boot-sip: keep the per-boot agent socket under a
+      # short $HOME path so it stays within the 104-byte unix-socket limit. Kept
+      # separate from the other jobs' stores so they never race on one mount.
+      - name: Choose a short store dir (macOS SUN_LEN)
+        run: echo "HULL_STORE_DIR=$HOME/hull-ci-store" >> "$GITHUB_ENV"
+
+      # This job boots the hvi backend, so it needs the submodule.
+      - uses: ./.github/actions/fetch-hvi-vmm
+
+      # Ad-hoc build, no keychain and no Developer ID: `make macos` with no
+      # identity still embeds the entitlements (the build job's check proves it),
+      # and with SIP off they are honored without a real signature -- which is
+      # exactly the posture this job exists to exercise.
+      - name: Build ad-hoc-signed binaries
+        run: |
+          make macos
+          # Both VMMs are discovered next to the hull executable, so they have to
+          # sit beside it in dist/ for the boots below to find them.
+          cp -p vz-runner/.build/arm64-apple-macosx/release/vz-runner dist/vz-runner
+          cp -p hvi-vmm/target/release/hvi dist/hvi
+
+      # The entitlement has to be on the binary even here -- SIP off relaxes who
+      # may HOLD it, not whether the framework looks for it. Cheap to check, and
+      # it catches a Makefile regression that drops the entitlement from an ad-hoc
+      # build. The hvi boot below is the equivalent check for hvi's entitlement.
+      - uses: ./.github/actions/verify-vz-entitlement
+
+      # Seed the boot assets the hvi boot needs. See
+      # .github/actions/fetch-boot-assets for why --force matters here.
+      - uses: ./.github/actions/fetch-boot-assets
+        with:
+          hull-bin: ./dist/hull_arm64
+          store-dir: ${{ env.HULL_STORE_DIR }}
+          registry-token: ${{ secrets.HULL_ASSETS_TOKEN }}
+
+      # vz boot: one real microVM on the vz backend, driven on a PTY so a hung
+      # guest console fails the job instead of hanging it. With SIP off the ad-hoc
+      # binary's virtualization entitlement is honored and the VM device comes up.
+      - name: Boot a microVM on vz (real VM, SIP off)
+        env:
+          HULL_BIN: ${{ github.workspace }}/dist/hull_arm64
+        run: python3 test/pty-terminal-test.py vz ci-nosip-vz-${GITHUB_RUN_ID} type
+
+      # hvi boot: boots an unmodified OCI image on the hvi backend, exercising the
+      # ad-hoc hvi VMM, the host kernel and initrd, and the virtio-fs rootfs export
+      # in one go. Skips with a named reason (exit 0) when the assets or the hvi
+      # binary are missing.
+      - name: Boot a microVM on hvi (real VM, SIP off)
+        env:
+          HULL_BIN: ${{ github.workspace }}/dist/hull_arm64
+        run: python3 test/hvi-boot-test.py ci-nosip-hvi-${GITHUB_RUN_ID}
+
+      # The store is a mounted sparse image and nothing unmounts it on its own; on
+      # a long-lived self-hosted Mac that would leave one mount per run behind. The
+      # image stays on disk, so the next run remounts the same store with its
+      # pulled image intact -- this gives back the mount, not the cache. A failed
+      # detach here does not fail the job, same reasoning as boot-sip.
+      - uses: ./.github/actions/detach-store
+        if: always()
+        with:
+          hull-bin: ./dist/hull_arm64
+          store-dir: ${{ env.HULL_STORE_DIR }}
+          fail-on-error: "false"
+
+# Both halves of the pair now exist. boot-sip pins sip-enabled (this SIP-on Mac);
+# boot-nosip pins sip-disabled (the msuch fleet, SIP off). Both labels are
+# positive, because runs-on matches the labels a runner HAS and cannot ask for the
+# ABSENCE of one -- "self-hosted, macOS, ARM64 but not sip-enabled" is
+# unschedulable, so the non-SIP host carries an explicit sip-disabled label
+# instead. SIP is machine-wide, so the two halves are always different Macs, and
+# each job asserts csrutil to keep its own label honest.

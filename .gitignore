@@ -1,0 +1,22 @@
+.DS_Store
+dist/
+vz-runner/.build/
+*.dmg
+go.work
+go.work.sum
+.worktrees/
+
+# Staging for release artifacts built outside dist/ (see release.yml).
+/build/
+
+# The binary a plain `go build` drops in the repo root. It was committed once
+# by accident and shipped in a tag; nothing in the release path consumes it,
+# which is exactly why nobody would notice it changing.
+/hull
+/vz-runner
+/hvi
+# ...but /vz-runner is also the name of the Swift package DIRECTORY, and the
+# rule above matches both. Un-ignore the directory, or every new source file
+# under it is silently untracked -- already-tracked ones keep working, which is
+# exactly what makes it easy to miss.
+!/vz-runner/
