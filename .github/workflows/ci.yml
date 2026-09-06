@@ -255,8 +255,22 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # The profile costs almost nothing to write and is what the coverage
+      # badge reads. It is uploaded on a push to main only, a few steps below:
+      # the figure describes the branch other work builds on.
       - name: Unit tests
-        run: go test ./...
+        run: go test -covermode=atomic -coverprofile=coverage.out ./...
+
+      # Renders the README badge and the per-file view on codecov.io. Never
+      # fails the run: a coverage service that cannot be reached is not a
+      # reason to call a green commit broken.
+      - name: Upload coverage to Codecov
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.out
+          fail_ci_if_error: false
 
       # Everything below boots real VMs (or only exists to serve those
       # steps), so it runs on the self-hosted runner only. On GitHub-hosted

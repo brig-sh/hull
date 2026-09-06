@@ -5,6 +5,14 @@
   </picture>
 </p>
 
+<p align="center">
+  <a href="https://github.com/brig-sh/hull/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/brig-sh/hull?include_prereleases"></a>
+  <a href="https://github.com/brig-sh/hull/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/brig-sh/hull/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://codecov.io/gh/brig-sh/hull"><img alt="Coverage" src="https://codecov.io/gh/brig-sh/hull/graph/badge.svg"></a>
+  <a href="go.mod"><img alt="Go" src="https://img.shields.io/github/go-mod/go-version/brig-sh/hull"></a>
+  <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
+</p>
+
 Run unikernels and sandboxed Linux containers on macOS with Apple Silicon,
 using the same OCI images and workflows as Linux.
 
