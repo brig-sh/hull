@@ -1,0 +1,2 @@
+go test fuzz v1
+string("--no-tty|--user|root|--workdir|/tmp|--env|A=1|web|--|sh")
