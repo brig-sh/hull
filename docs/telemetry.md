@@ -36,7 +36,7 @@ persisted either way.
 <product> collects anonymous usage events and crash reports to help us
 improve it: command names, backend choice, versions and stack traces --
 never file paths, arguments, image names or anything that identifies you.
-Docs: https://github.com/NOFireAI/homebrew-nofire/blob/main/TELEMETRY.md
+Docs: https://github.com/brig-sh/hull/blob/main/docs/telemetry.md
 Enable telemetry? [Y/n]
 ```
 
@@ -62,6 +62,15 @@ hull --unattended --dnt ...  # skip the y/n and record the opt-out
 
 The env vars above work everywhere, no flags needed.
 
+Three more variables exist for the tools that drive hull, not for opting
+out:
+
+| variable | what it does |
+|---|---|
+| `HULL_TELEMETRY_PRODUCT` | the `product` field: a wrapper driving hull (brig) sets it so events count against the tool the user installed. Defaults to `hull` |
+| `HULL_TELEMETRY_ENDPOINT` | overrides the collector endpoint baked in at build time (tests, staging). A dev build has none, and sends nothing |
+| `HULL_TELEMETRY_SUPPRESS` | internal: hull sets it on its own child invocations (compose self-exec, the `network-gateway` daemon) so one user command counts once. Not an opt-out |
+
 ## What is sent
 
 All events share a common envelope:
@@ -74,7 +83,7 @@ All events share a common envelope:
 | `version` | `0.1.0-rc14` | tool version |
 | `os` | `26.0` | macOS major.minor only |
 | `arch` | `arm64` | |
-| `install_id` | random UUID | generated locally on first run; not derived from the machine; delete `~/.hull/telemetry.json` to rotate it |
+| `install_id` | random UUID | generated locally on first run; not derived from the machine; delete `<store>/telemetry.json` to rotate it |
 | `uname` | `Darwin 25.3.0 <kernel build> arm64` | full uname, explicitly excluding the hostname |
 | `captured_at` | RFC 3339 timestamp | when the event happened (for crash reports: the crash, not the upload) |
 | `checksum` | hex SHA-256 | integrity checksum over `event\|product\|version\|install_id\|captured_at` with a fixed salt; ingestion drops payloads whose checksum does not match -- a soft guard against naive forgery, not a security boundary |
@@ -93,7 +102,7 @@ Emitted when a VMM launch is attempted.
 
 | field | example | notes |
 |---|---|---|
-| `backend` | `qemu` / `vz` | the VMM backend used |
+| `backend` | `qemu` / `vz` / `hvi` | the VMM backend used |
 | `backend_source` | `default` | `flag`, `annotation` or `default` |
 | `boot` | `ok` / `fail` | whether the VMM process started |
 
@@ -136,9 +145,17 @@ almost no CPU or memory of its own.
 | `panic_type` | the Go type of the panic value (eg. `*errors.errorString`); never the panic message, which can embed paths |
 | `stack` | Go stack trace, file paths trimmed to module-relative form |
 
-Crash reports are written to `~/.hull/crashes/` when a panic happens
+Crash reports are written to `<store>/crashes/` when a panic happens
 and uploaded on the next invocation. You can inspect or delete the files at
 any time; the directory is the full queue.
+
+## Where the state lives
+
+The consent answer and the install id are in `<store>/telemetry.json`, and
+the crash queue in `<store>/crashes/`, where `<store>` is the `--store-dir`
+(default `~/.hull/store`). The store is the isolation boundary for
+everything else hull keeps, and telemetry follows it: a command run with
+another `--store-dir` has its own consent state and its own install id.
 
 ## What is never sent
 
