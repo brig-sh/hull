@@ -17,13 +17,14 @@ Run unikernels and sandboxed Linux containers on macOS with Apple Silicon,
 using the same OCI images and workflows as Linux.
 
 hull is the microVM runtime [brig](https://github.com/brig-sh/brig) drives on
-macOS, and it is useful on its own: it boots an OCI image as a real VM through
-Virtualization.framework, with a QEMU backend as an alternative.
+macOS, and it is useful on its own: it boots an OCI image as a real VM. Three
+backends do the booting: `vz` (Virtualization.framework), `hvi` (hull's own
+VMM on Hypervisor.framework) and `qemu`.
 
 Requires Apple Silicon (M1-M5). **macOS 26 (Tahoe) is the recommended
-platform and the only one we test on**; the Swift runner is built for macOS
-14+, so earlier releases may well work, and the install does not block them.
-If you run one, tell us how it went.
+platform and the only one CI tests on**. `vz-runner` is built for macOS 14+
+(`vz-runner/Package.swift`), so earlier releases may well work, and neither
+the cask nor the binary blocks them. If you run one, tell us how it went.
 
 ## Install
 
@@ -38,12 +39,17 @@ brew install --cask hull
 Installing brig brings hull with it, since brig depends on it -- so
 `brew install --cask brig` is the other way in.
 
-The cask lands in the tap with hull's first stable release; until then, build
-from source as described below. It installs `hull` and `vz-runner` side by
-side (the CLI discovers the runner next to its own executable) and pulls in
-`e2fsprogs`
-for block-rootfs mode. The [QEMU](https://www.qemu.org/) backend stays
-optional: `brew install qemu`.
+The tap carries `Casks/hull.rb` at the current release candidate. It is
+written by hand for now: the release workflow's cask publishing is set to
+`skip_upload: auto`, so goreleaser takes the cask over from the first stable
+tag. The cask depends on `cosign`, which checks the signature on the boot
+bundle, and installs `hull`, `vz-runner` and `hvi` side by side (the CLI
+discovers both runners next to its own executable). Block-rootfs mode wants
+`e2fsprogs`, and the [QEMU](https://www.qemu.org/) backend is optional:
+
+```bash
+brew install e2fsprogs qemu
+```
 
 Check it works:
 
@@ -107,6 +113,9 @@ docker push ttl.sh/my-nginx:1h
 # Run with Virtualization.framework
 hull run --hypervisor vz --mem 512 --cpus 2 --net shared ttl.sh/my-nginx:1h
 
+# Run with hvi
+hull run --hypervisor hvi --mem 512 --cpus 2 --net shared ttl.sh/my-nginx:1h
+
 # Run with QEMU
 hull run --hypervisor qemu --mem 512 --cpus 2 --net shared ttl.sh/my-nginx:1h
 ```
@@ -150,6 +159,7 @@ hull rm $ID
 | `hull assets show\|dir\|pull` | the boot assets used for images that carry no kernel of their own |
 | `hull store detach` | unmount the store volume, leaving its backing image on disk |
 | `hull telemetry on\|off\|status` | anonymous usage and crash telemetry |
+| `hull network-gateway` | the user-mode network gateway daemon. Hidden from `--help`: compose starts one per project, and `run --gateway-sock` joins one. Flags in [docs/network-egress.md](docs/network-egress.md#the-gateway-itself) |
 
 Global options apply to every command: `--debug`, `--store-dir` (default
 `~/.hull/store`), and the telemetry pair `--unattended` and `--dnt`.
@@ -162,15 +172,18 @@ does not collect in [docs/telemetry.md](docs/telemetry.md).
 
 ## Supported backends
 
-hull supports two VMM backends:
+hull supports three VMM backends; `run --hypervisor` picks one, and the
+image's `com.urunc.unikernel.hypervisor` annotation is the default:
 
-| Backend | Technology | Network | Rootfs Modes | Boot Time |
+| Backend | Technology | `--net shared` | Rootfs Modes | Boot Time |
 |---------|-----------|---------|--------------|-----------|
-| **Vz** | Apple Virtualization.framework | VZNATNetworkDeviceAttachment | virtiofs, ext4 block | ~60 ms |
+| **vz** | Apple Virtualization.framework, through `vz-runner` (Swift) | VZNATNetworkDeviceAttachment | virtiofs, ext4 block | ~60 ms |
+| **hvi** | Hypervisor.framework, through `hvi` (Rust, the `hvi-vmm` submodule) | hvi's own user-space stack | virtiofs (writable APFS clone), ext4 block | not measured here |
 | **QEMU** | QEMU + HVF acceleration | vmnet-shared | 9pfs, ext4 block | ~73 ms |
 
-Both backends use hardware-accelerated virtualization (Apple Hypervisor Framework)
-and boot ARM64 Linux kernels with near-native performance.
+All three sit on the Apple Hypervisor Framework and boot ARM64 Linux kernels
+with near-native performance. All three can also join the user-mode network
+gateway (`--gateway-sock`), which is how compose networks them.
 
 A `compose` subcommand runs multi-service projects from a docker-compose
 subset. [`docs/compose.md`](docs/compose.md) lists the keys it supports, the
@@ -212,23 +225,32 @@ you get that entitlement honored depends on how the binary is signed:
 ### The urunc dependency
 
 This module consumes [urunc](https://github.com/urunc-dev/urunc) as a Go
-dependency. Until darwin support is merged upstream, `go.mod` replaces it with
-the NOFireAI fork pinned at a pseudo-version of the `darwin-integration`
-branch:
+dependency. The darwin work hull depends on -- the Vz backend, exec, console,
+the GUI window flags, the HVI backend and the generic container initrd -- lives
+on the upstream `feat/initrd-hvi-backend-v0.8.0` branch (the darwin commits
+rebased onto the v0.8.0 release), and `go.mod` requires that branch's tip as a
+pseudo-version:
 
 ```
-replace github.com/urunc-dev/urunc => github.com/nofireai/urunc v0.0.0-<date>-<sha>
+require github.com/urunc-dev/urunc v0.8.1-0.<date>-<sha>
 ```
 
-**When `darwin-integration` moves**, refresh the pin:
+There is no `replace`: the module is the upstream repository itself, and the
+comment above that line in `go.mod` says so. **When
+`feat/initrd-hvi-backend-v0.8.0` moves**, refresh the pin by commit, not by
+branch name -- Go refuses `@feat/initrd-hvi-backend-v0.8.0` as a disallowed
+version string, because the name ends in something that parses as one:
 
 ```bash
-PV=$(go list -m github.com/nofireai/urunc@darwin-integration | awk '{print $2}')
-go mod edit -replace=github.com/urunc-dev/urunc=github.com/nofireai/urunc@"$PV"
+go get github.com/urunc-dev/urunc@<sha of the branch tip>
 go mod tidy
 ```
 
-**For local development** against a live fork checkout, use an uncommitted
+A pseudo-version lives only while its commit is reachable upstream. If the
+branch is deleted once it merges, move the pin to the merge commit or to the
+tag that carries the work.
+
+**For local development** against a live checkout, use an uncommitted
 `go.work` (gitignored) instead of editing `go.mod`:
 
 ```
@@ -236,17 +258,16 @@ go 1.26.4
 
 use (
 	.
-	/path/to/urunc   # checkout on darwin-integration
+	/path/to/urunc   # checkout on feat/initrd-hvi-backend-v0.8.0
 )
 ```
 
-Once darwin support lands upstream, drop the `replace` and require a released
-`github.com/urunc-dev/urunc` version.
+Once the darwin work is in a tagged urunc release, require that tag.
 
 ### The app bundle and installer
 
-`make app` wraps both binaries into `hull.app` (urunc CNCF mark as the
-app icon; vz-runner rides inside `Contents/MacOS`, so sibling discovery
+`make app` wraps the three binaries into `hull.app` (urunc CNCF mark as the
+app icon; vz-runner and hvi ride inside `Contents/MacOS`, so sibling discovery
 works from `/Applications`). `make dmg` produces the drag-to-Applications
 installer: styled background, NOFire volume icon, `/Applications` drop link,
 signed + notarized + stapled. After dragging to Applications, put the CLI on
@@ -262,14 +283,17 @@ logo sources with `scripts/make-packaging-assets.sh` (needs imagemagick).
 ### Release signing (CI)
 
 Regular CI (`.github/workflows/ci.yml`) lints and builds with ad-hoc
-signatures only. Distributable builds come from the manually-invoked
-**Sign and Notarize** workflow (`.github/workflows/sign-notarize.yml`):
+signatures, and its e2e job signs with the Developer ID so the entitlements
+hold under SIP. Distributable builds come from `.github/workflows/release.yml`,
+which runs on a `v*` tag (or on `workflow_dispatch` with an existing tag).
+It builds, signs and notarizes `vz-runner` and `hvi` itself, then runs
+[goreleaser](.goreleaser.yaml), which builds and notarizes `hull`, packs all
+three into `hull-<version>-arm64.tar.gz`, writes `checksums.txt` with a
+keyless cosign signature, drafts the GitHub release, and opens a cask pull
+request against the tap (stable tags only; `skip_upload: auto`). A second job
+builds the DMG.
 
-```bash
-gh workflow run sign-notarize.yml
-```
-
-It needs five repository secrets:
+The workflow reads these repository secrets:
 
 | Secret | Content | How to produce |
 |--------|---------|----------------|
@@ -278,15 +302,18 @@ It needs five repository secrets:
 | `NOTARY_KEY_P8` | App Store Connect API private key, plain `.p8` contents | App Store Connect → Users and Access → Integrations → App Store Connect API |
 | `NOTARY_KEY_ID` | the API key's ID | shown next to the key |
 | `NOTARY_ISSUER_ID` | the issuer UUID | shown on the same page |
+| `NOFIRE_BOT_PRIVATE_KEY` | private key of the GitHub App that mints the tap token | the App's settings page |
+| `HOMEBREW_TAP_GITHUB_TOKEN` | fallback PAT for the tap, used when the App token is unavailable | a fine-grained PAT with contents and pull-requests write on `homebrew-brig` |
 
-Set them with:
+`TELEMETRY_ENDPOINT` is a repository *variable*, not a secret; empty leaves
+the telemetry client inert. CI itself reads two more secrets:
+`HULL_ASSETS_TOKEN` (pulls the boot bundle on the e2e runner) and
+`CODECOV_TOKEN` (coverage upload on pushes to main).
+
+Set a secret with:
 
 ```bash
 gh secret set MACOS_CERT_P12 --repo brig-sh/hull < cert.p12.b64
-gh secret set MACOS_CERT_PASSWORD --repo brig-sh/hull
-gh secret set NOTARY_KEY_P8 --repo brig-sh/hull < AuthKey_XXXX.p8
-gh secret set NOTARY_KEY_ID --repo brig-sh/hull
-gh secret set NOTARY_ISSUER_ID --repo brig-sh/hull
 ```
 
 hull consists of three binaries:
@@ -295,7 +322,7 @@ hull consists of three binaries:
 |--------|----------|-------------|
 | `hull` | Go | CLI for pulling OCI images and orchestrating VM lifecycle |
 | `vz-runner` | Swift | Virtualization.framework backend (launches VZVirtualMachine) |
-| `containerd-shim-urunc-v2` | Go | containerd shim (for containerd integration) |
+| `hvi` | Rust | Hypervisor.framework VMM, built from the `hvi-vmm` submodule |
 
 ### Prerequisites
 
@@ -319,9 +346,10 @@ make macos CODESIGN_IDENTITY="Apple Development: Your Name (TEAMID)"
 # Verify what got signed (authority chain + entitlements)
 make codesign_verify
 
-# Symlink into the current directory (vz-runner must sit next to hull)
+# Symlink into the current directory (the runners must sit next to hull)
 ln -sf dist/hull_arm64 ./hull
-ln -sf cmd/vz-runner/.build/arm64-apple-macosx/release/vz-runner ./vz-runner
+ln -sf vz-runner/.build/arm64-apple-macosx/release/vz-runner ./vz-runner
+ln -sf hvi-vmm/target/release/hvi ./hvi
 ```
 
 Omit `CODESIGN_IDENTITY` to fall back to ad-hoc signing (`-`), which requires a
@@ -331,7 +359,7 @@ disabled AMFI (see [System Configuration](#system-configuration)).
 ### Signing
 
 `make sign` (invoked by `make macos`) signs `vz-runner` with the
-virtualization-only entitlements plist (`cmd/vz-runner/Entitlements-novmnet.plist`),
+virtualization-only entitlements plist (`vz-runner/Entitlements-novmnet.plist`),
 signs `hvi` with `com.apple.security.hypervisor` (`hvi-vmm/hvi.entitlements`),
 signs `hull`, and strips the quarantine attribute from all three.
 
@@ -385,12 +413,12 @@ go build -o hull ./cmd/hull/
 
 ```bash
 # Build release binary
-cd cmd/vz-runner
+cd vz-runner
 swift build -c release
-cd ../..
+cd ..
 
 # The binary is at:
-# cmd/vz-runner/.build/arm64-apple-macosx/release/vz-runner
+# vz-runner/.build/arm64-apple-macosx/release/vz-runner
 ```
 
 **Important:** vz-runner must be re-signed with entitlements every time it is
@@ -400,11 +428,11 @@ at runtime. Prefer `make sign` (see [Signing](#signing)); to sign by hand:
 ```bash
 codesign --force --options runtime \
   --sign "Apple Development: Your Name (TEAMID)" \
-  --entitlements cmd/vz-runner/Entitlements-novmnet.plist \
-  cmd/vz-runner/.build/arm64-apple-macosx/release/vz-runner
+  --entitlements vz-runner/Entitlements-novmnet.plist \
+  vz-runner/.build/arm64-apple-macosx/release/vz-runner
 ```
 
-The default plist (`cmd/vz-runner/Entitlements-novmnet.plist`) contains only:
+The default plist (`vz-runner/Entitlements-novmnet.plist`) contains only:
 - `com.apple.security.virtualization` — required to create VZVirtualMachine
 
 This is sufficient for the Vz backend, **including NAT networking**
@@ -412,12 +440,13 @@ This is sufficient for the Vz backend, **including NAT networking**
 **not** needed for NAT; the older `Entitlements.plist` (which adds it) is only
 relevant for bridged networking.
 
-### 3. containerd-shim-urunc-v2 (Go — optional)
-
-Only needed if integrating with containerd on macOS:
+### 3. hvi (Rust -- Hypervisor.framework)
 
 ```bash
-go build -o containerd-shim-urunc-v2 ./cmd/containerd-shim-urunc-v2/
+git submodule update --init
+make hvi_vmm
+# The binary is at hvi-vmm/target/release/hvi; `make sign` signs it with
+# hvi-vmm/hvi.entitlements
 ```
 
 ### 4. QEMU
@@ -457,28 +486,34 @@ EOF
 ) /usr/local/bin/qemu-system-aarch64-signed
 ```
 
-Then configure urunc to use the signed binary (see [urunc configuration](#urunc-configuration)).
+Then point hull at it: `hull run --hypervisor qemu --qemu-path /usr/local/bin/qemu-system-aarch64-signed ...`.
 
 </details>
 
 ### Installation
 
-Place the binaries where hull can find them. `vz-runner` must be in
-the same directory as `hull` (it is located via `os.Executable()`):
+Place the binaries where hull can find them. `vz-runner` and `hvi` must be
+in the same directory as `hull` (they are located via `os.Executable()`).
+`make install` does this for `PREFIX` (default `/usr/local/bin`); by hand:
 
 ```bash
 # Option A: install to /usr/local/bin
 sudo cp dist/hull_arm64 /usr/local/bin/hull
-sudo cp cmd/vz-runner/.build/arm64-apple-macosx/release/vz-runner /usr/local/bin/vz-runner
+sudo cp vz-runner/.build/arm64-apple-macosx/release/vz-runner /usr/local/bin/vz-runner
+sudo cp hvi-vmm/target/release/hvi /usr/local/bin/hvi
 
-# Re-sign vz-runner after copying (entitlements are stripped on copy)
+# Re-sign the runners after copying (entitlements are stripped on copy)
 sudo codesign --force --sign - \
-  --entitlements cmd/vz-runner/Entitlements.plist \
+  --entitlements vz-runner/Entitlements-novmnet.plist \
   /usr/local/bin/vz-runner
+sudo codesign --force --sign - \
+  --entitlements hvi-vmm/hvi.entitlements \
+  /usr/local/bin/hvi
 
 # Option B: run from the build directory
 ln -sf dist/hull_arm64 ./hull
-ln -sf cmd/vz-runner/.build/arm64-apple-macosx/release/vz-runner ./vz-runner
+ln -sf vz-runner/.build/arm64-apple-macosx/release/vz-runner ./vz-runner
+ln -sf hvi-vmm/target/release/hvi ./hvi
 ```
 
 ### Verify Installation
@@ -493,21 +528,6 @@ codesign -d --entitlements :- ./vz-runner 2>/dev/null | grep -c virtualization
 
 # Check QEMU (if using QEMU backend)
 qemu-system-aarch64 --version
-```
-
-### urunc Configuration
-
-hull looks for the QEMU binary in a config file or uses the system
-default. To point it at a signed QEMU binary, create `~/.hull/config.json`:
-
-```json
-{
-  "monitors": {
-    "qemu": {
-      "path": "/usr/local/bin/qemu-system-aarch64-signed"
-    }
-  }
-}
 ```
 
 ## VMM Backends
@@ -530,7 +550,7 @@ macOS integration.
 
 **Requirements:**
 - `vz-runner` must be signed with the `com.apple.security.virtualization` entitlement (NAT networking needs nothing more; see [Signing](#signing))
-- macOS 26+ (VZLinuxBootLoader requires ARM64 Image format kernel, not PE32+/EFI stub)
+- macOS 14+ is what `vz-runner` is built for; macOS 26 is what CI tests. VZLinuxBootLoader requires an ARM64 Image format kernel, not PE32+/EFI stub
 
 #### Booting an unmodified OCI image
 
@@ -556,9 +576,9 @@ published bundle if it is not there yet:
 ./hull run --hypervisor vz ubuntu:latest /bin/echo hello-from-vz
 ```
 
-The bundles are built and published by
-[NOFireAI/hull-assets](https://github.com/NOFireAI/hull-assets), one OCI
-artifact per host platform. `hull assets show` says where they are and what is
+The bundles are published as the OCI artifact `ghcr.io/nofireai/hull-assets`,
+one tag per host platform; it pulls anonymously. The repository that builds
+them is not public. `hull assets show` says where they are and what is
 present; `hull assets pull [REF]` fetches them ahead of time. `--no-boot-assets`
 turns the fallback off, and `HULL_BOOT_ASSETS` points at a local build of the
 assets repo instead. The assets live under the store so that `--store-dir` is a
@@ -572,6 +592,11 @@ how you pin a version.
 | `HULL_BOOT_ASSETS` | Use this directory instead of the store's, for a local build of the assets repo |
 | `HULL_BOOT_ASSETS_REF` | Fetch this reference instead of the one for this platform, to pin a version or use a mirror |
 | `HULL_REGISTRY_TOKEN` | A token with `read:packages`, for a private bundle or a machine whose keychain cannot be unlocked -- a CI runner, or any headless session, where Docker's credential helper cannot prompt |
+| `BRIG_BOOT_ASSETS` | Honoured like `HULL_BOOT_ASSETS` (it loses to it), so a machine that already has brig pointed somewhere does not spell the path twice |
+| `XDG_DATA_HOME` | Only consulted with no store and off macOS: the assets then live under `$XDG_DATA_HOME/brig/assets` (default `~/.local/share`) |
+| `HULL_VERIFY` | How the bundle's cosign signature is checked: `warn` (default; boots and prints a warning when it cannot be verified), `require` or `strict` (refuse anything not positively verified, including a host without cosign), `off`/`none`/`0`. Anything unrecognised is `warn` |
+| `HULL_BOOT_ASSETS_ALLOW_FOREIGN` | `1`, or the repository being allowed, to fetch a bundle from a repository other than the published one. Without it such a reference is refused |
+| `HULL_BOOT_ASSETS_INSECURE` | `1` to fetch from a registry that resolves to a scheme other than https (a local registry). Without it the fetch is refused |
 
 Passing the annotations explicitly still wins, so nothing that already sets
 them changes behaviour -- brig, in particular, keeps supplying its own.
@@ -605,20 +630,13 @@ hardware-accelerated virtualization.
 - Guest kernel boots with `root=rootfs rootfstype=9p rootflags=trans=virtio,version=9p2000.L` (9pfs mode) or `root=/dev/vda` (block mode)
 
 **Requirements:**
-- `brew install qemu`
-- For networking: QEMU binary must be signed with `com.apple.vm.networking` entitlement:
-  ```bash
-  cp $(which qemu-system-aarch64) /usr/local/bin/qemu-aarch64-signed
-  codesign --force --sign - --entitlements <(cat <<EOF
-  <?xml version="1.0" encoding="UTF-8"?>
-  <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-  <plist version="1.0"><dict>
-    <key>com.apple.security.hypervisor</key><true/>
-    <key>com.apple.vm.networking</key><true/>
-  </dict></plist>
-  EOF
-  ) /usr/local/bin/qemu-aarch64-signed
-  ```
+- `brew install qemu` (>= 7.2). `--qemu-path` picks a specific binary;
+  otherwise hull auto-detects one, preferring a signed copy.
+- For networking, use the gateway (`--gateway-sock`, or anything under
+  compose): a unix-socket stream netdev, no entitlement, no root. Standalone
+  `--net shared` goes through vmnet, which needs root or a QEMU signed with
+  `com.apple.vm.networking`; see
+  [the QEMU build notes](#4-qemu) and the troubleshooting entry below.
 
 ## Rootfs Modes
 
@@ -648,8 +666,9 @@ attaches it as a virtio block device. This provides a native POSIX filesystem
 without the limitations of virtiofs or 9pfs.
 
 ```bash
-# Works with both backends
+# Works with every backend
 ./hull run --hypervisor vz --rootfs-type block <image>
+./hull run --hypervisor hvi --rootfs-type block <image>
 ./hull run --hypervisor qemu --rootfs-type block <image>
 ```
 
@@ -711,6 +730,12 @@ Commands:
   telemetry       Control anonymous usage and crash telemetry
 ```
 
+One more command is not in that list. `hull network-gateway` runs the
+user-mode network gateway daemon and is hidden from `--help`, because compose
+starts it for you, one per project. It can be run by hand to give a `run
+--gateway-sock` instance a network with a policy; its flags are in
+[docs/network-egress.md](docs/network-egress.md#the-gateway-itself).
+
 ### The store
 
 `--store-dir` is where images, instances and boot assets live, and it is a
@@ -742,28 +767,69 @@ hull assets pull [REF]     # fetch them ahead of time
 
 ### `run` Flags
 
+`hull run --help` is the authority; this is the same list with the defaults.
+
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--hypervisor` | from image | `vz` or `qemu` |
-| `--rootfs-type` | auto | `virtiofs`, `9pfs`, or `block` |
+| `--hypervisor` | from image annotation | `vz`, `qemu` or `hvi` |
+| `--rootfs-type` | per backend | `virtiofs` (vz default), `9pfs` (QEMU default) or `block` (ext4 disk image) |
 | `--mem` | 512 | Memory in MB |
 | `--cpus` | 1 | Number of vCPUs |
 | `--net` | none | `none` or `shared` (NAT) |
-| `--detach, -d` | false | Run in background |
-| `--name` | random | Instance name |
-| `--shared-dir` | — | Host path to share: `/host:/guest` |
-| `--shared-dir-fd` | — | Share a directory the caller already holds open: `FD:/guest` |
+| `--detach, -d` | false | Run in background and print the instance id |
+| `--name` | auto-generated | Instance name |
+| `--pull` | missing | Pull policy: `missing`, `always` or `never`. A cached tag is not re-resolved, so `always` picks up a republished tag |
+| `--platform` | linux/arm64 | Image platform to pull, e.g. `linux/amd64` for the Rosetta path |
+| `--shared-dir` | - | Share a host directory: `/host/path:/guest/path[:ro\|rw]` (repeatable) |
+| `--shared-dir-fd` | - | Share a directory the caller already holds open: `FD:/guest/path[:ro\|rw]` (repeatable). Clear `FD_CLOEXEC` on it first |
+| `--env`, `-e` | - | `KEY=VALUE`, or a bare `KEY` to inherit it from the host without putting the value in argv (repeatable) |
+| `--add-host` | - | Add an entry to the guest's `/etc/hosts`: `host:ip` (repeatable) |
+| `--annotation` | - | Set an OCI runtime annotation: `KEY=VALUE` (repeatable) |
+| `--no-boot-assets` | false | Do not fall back to the published boot assets when the image carries no kernel |
+| `--qemu-path` | auto-detect, prefers a signed copy | Path to `qemu-system-aarch64` |
+| `--stop-grace` | 10 | Seconds vz-runner waits for the guest to answer a stop request before forcing |
+| `--wait-ip` | false | With `--detach` and NAT networking, wait for the DHCP lease and record the IP before returning |
+| `--gateway-sock` | - | Join the user-mode network gateway at this control socket (vz, hvi or QEMU) |
+| `--gateway-cidr` | - | Static guest CIDR on the gateway subnet, e.g. `10.87.0.10/24` (requires `--gateway-sock`) |
+| `--gui` | false | Open a graphical window for the instance (vz only) |
+| `--gui-title` | - | Title for the GUI window (requires `--gui`) |
+| `--rosetta` | false | Run an amd64 rootfs under Rosetta translation (vz only; the kernel stays arm64). Implies `--platform linux/amd64` for the pull |
+
+### Environment variables
+
+The boot-asset variables are in
+[Booting an unmodified OCI image](#booting-an-unmodified-oci-image). The rest:
+
+| Variable | What it does |
+|----------|--------------|
+| `HULL_TERMINAL_FILTER` | `off`, `0`, `none` or `false` turns off the filter hull puts between guest output and your terminal (OSC 52 clipboard reads, DCS passthrough, cursor-position queries). Anything else leaves it on. Reach for it when the filter is in the way; do not leave it set |
+| `HULL_TELEMETRY_DISABLED`, `DO_NOT_TRACK` | Either one turns telemetry off |
+| `HULL_TELEMETRY_DEBUG` | Print every telemetry payload to stderr instead of sending it |
+| `HULL_TELEMETRY_PRODUCT` | The product a wrapper driving hull reports events under (brig sets it); default `hull` |
+| `HULL_TELEMETRY_ENDPOINT` | Override the build-time collector endpoint (tests, staging) |
+| `HULL_TELEMETRY_SUPPRESS` | Internal: set on hull's own child invocations (compose self-exec, the gateway daemon) so one command counts once. Not an opt-out |
+| `CI` | Counts the session as non-interactive, so the telemetry consent prompt never shows |
+| `HULL_BIN`, `HULL_STORE_DIR`, `HULL_TEST_LOG_DIR` | Read by the harnesses under `test/` only, never by hull itself; see [test/README.md](test/README.md) |
+
+[docs/telemetry.md](docs/telemetry.md) has the telemetry ones in full.
 
 ## Networking
 
-Both backends provide NAT networking with automatic DHCP:
+`--net shared` gives the guest NAT networking; what serves it depends on the
+backend:
 
-| | Vz | QEMU |
-|---|---|---|
-| Subnet | 192.168.64.x | 192.168.64.x (vmnet) |
-| Gateway | 192.168.64.1 | 192.168.64.1 |
-| DHCP | Automatic (`ip=dhcp`) | Automatic (`ip=dhcp`) |
-| DNS | Copies from `/proc/net/pnp` | Copies from `/proc/net/pnp` |
+| | vz | QEMU | hvi |
+|---|---|---|---|
+| Serviced by | Apple NAT (`VZNATNetworkDeviceAttachment`) | vmnet-shared | hvi's built-in user-space stack |
+| Subnet | 192.168.64.x | 192.168.64.x | 10.0.2.x |
+| Gateway | 192.168.64.1 | 192.168.64.1 | 10.0.2.2 |
+| DHCP | Automatic (`ip=dhcp`) | Automatic (`ip=dhcp`) | static, set by hull |
+| DNS | Copies from `/proc/net/pnp` | Copies from `/proc/net/pnp` | 10.0.2.3 |
+
+`--gateway-sock` replaces all of that with the user-mode gateway, on every
+backend: a static address on the gateway's subnet (default `10.87.0.0/24`),
+DNS served by the gateway, and the egress policy in
+[docs/network-egress.md](docs/network-egress.md).
 
 Guest DNS resolution is configured automatically by the init wrapper,
 which copies the kernel DHCP response from `/proc/net/pnp` to `/etc/resolv.conf`.
@@ -803,19 +869,19 @@ sub-100ms boot times.
 
 ```
 ┌──────────────────────────────────────────────────┐
-│  hull CLI (Go)                            │
+│  hull CLI (Go)                                   │
 │  Pull OCI image → prepare rootfs → build cmdline │
-└──────────┬───────────────────────┬───────────────┘
-           │                       │
-     ┌─────▼─────┐          ┌─────▼──────┐
-     │ vz-runner  │          │   QEMU     │
-     │  (Swift)   │          │ aarch64    │
-     │  Vz.fwk    │          │ +HVF      │
-     └─────┬──────┘          └─────┬──────┘
-           │                       │
-     ┌─────▼───────────────────────▼──────┐
-     │  Apple Hypervisor Framework (HVF)  │
-     └─────┬──────────────────────────────┘
+└──────────┬───────────────┬───────────────┬───────┘
+           │               │               │
+     ┌─────▼─────┐   ┌──────────┐   ┌─────▼──────┐
+     │ vz-runner  │   │   hvi    │   │   QEMU     │
+     │  (Swift)   │   │  (Rust)  │   │ aarch64    │
+     │  Vz.fwk    │   │ Hv.fwk   │   │ +HVF      │
+     └─────┬──────┘   └────┬─────┘   └─────┬──────┘
+           │               │               │
+     ┌─────▼───────────────▼───────────────▼──────┐
+     │       Apple Hypervisor Framework (HVF)      │
+     └─────┬──────────────────────────────────────┘
            │
      ┌─────▼──────────────────────────────┐
      │  ARM64 Linux Kernel (6.18.0urunc)  │
@@ -844,7 +910,7 @@ Bunny-built images store configuration in `rootfs/urunc.json` with base64-encode
 | Annotation | Description |
 |-----------|-------------|
 | `com.urunc.unikernel.binary` | Path to kernel (e.g., `/.boot/kernel`) |
-| `com.urunc.unikernel.hypervisor` | Default backend (`qemu` or `vz`) |
+| `com.urunc.unikernel.hypervisor` | Default backend (`vz`, `qemu` or `hvi`) |
 | `com.urunc.unikernel.unikernelType` | Unikernel type (e.g., `linux`) |
 | `com.urunc.unikernel.cmdline` | Custom kernel command line |
 | `com.urunc.unikernel.mountRootfs` | `true` to use virtiofs/9pfs rootfs mode |
@@ -982,11 +1048,19 @@ team — not available on a free account.
 
 1. Bump the `VERSION` file (the tag must match it), commit, and tag:
    `git tag v$(cat VERSION) && git push origin v$(cat VERSION)`.
-2. The *Sign and Notarize* workflow runs on the tag: it builds, signs with
-   Developer ID, notarizes, and creates the GitHub release with the dmg and
-   the Homebrew tarball (`hull-<version>-arm64.tar.gz` + sha256).
-3. Update `Formula/hull.rb` in the tap with the new version URL and
-   the sha256 printed in the workflow's job summary.
+2. `release.yml` runs on the tag: it signs and notarizes the runners, then
+   goreleaser builds and notarizes `hull`, uploads
+   `hull-<version>-arm64.tar.gz`, `checksums.txt` and its cosign signature,
+   and drafts the GitHub release with notes from the PR titles. Publish the
+   draft.
+3. For a stable tag goreleaser opens a pull request against
+   `brig-sh/homebrew-brig` with the new `Casks/hull.rb`; merge it. For a
+   release candidate the cask is not published (`skip_upload: auto`), so
+   bump `version` and `sha256` in the tap's `Casks/hull.rb` by hand if the
+   rc should be installable.
+4. `CHANGELOG.md` is not touched by the workflow. Regenerate it with
+   `scripts/changelog.sh` (or `git-cliff --config cliff.toml -o
+   CHANGELOG.md`) and commit it.
 
 ## Built on urunc
 
