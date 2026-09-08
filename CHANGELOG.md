@@ -7,6 +7,53 @@ release. History before v0.1.0-rc21 predates the import of this tree and
 is kept below as it was generated then; v0.1.0-rc19 and rc20 were re-cut
 imports of the same tree as rc21, and rc23 was a version bump only.
 
+## [0.1.0-rc26] - 2026-09-08
+
+### Bug Fixes
+
+- Restore the short flags on run, restore, logs, rm and stop
+- Refuse a unix socket path the kernel cannot bind
+- Say why a checkpoint failed instead of timing out
+- Build hvi from the submodule so its toolchain pin applies
+- Serve the DNS records the gateway was started with
+
+### Build
+
+- Pin urunc to urunc-dev/urunc feat/initrd-hvi-backend-v0.8.0
+
+### Documentation
+
+- Say what make macos builds and what CI runs
+- Regenerate through rc25 and stop claiming CI does it
+- Replace the two legacy READMEs
+- Document the gateway flags and the checkpoint knobs
+- Say where the state lives and what the prompt prints
+- Match the compose reference to the shipped command
+- Bring the README up to the hull we ship
+- Complete the sentences the import cut
+- Add release, CI, coverage, Go and license badges
+- Add AI policy
+- Say a host rule authorizes an address, not a name
+- Say that a policy covers a gateway, so give each sandbox one
+- Say that refreshed addresses are not held per guest
+- State what egress filtering leaves alone
+
+### Features
+
+- Re-resolve the named hosts in the egress rules on a timer
+- Add the --egress-default and --egress-allow/deny flags
+- Gate and pin DNS so host globs are enforceable
+- Enforce the egress policy in the netstack forwarders
+- Add the egress policy rules and the DNS pin table
+
+### Refactor
+
+- Build the netstack in-repo, not via virtualnetwork
+
+### Tests
+
+- Prove egress filtering with real bytes on real sockets
+
 ## [0.1.0-rc25] - 2026-08-28
 
 ### Miscellaneous
