@@ -2443,8 +2443,8 @@ func launchVMM(cmd *cli.Command, s *store.Store, state *store.InstanceState, cmd
 
 	metricsDone := make(chan struct{})
 	defer close(metricsDone)
-	startVMMMetricsSampler(vmmCmd.Process.Pid, string(vmmType), state.StartTime,
-		s.InstanceDir(state.ID), metricsDone)
+	startVMMMetricsSampler(vmmCmd.Process.Pid, string(vmmType), vcpusFromCmdLine(state.CmdLine),
+		state.StartTime, s.InstanceDir(state.ID), metricsDone)
 
 	markStopped := func() {
 		state.Status = "stopped"

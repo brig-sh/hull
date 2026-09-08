@@ -199,15 +199,160 @@ func sendEndOnce(s *store.Store, state *store.InstanceState) {
 	sendEndEvent(state.Backend, dur)
 }
 
-// startVMMMetricsSampler samples the VMM process every 30s while a CLI is
-// attached to it -- the foreground `run`, or an `exec` session on a
-// detached VM (which is how a wrapped sandbox gets sampled while an agent
-// session is active). startTime is the VM's launch time, so uptime is
-// the VM's and not the sampler's. A non-blocking per-instance flock
-// keeps it to one sampler per VM, so a second attach never double-counts.
-// Sampling stops when done closes, when the flock is dropped with the
-// process, or when the VMM PID disappears.
-func startVMMMetricsSampler(launcherPID int, backend string, startTime time.Time, instanceDir string, done <-chan struct{}) {
+// Metrics sampling cadence. A rate needs two readings, so the first tick
+// only takes a baseline; both of the first two come from the short warm-up
+// rather than the full interval. A VM or an exec session that ended inside
+// thirty seconds used to emit nothing at all, which biased everything we
+// collected towards long-lived, mostly idle VMs.
+//
+// Variables rather than constants so a test can drive the sampler through
+// both ticks without spending thirty-five seconds doing it.
+var (
+	metricsInterval       = 30 * time.Second
+	metricsWarmupInterval = 5 * time.Second
+)
+
+// vmmCPUSample is one reading of a VMM process' cumulative CPU time, with
+// the clock at the moment it was taken and the PID it came from.
+//
+// Utilization is the difference between two of these over the real time
+// that passed. A single reading is not one: hull used to forward `ps -o
+// %cpu` as `cpu_pct`, and that column is a decaying average over up to a
+// minute, summed over the process' threads -- so four busy vCPUs read
+// about 400, not 100, over a window that overlapped the next sample's.
+type vmmCPUSample struct {
+	pid  int
+	cpu  time.Duration
+	when time.Time
+}
+
+// sampleVMMProcess reads one process' RSS and cumulative CPU time.
+func sampleVMMProcess(pid int) (rssKB string, cpu time.Duration, err error) {
+	out, err := exec.Command("ps", "-o", "rss=,time=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return "", 0, err
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) < 2 {
+		return "", 0, fmt.Errorf("ps: short output for pid %d", pid)
+	}
+	cpu, err = parsePSCPUTime(fields[1])
+	if err != nil {
+		return "", 0, err
+	}
+	return fields[0], cpu, nil
+}
+
+// parsePSCPUTime parses the `ps -o time=` column: CPU time accumulated
+// across a process' threads, written as [minutes:]seconds.hundredths.
+//
+// The minutes field is unbounded -- Darwin never rolls it up into hours,
+// so a VM with 41 hours on the clock reads "2463:28.96", not "41:03:28.96".
+// (The day-and-hour shape belongs to `etime`, which is elapsed real time,
+// not CPU time.) Reading from the last colon keeps this correct whatever
+// the magnitude, and the hundredths survive at every size.
+func parsePSCPUTime(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	secs := s
+	var mins float64
+	if i := strings.LastIndex(s, ":"); i >= 0 {
+		m, err := strconv.ParseFloat(s[:i], 64)
+		if err != nil {
+			return 0, fmt.Errorf("ps time %q: %w", s, err)
+		}
+		mins, secs = m, s[i+1:]
+	}
+	sec, err := strconv.ParseFloat(secs, 64)
+	if err != nil {
+		return 0, fmt.Errorf("ps time %q: %w", s, err)
+	}
+	return time.Duration((mins*60 + sec) * float64(time.Second)), nil
+}
+
+// cpuPercent turns two readings into the share of the guest's vCPUs that
+// were busy between them, so 100 means every vCPU fully busy for the whole
+// interval. The bool reports whether the two are comparable at all.
+//
+// Each rejection has a real path to it. Differing PIDs mean the vz helper
+// cycled or a PID was reused, so the readings belong to two processes and
+// their difference is meaningless (and frequently negative). An unknown
+// vCPU count must not divide -- in Go that produces +Inf, and since
+// cpu_pct ships as a string, "+Inf" would land in the data unremarked. A
+// negative delta means the same thing a PID change does, arrived at
+// without our noticing. None of these could happen while the sampler
+// forwarded a string and did no arithmetic at all.
+func cpuPercent(prev, cur vmmCPUSample, vcpus int) (float64, bool) {
+	if prev.pid == 0 || prev.pid != cur.pid || vcpus <= 0 {
+		return 0, false
+	}
+	elapsed := cur.when.Sub(prev.when).Seconds()
+	if elapsed <= 0 {
+		return 0, false
+	}
+	pct := (cur.cpu - prev.cpu).Seconds() / elapsed * 100 / float64(vcpus)
+	if pct < 0 {
+		return 0, false
+	}
+	return pct, true
+}
+
+// vcpusFromCmdLine reads the guest's vCPU count out of the VMM argv.
+//
+// The count is not a field on the instance record, but the argv that
+// launched the VM is, and every backend carries the number in it: qemu
+// takes `-smp`, vz and hvi take `--cpus`. Reading it from there rather
+// than adding a field means an instance that was already running when hull
+// was upgraded still normalises correctly, and it keeps the telemetry
+// event's field list unchanged -- widening that list is what re-opens the
+// consent question, and a vCPU count is not worth re-asking the world.
+func vcpusFromCmdLine(argv []string) int {
+	for i, a := range argv {
+		var v string
+		switch {
+		case a == "-smp" || a == "--cpus":
+			if i+1 < len(argv) {
+				v = argv[i+1]
+			}
+		case strings.HasPrefix(a, "--cpus="):
+			v = strings.TrimPrefix(a, "--cpus=")
+		case strings.HasPrefix(a, "-smp="):
+			v = strings.TrimPrefix(a, "-smp=")
+		default:
+			continue
+		}
+		if n, ok := parseCPUCount(v); ok {
+			return n
+		}
+	}
+	return 0
+}
+
+// parseCPUCount reads a vCPU count from a flag value. urunc always writes a
+// bare integer, but qemu's own -smp accepts `cpus=4,sockets=1` too, so read
+// that shape rather than silently taking zero from it.
+func parseCPUCount(v string) (int, bool) {
+	if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		return n, true
+	}
+	for _, part := range strings.Split(v, ",") {
+		if after, ok := strings.CutPrefix(part, "cpus="); ok {
+			if n, err := strconv.Atoi(after); err == nil && n > 0 {
+				return n, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// startVMMMetricsSampler samples the VMM process while a CLI is attached to
+// it -- the foreground `run`, or an `exec` session on a detached VM (which
+// is how a wrapped sandbox gets sampled while an agent session is active).
+// startTime is the VM's launch time, so uptime is the VM's and not the
+// sampler's; vcpus normalises the CPU reading and comes from the argv. A
+// non-blocking per-instance flock keeps it to one sampler per VM, so a
+// second attach never double-counts. Sampling stops when done closes, when
+// the flock is dropped with the process, or when the VMM PID disappears.
+func startVMMMetricsSampler(launcherPID int, backend string, vcpus int, startTime time.Time, instanceDir string, done <-chan struct{}) {
 	if !telemetryClient.Enabled() {
 		return
 	}
@@ -225,15 +370,22 @@ func startVMMMetricsSampler(launcherPID int, backend string, startTime time.Time
 			_ = unix.Flock(int(lock.Fd()), unix.LOCK_UN)
 			_ = lock.Close()
 		}()
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
+		// The warm-up also covers a vz helper that is not resolvable the
+		// instant we attach: we retry every few seconds rather than every
+		// thirty, and only settle to the full interval once a sample has
+		// actually gone out.
+		interval := metricsWarmupInterval
+		timer := time.NewTimer(interval)
+		defer timer.Stop()
+		var prev vmmCPUSample
 		vzHelper := 0
 		for {
 			select {
 			case <-done:
 				return
-			case <-ticker.C:
-				// Which PID actually is the VM? qemu runs the guest
+			case <-timer.C:
+				timer.Reset(interval)
+				// Which PID actually is the VM? qemu and hvi run the guest
 				// in-process, so the launcher is it. vz (Apple
 				// Virtualization.framework) runs the guest in a separate
 				// launchd-owned XPC helper -- the launcher is a thin
@@ -252,23 +404,33 @@ func startVMMMetricsSampler(launcherPID int, backend string, startTime time.Time
 					}
 					pid = vzHelper
 				}
-				out, err := exec.Command("ps", "-o", "rss=,%cpu=", "-p", strconv.Itoa(pid)).Output()
-				sample := strings.Fields(string(out))
-				if err != nil || len(sample) < 2 {
+				rssKB, cpu, err := sampleVMMProcess(pid)
+				if err != nil {
 					if backend == "vz" {
 						vzHelper = 0 // helper cycled; re-resolve next tick
-						if pidAlive(launcherPID) {
-							continue
-						}
+					}
+					// One ps failure is not the end of the VM. Only a PID
+					// that is actually gone ends the sampler: qemu and hvi
+					// used to return here and stop sampling for the rest of
+					// the attach, where vz alone recovered.
+					if pidAlive(launcherPID) {
+						continue
 					}
 					return
 				}
+				cur := vmmCPUSample{pid: pid, cpu: cpu, when: time.Now()}
+				pct, ok := cpuPercent(prev, cur, vcpus)
+				prev = cur
+				if !ok {
+					continue // baseline taken, or the two are not comparable
+				}
 				telemetryClient.Send("metrics", map[string]string{
 					"backend":  backend,
-					"rss_kb":   sample[0],
-					"cpu_pct":  sample[1],
+					"rss_kb":   rssKB,
+					"cpu_pct":  strconv.FormatFloat(pct, 'f', 1, 64),
 					"uptime_s": strconv.FormatInt(int64(time.Since(startTime).Seconds()), 10),
 				})
+				interval = metricsInterval
 			}
 		}
 	}()

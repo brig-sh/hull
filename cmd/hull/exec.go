@@ -126,8 +126,8 @@ func execInstance(_ context.Context, cmd *cli.Command) error {
 	// in the sampler keeps concurrent sessions from double-counting.
 	metricsDone := make(chan struct{})
 	defer close(metricsDone)
-	startVMMMetricsSampler(state.PID, state.Backend, state.StartTime,
-		s.InstanceDir(instanceID), metricsDone)
+	startVMMMetricsSampler(state.PID, state.Backend, vcpusFromCmdLine(state.CmdLine),
+		state.StartTime, s.InstanceDir(instanceID), metricsDone)
 
 	useTTY := cmd.Bool("tty")
 	stdinFd := int(os.Stdin.Fd())
