@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -91,7 +92,6 @@ func checkpointInstance(_ context.Context, cmd *cli.Command) error {
 	}
 
 	ckptDir := instanceCheckpointDir(s, instanceID)
-	manifest := filepath.Join(ckptDir, ckptManifest)
 	started := time.Now()
 
 	// vz-runner pauses, saves, clones the disk, resumes, and writes the
@@ -100,15 +100,36 @@ func checkpointInstance(_ context.Context, cmd *cli.Command) error {
 		return fmt.Errorf("failed to signal vz-runner (pid %d): %w", state.PID, err)
 	}
 
-	deadline := started.Add(time.Duration(cmd.Int("timeout")) * time.Second)
+	timeout := time.Duration(cmd.Int("timeout")) * time.Second
+	return waitForCheckpoint(ckptDir, instanceID, state.PID, started, timeout)
+}
+
+// waitForCheckpoint watches ckptDir until the checkpoint that began at started
+// finishes, until the runner records why it could not take one, until the
+// runner exits, or until timeout runs out.
+func waitForCheckpoint(ckptDir, instanceID string, pid int, started time.Time, timeout time.Duration) error {
+	deadline := started.Add(timeout)
 	for time.Now().Before(deadline) {
-		if info, err := os.Stat(manifest); err == nil && !info.ModTime().Before(started) {
+		done, err := checkpointCompleted(ckptDir, started)
+		if err != nil {
+			// Not "checkpoint failed", which is the runner's own reason a few
+			// lines below. This one is hull refusing to call an incomplete
+			// artifact set a checkpoint, and the two read differently to
+			// whoever has to act on them.
+			return fmt.Errorf("checkpoint incomplete: %w", err)
+		}
+		if done {
 			stateSize := int64(0)
 			if st, err := os.Stat(filepath.Join(ckptDir, ckptStateFile)); err == nil {
 				stateSize = st.Size()
 			}
+			// The clone's mtime is no use as a freshness test: `cp -c` on APFS
+			// carries the source file's timestamps over, so a clone taken now
+			// from a disk the guest last wrote to an hour ago is an hour old.
+			// The manifest naming the clone is what says it belongs to this
+			// checkpoint, and checkpointCompleted has just established that.
 			diskNote := ""
-			if st, err := os.Stat(filepath.Join(ckptDir, ckptDiskFile)); err == nil && !st.ModTime().Before(started) {
+			if st, err := os.Stat(filepath.Join(ckptDir, ckptDiskFile)); err == nil {
 				diskNote = fmt.Sprintf(", disk clone %.1f MB", float64(st.Size())/(1024*1024))
 			}
 			fmt.Printf("Checkpoint of %s saved in %s (%s: %.1f MB%s)\n",
@@ -130,12 +151,127 @@ func checkpointInstance(_ context.Context, cmd *cli.Command) error {
 		// unconditionally sent people looking for a file that does not exist:
 		// launchVMM only opens the log in the detached branch, and a
 		// foreground run gives the VMM the terminal instead.
-		if err := syscall.Kill(state.PID, 0); err != nil {
+		if err := syscall.Kill(pid, 0); err != nil {
 			return errors.New("vz-runner exited while checkpointing; the reason is on the guest console (`hull logs` for a detached run, the terminal for a foreground one)")
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	return fmt.Errorf("checkpoint did not complete within %ds; the reason, if the runner gave one, is on the guest console (`hull logs` for a detached run, the terminal for a foreground one)", cmd.Int("timeout"))
+	return fmt.Errorf("checkpoint did not complete within %ds; the reason, if the runner gave one, is on the guest console (`hull logs` for a detached run, the terminal for a foreground one)", int(timeout.Seconds()))
+}
+
+// checkpointManifest is latest.json, the file vz-runner writes last
+// (vz-runner/Sources/main.swift:1059-1067). It names the artifacts the
+// checkpoint is made of. diskImage is the empty string when the disk clone
+// failed. Fields the CLI does not act on (savedAt, durationMs) are ignored.
+type checkpointManifest struct {
+	StateFile string `json:"stateFile"`
+	DiskImage string `json:"diskImage"`
+}
+
+// checkpointCompleted reports whether ckptDir holds a finished checkpoint from
+// the attempt that began at started.
+//
+// docs/checkpoint-restore.md:43 defines the marker: "latest.json | manifest,
+// written last — its mtime marks checkpoint completion". A fresh manifest
+// therefore says the runner is done, but not that it succeeded: it publishes
+// one whenever the machine state was saved, whether or not the disk clone
+// worked (main.swift:1057 gates the write on saveError == nil alone). So
+// completion is the manifest *and* the artifacts it names.
+//
+// The three answers are distinct:
+//   - (false, nil): nothing from this attempt yet, keep waiting.
+//   - (false, err): the attempt finished and did not produce a whole
+//     checkpoint. The manifest is written last, so nothing more is coming and
+//     waiting out the timeout would only delay the same bad news.
+//   - (true, nil): every named artifact is on disk.
+func checkpointCompleted(ckptDir string, started time.Time) (bool, error) {
+	info, err := os.Stat(filepath.Join(ckptDir, ckptManifest))
+	if err != nil || info.ModTime().Before(started) {
+		return false, nil
+	}
+	m, err := readCheckpointManifest(ckptDir)
+	if err != nil {
+		// The runner writes the manifest non-atomically (main.swift:1066,
+		// Data.write with no .atomic option), so a manifest that does not
+		// parse may be one being written right now. Keep waiting; the timeout
+		// is the backstop for one that never becomes readable.
+		return false, nil
+	}
+	if err := verifyCheckpointArtifacts(ckptDir, m); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// readCheckpointManifest reads and parses latest.json out of ckptDir.
+func readCheckpointManifest(ckptDir string) (checkpointManifest, error) {
+	var m checkpointManifest
+	data, err := os.ReadFile(filepath.Join(ckptDir, ckptManifest))
+	if err != nil {
+		return m, fmt.Errorf("no %s in %s, so no checkpoint finished there", ckptManifest, ckptDir)
+	}
+	if err := json.Unmarshal(data, &m); err != nil {
+		return m, fmt.Errorf("%s in %s does not read as a manifest: %w", ckptManifest, ckptDir, err)
+	}
+	return m, nil
+}
+
+// verifyCheckpointArtifacts checks that every artifact the manifest names is
+// on disk with contents in it.
+//
+// A manifest naming no disk image is the runner reporting a failed clone:
+// diskCloned drives that field (main.swift:1061) and stays false when `cp -c`
+// exits nonzero (main.swift:1052-1055). The runner deletes the previous clone
+// before it makes the new one (main.swift:1049), so this is not a checkpoint
+// that fell back on an older disk. It is a machine state with no rootfs to go
+// with it, and the pair has to rewind together for the guest to survive
+// (docs/checkpoint-restore.md:45-47).
+func verifyCheckpointArtifacts(ckptDir string, m checkpointManifest) error {
+	if err := checkpointArtifact(ckptDir, "machine state", m.StateFile); err != nil {
+		return err
+	}
+	if m.DiskImage == "" {
+		return errors.New("the machine state was saved but the disk was not cloned, so there is no rootfs to rewind with it")
+	}
+	return checkpointArtifact(ckptDir, "disk clone", m.DiskImage)
+}
+
+// checkpointArtifact reports whether one artifact the manifest names is there
+// to be used. The name has to be a file in the checkpoint directory itself: a
+// name that walks out of it describes something other than this checkpoint.
+func checkpointArtifact(ckptDir, role, name string) error {
+	switch {
+	case name == "":
+		return fmt.Errorf("%s: %s names no file for it", role, ckptManifest)
+	case name == "." || name == ".." || filepath.Base(name) != name:
+		return fmt.Errorf("%s: %s names %q, which is not a file in %s", role, ckptManifest, name, ckptDir)
+	}
+	info, err := os.Stat(filepath.Join(ckptDir, name))
+	if err != nil {
+		return fmt.Errorf("%s: %s names %s but it is not in %s", role, ckptManifest, name, ckptDir)
+	}
+	if info.Size() == 0 {
+		return fmt.Errorf("%s: %s is empty", role, name)
+	}
+	return nil
+}
+
+// requireRestorableCheckpoint refuses a checkpoint that is not all there.
+//
+// The runner restores the machine state onto whatever rootfs it finds: with no
+// clone in the checkpoint it prints "no disk image in checkpoint, keeping
+// current rootfs" and carries on (main.swift:1091-1094). The guest then
+// resumes holding memory from the checkpoint moment against a disk that has
+// moved on since — inodes, journal and free lists all disagree with what the
+// guest believes. Reading the manifest here is what makes the difference
+// visible: vm.vzstate on its own says a state was saved, not that a whole
+// checkpoint was.
+func requireRestorableCheckpoint(ckptDir string) error {
+	m, err := readCheckpointManifest(ckptDir)
+	if err != nil {
+		return err
+	}
+	return verifyCheckpointArtifacts(ckptDir, m)
 }
 
 // freshCheckpointFailure reads the reason vz-runner records when it cannot
@@ -234,6 +370,12 @@ func restoreInstance(_ context.Context, cmd *cli.Command) error {
 	}
 	if err := requireNoDescriptorShare(state.CmdLine); err != nil {
 		return err
+	}
+	// After requireBlockRootfs, because that is what makes a manifest naming
+	// no disk image unambiguous: the runner only skips the clone when the
+	// instance has no block rootfs, and this instance has one.
+	if err := requireRestorableCheckpoint(ckptDir); err != nil {
+		return fmt.Errorf("the checkpoint for %s cannot be restored: %w", instanceID, err)
 	}
 
 	cmdArgs := slices.Clone(state.CmdLine)
