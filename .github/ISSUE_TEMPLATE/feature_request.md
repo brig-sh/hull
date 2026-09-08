@@ -16,7 +16,8 @@ compose layer". Search open and closed issues first to avoid duplicates.
 <!--
 The problem or gap this addresses, and why it matters. If it builds on existing
 code, ground it with a `file.go:line` reference or two so a reader can start
-from the right place. For compose-spec gaps, name the capability id from
+from the right place. For compose-spec gaps, name the compose key and say
+what `hull compose config` prints for it today.
 -->
 
 ## Proposed solution

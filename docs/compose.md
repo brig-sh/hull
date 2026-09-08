@@ -83,16 +83,15 @@ into the project (see below). Named volumes work: declare them under the
 top-level `volumes:` key and they become store-managed directories
 (`<store>/volumes/<project>_<name>`) that persist across `down`/`up` and
 are removed only by `down --volumes`. Notable gaps: no `build:`, no
-`networks:` customization beyond `--subnet`.
-for the exhaustive matrix and `compose-support.md` for what's deferred.
+`networks:` customization beyond `--subnet`. The keys named in this section
+are the supported set; [`compose-support.md`](./compose-support.md) records
+what is deferred and why.
 
-Not everything unsupported is backlog. 21 capabilities are declared
-permanently out of scope by
-orchestration (`deploy`),
-cross-VM namespace sharing (`ipc:`/`pid:`/`network_mode: host`),
-Windows-only keys, Docker-platform machinery, and device passthrough — and
-the headline support figures count only in-scope capabilities. Out-of-
-scope keys still warn just as loudly.
+Not everything unsupported is backlog. Orchestration (`deploy`), cross-VM
+namespace sharing (`ipc:`/`pid:`/`network_mode: host`), Windows-only keys,
+Docker-platform machinery and device passthrough are out of scope for good:
+one service is one VM, and those keys assume a shared kernel or a Docker
+daemon. Out-of-scope keys still warn just as loudly.
 
 ## Profiles
 
@@ -231,7 +230,7 @@ consequences worth knowing before you write one:
 - A job **requires an agent-bearing image** (one shipping `/urunit-agent`).
  There is no other channel that carries a guest process's exit status
  today, so `up` fails loudly naming the requirement rather than assuming
- success ().
+ success.
 - A job's VM runs a benign init and the command runs through the agent, so
  the job's output is **not** in `compose logs` — it is captured and printed
  when the job fails.
