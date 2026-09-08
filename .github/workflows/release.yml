@@ -41,7 +41,10 @@ permissions:
 jobs:
   release:
     name: build, sign, notarize, publish
-    runs-on: [self-hosted, macOS, ARM64]
+    # notary: a runner whose egress reaches Apple's notarization service.
+    # v0.1.0-rc26 failed three times with HTTPClientError.connectTimeout on
+    # the mac-dev-01 runners, which cannot, while the msuch ones can.
+    runs-on: [self-hosted, macOS, ARM64, notary]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
