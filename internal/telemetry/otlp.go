@@ -17,6 +17,7 @@ package telemetry
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 )
 
@@ -26,18 +27,36 @@ import (
 // fields are duplicated as attributes for routing, filtering, and the
 // ingestion-side checksum validation (the collector recomputes the
 // checksum from these attributes and drops mismatches).
+// attrString renders an envelope value for an OTLP attribute. Everything
+// promoted is a string except schema_version, which is a number in the
+// payload and would otherwise be dropped by a string type assertion --
+// leaving the collector unable to route on the one field that says how to
+// read the rest.
+func attrString(v any) (string, bool) {
+	switch t := v.(type) {
+	case string:
+		return t, true
+	case float64: // every JSON number unmarshals to this
+		return strconv.FormatFloat(t, 'f', -1, 64), true
+	default:
+		return "", false
+	}
+}
+
 func otlpWrap(flat []byte) []byte {
 	var fields map[string]any
 	_ = json.Unmarshal(flat, &fields)
 
 	var attrs []map[string]any
-	for _, k := range []string{"event", "product", "version", "install_id", "captured_at", "checksum"} {
-		if v, ok := fields[k].(string); ok {
-			attrs = append(attrs, map[string]any{
-				"key":   k,
-				"value": map[string]any{"stringValue": v},
-			})
+	for _, k := range []string{"schema_version", "event", "product", "version", "install_id", "captured_at", "checksum"} {
+		v, ok := attrString(fields[k])
+		if !ok {
+			continue
 		}
+		attrs = append(attrs, map[string]any{
+			"key":   k,
+			"value": map[string]any{"stringValue": v},
+		})
 	}
 	wrapped, err := json.Marshal(map[string]any{
 		"resourceLogs": []any{map[string]any{
