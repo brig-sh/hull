@@ -8,8 +8,10 @@
 #   scripts/changelog.sh --tag vX.Y.Z    # rewrite, treating unreleased as vX.Y.Z
 #   scripts/changelog.sh --notes vX.Y.Z  # print notes for a single tag to stdout
 #
-# The release workflow uses --tag (to fold the release being cut into
-# CHANGELOG.md) and --notes (to build the GitHub release body).
+# Nothing in CI runs this. The release workflow takes its notes from GitHub
+# through goreleaser, so CHANGELOG.md is regenerated and committed by hand.
+# Without docker, `git-cliff --config cliff.toml -o CHANGELOG.md` is the same
+# thing with a host install (brew install git-cliff).
 set -euo pipefail
 
 IMAGE="${GIT_CLIFF_IMAGE:-orhunp/git-cliff:latest}"
