@@ -13,10 +13,15 @@ reference for what ships today.
 ## Commands
 
 ```
-hull compose [-f FILE] [-p NAME] up [--subnet CIDR]
-hull compose [-f FILE] [-p NAME] down
-hull compose [-f FILE] [-p NAME] ps
-hull compose [-f FILE] [-p NAME] logs [-f] [SERVICE]
+hull compose [-f FILE] [-p NAME] [--env-file FILE]... [--profile NAME]... COMMAND
+
+hull compose up [-d] [--subnet CIDR] [SERVICE...]
+hull compose down [-v|--volumes]
+hull compose ps
+hull compose logs [-f] [SERVICE]
+hull compose config [SERVICE...]
+hull compose exec [-T|--no-tty] [-u|--user U] [-e|--env K=V]... [-w|--workdir DIR] SERVICE COMMAND [ARGS...]
+hull compose top
 ```
 
 - `-f, --file` — Compose file (env `COMPOSE_FILE`; default:
@@ -25,10 +30,22 @@ hull compose [-f FILE] [-p NAME] logs [-f] [SERVICE]
 - `-p, --project-name` — project name (env `COMPOSE_PROJECT_NAME`;
  default: the current directory name). Namespaces the instances, the
  network, and state.
+- `--env-file` -- interpolation env file; replaces the `.env` beside the
+ compose file. Repeatable, later files win.
+- `--profile` -- activate a profile (env `COMPOSE_PROFILES`, comma-separated).
+ Repeatable; `*` activates every profile. See [Profiles](#profiles).
 - `up` always runs detached (`-d` is accepted for compatibility).
  `--subnet` sets the project's virtual network (default `10.87.0.0/24`).
- Ctrl-C during `up` tears down whatever was created.
+ Naming services starts those and their dependencies only. Ctrl-C during
+ `up` tears down whatever was created.
+- `down` stops and removes every service and the gateway; `--volumes` also
+ removes the project's named volumes.
 - `logs -f` follows a single named service.
+- `config` validates the file and prints the effective configuration, in the
+ canonical form `docker compose config` prints.
+- `exec` runs a command in a running service through the guest agent;
+ `top` lists guest processes per service (the agent and `/bin/ps` are
+ required for both).
 
 Instances are ordinary hull instances underneath, so
 `hull ps` / `logs` / `stop` also see them; `compose ps` filters to
@@ -68,12 +85,15 @@ replaces it). `env_file:` feeds the guest environment, with `environment:`
 winning on collisions. Three urunc-specific extensions,
 `x-` prefixed so the file stays Compose-valid, tune the VM:
 
-- `x-hypervisor` — `vz` or `qemu` per service. **Defaults to `vz` when
- unset** (the backend is forced to `vz`, not read from the image
+- `x-hypervisor` -- `vz`, `qemu` or `hvi` per service. **Defaults to `vz`
+ when unset** (the backend is forced to `vz`, not read from the image
  annotation).
-- `x-healthcheck-tcp` — `{ port: N, interval: …, timeout: … }`, a
- TCP-connect healthcheck the gateway probes, used by
- `depends_on: { condition: service_healthy }`.
+- `x-healthcheck-tcp` -- `{ port: N, interval: …, retries: N, start_period: … }`,
+ a TCP-connect healthcheck the gateway probes, used by
+ `depends_on: { condition: service_healthy }`. Defaults: a 1 s interval and
+ 60 retries. There is no `timeout` key: a connect either succeeds or it
+ does not, so a `timeout` in the file is ignored with a warning. Size the
+ wait with `retries` and `start_period`.
 - `x-oneshot: true` — run the service as a **job**: its `command` runs to
  completion and its exit code is what dependents wait on (see below).
 
@@ -279,7 +299,7 @@ services:
  x-healthcheck-tcp:
  port: 5432
  interval: 1s
- timeout: 30s
+ retries: 30
 
  api:
  image: harbor.nbfc.io/nubificus/my-api:aarch64
