@@ -267,6 +267,12 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	bundleDir := s.InstanceBundleDir(instanceName)
 	logFile := s.InstanceLogFile(instanceName)
 	qmpSocket := s.InstanceQMPSocket(instanceName)
+	if err := checkUnixSocketPath("QMP", qmpSocket); err != nil {
+		return err
+	}
+	if err := checkUnixSocketPath("agent", s.InstanceAgentSocket(instanceName)); err != nil {
+		return err
+	}
 
 	// Track image digest (will be set based on whether we use local bundle or pull from registry)
 	var imageDigest string
@@ -570,6 +576,9 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 		// so a down gateway surfaces as the same friendly error the Vz path
 		// gets, instead of a VMM connection failure buried in its log.
 		qsock := qemuGatewaySock(gatewaySock)
+		if err := checkUnixSocketPath("gateway", qsock); err != nil {
+			return err
+		}
 		if conn, err := net.DialTimeout("unix", qsock, 2*time.Second); err != nil {
 			return fmt.Errorf("failed to reach network gateway at %s: %w", qsock, err)
 		} else {

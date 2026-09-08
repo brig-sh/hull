@@ -990,6 +990,12 @@ func composeUp(ctx context.Context, cmd *cli.Command) error {
 	// NAT egress, DNS, and the host-side port forwards computed above.
 	gatewaySock := filepath.Join(s.RootDir(), "compose", project+".gateway.sock")
 	gatewayAPI := filepath.Join(s.RootDir(), "compose", project+".api.sock")
+	// The QEMU-protocol socket is the longest name derived from these.
+	for what, p := range map[string]string{"gateway": qemuGatewaySock(gatewaySock), "gateway API": gatewayAPI} {
+		if err := checkUnixSocketPath(what, p); err != nil {
+			return err
+		}
+	}
 	// Service names double as DNS A records on the gateway, so guests that
 	// resolve via plain DNS (unikernels without /etc/hosts) also work.
 	var dnsRecords []string
