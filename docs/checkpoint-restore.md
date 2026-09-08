@@ -22,7 +22,10 @@ hull restore --detach demo   # background
 
 `checkpoint` returns once the snapshot is on disk (typically a few hundred
 ms; the state file is roughly the guest's touched memory, not its full RAM
-size). The VM keeps running afterwards — checkpoint-and-continue. Restoring
+size). It waits up to `--timeout` seconds (default 60) for the runner to
+finish, and past that fails with a message that says where to look for the
+reason: the guest console, which is `hull logs` for a detached run and the
+terminal for a foreground one. The VM keeps running afterwards -- checkpoint-and-continue. Restoring
 rewinds the guest to the checkpoint moment; the same checkpoint can be
 restored any number of times, which also makes it a fast-boot source: a
 golden post-boot checkpoint restores in well under a second, skipping kernel
@@ -62,6 +65,15 @@ Artifacts live in `<store>/instances/<name>/checkpoint/`:
 - Instances started on the user-mode network **gateway** re-join it at
   restore: pass `--gateway-sock` to `restore`. NAT instances keep their MAC,
   so the DHCP lease (and recorded IP) carries over.
+- An instance that shared a directory by descriptor (`run --shared-dir-fd`)
+  is **refused by `restore`**. The descriptor did not survive the process it
+  was passed to, so the path it named is no longer pinned: the directory can
+  be gone, or on a volume that reuses inode numbers it can name a different
+  one. Handing the guest a directory nobody vouched for is the substitution
+  `--shared-dir-fd` exists to prevent, so run the instance again with a
+  fresh descriptor instead of restoring it.
+- `restore` takes `--detach`, `--stop-grace`, `--wait-ip` and
+  `--gateway-sock`, with the same meaning as on `run`.
 - Restoring requires the stored launch configuration to be identical —
   `restore` re-uses the instance's recorded command line, so this holds
   automatically. Instances created by an older hull (no state dir)
