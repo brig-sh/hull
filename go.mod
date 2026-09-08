@@ -12,7 +12,7 @@ require (
 	github.com/opencontainers/runtime-spec v1.2.1
 	github.com/sirupsen/logrus v1.9.4
 	github.com/urfave/cli/v3 v3.10.1
-	github.com/urunc-dev/urunc v0.0.0
+	github.com/urunc-dev/urunc v0.8.1-0.20260907203506-f02da0c7e57a
 	golang.org/x/sys v0.47.0
 	golang.org/x/term v0.44.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -20,18 +20,23 @@ require (
 )
 
 require (
+	cyphar.com/go-pathrs v0.2.5 // indirect
 	github.com/BurntSushi/toml v1.6.0 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/Microsoft/hcsshim v0.13.0 // indirect
 	github.com/apparentlymart/go-cidr v1.1.1 // indirect
 	github.com/cavaliergopher/cpio v1.0.1 // indirect
+	github.com/checkpoint-restore/go-criu/v6 v6.3.0 // indirect
+	github.com/cilium/ebpf v0.17.3 // indirect
 	github.com/containerd/cgroups/v3 v3.1.0 // indirect
+	github.com/containerd/console v1.0.5 // indirect
 	github.com/containerd/continuity v0.5.0 // indirect
 	github.com/containerd/errdefs v1.0.0 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
 	github.com/containerd/log v0.1.0 // indirect
 	github.com/containerd/stargz-snapshotter/estargz v0.14.3 // indirect
 	github.com/containerd/typeurl/v2 v2.3.0 // indirect
+	github.com/coreos/go-systemd/v22 v22.7.0 // indirect
 	github.com/cyphar/filepath-securejoin v0.7.0 // indirect
 	github.com/distribution/reference v0.6.0 // indirect
 	github.com/docker/cli v24.0.0+incompatible // indirect
@@ -42,6 +47,7 @@ require (
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/elastic/go-seccomp-bpf v1.6.0 // indirect
 	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
+	github.com/godbus/dbus/v5 v5.2.2 // indirect
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
 	github.com/google/btree v1.1.2 // indirect
 	github.com/google/gopacket v1.1.19 // indirect
@@ -49,21 +55,27 @@ require (
 	github.com/insomniacslk/dhcp v0.0.0-20240710054256-ddd8a41251c9 // indirect
 	github.com/jackpal/gateway v1.2.0 // indirect
 	github.com/klauspost/compress v1.18.6 // indirect
-	github.com/kr/pretty v0.3.1 // indirect
 	github.com/mattn/go-colorable v0.1.15 // indirect
 	github.com/mattn/go-isatty v0.0.22 // indirect
 	github.com/mattn/go-shellwords v1.0.12 // indirect
 	github.com/mitchellh/go-homedir v1.1.0 // indirect
+	github.com/moby/sys/capability v0.4.0 // indirect
 	github.com/moby/sys/mountinfo v0.7.2 // indirect
 	github.com/moby/sys/sequential v0.7.0 // indirect
+	github.com/moby/sys/user v0.4.0 // indirect
 	github.com/moby/sys/userns v0.1.0 // indirect
+	github.com/mrunalp/fileutils v0.5.1 // indirect
 	github.com/nubificus/hedge_cli v0.0.3 // indirect
+	github.com/opencontainers/cgroups v0.0.4 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
+	github.com/opencontainers/runc v1.3.6 // indirect
+	github.com/opencontainers/selinux v1.13.1 // indirect
 	github.com/pierrec/lz4/v4 v4.1.14 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/rs/zerolog v1.35.1 // indirect
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.1 // indirect
+	github.com/seccomp/libseccomp-golang v0.10.0 // indirect
 	github.com/u-root/uio v0.0.0-20240224005618-d2acac8f3701 // indirect
 	github.com/vbatts/tar-split v0.11.3 // indirect
 	github.com/vishvananda/netlink v1.3.1 // indirect
@@ -83,20 +95,8 @@ require (
 	google.golang.org/protobuf v1.36.12-0.20260120151049-f2248ac996af // indirect
 )
 
-// TEMPORARY. The darwin work hull depends on -- the Vz backend, exec, console,
-// the GUI window flags, the HVI backend and the generic container initrd --
-// lives on nofireai/urunc_fork@feat/initrd-hvi-backend, and this
-// pseudo-version is that branch's tip (1ff9d7d3).
-//
-// feat/initrd-hvi-backend is the branch hull needs. It carries the initrd and
-// HVI commits without the VMI introspection work, which hull does not use.
-//
-// This previously named nofireai/urunc, which does NOT contain the commit. It
-// built anyway because our release runner is the same Mac that had the module
-// cached; from a cold cache it fails with `unknown revision 9ba1e785a2d2`, so
-// nobody cloning the repo could build it. Pointing at the repo that actually
-// has the commit is the whole fix -- the module content is identical.
-//
-// To be resolved properly later: either upstream the darwin work or settle on
-// one fork repo and a tagged release, rather than pinning a branch tip.
-replace github.com/urunc-dev/urunc => github.com/nofireai/urunc_fork v0.7.1-0.20260817061214-770a319bb025
+// The darwin work hull depends on -- the Vz backend, exec, console, the GUI
+// window flags, the HVI backend and the generic container initrd -- is the
+// urunc-dev/urunc branch feat/initrd-hvi-backend-v0.8.0: the darwin commits
+// rebased onto the v0.8.0 release. The require below is that branch's tip.
+// No replace: the module is the upstream repository itself.
