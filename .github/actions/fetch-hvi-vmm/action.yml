@@ -9,4 +9,10 @@ runs:
   steps:
     - name: Fetch the hvi-vmm submodule
       shell: bash
-      run: git submodule update --init hvi-vmm
+      # sync first: a self-hosted runner keeps its workspace between jobs, and
+      # a module config that once recorded an ssh remote keeps fetching over
+      # ssh (no key on the runner) however public the repository is. sync
+      # re-reads the https URL from .gitmodules on every run.
+      run: |
+        git submodule sync -- hvi-vmm
+        git submodule update --init hvi-vmm
