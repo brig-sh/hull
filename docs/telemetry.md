@@ -77,7 +77,7 @@ All events share a common envelope:
 
 | field | example | notes |
 |---|---|---|
-| `schema_version` | `1` | bumped on any schema change, with this page updated |
+| `schema_version` | `2` | bumped on any schema change, with this page updated |
 | `event` | `command` | one of `command`, `start`, `end`, `metrics`, `crash` |
 | `product` | `brig` | set by the wrapper driving hull; defaults to `hull` |
 | `version` | `0.1.0-rc14` | tool version |
@@ -118,12 +118,17 @@ by `stop` for a detached VM.
 
 ### `metrics` events
 
-Sampled every 30 seconds per running VMM while a CLI is attached to it.
-"Attached" means the foreground `run`, or an `exec` session on a
-detached VM -- so a sandbox is sampled while a session is using it, but an
-idle detached VM that nobody is attached to reports nothing.
+Sampled per running VMM while a CLI is attached to it. "Attached" means
+the foreground `run`, or an `exec` session on a detached VM -- so a sandbox
+is sampled while a session is using it, but an idle detached VM that nobody
+is attached to reports nothing.
 
-The reading is the actual VM process: for qemu that is the launcher
+The first sample follows a few seconds after the attach and the rest come
+every 30 seconds. The short start is deliberate: a VM or an exec session
+that ends inside one interval would otherwise report nothing at all, which
+biases the data towards long-lived, mostly idle VMs.
+
+The reading is the actual VM process: for qemu and hvi that is the launcher
 (the guest runs in-process); for vz the guest runs in Apple
 Virtualization.framework's separate XPC helper, so the sampler measures
 that helper rather than the thin `vz-runner` launcher, which reports
@@ -133,8 +138,23 @@ almost no CPU or memory of its own.
 |---|---|---|
 | `backend` | `vz` | |
 | `rss_kb` | `524288` | VMM process resident set size |
-| `cpu_pct` | `12.3` | VMM process CPU usage |
+| `cpu_pct` | `48.5` | share of the guest's vCPUs busy since the previous sample, 0-100 |
 | `uptime_s` | `90` | seconds since launch |
+
+`cpu_pct` is a rate measured over the interval between two samples: the CPU
+time the VM process accumulated, divided by the real time that passed and
+by the guest's vCPU count. 100 means every vCPU was busy for the whole
+interval. It can read somewhat above 100: the measurement covers the whole
+VMM process, whose device emulation and I/O threads burn host CPU on top of
+the vCPU threads. A sample is skipped rather than guessed when the two
+readings cannot be compared -- the first one of an attach, which only sets the baseline, or
+a vz helper that was replaced between ticks.
+
+Before schema version 2 this field carried the `%cpu` column of `ps`
+unchanged. That is a decaying average over up to a minute, summed across
+the process' threads, so it ran to about 400 on a busy four-vCPU guest and
+overlapped the neighbouring sample's window. Values collected under schema
+version 1 are not comparable with later ones and should not be mixed.
 
 ### `crash` reports
 
