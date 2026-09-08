@@ -374,6 +374,9 @@ func recvFD(conn *net.UnixConn) (int, error) {
 // if something answers a dial, another gateway owns it; only a refused
 // connection marks the socket file as stale and safe to remove.
 func claimUnixSocket(path string) (net.Listener, error) {
+	if err := checkUnixSocketPath("gateway", path); err != nil {
+		return nil, err
+	}
 	if conn, err := net.DialTimeout("unix", path, time.Second); err == nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("socket %s is in use by a running gateway", path)
