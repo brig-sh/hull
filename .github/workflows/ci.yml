@@ -8,18 +8,23 @@ name: CI
 # notarized release artifacts come from the manually-invoked "Sign and
 # Notarize" workflow.
 #
-# The test job runs the unit suite and the PTY end-to-end harnesses, which
-# boot real VMs — possible only on a self-hosted Apple Silicon runner with
-# working HVF (GitHub-hosted macOS runners cannot nest virtualization).
-# Binaries are signed with the Developer ID from secrets so the
+# Two darwin-only lanes do the checking. `unit` builds vz-runner and runs the
+# Go suite twice, once for coverage and once under the race detector -- about
+# three minutes, arithmetic in that job's own comment -- and runs on every
+# push and PR, docs-only diffs included, because nothing in it can be broken
+# by a diff it cannot see. `e2e` runs the PTY end-to-end harnesses, which
+# boot real VMs -- possible only on a self-hosted Apple Silicon runner with
+# working HVF (GitHub-hosted macOS runners cannot nest virtualization) -- and
+# is the expensive lane, gated on the `changes` job's code filter below.
+# Binaries there are signed with the Developer ID from secrets so the
 # virtualization entitlement is honored under SIP.
 #
 # The macOS jobs target the self-hosted Apple Silicon runners (re-enabled
 # 2026-07-30; they had been parked on GitHub-hosted macos-15 while the
 # runner's VZ checkpoint/restore was broken). The VM-boot steps stay gated
-# on runner.environment == 'self-hosted', so parking the jobs back on
-# macos-15 degrades gracefully to the unit suite -- no other change needed
-# in either direction.
+# on runner.environment == 'self-hosted', so parking `e2e` back on macos-15
+# degrades its VM-boot steps to no-ops there -- `unit` needs no self-hosted
+# capability at all, so it keeps running the suite either way.
 
 on:
   push:
@@ -44,7 +49,7 @@ concurrency:
   #
   # This queues separate runs of this workflow (and of release) against each
   # other, but a single run's own jobs are scheduled by their needs graph,
-  # not by this block -- so test and boot-sip, which only share a `needs:
+  # not by this block -- so e2e and boot-sip, which only share a `needs:
   # changes` dependency, can still land on the shared Mac at the same time.
   # They carry their own job-level `concurrency: group:
   # macos-signing-shared-mac` for that.
@@ -58,6 +63,8 @@ jobs:
   # What kind of change is this? Booting VMs takes minutes and occupies a
   # self-hosted Mac, and a README edit cannot break a boot. So the tier that
   # boots real VMs runs when code changes and is skipped when it does not.
+  # The unit-test lane is a separate job (see `unit` below) and is not gated
+  # on this output at all -- it is cheap enough to run on every diff.
   #
   # Workflow files count as code: a change to CI has to be exercised by CI.
   changes:
@@ -95,6 +102,16 @@ jobs:
               - 'scripts/**'
               - 'test/**'
               - '.github/workflows/**'
+              # The same gap existed one level down: '.github/actions/**' was
+              # missing too. fetch-hvi-vmm and verify-vz-entitlement live
+              # there but are already exercised regardless of this filter --
+              # `build` below has no `needs: changes` and runs unconditionally,
+              # and it uses both -- so the real exposure was narrower:
+              # fetch-boot-assets and detach-store, which only the gated VM
+              # lanes (`e2e`, `boot-sip`, `boot-nosip`) consume. A change to
+              # either of those read as a docs change and skipped the one
+              # place that would have run it.
+              - '.github/actions/**'
 
   lint:
     name: lint (golangci-lint)
@@ -125,7 +142,7 @@ jobs:
     # same-repo (branch) PRs run on ours -- so a maintainer's branch PR
     # exercises the full build-and-boot path before merge, while a fork PR
     # stays on the disposable hosted runner (its self-hosted-gated boot steps
-    # then self-disable, leaving the unit suite).
+    # then self-disable).
     #
     # Read this as routing, NOT as a security boundary. For the pull_request
     # event GitHub evaluates this workflow file from the PR head, so a fork can
@@ -184,10 +201,202 @@ jobs:
             vz-runner/.build/arm64-apple-macosx/release/vz-runner
           retention-days: 7
 
-  test:
-    name: unit + e2e (boots real VMs)
-    # Docs-only changes skip this entirely: nothing it asserts can have moved --
-    # unless a maintainer dispatched the workflow by hand, which forces the run.
+  # ACTION REQUIRED IN BRANCH PROTECTION -- this split renamed the checks.
+  #
+  # One job used to report as
+  #
+  #     unit + e2e (boots real VMs)     <- the OLD name, gone as of this change
+  #
+  # and it is now two:
+  #
+  #     unit tests (fast lane)          <- NEW
+  #     e2e (boots real VMs)            <- NEW
+  #
+  # Branch protection matches a required status check by NAME, so a rule still
+  # asking for the old name is asking for a check no run will ever report.
+  # Whoever merges this has to update the required checks under Settings >
+  # Branches to the new names. Nothing in this file can do that, and nothing
+  # in this file can read the current setting either -- so this note is the
+  # only place the handover can be written down.
+  #
+  # The two new names are not interchangeable when choosing which to require.
+  # `unit tests (fast lane)` has no `needs:` and no `if:`, so it reports on
+  # every pull request, docs-only and fork PRs included, and can be required
+  # unconditionally. `e2e (boots real VMs)` is gated on
+  # `needs.changes.outputs.code` (or a manual dispatch) and is skipped
+  # outright on a docs-only diff, so requiring it is a decision about what a
+  # skipped check should mean on this repository. Make it deliberately rather
+  # than by copying the old rule across.
+  unit:
+    name: unit tests (fast lane)
+    # No VM boot, no keychain, no Developer ID -- so this needs neither the
+    # `gui` label (that's e2e, for checkpoint's console-session requirement,
+    # see its comment below) nor the macos-signing-shared-mac concurrency
+    # group. That group exists for one specific corruption: two jobs on the
+    # same Mac each calling `security list-keychains -d user -s ...` and
+    # replacing the other's search list mid-sign. No step below runs
+    # `security`, and none signs with an identity -- `swift build` gets the
+    # ad-hoc signature the linker attaches itself, which never consults the
+    # user keychain search list. The precedent is already in this file:
+    # `build` above runs the whole of `make macos`, which does invoke
+    # `codesign --sign -`, and has never carried the group.
+    #
+    # HEAD's single `test` job did carry the group, and the unit suite
+    # inherited it by living inside that job. That was packaging, not a
+    # requirement of the tests: the suite ran in the steps BEFORE the keychain
+    # import, and the import is what the group protects.
+    #
+    # What this job does share with e2e and boot-sip is the machine. One Mac
+    # hosts several runner processes (see boot-sip's SUN_LEN comment and the
+    # /Users/githubrunner/actions-runner-2/_work/... path in it), so a race
+    # lane here can run beside a VM boot there and compete for CPU and RAM.
+    # That is contention, not corruption; `build` already imposes the same;
+    # and a `cancel-in-progress: false` group is the wrong instrument for it.
+    # A group name is repository-wide, not run-scoped, so joining that one
+    # would park this lane behind whatever VM boot currently holds it --
+    # including a boot belonging to somebody else's pull request -- which is
+    # the exact wait the split was made to remove. Workspaces do not collide
+    # either: each runner process has its own _work tree, so the
+    # vz-runner/.build this job writes is nobody else's.
+    #
+    # Same fork-PR routing as `build` above, for the same reason -- see that
+    # job's comment for why a fork PR lands on macos-15 and what actually
+    # keeps a stranger off the self-hosted machine.
+    #
+    # Deliberately NOT gated on the `changes` filter -- and not free either.
+    # The parts, added up here rather than observed as one number: the
+    # coverage pass is 58.6s of package time summed sequentially at 2c427ae6
+    # (cmd/hull 30.1s, ociclient 15.0s, netgw 6.0s, store 3.7s, telemetry
+    # 1.5s, compose 1.3s, bootassets 1.2s), and it runs at go test's default
+    # -p, so its wall clock is lower than that sum; the race pass is the
+    # ~2min recorded in its own step comment below; the Swift build is ~15s,
+    # and always the cold ~15s, because nothing here caches .build between
+    # runs. Call it about three minutes of self-hosted time on every diff,
+    # docs-only ones included -- not the "about a minute" an earlier draft of
+    # this comment claimed by pricing the coverage pass and nothing else.
+    # Three minutes is still the right trade against the VM lane below, which
+    # costs a multiple of that on a Mac a docs diff cannot break. The reason
+    # to run this unconditionally was never that it is nearly free; it is
+    # that a suite hidden behind a filter is a suite that can stop running
+    # without anyone noticing.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","macOS","ARM64"]') || fromJSON('["macos-15"]') }}
+    # Left to itself, the Swift contract test finds its binary by probing
+    # three candidate paths and SKIPS when none matches -- fine for a
+    # developer who has not built vz-runner, wrong for CI, where a skipped
+    # test and a passing one produce the same green tick. Naming the path
+    # here removes the judgement call: the test treats a HULL_VZ_RUNNER_BIN
+    # that does not resolve to a file as a hard failure, not a skip, so the
+    # build step below either produces this binary or the job goes red.
+    # Absolute, because go test runs each package's binary in that package's
+    # own directory.
+    env:
+      HULL_VZ_RUNNER_BIN: ${{ github.workspace }}/vz-runner/.build/debug/vz-runner
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # Self-hosted runners provide their own Go toolchain; setup-go is only
+      # needed on ephemeral GitHub-hosted runners.
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        if: runner.environment == 'github-hosted'
+        with:
+          go-version-file: go.mod
+
+      # cmd/hull/terminal_swift_contract_test.go runs the guest-console filter
+      # policy through BOTH implementations -- Go's sanitizeTerminalBytes and
+      # the Swift TerminalSanitizer, reached by driving `vz-runner
+      # --filter-selftest` as a subprocess. Nothing else in this job builds
+      # that binary, and until this step existed the test found none and
+      # skipped on every single run: a green tick for a comparison it never
+      # made, which is the silent non-execution the suite exists to catch.
+      #
+      # Debug, not `-c release`: `swift build` puts the product at
+      # .build/debug/vz-runner, which is the path HULL_VZ_RUNNER_BIN above
+      # names and the command the test's own skip message tells a developer
+      # to run. ~15s. Swift is present on both routings -- on the
+      # self-hosted Macs (`build` above already runs `swift build -c release`
+      # there through `make macos`) and on GitHub-hosted macos-15, where it
+      # ships in the preinstalled Xcode. vz-runner is in-tree, not a
+      # submodule, and its Package.swift declares no dependencies, so this
+      # needs neither fetch-hvi-vmm nor the network. --filter-selftest only
+      # reads stdin and writes stdout, so it needs no entitlement, no real
+      # signature and no virtualization to run.
+      - name: Build vz-runner (the Swift terminal contract test needs it)
+        working-directory: vz-runner
+        run: swift build
+
+      # -count=1 bypasses the test cache: without it, go test can replay a
+      # previous result instead of actually executing the suite, which is
+      # the mechanism behind run 34210128598 reporting cached unit results.
+      # -covermode=atomic only makes the coverage counters safe to increment
+      # from concurrent goroutines -- it does NOT enable the race detector,
+      # that is the separate step below; the two flags are unrelated.
+      #
+      # -json piped through `tee` gives every run, PR or push, a
+      # machine-readable record independent of Codecov, which only uploads
+      # on push-to-main and is non-fatal -- so a failing PR currently leaves
+      # no artifact behind at all. `set -o pipefail` is load-bearing here:
+      # without it the step's exit status is tee's, not go test's, and a
+      # failing suite would tee its own failure straight into a green step.
+      - name: Unit tests
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -count=1 -json -covermode=atomic -coverprofile=coverage.out ./... | tee test-report.json
+
+      # A regression gate as of this change, not a backlog item: measured
+      # clean at 2c427ae6, exit 0, zero data races, ~2min. -p 2 because this
+      # machine is shared with 6+ concurrent sessions, same reasoning as
+      # every other -p in this file. -timeout bounds each package's test
+      # binary (go test's own default is 10m per package; writing it out
+      # documents the intent rather than relying on recall). timeout-minutes
+      # bounds the step's wall clock across the whole ./... run -- the two
+      # are not the same guard, and a shared, contended Mac is where that
+      # difference gets found the hard way.
+      - name: Race detector
+        timeout-minutes: 15
+        run: go test -count=1 -p 2 -race -timeout=10m ./...
+
+      # Renders the README badge and the per-file view on codecov.io. Never
+      # fails the run: a coverage service that cannot be reached is not a
+      # reason to call a green commit broken.
+      - name: Upload coverage to Codecov
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.out
+          fail_ci_if_error: false
+
+      # Codecov's own record is push-to-main only and non-fatal by design, so
+      # it is not evidence a PR can be judged on, and it is not durable if
+      # the upload silently fails. Keep the coverage profile and the JSON
+      # test report as workflow artifacts on every run, PR or push, so there
+      # is always a machine-readable result to point at. continue-on-error
+      # is deliberate: a flaky artifact upload must never turn a real green
+      # test result red.
+      - name: Upload test evidence
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: unit-test-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            test-report.json
+            coverage.out
+          if-no-files-found: warn
+          retention-days: 14
+
+  e2e:
+    name: e2e (boots real VMs)
+    # This is the expensive lane: VM boots take minutes and occupy a
+    # self-hosted Mac, so it is the one gated on a code change -- `unit`
+    # above is not, on purpose (see its comment). Docs-only changes skip
+    # this entirely: nothing it asserts can have moved -- unless a maintainer
+    # dispatched the workflow by hand, which forces the run.
+    #
+    # This job's reported name changed with the split, from "unit + e2e
+    # (boots real VMs)" to "e2e (boots real VMs)". See the branch-protection
+    # note above `unit` before requiring either new name.
     needs: changes
     if: needs.changes.outputs.code == 'true' || github.event_name == 'workflow_dispatch'
     # This job and boot-sip land on the same physical Mac (see the note on the
@@ -205,7 +414,7 @@ jobs:
     # same-repo (branch) PRs run on ours -- so a maintainer's branch PR
     # exercises the full build-and-boot path before merge, while a fork PR
     # stays on the disposable hosted runner (its self-hosted-gated boot steps
-    # then self-disable, leaving the unit suite).
+    # then self-disable).
     #
     # Read this as routing, NOT as a security boundary. For the pull_request
     # event GitHub evaluates this workflow file from the PR head, so a fork can
@@ -255,26 +464,12 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # The profile costs almost nothing to write and is what the coverage
-      # badge reads. It is uploaded on a push to main only, a few steps below:
-      # the figure describes the branch other work builds on.
-      - name: Unit tests
-        run: go test -covermode=atomic -coverprofile=coverage.out ./...
-
-      # Renders the README badge and the per-file view on codecov.io. Never
-      # fails the run: a coverage service that cannot be reached is not a
-      # reason to call a green commit broken.
-      - name: Upload coverage to Codecov
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: coverage.out
-          fail_ci_if_error: false
-
       # Everything below boots real VMs (or only exists to serve those
       # steps), so it runs on the self-hosted runner only. On GitHub-hosted
-      # macos-15 the job stops at the unit suite.
+      # macos-15 -- where a fork PR's code change routes -- every step below
+      # self-disables and this job does nothing beyond fetching the
+      # submodule: `unit` above already covered the test suite by then, on
+      # the same routing.
       - name: Import Developer ID certificate into ephemeral keychain
         if: runner.environment == 'self-hosted'
         env:
@@ -454,8 +649,8 @@ jobs:
   #
   # There is no GitHub-hosted equivalent -- a hosted macOS runner cannot nest
   # virtualization, and none run with a SIP posture we control -- so unlike
-  # build/test this job has no macos-15 fallback and always asks for the
-  # self-hosted runner. The protections the test job documents apply unchanged:
+  # build/unit/e2e this job has no macos-15 fallback and always asks for the
+  # self-hosted runner. The protections the e2e job documents apply unchanged:
   # the fork-PR approval gate and the runner group's own restrictions, both in
   # org settings, are what keep a stranger off the machine, not this line.
   boot-sip:
@@ -464,19 +659,19 @@ jobs:
     # uses gates this one too -- unless a maintainer dispatched the workflow by
     # hand, which forces the boot regardless of the diff.
     needs: changes
-    # The second clause withholds these from fork pull requests. Unlike build
-    # and test above, which reroute to a hosted runner, a boot needs a real Mac
-    # with a known SIP state, so there is nowhere to reroute to: a fork skips
-    # the job instead. These are persistent machines, so untrusted code that
-    # ran on them would outlive its own job.
+    # The second clause withholds these from fork pull requests. Unlike
+    # build, unit, and e2e above, which reroute to a hosted runner, a boot
+    # needs a real Mac with a known SIP state, so there is nowhere to
+    # reroute to: a fork skips the job instead. These are persistent
+    # machines, so untrusted code that ran on them would outlive its own job.
     if: >-
       (needs.changes.outputs.code == 'true'
        || github.event_name == 'workflow_dispatch')
       && (github.event_name != 'pull_request'
           || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ["self-hosted", "macOS", "ARM64", "sip-enabled"]
-    # Same physical Mac as test, same keychain race -- see the note on
-    # test's concurrency block.
+    # Same physical Mac as e2e, same keychain race -- see the note on
+    # e2e's concurrency block.
     concurrency:
       group: macos-signing-shared-mac
       cancel-in-progress: false
@@ -502,7 +697,7 @@ jobs:
       # so the store has to sit somewhere short or the hvi boot cannot bind the
       # socket and fails with "path must be shorter than SUN_LEN". $HOME is short
       # and stable across runs, so the image and boot assets stay cached. Set once
-      # here so every step below shares it; kept separate from the test job's
+      # here so every step below shares it; kept separate from the e2e job's
       # store so the two never race on the same mount.
       - name: Choose a short store dir (macOS SUN_LEN)
         run: echo "HULL_STORE_DIR=$HOME/hull-ci-store" >> "$GITHUB_ENV"
@@ -513,7 +708,7 @@ jobs:
 
       # The signed build is the whole point here: an ad-hoc signature boots fine
       # with SIP off and is refused the entitlement with SIP on. Sign with the
-      # Developer ID from an ephemeral keychain, as the test job does, so what we
+      # Developer ID from an ephemeral keychain, as the e2e job does, so what we
       # boot is what a release would ship.
       - name: Import Developer ID certificate into ephemeral keychain
         env:
@@ -623,11 +818,11 @@ jobs:
   boot-nosip:
     name: microVM boot (SIP-disabled)
     needs: changes
-    # The second clause withholds these from fork pull requests. Unlike build
-    # and test above, which reroute to a hosted runner, a boot needs a real Mac
-    # with a known SIP state, so there is nowhere to reroute to: a fork skips
-    # the job instead. These are persistent machines, so untrusted code that
-    # ran on them would outlive its own job.
+    # The second clause withholds these from fork pull requests. Unlike
+    # build, unit, and e2e above, which reroute to a hosted runner, a boot
+    # needs a real Mac with a known SIP state, so there is nowhere to
+    # reroute to: a fork skips the job instead. These are persistent
+    # machines, so untrusted code that ran on them would outlive its own job.
     if: >-
       (needs.changes.outputs.code == 'true'
        || github.event_name == 'workflow_dispatch')
