@@ -31,3 +31,36 @@ func TestOTLPCarriesServiceName(t *testing.T) {
 		t.Errorf("scope name = %v, want %v", scope["name"], ServiceName)
 	}
 }
+
+// TestOTLPPromotesSchemaVersionAsAnAttribute pins the field a collector
+// needs to route on. schema_version says how to read the rest of the
+// record -- cpu_pct means one thing under 1 and another under 2 -- and it
+// is a number in the payload, so a string-only promotion silently dropped
+// it and left the body JSON as the only place it existed.
+func TestOTLPPromotesSchemaVersionAsAnAttribute(t *testing.T) {
+	flat := []byte(`{"schema_version":2,"event":"metrics","product":"brig",` +
+		`"version":"0.1.0-rc28","install_id":"abc","captured_at":"2026-09-08T00:00:00Z",` +
+		`"checksum":"deadbeef","cpu_pct":"48.5"}`)
+
+	var out map[string]any
+	if err := json.Unmarshal(otlpWrap(flat), &out); err != nil {
+		t.Fatalf("wrapped payload is not JSON: %v", err)
+	}
+	rl := out["resourceLogs"].([]any)[0].(map[string]any)
+	rec := rl["scopeLogs"].([]any)[0].(map[string]any)["logRecords"].([]any)[0].(map[string]any)
+
+	got := map[string]string{}
+	for _, a := range rec["attributes"].([]any) {
+		attr := a.(map[string]any)
+		got[attr["key"].(string)] = attr["value"].(map[string]any)["stringValue"].(string)
+	}
+	// "2", not "2.0": a collector filter compares this to a version number.
+	if got["schema_version"] != "2" {
+		t.Errorf("schema_version attribute = %q, want %q", got["schema_version"], "2")
+	}
+	for _, k := range []string{"event", "product", "version", "install_id", "captured_at", "checksum"} {
+		if got[k] == "" {
+			t.Errorf("attribute %q was dropped", k)
+		}
+	}
+}

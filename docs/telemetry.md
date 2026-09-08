@@ -191,8 +191,11 @@ another `--store-dir` has its own consent state and its own install id.
 
 Events go to an OpenTelemetry collector operated by NOFire AI (OTLP/HTTP,
 each event one log record with the payload above as its body) -- no
-third-party analytics service ever receives them. Payloads with a
-mismatching `checksum` are dropped at ingestion. The client sends with a 2 second
+third-party analytics service ever receives them. `schema_version`,
+`event`, `product`, `version`, `install_id`, `captured_at` and `checksum`
+are duplicated as log-record attributes so the collector can route and
+filter without parsing the body. Payloads with a mismatching `checksum`
+are dropped at ingestion. The client sends with a 2 second
 timeout and gives up silently: telemetry can never slow down or break a
 command. Raw events and crash reports are retained for 365 days; only
 aggregate statistics are kept longer.
