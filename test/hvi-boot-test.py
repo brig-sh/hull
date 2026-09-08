@@ -14,7 +14,7 @@
 # is a real one.
 #
 # Usage: HULL_BIN=dist/hull_arm64 python3 test/hvi-boot-test.py <name>
-import os, platform, shutil, subprocess, sys
+import os, platform, select, shutil, subprocess, sys, time
 
 BIN = os.environ.get("HULL_BIN", "dist/hull_arm64")
 STORE = os.environ.get("HULL_STORE_DIR", "")
@@ -86,7 +86,14 @@ cleanup()  # a leftover instance from an interrupted run still holds the name
 # --net none deliberately: this asserts that a stock image boots and runs its
 # entrypoint, not that it can reach the network. Networking on hvi needs the
 # gateway and is a separate concern.
-run = subprocess.run(
+#
+# The console is read as it arrives rather than collected at exit, so each
+# boot marker gets the timestamp of the read that carried it. The times are
+# printed, never asserted on: they are what README quotes for boot time, and
+# they come from here instead of by hand.
+RUN_TIMEOUT = 300
+t_spawn = time.time()
+proc = subprocess.Popen(
     [BIN] + GLOBAL_ARGS + [
         "run", "--hypervisor", "hvi", "--rootfs-type", "virtiofs",
         "--net", "none", "--name", name,
@@ -94,8 +101,39 @@ run = subprocess.run(
         "--annotation", f"com.urunc.unikernel.bootInitrd={initrd}",
         "--", IMAGE, "/bin/echo", TOKEN,
     ],
-    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=300)
-output = run.stdout or b""
+    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+# marker -> time first seen. "VMM started" is hull's own line after the
+# spawn (and after any image pull); "Run /." is the init wrapper's exec
+# line, where the image ships one that prints it; the token is the
+# entrypoint itself.
+markers = {b"VMM started (PID": None, b"Run /.": None, TOKEN.encode(): None}
+output = b""
+deadline = t_spawn + RUN_TIMEOUT
+while True:
+    r, _, _ = select.select([proc.stdout], [], [], 0.1)
+    if r:
+        chunk = os.read(proc.stdout.fileno(), 4096)
+        if not chunk:
+            break
+        output += chunk
+        now = time.time()
+        for m, seen in markers.items():
+            if seen is None and m in output:
+                markers[m] = now
+    if time.time() > deadline:
+        proc.kill()
+        die(f"run did not finish within {RUN_TIMEOUT}s", output)
+proc.wait()
+t_exit = time.time()
+
+t_vmm = markers[b"VMM started (PID"]
+origin = t_vmm if t_vmm is not None else t_spawn
+origin_note = "" if t_vmm is not None else ", from hull spawn: no VMM-started line seen"
+if markers[b"Run /."] is not None:
+    print(f"boot: kernel-to-init {markers[b'Run /.'] - origin:.2f}s (backend hvi{origin_note})")
+if markers[TOKEN.encode()] is not None:
+    print(f"boot: kernel-to-entrypoint {markers[TOKEN.encode()] - origin:.2f}s (backend hvi{origin_note})")
+print(f"boot: hull-spawn-to-exit {t_exit - t_spawn:.2f}s (backend hvi, includes any image pull and the guest shutdown)")
 
 if TOKEN.encode() not in output:
     die(f"the image's entrypoint did not run: {TOKEN!r} never reached the console", output)
@@ -103,8 +141,8 @@ if TOKEN.encode() not in output:
 # The token can reach the console and the guest can still die afterwards --
 # `hull run` then exits nonzero even though the entrypoint ran. That must
 # fail here, not read as a pass because the token was seen.
-if run.returncode != 0:
-    die(f"hull run exited {run.returncode} after the entrypoint ran", output)
+if proc.returncode != 0:
+    die(f"hull run exited {proc.returncode} after the entrypoint ran", output)
 
 # A guest that ran is only half of it: the VMM must be gone and the instance
 # must read stopped, or the next run inherits a machine nobody is watching.
