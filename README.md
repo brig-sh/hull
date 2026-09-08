@@ -173,9 +173,8 @@ Both backends use hardware-accelerated virtualization (Apple Hypervisor Framewor
 and boot ARM64 Linux kernels with near-native performance.
 
 A `compose` subcommand runs multi-service projects from a docker-compose
-subset ([`docs/compose.md`](docs/compose.md)). How much of the compose spec is
-covered — with per-capability status, divergences, and security tradeoffs —
-is measured continuously and published in
+subset. [`docs/compose.md`](docs/compose.md) lists the keys it supports, the
+places it diverges from docker, and what is out of scope.
 
 ## Building from source
 

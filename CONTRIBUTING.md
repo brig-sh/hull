@@ -11,14 +11,13 @@ notes come first.
 - Build: `make macos` builds and ad-hoc signs the `hull` CLI, the Swift
   `vz-runner` and the Rust `hvi`. See the Makefile header for signing knobs
   (`CODESIGN_IDENTITY`, `VZ_ENTITLEMENTS`, `HVI_ENTITLEMENTS`).
-  for the env contract).
-  doc.
 - End-to-end: the PTY and shared-folder harnesses under `test/`
   (`pty-terminal-test.py`, `pty-jobcontrol-test.py`, `share-test.py`,
   `hvi-boot-test.py`) boot real VMs and need an Apple Silicon host with
   working HVF. They skip with a named reason rather than fail when the
   host cannot run them.
-  `vz-runner`, `qemu`, `ci`, `docs`.
+- Commit scopes in use: `compose`, `run`, `exec`, `store`, `vz-runner`,
+  `hvi`, `qemu`, `ci`, `docs`.
 
 # Working with Git at NOFire AI
 

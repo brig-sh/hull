@@ -101,7 +101,7 @@ the discovered guest IP. No guest changes required.
  (`service_healthy`) need a compose-layer prober (TCP/exec-over-serial is
  not available — TCP probe against the discovered IP is the realistic MVP).
 
-> **Resolved (2026-07-30, [)).**
+> **Resolved (2026-07-30).**
 > The poll-based supervisor was built where this section predicted, inside the
 > per-project gateway daemon: `restart: no|always|on-failure[:N]|unless-stopped`
 > is parsed, validated and enforced, and `depends_on:
