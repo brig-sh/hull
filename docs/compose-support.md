@@ -20,9 +20,9 @@ docker-compose drives the Docker engine.
 
 | Compose concept | Existing mechanism |
 |---|---|
-| `image:` | `pull` + OCI config is fully read (Entrypoint/Cmd/Env/WorkingDir → spec, `bundle.go:129-146`) |
+| `image:` | `pull` + OCI config is fully read (Entrypoint/Cmd/Env/WorkingDir → spec, `bundle.go`) |
 | `mem_limit`, `cpus` | `--mem`, `--cpus` pass through to both backends |
-| per-service isolation | rootfs is APFS-cloned per instance (`run.go:472-485`) — same image, independent writable roots |
+| per-service isolation | rootfs is APFS-cloned per instance (`run.go`) -- same image, independent writable roots |
 | `container_name:` | `--name` (with caveats below) |
 | logs | per-instance log file + `logs -f` |
 | same-subnet networking | both backends land on the shared vmnet NAT subnet (192.168.64.x); inter-VM traffic works |
@@ -46,14 +46,14 @@ Ordered by how hard they block a compose MVP:
 ### 1. Service discovery (the critical path)
 Compose services reach each other **by name**. Today:
 - The guest IP is assigned in-kernel via `ip=dhcp` and **never captured
- anywhere** — not in `state.json` (no IP field, `store.go:43-53`), not via
+ anywhere** -- not in `state.json` (no IP field in `store.go`), not via
  QMP, not by vz-runner.
 - No `/etc/hosts` injection and no DNS beyond the NAT resolver
  (`/proc/net/pnp` → resolv.conf only).
 
 **Recommended mechanism** (the Lima/Colima approach):
 1. Deterministic MAC per instance — already implemented for QEMU
- (`run.go:853-865`, derived from the instance name); vz-runner needs a
+ (`run.go`, derived from the instance name); vz-runner needs a
  `--mac` flag (small Swift change) instead of a random
  `VZMACAddress`.
 2. Host-side lease parsing: `/var/db/dhcpd_leases` maps MAC → IP a few
@@ -72,19 +72,30 @@ Compose services reach each other **by name**. Today:
 
 ### 2. Per-run overrides: `environment:`, `command:`, `working_dir:`
 All container config is currently frozen into the image; `run` has **no
-`--env`, no command override** (`run.go:51-96` — the only positional is the
+`--env`, no command override** (in `run.go` the only positional is the
 image ref). But the plumbing exists: env/uid/gid/cwd already flow through
-`urunit.conf` (`buildUrunitConfig`, `run.go:884-903`). Adding `--env KEY=V`
+`urunit.conf` (`buildUrunitConfig` in `run.go`). Adding `--env KEY=V`
 (repeatable) and an optional command override that rewrites `process.args`
 in the generated spec is straightforward CLI + spec-merge work.
+
+> **Resolved.** `run --env KEY=VALUE` is repeatable, and a bare `--env KEY`
+> inherits the value from the host without putting it in argv. Arguments
+> after the image reference override the image's command. Compose feeds
+> `environment:`, `env_file:` and `command:` through them.
 
 ### 3. `volumes:`
 `--shared-dir` exists but: only **one** allowed, the virtiofs tag is
 hardcoded (`"shared"`), and the declared guest path is **ignored** — the
-guest must mount the tag itself (`run.go:650-682`, `vz_darwin.go:75`).
+guest must mount the tag itself (`run.go`, `vz_darwin.go`).
 Needed: repeatable flag, unique tag per share, and init-wrapper mounts of
 each tag at its guest path (the wrappers are generated in `run.go`, so this
 is host-side templating).
+
+> **Resolved (Phase 3).** `--shared-dir` is repeatable, each share gets its
+> own virtiofs tag, and the init wrapper mounts it at the declared guest
+> path with the declared `ro`/`rw` mode. `--shared-dir-fd` shares a
+> directory the caller already holds open. Named volumes landed later as
+> store-managed directories (see `compose.md`).
 
 ### 4. `ports:`
 No port forwarding at all (README documents it as unimplemented) — but the
@@ -115,10 +126,14 @@ the discovered guest IP. No guest changes required.
  serves; vz-runner accepts `--qmp` but never opens the socket. Either
  implement the QMP stub in vz-runner or (simpler) send SIGTERM to
  vz-runner, which already triggers `requestStop` graceful shutdown.
+ **Resolved (Phase 3):** `stop` sends SIGTERM, vz-runner runs `requestStop`,
+ and the force-stop comes after `--stop-grace` seconds (default 10).
 
 ### 6. Robustness fixes the orchestrator needs
 - `--name` collisions silently overwrite instance state
- (`store.go:180-181`, no existence check) — must error instead.
+ (no existence check in `store.go`) -- must error instead.
+ **Resolved:** the store refuses a name that is already taken
+ (`ErrInstanceExists`).
 - The store's mutex is in-process only; concurrent `run` invocations (how a
  compose layer parallelizes) race on the store. Add file locking
  (`flock` on the store dir) or serialize in the compose layer.
