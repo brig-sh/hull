@@ -42,8 +42,9 @@ func rmCommand() *cli.Command {
 		Usage: "remove a stopped instance",
 		Flags: []cli.Flag{
 			&cli.BoolFlag{
-				Name:  "force,f",
-				Usage: "force stop running instance before removal",
+				Name:    "force",
+				Aliases: []string{"f"},
+				Usage:   "force stop running instance before removal",
 			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {

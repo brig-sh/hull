@@ -167,8 +167,9 @@ func restoreCommand() *cli.Command {
 		Usage: "restore a stopped Vz instance from its checkpoint",
 		Flags: []cli.Flag{
 			&cli.BoolFlag{
-				Name:  "detach,d",
-				Usage: "run in background",
+				Name:    "detach",
+				Aliases: []string{"d"},
+				Usage:   "run in background",
 			},
 			&cli.IntFlag{
 				Name:  "stop-grace",
