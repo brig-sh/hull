@@ -7,6 +7,17 @@ release. History before v0.1.0-rc21 predates the import of this tree and
 is kept below as it was generated then; v0.1.0-rc19 and rc20 were re-cut
 imports of the same tree as rc21, and rc23 was a version bump only.
 
+## [0.1.0-rc27] - 2026-09-08
+
+### Build
+
+- Bump hvi-vmm to c5305f9: virtio-fs serves FORGET, bounds the host resources a guest can pin and leaves host setuid and setgid bits alone on chmod; the macOS VM ends on a failure instead of hanging; x86 serial moves to vm-superio
+
+### Miscellaneous
+
+- Notarize releases on a runner that reaches Apple
+- Sync the hvi-vmm submodule URL before fetching it in CI
+
 ## [0.1.0-rc26] - 2026-09-08
 
 ### Bug Fixes
