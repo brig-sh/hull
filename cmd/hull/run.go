@@ -56,8 +56,9 @@ func runCommand() *cli.Command {
 		Usage: "create and run a unikernel",
 		Flags: []cli.Flag{
 			&cli.BoolFlag{
-				Name:  "detach,d",
-				Usage: "run in background",
+				Name:    "detach",
+				Aliases: []string{"d"},
+				Usage:   "run in background",
 			},
 			&cli.StringFlag{
 				Name:  "net",

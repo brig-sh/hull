@@ -34,13 +34,15 @@ func logsCommand() *cli.Command {
 		Usage: "view instance logs",
 		Flags: []cli.Flag{
 			&cli.BoolFlag{
-				Name:  "follow,f",
-				Usage: "follow log output",
+				Name:    "follow",
+				Aliases: []string{"f"},
+				Usage:   "follow log output",
 			},
 			&cli.IntFlag{
-				Name:  "tail,n",
-				Value: -1,
-				Usage: "number of recent lines to show (-1 for all)",
+				Name:    "tail",
+				Aliases: []string{"n"},
+				Value:   -1,
+				Usage:   "number of recent lines to show (-1 for all)",
 			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
