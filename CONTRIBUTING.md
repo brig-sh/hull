@@ -11,11 +11,16 @@ notes come first.
 - Build: `make macos` builds and ad-hoc signs the `hull` CLI, the Swift
   `vz-runner` and the Rust `hvi`. See the Makefile header for signing knobs
   (`CODESIGN_IDENTITY`, `VZ_ENTITLEMENTS`, `HVI_ENTITLEMENTS`).
-- End-to-end: the PTY and shared-folder harnesses under `test/`
-  (`pty-terminal-test.py`, `pty-jobcontrol-test.py`, `share-test.py`,
-  `hvi-boot-test.py`) boot real VMs and need an Apple Silicon host with
-  working HVF. They skip with a named reason rather than fail when the
-  host cannot run them.
+- End-to-end: the harnesses under `test/` (`pty-terminal-test.py`,
+  `pty-jobcontrol-test.py`, `pty-checkpoint-test.py`, `share-test.py`,
+  `hvi-boot-test.py`, `rosetta-test.py`) boot real VMs and need an Apple
+  Silicon host with working HVF; `compose-config-smoke.sh` runs against the
+  built binary without one. CI runs all of them (see
+  [test/README.md](test/README.md)). They skip with a named reason rather
+  than fail when the host cannot run them.
+- `CHANGELOG.md` is generated, not edited: `scripts/changelog.sh` (or
+  `git-cliff --config cliff.toml -o CHANGELOG.md`). The release workflow
+  does not run it, so regenerate and commit it when cutting a release.
 - Commit scopes in use: `compose`, `run`, `exec`, `store`, `vz-runner`,
   `hvi`, `qemu`, `ci`, `docs`.
 
@@ -229,8 +234,8 @@ A few norms that make reviews pleasant on both sides:
 
 A PR is mergeable when:
 
-- CI is green: linting (including commit-message linting), builds, unit tests
-  and end-to-end tests pass.
+- CI is green: linting (golangci-lint), builds, unit tests and end-to-end
+  tests pass. Commit messages are checked in review, not by a job.
 - The required approvals are in place.
 - The branch is up to date with `main` (rebased, with a clean, logical commit
   series).
