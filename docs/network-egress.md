@@ -182,3 +182,31 @@ records, since an address the guest cannot use is one worth not giving it. The
 filter itself is written for both families already: `cidr` rules take IPv6
 prefixes and pins hold IPv6 addresses. What is missing is the forwarding, not
 the filtering.
+
+## The gateway itself
+
+`hull network-gateway` is hidden from `hull --help`: `hull compose up` starts
+one per project and `hull run --gateway-sock` joins one, so most people never
+type it. It can be run by hand, and the flags beyond the egress policy are:
+
+```
+--socket PATH               control socket (required); guests and `run --gateway-sock` connect here
+--api PATH                  HTTP API socket for the healthcheck probe endpoint
+--qemu-socket PATH          unix socket for QEMU (and hvi) stream-netdev members
+--subnet CIDR               virtual subnet, default 10.87.0.0/24
+--gateway-ip ADDR           the gateway's own address on it, default 10.87.0.1
+--forward HOSTADDR:PORT=GUESTIP:PORT
+                            host port forward, repeatable
+--host NAME=IP              static DNS A record served by the gateway, repeatable
+--project NAME              compose project to supervise; turns on restart policies
+--supervise-interval DUR    liveness poll interval of that loop, default 2s
+--egress-refresh DUR        how often the named hosts in the egress rules are re-resolved, default 30s; 0 disables
+```
+
+A hand-started gateway for one sandbox looks like this:
+
+```
+hull network-gateway --socket /tmp/gw.sock --egress-default deny \
+  --egress-allow host=api.example.com &
+hull run --gateway-sock /tmp/gw.sock --gateway-cidr 10.87.0.10/24 <image>
+```
