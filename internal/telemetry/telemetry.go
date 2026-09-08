@@ -25,7 +25,7 @@ package telemetry
 
 // SchemaVersion is the version of the event schema. Any change to what
 // is collected bumps it, together with docs/telemetry.md.
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 // ConsentVersion is the version of the consent ask. Expanding what we
 // collect bumps it, which re-triggers the prompt on the next interactive
