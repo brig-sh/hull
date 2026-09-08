@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -767,34 +766,19 @@ func TestMarkStoppedRecordsIntent(t *testing.T) {
 // deliberate-stop marker, and the supervisor then undid the stop within a
 // poll; a structural funnel is only a guarantee while something drives it.
 func TestStopInstanceMarksIntentOnTheSignalPath(t *testing.T) {
-	dir := t.TempDir()
-	s, err := store.New(dir)
+	s, err := store.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	// vmmProcessMatches looks for "qemu-system" in the argv, so give a
-	// harmless sleeper that name.
-	// A script rather than a copied binary: macOS code signing kills a
-	// copy of a system binary, and ps reports the script path, which is
-	// what vmmProcessMatches reads.
-	fake := filepath.Join(dir, "qemu-system-fake")
-	if err := os.WriteFile(fake, []byte(
-		"#!/bin/sh\n"+
-			"# Dies on SIGTERM like a real VMM, and stays as the process ps\n"+
-			"# reports so vmmProcessMatches keeps seeing this script's name.\n"+
-			"trap 'exit 0' TERM\nsleep 60 &\nwait\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	proc := exec.Command("/bin/sh", fake)
-	if err := proc.Start(); err != nil {
-		t.Skipf("cannot start the fake VMM: %v", err)
-	}
-	defer func() {
-		_ = proc.Process.Kill()
-		_, _ = proc.Process.Wait()
-	}()
-	if !vmmProcessMatches(proc.Process.Pid) {
-		t.Skip("the staged process is not recognized as a VMM on this host")
+	// startProcessAs sets argv[0]'s base name to qemu-system-fake directly,
+	// rather than staging a shell script: macOS ps reports a shebang script
+	// as "/bin/sh <script>", so processIsAVMM would see base name "sh" and
+	// this test would never exercise the path it exists to cover. /bin/sleep
+	// dies on SIGTERM by default, which doubles as "a VMM that dies
+	// gracefully".
+	pid, _ := startProcessAs(t, "qemu-system-fake", "/bin/sleep", "60")
+	if !vmmProcessMatches(pid) {
+		t.Fatal("staged process is not recognized as a VMM; the guard this test exists to run never executed")
 	}
 
 	const instance = "signal-path"
@@ -802,7 +786,7 @@ func TestStopInstanceMarksIntentOnTheSignalPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := s.SaveInstance(&store.InstanceState{
-		ID: instance, Status: "running", PID: proc.Process.Pid,
+		ID: instance, Status: "running", PID: pid,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -827,29 +811,23 @@ func TestStopInstanceMarksIntentOnTheSignalPath(t *testing.T) {
 // gap between signalling and confirming death is a whole poll interval wide
 // and the supervisor restarts anything it sees dead without a marker.
 func TestStopMarksIntentBeforeSignalling(t *testing.T) {
-	dir := t.TempDir()
-	s, err := store.New(dir)
+	s, err := store.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	fake := filepath.Join(dir, "qemu-system-fake")
-	if err := os.WriteFile(fake, []byte("#!/bin/sh\nsleep 60\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	proc := exec.Command("/bin/sh", fake)
-	if err := proc.Start(); err != nil {
-		t.Skipf("cannot start the fake VMM: %v", err)
-	}
-	defer func() { _ = proc.Process.Kill(); _, _ = proc.Process.Wait() }()
-	if !vmmProcessMatches(proc.Process.Pid) {
-		t.Skip("the staged process is not recognized as a VMM on this host")
+	// See TestStopInstanceMarksIntentOnTheSignalPath: a shell script's argv[0]
+	// base name is "sh" on this platform's ps output, not the script's name,
+	// so processIsAVMM never matched it and this test never ran.
+	pid, _ := startProcessAs(t, "qemu-system-fake", "/bin/sleep", "60")
+	if !vmmProcessMatches(pid) {
+		t.Fatal("staged process is not recognized as a VMM; the guard this test exists to run never executed")
 	}
 	const instance = "intent-first"
 	if _, err := s.CreateInstance(instance); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.SaveInstance(&store.InstanceState{
-		ID: instance, Status: "running", PID: proc.Process.Pid,
+		ID: instance, Status: "running", PID: pid,
 	}); err != nil {
 		t.Fatal(err)
 	}
