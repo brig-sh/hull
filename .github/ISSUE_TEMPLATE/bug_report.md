@@ -42,11 +42,11 @@ usual repro path; for compose loading bugs, a minimal compose file plus
 <!-- Fill in what applies; delete the rest. -->
 
 - Component / scope: <!-- compose, run, exec, store, vz-runner, qemu, ... -->
-- Hypervisor: <!-- vz | qemu -->
+- Hypervisor: <!-- vz | qemu | hvi -->
 - macOS version and chip: <!-- e.g. macOS 26.0, M3 Pro -->
 - hull version / commit: <!-- hull --version, or git rev-parse HEAD -->
 - Guest image: <!-- e.g. harbor.nbfc.io/nubificus/urunc-ubuntu-vz:aarch64 -->
-- Store dir: <!-- default, or the --store-dir / HULL_STORE_DIR in use -->
+- Store dir: <!-- default, or the --store-dir in use -->
 
 ## Logs and additional context
 

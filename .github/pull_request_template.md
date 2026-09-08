@@ -25,13 +25,14 @@ not apply, rather than deleting or rewording them. Keep the reasoning in
 Summary or Changes, not here.
 
 `make test` runs the Go unit suite;
-`make macos` builds and ad-hoc signs hull + vz-runner. The PTY and
-shared-folder harnesses under test/ boot real VMs and need an Apple Silicon
-host with working HVF. See CONTRIBUTING.md.
+`make macos` builds and ad-hoc signs hull, vz-runner and hvi. The harnesses
+under test/ (PTY, checkpoint, shared-folder, hvi boot, Rosetta) boot real VMs
+and need an Apple Silicon host with working HVF. See CONTRIBUTING.md and
+test/README.md.
 -->
 
 - [ ] `make test` passes
-- [ ] `make macos` builds hull + vz-runner, if Go or Swift code changed
+- [ ] `make macos` builds hull, vz-runner and hvi, if Go, Swift or Rust code changed
 - [ ] I have added or updated tests covering the change
-- [ ] I have run the PTY / shared-folder e2e harnesses (`test/*.py`) for changes touching boot, console, or the run path
+- [ ] I have run the e2e harnesses (`test/*.py`) for changes touching boot, console, or the run path
 - [ ] I have updated the affected docs (README, `docs/`)
