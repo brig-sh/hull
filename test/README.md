@@ -1,11 +1,21 @@
 # Test harnesses
 
-Everything in this directory boots a real VM through a built `hull`, except
-`compose-config-smoke.sh`, which only runs `compose config`. The Go unit
-tests live next to the code and run with `make test`; these scripts are the
-end-to-end layer on top of them, and they need an Apple Silicon host with
-working HVF. Each Python harness skips with a named reason, exit 0, when the
-host cannot run it.
+The six `.py` harnesses here boot a real VM through a built `hull`. Two of
+the shell scripts boot nothing: `compose-config-smoke.sh` only runs `compose
+config`, and `harness-selftest.sh` drives two of the harnesses against fake
+`hull` binaries. The rest are image builders and hand-run scripts, listed
+under Files below. The Go unit tests live next to the code and run with
+`make test`; these scripts are the end-to-end layer on top of them, and the
+ones that boot a VM need an Apple Silicon host with working HVF.
+
+Two harnesses skip with a named reason, exit 0, when the host cannot run
+them: `hvi-boot-test.py`, when the host is not Apple Silicon, or the `hull`
+binary, the `hvi` binary or a boot artifact is missing, and
+`rosetta-test.py`, when Rosetta is not installed. The other four --
+`pty-terminal-test.py`, `pty-jobcontrol-test.py`, `pty-checkpoint-test.py`
+and `share-test.py` -- have no skip path at all: their only exits are a
+success and a failure, so pointing one of them at a host that cannot run it
+fails rather than reporting a clean skip.
 
 ## Environment
 
@@ -13,12 +23,21 @@ host cannot run it.
 |---|---|---|
 | `HULL_BIN` | every `.py` harness except `pty-jobcontrol-test.py`, which takes the binary as its first argument | the `hull` binary to drive; default `dist/hull_arm64`, the `make macos` output |
 | `HULL_STORE_DIR` | every `.py` harness | passed as `--store-dir` when set, so a run never touches `~/.hull/store`. CI uses a store beside the runner's temp dir; the SIP jobs use `$HOME/hull-ci-store` because a long path overflows a unix socket address |
+| `HULL_TEST_BOOT_TIMEOUT` | every `.py` harness except `hvi-boot-test.py` | seconds to wait for the guest to come up before giving up on the boot; default 180. What is waited for differs: the `Run /.` boot marker in `pty-terminal-test.py` and `pty-jobcontrol-test.py`, a shell prompt in `pty-checkpoint-test.py`, the seeded script's marker in `share-test.py`, the guest agent's first answer in `rosetta-test.py` |
 | `HULL_TEST_LOG_DIR` | `pty-checkpoint-test.py` | when set, the console transcript is written to `<dir>/<name>.log`; CI uploads that directory as an artifact when the matrix fails |
 
 hull itself reads none of these. A detached instance's console lands in the
 store, at `<store>/instances/<id>/log` (`~/.hull/store/instances/<id>/log`
 by default), which is what `hull logs` prints and what the share tests read
 back.
+
+The table covers what a caller is expected to set. Four more override one
+harness's own defaults: `HULL_TEST_IMAGE` in `pty-checkpoint-test.py` and
+`share-test.py`, `HULL_ROSETTA_TEST_IMAGE` in `rosetta-test.py`, and
+`HULL_HVI_IMAGE` and `HULL_BOOT_ASSETS` in `hvi-boot-test.py`.
+`HULL_BOOT_ASSETS` is the one of those that is not test-only: hull reads it
+as well, in `internal/bootassets`, so setting it points the harness and the
+binary it drives at the same directory.
 
 ## Files
 
@@ -39,8 +58,8 @@ Harnesses CI runs:
   value.
 - `hvi-boot-test.py <name>` boots an unmodified OCI image on the hvi backend
   and asserts the image's own entrypoint ran and the instance stopped with
-  no VMM left. Skips without the `hvi` binary, the boot assets or Apple
-  Silicon.
+  no VMM left. Skips without the `hull` binary, the `hvi` binary, the boot
+  assets or Apple Silicon.
 - `share-test.py <vz|qemu> <name> <mode>` boots a detached run with
   `--shared-dir` from the user's home, seeds a script into the share, and
   reads the result back from the instance log. Modes: `readwrite`,
@@ -55,6 +74,27 @@ Harnesses CI runs:
 - `compose-config-smoke.sh <hull>` runs `compose config` against fixtures
   and asserts the supported surface renders deterministically, ignored keys
   warn on stderr, and static mistakes fail at load. No VM.
+
+Self-test for the harnesses themselves:
+
+- `harness-selftest.sh` drives `hvi-boot-test.py` and `pty-jobcontrol-test.py`
+  against fake `hull` binaries and asserts each one fails on input that is
+  not clean, then that each still passes on a genuine success, so a harness
+  rewritten to fail on everything cannot satisfy it either. Three of its
+  cases pin regressions: `hvi-boot-test.py` once reported PASS both for a
+  guest that printed its token and then died and for a `hull ps -a` that
+  exited nonzero, and `pty-jobcontrol-test.py` once reported CLEAN for a
+  `hull` binary that did not exist. Two more cover checks that already
+  worked and had no coverage: a `hull ps -a` that still lists the instance
+  as running, and a job suspended by SIGTTOU. No VM, no hypervisor, no boot
+  assets and no built `hull`; it does need Apple Silicon, because
+  `hvi-boot-test.py` skips on any other host and the cases that expect a
+  failure would then be asserting against that skip. Run it after changing
+  either harness:
+
+  ```bash
+  bash test/harness-selftest.sh
+  ```
 
 Image builders and scripted QEMU checks, run by hand:
 
@@ -80,17 +120,26 @@ The PTY harnesses boot `harbor.nbfc.io/nubificus/urunc-ubuntu-vz:aarch64`.
 
 ## How CI runs them
 
-`.github/workflows/ci.yml` gates the VM tiers on a code change (Go, Swift,
-the hvi submodule, `test/`, workflows) or a manual dispatch; a docs-only
-change runs lint and the unit suite and skips the rest. The VM steps run only
-on the self-hosted Apple Silicon runners, so a fork pull request, which lands
-on a GitHub-hosted runner, stops at the unit suite.
+`.github/workflows/ci.yml` gates only the VM-booting tiers on a code change
+(Go, Swift, the hvi submodule, `.github/actions/`, `test/`, workflows) or a
+manual dispatch; a docs-only change still runs lint, `build`, and the
+`unit` job's test suite -- none of those can be broken by a diff they
+cannot see, so none of them are gated on one. Only `e2e`, `microVM boot
+(SIP-enabled)`, and `microVM boot (SIP-disabled)` skip on a docs-only
+change. The VM-boot steps run only on the self-hosted Apple Silicon
+runners, so a fork pull request, which lands on a GitHub-hosted runner for
+`build`/`unit`/`e2e`, never boots a VM through any of them.
 
 - `build` runs `make macos`, smoke-tests the binary and runs
   `test/compose-config-smoke.sh ./dist/hull_arm64`.
-- `unit + e2e` runs the unit suite, then, signed with the Developer ID, the
-  PTY matrix (`pty-terminal-test.py` vz `type`/`intr`/`double`/`term` and
-  qemu `type`/`intr`, `pty-jobcontrol-test.py` on vz and qemu,
+- `unit` runs the Go test suite with coverage and the race detector
+  (`-count=1`, so a cached result is never mistaken for a fresh one), and
+  uploads the coverage profile and a JSON test report as workflow artifacts
+  on every run, PR or push, independent of the push-to-main-only Codecov
+  upload.
+- `e2e` runs, signed with the Developer ID, the PTY matrix
+  (`pty-terminal-test.py` vz `type`/`intr`/`double`/`term` and qemu
+  `type`/`intr`, `pty-jobcontrol-test.py` on vz and qemu,
   `pty-checkpoint-test.py`), `hvi-boot-test.py`, the share matrix
   (`share-test.py` on vz in all seven modes, on qemu in `readwrite`,
   `ownership` and `persist`), and `rosetta-test.py`. It asks for a runner
