@@ -50,7 +50,11 @@ echo "===================================="
 
 if ps -p $PID > /dev/null 2>&1; then
     # Get CPU and memory usage
-    PS_OUTPUT=$(ps -p $PID -o %cpu=%,rss= 2>/dev/null || echo "N/A N/A")
+    # Empty headers on both columns (-o %cpu=,rss=), or ps prints a header
+    # row: "%" as the %cpu header made $1 the literal "%", the bc comparison
+    # below failed to parse, and the check fell through to "is running" --
+    # so this block reported success without ever looking at the CPU.
+    PS_OUTPUT=$(ps -p $PID -o %cpu=,rss= 2>/dev/null || echo "N/A N/A")
     CPU=$(echo $PS_OUTPUT | awk '{print $1}')
     MEM=$(echo $PS_OUTPUT | awk '{print $2}')
 
