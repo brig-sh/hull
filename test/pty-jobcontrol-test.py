@@ -42,20 +42,62 @@ def drain(sec):
             try: out+=os.read(master,4096)
             except OSError: break
     return out
-drain(9)
-# ^C at the guest prompt. If the job already ended (guest halted before we
-# got here — a legitimate CLEAN outcome, common under the slower QEMU boot
-# on a loaded runner), the fake shell has exited and closed the pty slave,
-# so this write raises EIO. That is not a failure: fall through to the
-# shell's exit status, which is the actual verdict (CLEAN vs SUSPENDED-BUG).
-try:
-    os.write(master, b"\x03")
-except OSError:
-    pass
-out = drain(12)
-_, st = os.waitpid(shell, 0)
-tail = out[-160:]
+# 'Run /.' is the init-wrapper exec line hull's own boot writes to the
+# console before handing off to the guest command (see pty-terminal-test.py,
+# which waits on the same marker, same env var and same 180s default); it is
+# common to both the vz and qemu rootfs modes. Its presence is the only
+# positive evidence that hull, and the guest under it, actually ran -- not
+# just that the fake shell wrapper around it forked and exited. Without it
+# there is nothing to call CLEAN: a missing or instantly-crashing hull
+# binary produces empty console output and an ordinary (non-stopped) exit
+# from the fake shell, which used to be indistinguishable from a real clean
+# run.
+#
+# Wait for the marker (or for the fake shell exiting on its own -- a
+# legitimate CLEAN outcome if the guest halts before we get here) instead of
+# a fixed short sleep: a real but slow qemu boot on a loaded runner must not
+# be misread as a boot that never happened.
+BOOT_MARKER = b"Run /."
+BOOT_TIMEOUT = int(os.environ.get("HULL_TEST_BOOT_TIMEOUT", "180"))
+console = b""
+st = 0
+shell_reaped = False
+deadline = time.time() + BOOT_TIMEOUT
+while time.time() < deadline:
+    console += drain(1)
+    if BOOT_MARKER in console:
+        break
+    reaped, st = os.waitpid(shell, os.WNOHANG)
+    if reaped == shell:
+        shell_reaped = True
+        console += drain(1)  # flush whatever the guest wrote in the same
+                             # window as the shell exiting, so a marker
+                             # written right before exit still counts
+        break
+
+if not shell_reaped:
+    console += drain(2)  # settle
+    # ^C at the guest prompt. If the job already ended (guest halted before
+    # we got here), the fake shell has exited and closed the pty slave, so
+    # this write raises EIO. That is not a failure: fall through to the
+    # shell's exit status, which is the actual verdict (CLEAN vs
+    # SUSPENDED-BUG).
+    try:
+        os.write(master, b"\x03")
+    except OSError:
+        pass
+    console += drain(12)
+    _, st = os.waitpid(shell, 0)
+
+tail = console[-160:]
 print(f"console tail: {tail!r}")
-verdict = 'SUSPENDED-BUG' if os.WEXITSTATUS(st) == 3 else 'CLEAN'
+booted = BOOT_MARKER in console
+
+if os.WEXITSTATUS(st) == 3:
+    verdict = 'SUSPENDED-BUG'
+elif booted:
+    verdict = 'CLEAN'
+else:
+    verdict = 'NO-BOOT-EVIDENCE'
 print(f"verdict: {verdict}")
 sys.exit(0 if verdict == 'CLEAN' else 1)

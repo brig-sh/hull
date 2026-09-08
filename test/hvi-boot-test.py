@@ -100,10 +100,21 @@ output = run.stdout or b""
 if TOKEN.encode() not in output:
     die(f"the image's entrypoint did not run: {TOKEN!r} never reached the console", output)
 
+# The token can reach the console and the guest can still die afterwards --
+# `hull run` then exits nonzero even though the entrypoint ran. That must
+# fail here, not read as a pass because the token was seen.
+if run.returncode != 0:
+    die(f"hull run exited {run.returncode} after the entrypoint ran", output)
+
 # A guest that ran is only half of it: the VMM must be gone and the instance
 # must read stopped, or the next run inherits a machine nobody is watching.
 ps = subprocess.run([BIN] + GLOBAL_ARGS + ["ps", "-a"],
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
+# A broken `ps -a` prints nothing and the loop below never runs, which would
+# otherwise read as "no instance still running" -- a clean state indistin-
+# guishable from a `ps` that failed outright. Read its exit code first.
+if ps.returncode != 0:
+    die(f"hull ps -a exited {ps.returncode}; cannot confirm {name} stopped cleanly", output)
 for line in (ps.stdout or b"").decode(errors="replace").splitlines():
     fields = line.split()
     if len(fields) >= 2 and fields[0] == name and fields[1] == "running":
