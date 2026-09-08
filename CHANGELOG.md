@@ -1,7 +1,63 @@
 # Changelog
 
 All notable changes to hull. Generated from the Conventional-Commits
-history; each entry links to the PR that introduced it.
+history with git-cliff (`scripts/changelog.sh`); the release workflow does
+not regenerate it, so run the script and commit the result when cutting a
+release. History before v0.1.0-rc21 predates the import of this tree and
+is kept below as it was generated then; v0.1.0-rc19 and rc20 were re-cut
+imports of the same tree as rc21, and rc23 was a version bump only.
+
+## [0.1.0-rc25] - 2026-08-28
+
+### Miscellaneous
+
+- Correct the copyright holder in file headers
+- Bump hvi-vmm to main and follow the xattr rename
+
+## [0.1.0-rc24] - 2026-08-25
+
+### Bug Fixes
+
+- Move reference matching into the store and fix the listing split
+
+### Features
+
+- Print the store's records as JSON with full digests
+- Accept a directory handle for a share
+
+## [0.1.0-rc22] - 2026-08-25
+
+### Bug Fixes
+
+- Name the real reason a cached image was rejected
+- Stop a pull when its context is cancelled
+- Keep an index digest inside its own repository
+- Keep matching the reference an image was pulled under
+- Resolve a digest reference against the local store
+- Record the index digest a pull resolved through
+
+### Documentation
+
+- List every command in the README
+
+### Miscellaneous
+
+- Bump to the last of the descriptor path layer
+- Bump to the attribute stages
+- Bump to the descriptor path layer
+- Bump off the stale-descriptor bug
+- Bump to the fd-relative lookup and getattr
+
+### Tests
+
+- Fold the image seeding helpers into one
+
+## [0.1.0-rc21] - 2026-08-19
+
+### Features
+
+- Add hull, a microVM runtime for macOS
+
 ## [0.1.0-rc18] - 2026-08-09
 
 ### Bug Fixes

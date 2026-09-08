@@ -1,20 +1,26 @@
 # git-cliff configuration for hull.
 #
-# The changelog and the GitHub release notes are generated from the same
-# source: the Conventional-Commits history on main. Because PRs are
-# squash-merged, each PR lands as one commit whose subject is the PR title
-# (with the "(#NN)" GitHub appends), so the changelog entries map 1:1 to PRs.
+# CHANGELOG.md is generated from the Conventional-Commits history on main.
+# PRs are rebase-merged, so every commit lands as its own entry; a subject
+# that carries a "(#NN)" gets a PR link, the rest stand on their own.
 #
 # Local use:   scripts/changelog.sh            # rewrite CHANGELOG.md
 #              scripts/changelog.sh --notes vX  # print notes for one tag
-# CI drives the same script from the release workflow.
+#              git-cliff --config cliff.toml -o CHANGELOG.md   # no docker
+# Nothing in CI runs it: the release workflow takes its notes from GitHub
+# (goreleaser `changelog.use: github`), so regenerate and commit this file
+# by hand when cutting a release.
 
 [changelog]
 header = """
 # Changelog
 
 All notable changes to hull. Generated from the Conventional-Commits
-history; each entry links to the PR that introduced it.
+history with git-cliff (`scripts/changelog.sh`); the release workflow does
+not regenerate it, so run the script and commit the result when cutting a
+release. History before v0.1.0-rc21 predates the import of this tree and
+is kept below as it was generated then; v0.1.0-rc19 and rc20 were re-cut
+imports of the same tree as rc21, and rc23 was a version bump only.
 """
 # Grouped, Keep-a-Changelog-ish body. Curated highlights (if any) are
 # prepended by the release workflow, not here.
@@ -33,9 +39,8 @@ body = """
 """
 trim = true
 footer = ""
-# Turn the "(#NN)" that squash-merge appends into a PR link, without hitting
-# the GitHub API (the repo is private, so an unauthenticated remote lookup
-# 404s). This keeps changelog generation token-free.
+# Turn a "(#NN)" in a subject into a PR link without hitting the GitHub API,
+# so changelog generation needs no token.
 postprocessors = [
   { pattern = '\(#([0-9]+)\)', replace = "([#${1}](https://github.com/brig-sh/hull/pull/${1}))" },
 ]
@@ -56,7 +61,7 @@ commit_parsers = [
   { message = "^docs", group = "Documentation" },
   { message = "^test", group = "Tests" },
   { message = "^chore\\(release\\)", skip = true },
-  { message = "^chore: bump VERSION", skip = true },
+  { message = "(?i)^chore: bump VERSION", skip = true },
   { message = "^chore\\(changelog\\)", skip = true },
   { message = "^chore", group = "Miscellaneous" },
   { message = "^ci", skip = true },
