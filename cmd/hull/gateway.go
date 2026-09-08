@@ -16,7 +16,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -370,18 +372,47 @@ func recvFD(conn *net.UnixConn) (int, error) {
 	return fds[0], nil
 }
 
-// claimUnixSocket listens on path, refusing to steal it from a live process:
-// if something answers a dial, another gateway owns it; only a refused
-// connection marks the socket file as stale and safe to remove.
+// claimUnixSocket listens on path, refusing to steal it from a live process.
+// Three dial outcomes are conclusive, and only these three:
+//
+//	nil            something answered, so another gateway owns the path
+//	ECONNREFUSED   the socket file outlived its listener, so it is stale
+//	ENOENT         nothing is at the path, so there is nothing to remove
+//
+// Every other outcome means only that we could not reach the socket, which
+// is not the same as proof that nobody is listening — EACCES because a
+// directory on the way is not searchable, or because the socket's own mode
+// was changed; ENOTSOCK because something that is not a socket sits at the
+// path; a dial that times out. A live gateway we cannot dial looks exactly
+// like a stale file, so an outcome we cannot classify refuses instead of
+// removing. Refusing is recoverable and says why; unlinking the socket a
+// running gateway is serving is not, and it detaches that gateway from its
+// own address while it keeps running.
+//
+// The honest limit of dialling: on BSD a full accept queue also refuses, so
+// a wedged-but-live gateway can still read as stale. Narrowing "unreachable"
+// to "refused" does not make dialling a sound liveness test.
 func claimUnixSocket(path string) (net.Listener, error) {
 	if err := checkUnixSocketPath("gateway", path); err != nil {
 		return nil, err
 	}
-	if conn, err := net.DialTimeout("unix", path, time.Second); err == nil {
+	conn, err := net.DialTimeout("unix", path, time.Second)
+	switch {
+	case err == nil:
 		_ = conn.Close()
 		return nil, fmt.Errorf("socket %s is in use by a running gateway", path)
+	case errors.Is(err, syscall.ECONNREFUSED):
+		// Nobody is listening: the file the last gateway left behind is
+		// ours to clear.
+		if rmErr := os.Remove(path); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
+			return nil, fmt.Errorf("failed to remove stale socket %s: %w", path, rmErr)
+		}
+	case errors.Is(err, fs.ErrNotExist):
+		// Nothing at the path. net.Listen creates it.
+	default:
+		return nil, fmt.Errorf("cannot tell whether socket %s is in use: %w\n"+
+			"refusing to remove it; if no gateway is running, remove the socket by hand", path, err)
 	}
-	_ = os.Remove(path)
 	l, err := net.Listen("unix", path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to listen on %s: %w", path, err)
