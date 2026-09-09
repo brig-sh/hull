@@ -4,7 +4,7 @@
 #
 # hvi-boot-test.py and pty-jobcontrol-test.py both used to report a clean
 # PASS/CLEAN result on inputs that are not clean at all: a guest that prints
-# its token and then dies, a `hull ps -a` that fails outright and prints
+# its token and then dies, a `hull ps` that fails outright and prints
 # nothing, and a `hull` binary that does not even exist. This script pins
 # that regression down. It runs each harness against a fake `hull` built to
 # reproduce exactly those failures and fails itself if the harness does not
@@ -94,6 +94,14 @@ if sub == "run":
         print(token)
     sys.exit(int(os.environ.get("FAKE_RUN_EXIT", "0")))
 elif sub == "ps":
+    # `hull ps` takes no flags. Reject them the way urfave/cli does, so a
+    # harness that invents one fails here instead of passing against a fake
+    # that accepts anything. This harness asked for `ps -a` for as long as it
+    # existed; the fake accepted it, the real binary never did.
+    for a in sys.argv[2:]:
+        if a.startswith("-") and a not in ("--store-dir",):
+            print("Incorrect Usage: flag provided but not defined: " + a)
+            sys.exit(1)
     out = os.environ.get("FAKE_PS_OUTPUT", "")
     if out:
         print(out)
@@ -127,8 +135,8 @@ expect_contains "case 1: names hull's exit code" "$out" "hull run exited 1"
 out=$(HULL_BIN="$WORK/hull" HULL_BOOT_ASSETS="$WORK/assets" \
       FAKE_TOKEN="hvi-booted-c2" FAKE_RUN_EXIT=0 FAKE_PS_EXIT=1 \
       python3 "$HERE/hvi-boot-test.py" c2 2>&1); rc=$?
-expect_exit "case 2: entrypoint ran, hull ps -a exited nonzero" 1 "$rc"
-expect_contains "case 2: names the ps failure" "$out" "ps -a exited"
+expect_exit "case 2: entrypoint ran, hull ps exited nonzero" 1 "$rc"
+expect_contains "case 2: names the ps failure" "$out" "ps exited"
 
 # Case 3: `hull ps -a` succeeds and reports the instance still running after
 # its command exited -- a VMM nobody is watching, which the next run would
@@ -144,7 +152,7 @@ out=$(HULL_BIN="$WORK/hull" HULL_BOOT_ASSETS="$WORK/assets" \
       FAKE_TOKEN="hvi-booted-c3" FAKE_RUN_EXIT=0 FAKE_PS_EXIT=0 \
       FAKE_PS_OUTPUT=$'ID  STATUS  EXIT  PID  IP  CREATED\nc3  running  -  4242  -  1 second ago' \
       python3 "$HERE/hvi-boot-test.py" c3 2>&1); rc=$?
-expect_exit "case 3: ps -a still lists the instance as running" 1 "$rc"
+expect_exit "case 3: ps still lists the instance as running" 1 "$rc"
 expect_contains "case 3: names the instance left running" "$out" "c3 is still running"
 
 # Positive control: a genuine success must still pass. Without this, a
