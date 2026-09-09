@@ -108,13 +108,18 @@ if run.returncode != 0:
 
 # A guest that ran is only half of it: the VMM must be gone and the instance
 # must read stopped, or the next run inherits a machine nobody is watching.
-ps = subprocess.run([BIN] + GLOBAL_ARGS + ["ps", "-a"],
+ps = subprocess.run([BIN] + GLOBAL_ARGS + ["ps"],
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
-# A broken `ps -a` prints nothing and the loop below never runs, which would
+# A broken `ps` prints nothing and the loop below never runs, which would
 # otherwise read as "no instance still running" -- a clean state indistin-
 # guishable from a `ps` that failed outright. Read its exit code first.
+# This harness asked for `ps -a` for as long as it existed. `hull ps` takes
+# no flags, so every call exited 1 with "flag provided but not defined",
+# the loop read the usage text, matched nothing, and the run was reported
+# as a pass. The check below only started reporting once the exit code was
+# read, which is what caught it.
 if ps.returncode != 0:
-    die(f"hull ps -a exited {ps.returncode}; cannot confirm {name} stopped cleanly", output)
+    die(f"hull ps exited {ps.returncode}; cannot confirm {name} stopped cleanly", output)
 for line in (ps.stdout or b"").decode(errors="replace").splitlines():
     fields = line.split()
     if len(fields) >= 2 and fields[0] == name and fields[1] == "running":
