@@ -53,6 +53,11 @@ func TestParsePSCPUTimeReadsDarwinsUnboundedMinutes(t *testing.T) {
 		{"1:03.10", 63100 * time.Millisecond},
 		{"  2463:28.96  ", 2463*time.Minute + 28960*time.Millisecond},
 		{"45.50", 45500 * time.Millisecond},
+		// A comma-decimal locale. `ps -o time=` does not localise today,
+		// but `%cpu` beside it does ("198,8"), which is exactly how commas
+		// reached telemetry before this change.
+		{"2463:28,96", 2463*time.Minute + 28960*time.Millisecond},
+		{"0:03,10", 3100 * time.Millisecond},
 	} {
 		got, err := parsePSCPUTime(tc.in)
 		if err != nil {
