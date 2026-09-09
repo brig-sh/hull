@@ -251,8 +251,16 @@ func sampleVMMProcess(pid int) (rssKB string, cpu time.Duration, err error) {
 // (The day-and-hour shape belongs to `etime`, which is elapsed real time,
 // not CPU time.) Reading from the last colon keeps this correct whatever
 // the magnitude, and the hundredths survive at every size.
+//
+// A comma is accepted as the decimal separator. `time` is not localised
+// today, but its neighbour is: under a comma-decimal locale `ps -o %cpu=`
+// prints "198,8", and that is how it reached telemetry when hull forwarded
+// the column verbatim -- as a string LogQL's `unwrap` cannot parse, so
+// those samples were dropped at query time rather than merely being wrong.
+// If `time` ever follows, the cost of not handling it is the same silence,
+// and the cost of handling it is this line.
 func parsePSCPUTime(s string) (time.Duration, error) {
-	s = strings.TrimSpace(s)
+	s = strings.ReplaceAll(strings.TrimSpace(s), ",", ".")
 	secs := s
 	var mins float64
 	if i := strings.LastIndex(s, ":"); i >= 0 {
