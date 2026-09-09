@@ -374,63 +374,75 @@ func startVMMMetricsSampler(launcherPID int, backend string, vcpus int, startTim
 		// instant we attach: we retry every few seconds rather than every
 		// thirty, and only settle to the full interval once a sample has
 		// actually gone out.
-		interval := metricsWarmupInterval
+		//
+		// Both are read once here rather than per tick, so the goroutine
+		// never races a test that is restoring them.
+		warmup, steady := metricsWarmupInterval, metricsInterval
+		interval := warmup
 		timer := time.NewTimer(interval)
 		defer timer.Stop()
 		var prev vmmCPUSample
 		vzHelper := 0
+
+		// tick takes one sample and reports whether sampling continues. It
+		// is a closure rather than the body of the select so that the timer
+		// is rearmed exactly once per tick, after interval may have changed:
+		// rearming before that kept the sampler on the warm-up cadence for
+		// one extra sample, and rearming after an early `continue` would
+		// have left the timer dead and the sampler silent.
+		tick := func() bool {
+			// Which PID actually is the VM? qemu and hvi run the guest
+			// in-process, so the launcher is it. vz (Apple
+			// Virtualization.framework) runs the guest in a separate
+			// launchd-owned XPC helper -- the launcher is a thin wrapper
+			// reading ~0% CPU -- so find the helper holding this
+			// instance's files open and sample that.
+			pid := launcherPID
+			if backend == "vz" {
+				if vzHelper == 0 || !pidAlive(vzHelper) {
+					vzHelper = resolveVzHelper(instanceDir)
+				}
+				if vzHelper == 0 {
+					return pidAlive(launcherPID) // helper not up yet, or VM gone
+				}
+				pid = vzHelper
+			}
+			rssKB, cpu, err := sampleVMMProcess(pid)
+			if err != nil {
+				if backend == "vz" {
+					vzHelper = 0 // helper cycled; re-resolve next tick
+				}
+				// One ps failure is not the end of the VM. Only a PID that
+				// is actually gone ends the sampler: qemu and hvi used to
+				// return here and stop sampling for the rest of the attach,
+				// where vz alone recovered.
+				return pidAlive(launcherPID)
+			}
+			cur := vmmCPUSample{pid: pid, cpu: cpu, when: time.Now()}
+			pct, ok := cpuPercent(prev, cur, vcpus)
+			prev = cur
+			if !ok {
+				return true // baseline taken, or the two are not comparable
+			}
+			telemetryClient.Send("metrics", map[string]string{
+				"backend":  backend,
+				"rss_kb":   rssKB,
+				"cpu_pct":  strconv.FormatFloat(pct, 'f', 1, 64),
+				"uptime_s": strconv.FormatInt(int64(time.Since(startTime).Seconds()), 10),
+			})
+			interval = steady
+			return true
+		}
+
 		for {
 			select {
 			case <-done:
 				return
 			case <-timer.C:
-				timer.Reset(interval)
-				// Which PID actually is the VM? qemu and hvi run the guest
-				// in-process, so the launcher is it. vz (Apple
-				// Virtualization.framework) runs the guest in a separate
-				// launchd-owned XPC helper -- the launcher is a thin
-				// wrapper reading ~0% CPU -- so find the helper holding
-				// this instance's files open and sample that.
-				pid := launcherPID
-				if backend == "vz" {
-					if vzHelper == 0 || !pidAlive(vzHelper) {
-						vzHelper = resolveVzHelper(instanceDir)
-					}
-					if vzHelper == 0 {
-						if !pidAlive(launcherPID) {
-							return // VM gone
-						}
-						continue // helper not resolvable yet; try next tick
-					}
-					pid = vzHelper
-				}
-				rssKB, cpu, err := sampleVMMProcess(pid)
-				if err != nil {
-					if backend == "vz" {
-						vzHelper = 0 // helper cycled; re-resolve next tick
-					}
-					// One ps failure is not the end of the VM. Only a PID
-					// that is actually gone ends the sampler: qemu and hvi
-					// used to return here and stop sampling for the rest of
-					// the attach, where vz alone recovered.
-					if pidAlive(launcherPID) {
-						continue
-					}
+				if !tick() {
 					return
 				}
-				cur := vmmCPUSample{pid: pid, cpu: cpu, when: time.Now()}
-				pct, ok := cpuPercent(prev, cur, vcpus)
-				prev = cur
-				if !ok {
-					continue // baseline taken, or the two are not comparable
-				}
-				telemetryClient.Send("metrics", map[string]string{
-					"backend":  backend,
-					"rss_kb":   rssKB,
-					"cpu_pct":  strconv.FormatFloat(pct, 'f', 1, 64),
-					"uptime_s": strconv.FormatInt(int64(time.Since(startTime).Seconds()), 10),
-				})
-				interval = metricsInterval
+				timer.Reset(interval)
 			}
 		}
 	}()
