@@ -138,7 +138,7 @@ almost no CPU or memory of its own.
 |---|---|---|
 | `backend` | `vz` | |
 | `rss_kb` | `524288` | VMM process resident set size |
-| `cpu_pct` | `48.5` | share of the guest's vCPUs busy since the previous sample, 0-100 |
+| `cpu_pct` | `48.5` | share of the guest's vCPUs busy since the previous sample; 100 is all of them |
 | `uptime_s` | `90` | seconds since launch |
 
 `cpu_pct` is a rate measured over the interval between two samples: the CPU
@@ -147,8 +147,8 @@ by the guest's vCPU count. 100 means every vCPU was busy for the whole
 interval. It can read somewhat above 100: the measurement covers the whole
 VMM process, whose device emulation and I/O threads burn host CPU on top of
 the vCPU threads. A sample is skipped rather than guessed when the two
-readings cannot be compared -- the first one of an attach, which only sets the baseline, or
-a vz helper that was replaced between ticks.
+readings cannot be compared -- the first one of an attach, which only
+sets the baseline, or a vz helper that was replaced between ticks.
 
 Before schema version 2 this field carried the `%cpu` column of `ps`
 unchanged. That is a decaying average over up to a minute, summed across
