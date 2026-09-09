@@ -378,3 +378,50 @@ func TestFakePSHelperProcess(t *testing.T) {
 	}
 	os.Exit(0)
 }
+
+// TestSamplerSettlesToTheSteadyIntervalAfterTheFirstSample pins the hand-off
+// out of the warm-up.
+//
+// The warm-up exists only to get the first sample out quickly. Once one has
+// gone, the cadence is the steady interval -- if the rearm still reads the
+// warm-up, every attach emits an extra sample a few seconds after its first
+// and the documented "every 30 seconds" is not what ships.
+//
+// The second sample is the signal, so the test waits for the first rather
+// than sleeping a fixed window: the stand-in `ps` is a process spawn, which
+// costs over a second under -race, and a fixed window measures the machine
+// rather than the sampler.
+func TestSamplerSettlesToTheSteadyIntervalAfterTheFirstSample(t *testing.T) {
+	fakePS(t, 1.0)
+
+	events := make(chan struct{}, 16)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		events <- struct{}{}
+	}))
+	defer srv.Close()
+
+	// Three orders of magnitude between the two, so which one the rearm
+	// used is never a judgement call.
+	intervalWas, warmupWas := metricsInterval, metricsWarmupInterval
+	t.Cleanup(func() { metricsInterval, metricsWarmupInterval = intervalWas, warmupWas })
+	metricsWarmupInterval = 200 * time.Millisecond
+	metricsInterval = 60 * time.Second
+	withTelemetryClient(t, srv.URL)
+
+	done := make(chan struct{})
+	defer close(done)
+	startVMMMetricsSampler(os.Getpid(), "qemu", 1, time.Now(), t.TempDir(), done)
+
+	select {
+	case <-events:
+	case <-time.After(30 * time.Second):
+		t.Fatal("no sample at all: the warm-up never produced one")
+	}
+	// The next one is 60s out. A second inside this window can only have
+	// come from a rearm that was still on the warm-up.
+	select {
+	case <-events:
+		t.Error("a second sample arrived far inside the steady interval: the sampler never left the warm-up")
+	case <-time.After(5 * time.Second):
+	}
+}
