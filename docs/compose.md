@@ -2,9 +2,9 @@
 
 `hull compose` runs a multi-service Compose file where **each
 service is its own lightweight VM** (not a container), wired together on a
-private virtual network. It targets the common shape of a dev stack —
+private virtual network. It targets the common shape of a dev stack:
 a few services that talk to each other by name and expose a port or two to
-the host — not the full Compose specification.
+the host. It is not the full Compose specification.
 
 For the design rationale and phasing, see
 [`compose-support.md`](./compose-support.md); this page is the usage
@@ -24,10 +24,10 @@ hull compose exec [-T|--no-tty] [-u|--user U] [-e|--env K=V]... [-w|--workdir DI
 hull compose top
 ```
 
-- `-f, --file` — Compose file (env `COMPOSE_FILE`; default:
+- `-f, --file`: Compose file (env `COMPOSE_FILE`; default:
  `docker-compose.yml`, `docker-compose.yaml`, `compose.yml`, or
  `compose.yaml` in the working directory).
-- `-p, --project-name` — project name (env `COMPOSE_PROJECT_NAME`;
+- `-p, --project-name`: project name (env `COMPOSE_PROJECT_NAME`;
  default: the current directory name). Namespaces the instances, the
  network, and state.
 - `--env-file` -- interpolation env file; replaces the `.env` beside the
@@ -57,17 +57,20 @@ the project.
 each service a static IP on the subnet (gateway at `.1`, services from
 `.10`). The gateway provides:
 
-- **service-to-service switching** — services reach each other directly on
+- **service-to-service switching**: services reach each other directly on
  the subnet;
-- **name resolution** — every service name is both a DNS A record on the
+- **name resolution**: every service name is both a DNS A record on the
  gateway *and* an `/etc/hosts` entry in every guest, so `http://db:5432`
  works whether the guest resolves via DNS or hosts;
 - **NAT egress** to the outside world;
 - **host port forwards** from `ports:`.
 
-This is the same user-mode gateway path described in the README's QEMU
-section: unix-socket networking, **no vmnet, no
-`com.apple.vm.networking` entitlement, no root, no re-signed QEMU**.
+This is the same user-mode gateway path described in
+[`networking.md`](./networking.md): unix-socket networking, **no vmnet, no
+`com.apple.vm.networking` entitlement, no root, no re-signed QEMU**. For
+restricting what these guests may reach, see
+[`network-egress.md`](./network-egress.md). Note that a policy belongs to the
+gateway, so every service in a project answers to the same rules.
 
 ## Supported Compose keys
 
@@ -75,7 +78,14 @@ This section sketches the common shape of what is supported. Anything not
 listed here is either unsupported or untested; `hull compose config` is the
 quickest way to find out what a given file resolves to.
 
-The everyday service keys are `image` (**required** — `build:` is not
+Note what `compose config` does and does not establish. It loads the file,
+resolves interpolation and `extends`, applies profile selection, and warns on
+stderr about every key hull ignores. So a clean run proves the file parses and
+that every key in it is one hull honors. **It does not prove the services
+run**, and it does not exercise the backend, the network or the images. Treat
+it as a lint, not as a dry run.
+
+The everyday service keys are `image` (**required**; `build:` is not
 supported), `command`, `environment`, `env_file`, `depends_on`, `restart`,
 `volumes`, `ports`, `mem_limit`, `cpus`, `profiles`, and `container_name`. Variable interpolation
 works the way docker's does: `${VAR}`, defaults (`${VAR:-x}`), required
@@ -85,20 +95,56 @@ replaces it). `env_file:` feeds the guest environment, with `environment:`
 winning on collisions. Three urunc-specific extensions,
 `x-` prefixed so the file stays Compose-valid, tune the VM:
 
-- `x-hypervisor` -- `vz`, `qemu` or `hvi` per service. **Defaults to `vz`
- when unset** (the backend is forced to `vz`, not read from the image
- annotation).
+- `x-hypervisor` -- the backend for that service. **Defaults to `vz` when
+ unset** (the backend is forced to `vz`, not read from the image annotation).
+ Six values are accepted: `vz`, `qemu`, `hvi`, and the aliases `qemu-hvf`
+ (folding to `qemu`) and `virtualization` and `apple` (both folding to `vz`).
+ The error message for a rejected value lists only the first three.
 - `x-healthcheck-tcp` -- `{ port: N, interval: …, retries: N, start_period: … }`,
  a TCP-connect healthcheck the gateway probes, used by
  `depends_on: { condition: service_healthy }`. Defaults: a 1 s interval and
  60 retries. There is no `timeout` key: a connect either succeeds or it
  does not, so a `timeout` in the file is ignored with a warning. Size the
  wait with `retries` and `start_period`.
-- `x-oneshot: true` — run the service as a **job**: its `command` runs to
+- `x-oneshot: true`: run the service as a **job**: its `command` runs to
  completion and its exit code is what dependents wait on (see below).
 
-Anything not listed is ignored (unsupported keys are warned about, not
-dropped silently). The top-level `include:` key merges other compose files
+Four standard Compose keys are also supported and were missing from earlier
+versions of this list:
+
+- `healthcheck`: the standard Compose healthcheck, run as an exec probe in
+ the guest through the agent. `depends_on: { condition: service_healthy }`
+ waits on it. The keys read are `test`, `interval`, `timeout`, `retries`,
+ `start_period` and `disable`; anything else under `healthcheck:` warns. Only
+ the `CMD`, `CMD-SHELL` and `NONE` test forms are accepted. It is **mutually
+ exclusive with `x-healthcheck-tcp`**: setting both is an error, not a
+ precedence rule. Use `healthcheck` when the probe is a command in the guest,
+ and `x-healthcheck-tcp` when a TCP connect is enough.
+- `post_start`: hooks that run in the fresh guest after it starts. A failed
+ hook fails the `up`. Each entry reads `command` (required), `user` and
+ `environment`.
+- `pre_stop`: hooks that run before the service is stopped, same three keys.
+ These need the service definitions, so `down` reloads the compose file to
+ find them; if it cannot reload the file, the hooks are **skipped with a
+ warning** and the rest of the teardown still runs.
+- `extends`: resolved by compose-go while the file loads, so the service it
+ names is merged in before hull walks the document. It is not ignored, and it
+ does not warn.
+
+`depends_on` reads `condition` and `required`.
+
+Anything not listed is ignored, and warned about rather than dropped
+silently. Two different things happen depending on the key, which is worth
+knowing when you are debugging a file:
+
+- A key the Compose **specification defines** but hull does not act on
+  produces exactly one warning line on stderr and the load continues:
+  `warning: compose: ignoring unsupported key "<dotted.path>": <hint>`.
+- A key the specification **does not define**, such as the typo `imagee`,
+  **fails the load** at the schema pass. It does not warn.
+
+So a mistyped key name is an error, not a silent no-op. The top-level
+`include:` key merges other compose files
 into the project (see below). Named volumes work: declare them under the
 top-level `volumes:` key and they become store-managed directories
 (`<store>/volumes/<project>_<name>`) that persist across `down`/`up` and
@@ -139,9 +185,15 @@ $ COMPOSE_PROFILES=debug,tools hull compose up
 ```
 
 `compose config` applies the same selection, so it prints exactly the
-services `compose up` starts. The whole file is still validated, including
-the services the profiles disabled: an error in a service you did not
-activate is still an error.
+services `compose up` starts.
+
+Validation of a disabled service is only partial, and an earlier version of
+this page overstated it. The raw schema pass covers the whole document, so a
+malformed disabled service still fails the load. But hull's own
+urunc-specific checks and compose-go's consistency check both walk only the
+**profile-enabled** services. So an invalid `x-hypervisor`, a bad
+`container_name` or a broken `depends_on` inside a service no active profile
+enables is not caught until you activate it.
 
 Two conditions stop the command:
 
@@ -229,18 +281,23 @@ directory unless the include set `project_directory`, in which case it is that
 directory. An included file does not inherit the environment of the file that
 included it.
 
-Two cases fail the load instead of picking a winner in silence:
+Two cases were previously documented here as failing the load. Neither does,
+at the pinned compose-go version:
 
-- A service that is defined in an included file and in the including file.
- Rename one of the two services.
-- An include entry that lists more than one path. Docker treats the first
- file as a base and the rest as overrides. That merge is not implemented, so
- write one file per entry.
+- A service defined in **both** an included file and the including file is
+  **merged**, not rejected. Nothing in hull adds a rejection. If you did not
+  intend a merge, rename one of the two services.
+- An include entry that lists **more than one path** is accepted. compose-go
+  treats the first as the base and the rest as overrides, and hull's own
+  include handling reads a plural list of paths. So the docker merge semantics
+  do apply.
+
+Run `hull compose config` to see what either case actually resolved to.
 
 ## One-shot services, exit status, and restart policies
 
 `depends_on: { condition: service_completed_successfully }` works, and so
-does the `x-oneshot: true` marker that names a job directly — a service
+does the `x-oneshot: true` marker that names a job directly. A service
 targeted by that condition is a job whether or not it says so. A job boots,
 runs its `command` through the guest agent, records the **exact exit code**,
 and stops; code 0 releases its dependents, a non-zero code fails `up` with
@@ -252,7 +309,7 @@ consequences worth knowing before you write one:
  today, so `up` fails loudly naming the requirement rather than assuming
  success.
 - A job's VM runs a benign init and the command runs through the agent, so
- the job's output is **not** in `compose logs` — it is captured and printed
+ the job's output is **not** in `compose logs`. It is captured and printed
  when the job fails.
 
 ```yaml
@@ -275,61 +332,105 @@ liveness and re-runs what disappeared with capped exponential backoff. An
 unknown value is a load error. Divergences: a restart is noticed within the
 poll interval rather than instantly; `on-failure` **degrades to `always`**
 with a load-time warning (a plain service reports no exit code, so a clean
-exit cannot be told from a failure — the `:N` attempt cap is still honored);
+exit cannot be told from a failure; the `:N` attempt cap is still honored);
 `always` and `unless-stopped` are indistinguishable here; and a job is never
 restarted whatever its policy says. An explicit `hull stop` outranks
 every policy: a service you stop **stays stopped**.
 
 Only a job records an exit code. A plain service whose VM ended on its own
-reports `-` in `hull ps`'s EXIT column — an honest "ended without a
+reports `-` in `hull ps`'s EXIT column, an honest "ended without a
 reportable status", and exactly the gap Phase B closes. `compose
 ps` shows the state word only; a recorded code is visible through
 `hull ps` and `hull inspect`.
 
-## Example
+## A complete example you can run
+
+This uses only `ubuntu:latest`, so it needs no private registry and no
+packaged image. On the `vz` backend hull supplies the generic kernel and
+initrd, so a plain container image boots.
+
+Save this as `compose.yaml` in an empty directory:
 
 ```yaml
-# compose.yaml
 services:
- db:
- image: harbor.nbfc.io/nubificus/postgres-urunc:aarch64
- environment:
- POSTGRES_PASSWORD: dev
- mem_limit: 1g
- x-healthcheck-tcp:
- port: 5432
- interval: 1s
- retries: 30
+  greeter:
+    image: ubuntu:latest
+    x-hypervisor: vz
+    mem_limit: 512m
+    command: ["/bin/sh", "-c", "echo greeter listening; sleep 3600"]
+    volumes:
+      - shared-data:/data
 
- api:
- image: harbor.nbfc.io/nubificus/my-api:aarch64
- command: ["/usr/local/bin/api", "--db", "postgres://db:5432"]
- depends_on:
- db:
- condition: service_healthy
- ports:
- - "8080:8080"
- volumes:
- - ./config:/etc/api
- cpus: 2
+  worker:
+    image: ubuntu:latest
+    x-hypervisor: vz
+    mem_limit: 512m
+    x-oneshot: true
+    depends_on:
+      greeter:
+        condition: service_started
+    command: ["/bin/sh", "-c", "getent hosts greeter && echo worker resolved greeter"]
+
+volumes:
+  shared-data:
 ```
+
+Check what it resolves to before booting anything. This step needs no VM:
 
 ```bash
-hull compose up # boots db, waits for :5432, then api
-hull compose ps
-curl localhost:8080 # forwarded to api:8080 through the gateway
-hull compose logs -f api
-hull compose down # stops both VMs and the gateway
+hull compose config
 ```
 
-Here `api` reaches the database at `db:5432` by name, `up` blocks on the
-Postgres TCP healthcheck before starting `api`, and host `:8080` is
-forwarded to the `api` guest.
+That prints the canonical document and warns on stderr about any key hull
+ignores. The file above produces no warnings.
+
+Then run it:
+
+```bash
+hull compose up
+hull compose ps
+hull compose logs greeter
+```
+
+`worker` is a one-shot job, so `up` waits for it to finish and its exit code
+is what dependents would wait on. It resolves `greeter` by name through the
+gateway's resolver, which `hull compose up` starts for the project.
+
+Illustrative output from `hull compose logs worker`:
+
+```
+10.87.0.3       greeter
+worker resolved greeter
+```
+
+Clean up:
+
+```bash
+hull compose down              # stops both VMs and the gateway; keeps the volume
+hull compose down --volumes    # also deletes shared-data
+```
+
+CAUTION: `down --volumes` deletes a volume declared `external: true` as
+readily as any other. See
+[storage.md](storage.md#compose-volumes).
+
+Two things this example does not show, because they need a listening process
+in the guest: `ports:` forwarding a host port to a service, and
+`x-healthcheck-tcp` probing one. The sections above cover both.
+
+### Verification note
+
+The compose file above was validated with `hull compose config` against a
+binary built from this checkout: exit status 0, no ignored-key warnings, and
+the named volume resolved to `<store>/volumes/demo_shared-data`. It was not
+booted as part of writing this page, so the log output above is marked
+illustrative. A successful `compose config` proves the file loads and every
+key in it is one hull honors. It does not prove the workload runs.
 
 ## Limits
 
 - One service = one VM: a stack of N services boots N VMs (the subnet caps
  the count; a `/24` gives ~244 usable service addresses).
 - `--subnet` must be large enough for the services (`up` errors if not).
-- `build:` is unsupported — pre-build and push images (see
+- `build:` is unsupported: pre-build and push images (see
  [`NOFireAI/urunc-images`](https://github.com/NOFireAI/urunc-images) for the pattern).
