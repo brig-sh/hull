@@ -26,6 +26,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -239,7 +240,15 @@ func TestWaitHealthyExecGivesUpOnPersistentTransportFailure(t *testing.T) {
 func TestWaitHealthy(t *testing.T) {
 	start := func(t *testing.T, h http.HandlerFunc) (sock, addr string) {
 		t.Helper()
-		dir := t.TempDir()
+		// Not t.TempDir(): on darwin sun_path is 104 bytes, and t.TempDir()
+		// embeds the subtest name, so these paths overflow it and every
+		// net.Listen returns "bind: invalid argument". Short /tmp prefix, the
+		// same pattern as oneshot_prewarm_test.go and gateway_socket_test.go.
+		dir, err := os.MkdirTemp("/tmp", "hull-wh-")
+		if err != nil {
+			t.Fatalf("mkdtemp: %v", err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
 		sock = filepath.Join(dir, "gw.sock")
 		l, err := net.Listen("unix", sock)
 		if err != nil {
