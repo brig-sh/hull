@@ -131,8 +131,16 @@ codesign_verify:
 
 ## test Run the Go unit suite.
 .PHONY: test
-test:
+test: test-harness
 	$(GO) test -count=1 ./...
+
+# The harness self-test proves the VM-boot harnesses can still fail. It needs
+# no VM and takes seconds, so it runs with the unit suite rather than sitting
+# in the tree unexecuted. On a non-Darwin/arm64 host it reports its hvi cases
+# as skipped instead of asserting against a platform skip.
+.PHONY: test-harness
+test-harness:
+	bash test/harness-selftest.sh
 
 ## macos Build hull + vz-runner + hvi, then sign all three.
 .PHONY: macos

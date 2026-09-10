@@ -52,6 +52,7 @@ trap 'rm -rf "$WORK"' EXIT
 
 pass=0
 fail=0
+skip=0
 
 # expect_exit <label> <expected-exit> <actual-exit>
 expect_exit() {
@@ -63,6 +64,20 @@ expect_exit() {
         echo "OK    $label (exit $actual)"
         pass=$((pass + 1))
     fi
+}
+
+# skip_case <label> <reason>
+#
+# A skipped case is reported and counted, never silently passed. The hvi
+# cases below assert on exit codes that only a Darwin/arm64 host produces;
+# on any other host hvi-boot-test.py skips with exit 0 first, and case 4
+# ("a genuine clean boot still passes", which expects exit 0) would then
+# read that skip as a pass. That is the same false-evidence pattern this
+# whole script exists to catch, so gate the cases instead of asserting
+# against a skip.
+skip_case() {
+    echo "SKIP  $1: $2"
+    skip=$((skip + 1))
 }
 
 # expect_contains <label> <haystack> <needle>
@@ -114,7 +129,19 @@ touch "$WORK/hvi"; chmod +x "$WORK/hvi"
 mkdir -p "$WORK/assets"
 touch "$WORK/assets/Image" "$WORK/assets/container-initrd"
 
+HOST_OS=$(uname -s)
+HOST_ARCH=$(uname -m)
+
 echo "== hvi-boot-test.py =="
+if [ "$HOST_OS" != "Darwin" ] || [ "$HOST_ARCH" != "arm64" ]; then
+    for c in "case 1: entrypoint ran, hull run exited nonzero" \
+             "case 2: entrypoint ran, hull ps exited nonzero" \
+             "case 3: ps still lists the instance as running" \
+             "case 4: genuine clean boot still passes" \
+             "case 5: missing hull binary still skips"; do
+        skip_case "$c" "hvi-boot-test.py needs Darwin/arm64; this is $HOST_OS/$HOST_ARCH"
+    done
+else
 
 # Case 1 (required): the token reaches the console, then `hull run` exits
 # nonzero -- a guest that printed and then died. Before the fix this read
@@ -169,6 +196,9 @@ expect_contains "case 4: reports PASS" "$out" "PASS"
 out=$(HULL_BIN="$WORK/does-not-exist" python3 "$HERE/hvi-boot-test.py" c5 2>&1); rc=$?
 expect_exit "case 5: missing hull binary still skips" 0 "$rc"
 expect_contains "case 5: names the missing prerequisite" "$out" "SKIP:"
+
+echo
+fi
 
 echo
 echo "== pty-jobcontrol-test.py =="
@@ -236,5 +266,5 @@ expect_exit "case 8: SIGTTOU before any boot marker" 1 "$rc"
 expect_contains "case 8: reports SUSPENDED-BUG" "$out" "verdict: SUSPENDED-BUG"
 
 echo
-echo "$pass passed, $fail failed"
+echo "$pass passed, $fail failed, $skip skipped"
 [ "$fail" -eq 0 ]
