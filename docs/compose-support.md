@@ -1,8 +1,20 @@
 # Supporting docker-compose recipes on hull
 
-> **Usage docs**: for how to use the shipped `compose` command, see
-> [`compose.md`](./compose.md). This document is the design/gap analysis
-> that informed it.
+> **This is a historical design record, not documentation of current
+> behavior.**
+>
+> It was written on 2026-07-08, before `hull compose` shipped, as a gap
+> analysis to decide what to build. Parts of it are now wrong as a description
+> of hull: its "Out of scope initially" section lists named volumes as
+> unsupported, and a later note in this same file records that named volumes
+> did land, as store-managed directories.
+>
+> It is kept because the reasoning behind the design is worth having, and
+> because erasing the record would be worse than labelling it.
+>
+> **For what `hull compose` actually supports today, read
+> [`compose.md`](./compose.md).** For what a compose project puts on disk and
+> what teardown deletes, read [`storage.md`](./storage.md).
 
 Status: exploration (2026-07-08). Based on a code-level inventory of
 `cmd/hull`, `pkg/store`, `pkg/ociclient`, and the urunc darwin

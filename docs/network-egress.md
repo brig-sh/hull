@@ -19,12 +19,16 @@ own. Run one gateway per sandbox and the boundary lands where you want it: one
 gateway, one guest, one policy. That is the intended shape, and every claim on
 this page about what a guest can reach assumes it.
 
-Sharing a gateway shares the policy, in both directions. `hull compose up`
-starts one gateway per project, so every service in a project answers to the
-same rules, and `hull run --gateway-sock` joins an existing gateway and takes
-its policy. That suits a project whose services are one unit of trust. It does
-not suit two agents that must not reach the same things: put those on separate
-gateways.
+Sharing a gateway shares the policy, in both directions. `hull run
+--gateway-sock` joins an existing gateway and takes its policy. That suits a
+set of guests that are one unit of trust. It does not suit two agents that must
+not reach the same things: put those on separate gateways.
+
+**`hull compose` cannot apply an egress policy.** Only `hull network-gateway`
+accepts the egress flags. `hull run` has none, and the gateway that
+`hull compose up` starts for a project is given none, so **a compose project's
+gateway is always unfiltered.** To filter, start a gateway yourself with a
+policy and join it with `hull run --net shared --gateway-sock`.
 
 Per-sandbox networks are brig-sh/brig#15.
 
@@ -53,9 +57,13 @@ A sandbox that may reach the internet but not the host's own networks:
 hull network-gateway --socket ... \
   --egress-default allow \
   --egress-deny cidr=10.0.0.0/8 \
-  --egress-deny cidr=192.168.0.0/16 \
-  --egress-deny cidr=169.254.0.0/16
+  --egress-deny cidr=192.168.0.0/16
 ```
+
+Link-local `169.254.0.0/16` needs no rule, and a rule for it does nothing.
+The forwarder short-circuits that range before the policy is consulted, with a
+reset for TCP and a drop for UDP. An allow rule for it can never take effect
+and a deny rule for it changes nothing.
 
 ## How a rule is matched
 
@@ -74,11 +82,13 @@ Precedence is deny, then allow, then the default, decided per connection. A
 ## Why host globs work
 
 A packet carries an address, not a name, so a name has to be turned into
-addresses before it can be enforced. The gateway's resolver is the only one a
-guest can reach, so it does that itself: an answer it gives out puts its
+addresses before it can be enforced. Under `--egress-default deny` the
+gateway's resolver is the only one a guest can reach, so it does that itself: an answer it gives out puts its
 addresses in that guest's allow set, and the connection check consults the
-set. Pins are per guest, cover both address families, and expire; a guest that
-never asked never inherits another's.
+set. Pins are per guest and they expire, and a guest that never asked never
+inherits another's. The pin structures accept both address families, but the
+resolver drops IPv6 addresses out of an upstream answer before anything is
+pinned, so in practice a pin set only ever holds IPv4 addresses.
 
 The gateway tells the guest the same TTL it enforces, so what the guest caches
 and what the gateway honours cannot drift apart, and adds a short grace period
@@ -129,9 +139,17 @@ blocked whether or not the guest asked this resolver for them.
 
 Under `--egress-default deny` this has a second effect. A query for a name no
 allow glob covers is answered `REFUSED`, so a guest cannot learn an address
-here that it is not allowed to reach. Traffic sent straight to an IP,
-DNS-over-HTTPS and DNS-over-TLS then have nothing to reach: they are dead ends
-because of that rule, not because they are named anywhere.
+here that it is not allowed to reach. DNS-over-HTTPS and DNS-over-TLS to an
+off-gateway resolver are then dead ends too, because reaching that resolver is
+itself a connection the default denies.
+
+Be precise about direct-to-IP, though. It is not blocked as a category. A
+connection sent straight to an address gets out whenever that address matches a
+`cidr` allow rule, or is currently held by the refresh timer for a literal
+`host` rule, or is still pinned for that guest, or the default is `allow`. What
+`--egress-default deny` removes is the guest's ability to *learn* a new address
+through this resolver. It does not stop a guest using an address it already
+has.
 
 The flip side is worth stating plainly. Under `--egress-default deny`, a guest
 resolves only what an allow glob covers, so a policy written entirely in
@@ -208,5 +226,5 @@ A hand-started gateway for one sandbox looks like this:
 ```
 hull network-gateway --socket /tmp/gw.sock --egress-default deny \
   --egress-allow host=api.example.com &
-hull run --gateway-sock /tmp/gw.sock --gateway-cidr 10.87.0.10/24 <image>
+hull run --net shared --gateway-sock /tmp/gw.sock --gateway-cidr 10.87.0.10/24 <image>
 ```

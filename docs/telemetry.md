@@ -5,9 +5,16 @@ events and crash reports to help us understand what people run and fix what
 breaks. This page is the canonical reference for exactly what is sent. If a
 field is not listed here, it is not collected.
 
-Interactive
-users are asked before anything is sent, and turning telemetry off takes
-one command.
+The default is not the same in both directions, so both are stated here rather
+than in one sentence:
+
+- **Interactive sessions are asked first.** Nothing is sent before you answer,
+  and the answer is persisted.
+- **Non-interactive sessions are not asked, and telemetry defaults to on.**
+  That covers CI, a script, a pipe and `--unattended`. See
+  [Unattended installs](#unattended-installs).
+
+Turning it off takes one command, and an opt-out works in both cases.
 
 ## Turning it off
 
@@ -17,8 +24,15 @@ Any one of these disables all telemetry (usage and crash reports):
 hull telemetry off        # persisted; `on` re-enables, `status` shows state
 hull --dnt ...            # flag twin of DO_NOT_TRACK
 export HULL_TELEMETRY_DISABLED=1
-export DO_NOT_TRACK=1            # honored per consoledonottrack.com
+export DO_NOT_TRACK=1            # the consoledonottrack.com convention
 ```
+
+Both environment variables are compared to the exact string `1`. **A value
+like `DO_NOT_TRACK=true` or `DO_NOT_TRACK=yes` does not opt out.** Write `1`.
+
+Either variable suppresses usage and crash telemetry for that invocation and
+leaves nothing on disk: no state file is created and no consent answer is
+recorded. `hull telemetry off` and `--dnt` do persist the choice.
 
 To see every payload instead of sending it:
 
@@ -92,7 +106,7 @@ All events share a common envelope:
 
 | field | example | notes |
 |---|---|---|
-| `command` | `run` | top-level subcommand name only, never arguments |
+| `command` | `run` | the first non-flag token of the command line, skipping the value of `--store-dir`. See the caveat under [What is never sent](#what-is-never-sent) |
 | `outcome` | `ok` / `error` | |
 | `error_class` | `network` | coarse class on failure, one of `canceled`, `not-found`, `permission`, `network`, `other`; never the error message |
 
@@ -140,7 +154,7 @@ almost no CPU or memory of its own.
 
 | field | notes |
 |---|---|
-| `command` | top-level subcommand name only |
+| `command` | the first non-flag token, as above |
 | `backend` | if known at crash time |
 | `panic_type` | the Go type of the panic value (eg. `*errors.errorString`); never the panic message, which can embed paths |
 | `stack` | Go stack trace, file paths trimmed to module-relative form |
@@ -159,13 +173,25 @@ another `--store-dir` has its own consent state and its own install id.
 
 ## What is never sent
 
-- command arguments, flags values, environment variables
+- command arguments, flag values, environment variables
 - file paths, directory names, hostnames, usernames
-- image names, digests or registry references
+- image digests or registry references
 - error message text (only coarse error classes)
-- anything read from other processes or from macOS DiagnosticReports
+- anything from macOS DiagnosticReports
 - your IP address is not stored: it is stripped at ingestion and never
   written down
+
+Two entries on that list need a caveat, because taken flatly they are wrong:
+
+- **Process readings are sent.** A `metrics` event carries `rss_kb` and
+  `cpu_pct`, and both are sampled from the VMM process, which is another
+  process. The `metrics` section above says which process and when. What is
+  not read is macOS DiagnosticReports.
+- **A malformed invocation can send an image name.** The `command` field is
+  simply the first non-flag token, and it is not checked against the real
+  subcommand list. So `hull run ubuntu:latest` sends `run`, but
+  `hull ubuntu:latest`, with the subcommand left out, sends `ubuntu:latest`.
+  The same applies to a mistyped subcommand. If that matters to you, opt out.
 
 ## Where it goes and how long it stays
 
