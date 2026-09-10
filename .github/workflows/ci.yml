@@ -136,6 +136,19 @@ jobs:
           # unreviewed input to CI on a repository where CI is the gate.
           version: v2.12.2
 
+      # A release config that only runs on a tag is a config nobody has run.
+      # This validates the schema, so a tag is not the first time GoReleaser
+      # reads the file. It checks that the config is well-formed, not that it
+      # says everything it should -- a stanza left out is still valid YAML.
+      #
+      # No snapshot build here, unlike brig. The archive picks up build/hvi
+      # and build/vz-runner, which the build job produces on a Mac; there is
+      # nothing for GoReleaser to archive on this runner.
+      - uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
+        with:
+          version: "~> v2"
+          args: check
+
   build:
     name: build (go + swift, ad-hoc signed)
     # Fork pull requests run on a GitHub-hosted macOS runner; pushes and
