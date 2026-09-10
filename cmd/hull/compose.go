@@ -916,6 +916,33 @@ func selfExec(cmd *cli.Command, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
+// teardownProject unwinds everything composeUp created: recorded instances,
+// the possibly half-created instance of a failing service, the gateway, and
+// the project state. run is the command runner (selfExec, in production), warn
+// receives any diagnostics. failingInstance is the not-yet-recorded instance of
+// the service whose start failed, or "" when the unwind is not tied to one.
+//
+// proj.Name equals composeUp's local project variable (projectName(cmd)): proj
+// is built with Name: project at compose.go and neither is reassigned, so
+// projectStatePath(s, proj.Name) names the same state file the closure removed.
+func teardownProject(s *store.Store, proj *composeProject, run func(args ...string) (string, error), warn io.Writer, failingInstance string) {
+	// Supervision goes first, on disk: a service that is about to be
+	// stopped must not be restarted underneath this unwind.
+	pauseSupervision(s, proj, warn)
+	for _, started := range proj.Order {
+		if inst, ok := proj.Services[started]; ok {
+			_, _ = run("stop", inst)
+			_, _ = run("rm", inst)
+		}
+	}
+	if failingInstance != "" {
+		_, _ = run("stop", failingInstance)
+		_, _ = run("rm", failingInstance)
+	}
+	stopGatewayDaemon(proj)
+	_ = os.Remove(projectStatePath(s, proj.Name))
+}
+
 func composeUp(ctx context.Context, cmd *cli.Command) error {
 	file, err := findComposeFile(cmd)
 	if err != nil {
@@ -1043,24 +1070,10 @@ func composeUp(ctx context.Context, cmd *cli.Command) error {
 
 	// teardown unwinds everything up created: recorded instances, the
 	// possibly half-created instance of a failing service, the gateway,
-	// and the project state.
-	teardown := func(failingInstance string) {
-		// Supervision goes first, on disk: a service that is about to be
-		// stopped must not be restarted underneath this unwind.
-		pauseSupervision(s, proj, os.Stderr)
-		for _, started := range proj.Order {
-			if inst, ok := proj.Services[started]; ok {
-				_, _ = selfExec(cmd, "stop", inst)
-				_, _ = selfExec(cmd, "rm", inst)
-			}
-		}
-		if failingInstance != "" {
-			_, _ = selfExec(cmd, "stop", failingInstance)
-			_, _ = selfExec(cmd, "rm", failingInstance)
-		}
-		stopGatewayDaemon(proj)
-		_ = os.Remove(projectStatePath(s, project))
-	}
+	// and the project state. The body lives in teardownProject so a test can
+	// address it directly; composeUp cannot be driven far enough to reach it.
+	run := func(a ...string) (string, error) { return selfExec(cmd, a...) }
+	teardown := func(fi string) { teardownProject(s, proj, run, os.Stderr, fi) }
 
 	for _, svcName := range order {
 		svc := p.Services[svcName]
