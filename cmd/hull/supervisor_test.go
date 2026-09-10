@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -815,10 +816,23 @@ func TestStopMarksIntentBeforeSignalling(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The stand-in IGNORES SIGTERM, which is what makes this test a barrier
+	// rather than a race. stopInstanceIn writes the intent marker, confirms
+	// the pid is a VMM, sends SIGTERM, then polls waitForExit for the whole
+	// graceful budget before it escalates to SIGKILL and records "stopped".
+	// A stand-in that dies on SIGTERM closes that budget immediately and
+	// leaves only the width of the `ps` call inside processIsAVMM to observe,
+	// which is a few tens of milliseconds decided by process scheduling. One
+	// that ignores it holds the window open for the full budget below, so the
+	// watcher cannot miss the intermediate state.
+	//
 	// See TestStopInstanceMarksIntentOnTheSignalPath: a shell script's argv[0]
-	// base name is "sh" on this platform's ps output, not the script's name,
-	// so processIsAVMM never matched it and this test never ran.
-	pid, _ := startProcessAs(t, "qemu-system-fake", "/bin/sleep", "60")
+	// base name is "sh" in ps output, not the script's name, so processIsAVMM
+	// never matched it and this test never ran. startProcessAs sets argv[0]
+	// directly, and the trailing `exit 0` keeps the shell from exec-replacing
+	// itself with sleep, which would drop the trap.
+	pid, _ := startProcessAs(t, "qemu-system-fake",
+		"/bin/sh", "-c", `trap "" TERM; sleep 5; exit 0`)
 	if !vmmProcessMatches(pid) {
 		t.Fatal("staged process is not recognized as a VMM; the guard this test exists to run never executed")
 	}
@@ -832,13 +846,26 @@ func TestStopMarksIntentBeforeSignalling(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Watch the record while the stop runs: the marker must appear while the
-	// instance still reads "running", i.e. before death is confirmed.
+	// Watch the record while the stop runs. The marker must be on disk while
+	// the VMM is STILL ALIVE, which is what "before the first signal" means
+	// in observable terms: stopInstanceIn writes the intent, then signals,
+	// then waits, and only reaps and records "stopped" afterwards.
+	//
+	// Checking liveness, not just Status, is what makes this an ordering
+	// assertion. Status alone is too weak: markIntent leaves Status
+	// "running", so a markIntent moved to just before the terminal
+	// markStopped still produces a StoppedByUser+running record, and a test
+	// watching only those two fields passes either way. Measured: under that
+	// relocation this test passed 5 runs out of 5 before liveness was added,
+	// and fails every run after.
+	const budget = 2
 	seenEarly := make(chan bool, 1)
 	go func() {
 		deadline := time.Now().Add(10 * time.Second)
 		for time.Now().Before(deadline) {
-			if st, err := s.GetInstance(instance); err == nil && st.StoppedByUser && st.Status == "running" {
+			st, err := s.GetInstance(instance)
+			alive := syscall.Kill(pid, 0) == nil
+			if err == nil && st.StoppedByUser && st.Status == "running" && alive {
 				seenEarly <- true
 				return
 			}
@@ -846,11 +873,22 @@ func TestStopMarksIntentBeforeSignalling(t *testing.T) {
 		}
 		seenEarly <- false
 	}()
-	if err := stopInstanceIn(s, instance, 2); err != nil {
+	if err := stopInstanceIn(s, instance, budget); err != nil {
 		t.Fatalf("stopInstanceIn: %v", err)
 	}
 	if !<-seenEarly {
-		t.Error("the deliberate-stop marker must be recorded before the VM is confirmed dead")
+		t.Error("the deliberate-stop marker must be on disk before the VMM is signalled, while it is still alive")
+	}
+	// The escalation really happened: a stand-in that ignored SIGTERM can only
+	// have been reaped by the SIGKILL path, so the window above was the full
+	// graceful budget and not a scheduling accident.
+	st, err := s.GetInstance(instance)
+	if err != nil {
+		t.Fatalf("GetInstance after stop: %v", err)
+	}
+	if st.Status != "stopped" || st.PID != 0 || !st.StoppedByUser {
+		t.Errorf("after stop: Status=%q PID=%d StoppedByUser=%v; want stopped/0/true",
+			st.Status, st.PID, st.StoppedByUser)
 	}
 }
 

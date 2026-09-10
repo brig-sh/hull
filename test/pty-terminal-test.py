@@ -121,7 +121,13 @@ print("leftover VMMs for this instance:", len(orphans))
 if orphans:
     failures.append("VMM process left behind")
 
-st = subprocess.run([BIN] + GLOBAL_ARGS + ["ps"], capture_output=True, text=True).stdout
+ps = subprocess.run([BIN] + GLOBAL_ARGS + ["ps"], capture_output=True, text=True)
+# Read the exit code, not just stdout. This check fails closed, so a broken
+# `hull ps` already produced a failure -- but it reported "instance state is
+# not stopped", which sends the reader after the guest instead of the CLI.
+if ps.returncode != 0:
+    failures.append(f"hull ps exited {ps.returncode}, so the instance state was never read")
+st = ps.stdout
 state_ok = False
 for line in st.splitlines():
     if name in line:

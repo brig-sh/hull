@@ -137,9 +137,12 @@ scan:
 // FuzzParseComposeExecArgs pins the whole parse of `compose exec` argv --
 // every field, plus accept/reject -- against composeExecSpec above.
 //
-// The check this replaces only asked whether o.rest was *some* tail of argv,
-// which is vacuously satisfiable. Two mutations of exec_compose.go were
-// observed passing it before this change, and both fail now:
+// There was no check before this: the target's whole body was
+// `_, _ = parseComposeExecArgs(argv)`, so it only asserted the parser did not
+// panic. A tail-only invariant was tried first and dropped, because "o.rest is
+// some tail of argv" is vacuously satisfiable -- the empty tail is a tail. Two
+// mutations of exec_compose.go were observed passing that draft, and both fail
+// against the spec comparison below:
 //   - `o.rest = argv[i:]` replaced by `o.rest = nil`: the empty tail is a
 //     tail, so the old check was green while the parser returned nothing;
 //   - an off-by-one that slices one element late and silently drops the
@@ -209,23 +212,30 @@ func FuzzParseComposeExecArgs(f *testing.F) {
 				got.noTTY, got.user, got.workdir, got.env, got.rest,
 				want.noTTY, want.user, want.workdir, want.env, want.rest)
 		}
-		if len(got.rest) > 0 && got.rest[0] != orig[stop] {
-			t.Fatalf("parseComposeExecArgs(%q): rest[0] = %q but the flag scan stopped on %q: the SERVICE name was not preserved",
-				orig, got.rest[0], orig[stop])
+		// The two checks below assert on WANT, not GOT. Against got they could
+		// not fail: the field comparison above already proves got.rest equals
+		// want.rest, so any property of one holds for the other. Pointed at
+		// want they test the oracle instead, which is the half a differential
+		// comparison cannot cover -- both implementations agreeing on a wrong
+		// answer. If composeExecSpec ever drifts from the documented shape,
+		// these fail even though parser and spec still agree.
+		if len(want.rest) > 0 && want.rest[0] != orig[stop] {
+			t.Fatalf("composeExecSpec(%q): rest[0] = %q but the flag scan stopped on %q: the spec does not preserve the SERVICE name",
+				orig, want.rest[0], orig[stop])
 		}
 		// Nothing may be dropped silently: argv has to come back out of the
-		// pieces the parse claims to have split it into.
+		// pieces the spec claims to have split it into.
 		recon := make([]string, 0, len(orig))
 		recon = append(recon, orig[:stop]...)
 		if stripped {
-			recon = append(recon, got.rest[0], "--")
-			recon = append(recon, got.rest[1:]...)
+			recon = append(recon, want.rest[0], "--")
+			recon = append(recon, want.rest[1:]...)
 		} else {
-			recon = append(recon, got.rest...)
+			recon = append(recon, want.rest...)
 		}
 		if !slices.Equal(recon, orig) {
-			t.Fatalf("parseComposeExecArgs(%q): flag prefix %q + rest %q (separator stripped=%v) rebuilds to %q, not the input",
-				orig, orig[:stop], got.rest, stripped, recon)
+			t.Fatalf("composeExecSpec(%q): flag prefix %q + rest %q (separator stripped=%v) rebuilds to %q, not the input",
+				orig, orig[:stop], want.rest, stripped, recon)
 		}
 		// The in-place strip must not reach back over the flags or the
 		// SERVICE name. See the blast-radius note on this function.
