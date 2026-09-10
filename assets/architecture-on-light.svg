@@ -1,0 +1,127 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 560" width="940" height="560"
+     role="img" aria-labelledby="arch-title arch-desc" font-family="ui-sans-serif, -apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <!-- Light-theme variant. Dark counterpart: architecture-on-dark.svg.
+       Both are hand-edited; keep the geometry in step. -->
+  <title id="arch-title">hull architecture</title>
+  <desc id="arch-desc">The hull command line tool pulls an OCI image, prepares a rootfs in its
+  store, and builds a kernel command line. It then starts one of three runner processes:
+  vz-runner, written in Swift, which calls Apple's Virtualization.framework; hvi, written in
+  Rust, which calls Apple's Hypervisor.framework directly; or qemu-system-aarch64, which uses
+  Hypervisor.framework through its HVF accelerator. Each runner boots the same arm64 Linux
+  kernel and an init wrapper that hands off to the workload. Network egress is separate: the
+  optional user-mode gateway process serves all three runners over a Unix socket.</desc>
+
+  <style>
+    :root { color-scheme: light dark; }
+    .bg      { fill: none; }
+    .card    { fill: #FFFFFF; stroke: #0E2233; stroke-width: 1.5; }
+    .card-mut{ fill: #F7F5EF; stroke: #9AA7B1; stroke-width: 1.25; }
+    .card-acc{ fill: #FDF4E4; stroke: #B9761C; stroke-width: 1.5; }
+    .band    { fill: #F2EFE6; stroke: #C9C2B2; stroke-width: 1; }
+    .t       { fill: #0E2233; }
+    .t-mut   { fill: #4B5A66; }
+    .t-acc   { fill: #8A560F; }
+    .ln      { stroke: #0E2233; stroke-width: 1.5; fill: none; }
+    .ln-acc  { stroke: #B9761C; stroke-width: 1.5; fill: none; stroke-dasharray: 5 4; }
+    .arrow   { fill: #0E2233; }
+    .arrow-a { fill: #B9761C; }
+    .h       { font-size: 15px; font-weight: 600; }
+    .s       { font-size: 12.5px; }
+    .xs      { font-size: 11px; }
+    .lbl     { font-size: 10.5px; font-weight: 600; letter-spacing: .06em; }
+
+  </style>
+
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" class="arrow"/>
+    </marker>
+    <marker id="aa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" class="arrow-a"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="940" height="560"/>
+
+  <!-- registry -->
+  <rect class="card-mut" x="24" y="20" width="150" height="52" rx="8"/>
+  <text class="t s" x="99" y="42" text-anchor="middle">OCI registry</text>
+  <text class="t-mut xs" x="99" y="59" text-anchor="middle">image + boot assets</text>
+
+  <!-- hull CLI -->
+  <rect class="card" x="238" y="14" width="420" height="64" rx="8"/>
+  <text class="t h" x="448" y="38" text-anchor="middle">hull CLI (Go)</text>
+  <text class="t-mut s" x="448" y="60" text-anchor="middle">pull image, prepare rootfs, build kernel cmdline</text>
+
+  <!-- store -->
+  <rect class="card-mut" x="722" y="14" width="194" height="64" rx="8"/>
+  <text class="t s" x="819" y="34" text-anchor="middle">store (case-sensitive APFS)</text>
+  <text class="t-mut xs" x="819" y="51" text-anchor="middle">image cache · boot assets</text>
+  <text class="t-mut xs" x="819" y="66" text-anchor="middle">instance rootfs · checkpoints</text>
+
+  <path class="ln" d="M174 46 L232 46" marker-end="url(#a)"/>
+  <path class="ln" d="M658 46 L716 46" marker-end="url(#a)"/>
+
+  <!-- runner fan-out: a bus, so no arrow crosses the label -->
+  <text class="t-mut lbl" x="24" y="102">ONE PER INSTANCE</text>
+
+  <!-- vz-runner -->
+  <rect class="card" x="24" y="124" width="272" height="72" rx="8"/>
+  <text class="t h" x="160" y="150" text-anchor="middle">vz-runner (Swift)</text>
+  <text class="t-mut s" x="160" y="172" text-anchor="middle">virtiofs · ext4 block · GUI</text>
+  <text class="t-mut xs" x="160" y="188" text-anchor="middle">exec · checkpoint/restore · Rosetta</text>
+
+  <!-- hvi -->
+  <rect class="card" x="334" y="124" width="272" height="72" rx="8"/>
+  <text class="t h" x="470" y="150" text-anchor="middle">hvi (Rust)</text>
+  <text class="t-mut s" x="470" y="172" text-anchor="middle">virtiofs on APFS clone · ext4 block</text>
+  <text class="t-mut xs" x="470" y="188" text-anchor="middle">own virtio device model</text>
+
+  <!-- qemu -->
+  <rect class="card" x="644" y="124" width="272" height="72" rx="8"/>
+  <text class="t h" x="780" y="150" text-anchor="middle">qemu-system-aarch64</text>
+  <text class="t-mut s" x="780" y="172" text-anchor="middle">9pfs · ext4 block</text>
+  <text class="t-mut xs" x="780" y="188" text-anchor="middle">installed separately</text>
+
+  <path class="ln" d="M448 78 L448 98"/>
+  <path class="ln" d="M160 98 L780 98"/>
+  <path class="ln" d="M160 98 L160 118" marker-end="url(#a)"/>
+  <path class="ln" d="M470 98 L470 118" marker-end="url(#a)"/>
+  <path class="ln" d="M780 98 L780 118" marker-end="url(#a)"/>
+
+  <!-- frameworks: deliberately NOT merged into one box -->
+  <rect class="card-mut" x="24" y="232" width="272" height="54" rx="8"/>
+  <text class="t s" x="160" y="254" text-anchor="middle">Virtualization.framework</text>
+  <text class="t-mut xs" x="160" y="271" text-anchor="middle">Apple's VM abstraction</text>
+
+  <rect class="card-mut" x="334" y="232" width="272" height="54" rx="8"/>
+  <text class="t s" x="470" y="254" text-anchor="middle">Hypervisor.framework</text>
+  <text class="t-mut xs" x="470" y="271" text-anchor="middle">called directly</text>
+
+  <rect class="card-mut" x="644" y="232" width="272" height="54" rx="8"/>
+  <text class="t s" x="780" y="254" text-anchor="middle">Hypervisor.framework</text>
+  <text class="t-mut xs" x="780" y="271" text-anchor="middle">via QEMU's HVF accelerator</text>
+
+  <path class="ln" d="M160 196 L160 226" marker-end="url(#a)"/>
+  <path class="ln" d="M470 196 L470 226" marker-end="url(#a)"/>
+  <path class="ln" d="M780 196 L780 226" marker-end="url(#a)"/>
+
+  <!-- guest band -->
+  <rect class="band" x="24" y="322" width="892" height="128" rx="10"/>
+  <text class="t-mut lbl" x="44" y="346">GUEST</text>
+  <text class="t h" x="44" y="372">arm64 Linux kernel</text>
+  <text class="t-mut s" x="44" y="394">from the image, or the generic boot-asset bundle when the image carries no kernel</text>
+  <text class="t s" x="44" y="420">init wrapper  →  urunit  →  your workload</text>
+  <text class="t-mut xs" x="44" y="438">the wrapper mounts the rootfs, restores the OCI argv and environment, then hands off</text>
+
+  <path class="ln" d="M160 286 L160 316" marker-end="url(#a)"/>
+  <path class="ln" d="M470 286 L470 316" marker-end="url(#a)"/>
+  <path class="ln" d="M780 286 L780 316" marker-end="url(#a)"/>
+
+  <!-- gateway -->
+  <rect class="card-acc" x="24" y="480" width="892" height="60" rx="10"/>
+  <text class="t-acc h" x="44" y="504">network gateway (optional, one per project)</text>
+  <text class="t-mut s" x="44" y="524">user-mode netstack, DHCP, DNS, host port forwards, egress policy. Reached over a Unix socket with --gateway-sock.</text>
+
+  <path class="ln-acc" d="M470 450 L470 474" marker-end="url(#aa)" marker-start="url(#aa)"/>
+</svg>
