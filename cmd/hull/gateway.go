@@ -92,9 +92,9 @@ and no egress rule applies to it.
 IPv6 is dropped outright. The netstack does not forward IPv6 yet, so no
 guest reaches the outside world over it, with or without a policy.`),
 		Flags: []cli.Flag{
-			&cli.StringFlag{Name: "socket", Required: true, Usage: "control socket path"},
+			&cli.StringFlag{Name: "socket", Required: true, Usage: "control socket path (required)"},
 			&cli.StringFlag{Name: "api", Usage: "HTTP API socket path (probe endpoint)"},
-			&cli.StringFlag{Name: "qemu-socket", Usage: "unix socket for QEMU stream netdev members"},
+			&cli.StringFlag{Name: "qemu-socket", Usage: "unix socket for the QEMU stream netdev, used by both the QEMU and HVI backends"},
 			&cli.StringFlag{Name: "subnet", Value: "10.87.0.0/24", Usage: "virtual subnet CIDR"},
 			&cli.StringFlag{Name: "gateway-ip", Value: "10.87.0.1", Usage: "gateway IP on the subnet"},
 			&cli.StringSliceFlag{Name: "forward", Usage: "host port forward, hostaddr:port=guestip:port (repeatable)"},
