@@ -91,6 +91,8 @@ These fail before anything starts, rather than being documented and ignored:
 - `--pull` with any value other than `missing`, `always` or `never`
 - `--gateway-sock` without `--gateway-cidr`, and the reverse
 - `--gateway-sock` together with `--net none`
+- `--net` other than `none` on the `hvi` backend without `--gateway-sock`,
+  because hvi's built-in stack forwards no traffic. The error names the gateway
 - `--gui` or `--rosetta` on any backend but `vz`
 - `--gui-title` without `--gui`
 - `--rosetta` without the virtiofs rootfs mode, a `urunit` init, and a static

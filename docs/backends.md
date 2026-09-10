@@ -47,7 +47,7 @@ Start with `vz`. Move to another backend only for a reason on this list.
 | Rootfs: block | ext4 image | ext4 image | ext4 image |
 | Boots a plain image carrying no kernel | yes | yes | **no** |
 | Read-only `--shared-dir` | yes | yes | **refused** |
-| `--net shared` | Apple NAT, no extra privilege | **no TCP egress**, see below | vmnet, needs root or a signed QEMU |
+| `--net shared` | Apple NAT, no extra privilege | **refused**, see below | vmnet, needs root or a signed QEMU |
 | `--gateway-sock` | yes | yes | yes |
 | `exec` | yes | yes | yes |
 | Checkpoint and restore | yes, with a block rootfs | **no** | **no** |
@@ -165,23 +165,25 @@ host xattr under `com.nofire.hvi.` rather than from the host inode. That is why
 `hvi` preserves file modes a plain macOS share cannot express. See
 [storage.md](storage.md).
 
-**Networking. Read this before you run a server on `hvi`.**
+**Networking. `--net shared` alone is refused here.**
 
-`--net shared` on `hvi` does not give the guest egress. `hvi`'s built-in stack
-is a user-space responder inside the VMM. It answers ARP, ICMP echo, DHCP and
-DNS for a fixed address set, guest `10.0.2.15`, gateway `10.0.2.2`, resolver
-`10.0.2.3`, and it **drops guest TCP after logging it**. `hvi`'s own
-documentation lists "no egress from the built-in network stack" among its known
-limits.
+`hull run --hypervisor hvi --net shared IMAGE` with no `--gateway-sock` fails
+with an error naming the gateway, because there is no configuration in which it
+would work:
 
-There is a second problem with that built-in stack. Its DNS handler resolves
-names by calling the host's `getaddrinfo`, and it runs after `hvi` installs its
-Seatbelt sandbox. That profile is deny-by-default with no network grant, and
-`hvi`'s own selftest asserts that opening an outbound socket fails after the
-sandbox is entered. So built-in DNS is expected to return an empty answer
-unless the sandbox is off, which hull never turns off.
+- The built-in stack is a user-space responder inside the VMM. It answers ARP,
+  ICMP echo, DHCP and DNS for a fixed address set, guest `10.0.2.15`, gateway
+  `10.0.2.2`, resolver `10.0.2.3`, and its TCP path ends at the source line
+  `None // no egress yet`. `hvi`'s own documentation lists "no egress from the
+  built-in network stack" among its known limits.
+- `hvi` installs a `(deny default)` Seatbelt profile as the last thing before
+  the guest runs. Under it `connect(2)` and `sendto(2)` both return `EPERM`, so
+  the confined VMM cannot originate traffic even if the forwarding code
+  existed. Its own resolver fails for the same reason.
 
-For real egress on `hvi`, use the gateway:
+The gateway works because its socket is connected **before** confinement, which
+the sandbox comment names explicitly. On `hvi` the gateway is the design, not a
+workaround:
 
 ```bash
 hull run --hypervisor hvi --net shared \
