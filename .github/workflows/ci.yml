@@ -337,6 +337,13 @@ jobs:
       # no artifact behind at all. `set -o pipefail` is load-bearing here:
       # without it the step's exit status is tee's, not go test's, and a
       # failing suite would tee its own failure straight into a green step.
+      # Proves the VM-boot harnesses can still fail, using fake `hull`
+      # binaries. It needs no VM and takes seconds. It ran nowhere before, so
+      # a harness that stopped being able to fail would not have been noticed
+      # by any gate -- the same non-evidence this suite exists to remove.
+      - name: Harness self-test
+        run: bash test/harness-selftest.sh
+
       - name: Unit tests
         shell: bash
         run: |

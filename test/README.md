@@ -91,6 +91,10 @@ Self-test for the harnesses themselves:
   `hvi-boot-test.py` skips on any other host and the cases that expect a
   failure would then be asserting against that skip. Run it after changing
   either harness:
+  `make test` runs it, and so does the `unit tests (fast lane)` CI job. On a
+  host that is not Darwin/arm64 its five `hvi-boot-test.py` cases report as
+  skipped, with the reason named, rather than asserting against that
+  harness's own platform skip.
 
   ```bash
   bash test/harness-selftest.sh
