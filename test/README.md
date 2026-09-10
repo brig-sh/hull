@@ -82,19 +82,19 @@ Self-test for the harnesses themselves:
   not clean, then that each still passes on a genuine success, so a harness
   rewritten to fail on everything cannot satisfy it either. Three of its
   cases pin regressions: `hvi-boot-test.py` once reported PASS both for a
-  guest that printed its token and then died and for a `hull ps -a` that
-  exited nonzero, and `pty-jobcontrol-test.py` once reported CLEAN for a
-  `hull` binary that did not exist. Two more cover checks that already
-  worked and had no coverage: a `hull ps -a` that still lists the instance
-  as running, and a job suspended by SIGTTOU. No VM, no hypervisor, no boot
-  assets and no built `hull`; it does need Apple Silicon, because
-  `hvi-boot-test.py` skips on any other host and the cases that expect a
-  failure would then be asserting against that skip. Run it after changing
-  either harness:
-  `make test` runs it, and so does the `unit tests (fast lane)` CI job. On a
-  host that is not Darwin/arm64 its five `hvi-boot-test.py` cases report as
-  skipped, with the reason named, rather than asserting against that
-  harness's own platform skip.
+  guest that printed its token and then died and for a `hull ps` that exited
+  nonzero, and `pty-jobcontrol-test.py` once reported CLEAN for a `hull`
+  binary that did not exist. Two more cover checks that already worked and
+  had no coverage: a `hull ps` that still lists the instance as running, and
+  a job suspended by SIGTTOU. No VM, no hypervisor, no boot assets and no
+  built `hull`.
+
+  It does need a Darwin/arm64 host for its five `hvi-boot-test.py` cases,
+  because that harness skips on any other host and cases expecting a failure
+  would otherwise assert against the skip. On another host those five report
+  as counted skips with the reason named, and the three
+  `pty-jobcontrol-test.py` cases still run. `make test` runs it, and so does
+  the `unit tests (fast lane)` CI job. Run it after changing either harness:
 
   ```bash
   bash test/harness-selftest.sh
