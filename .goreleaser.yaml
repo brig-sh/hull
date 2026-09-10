@@ -109,6 +109,16 @@ homebrew_casks:
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     homepage: https://github.com/brig-sh/hull
     description: Run unikernels and sandboxed Linux containers as microVMs on Apple Silicon
+    dependencies:
+      # cosign is what checks the signature on the boot bundle: the kernel,
+      # initrd and guest agent every sandbox boots. Without it on PATH hull's
+      # check returns "no tooling", and under the default mode that is not a
+      # refusal -- the bundle is fetched, written and booted with a printed
+      # warning. So without this line the one control over the boot chain is
+      # off by default on the shipped install path, purely because nothing
+      # pulls the binary in. brig's cask has always depended on it; hull, the
+      # thing doing the verifying, did not.
+      - formula: cosign
     skip_upload: auto
     caveats: |
       hull boots VMs through Virtualization.framework. Block-rootfs mode wants
