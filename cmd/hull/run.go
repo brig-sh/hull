@@ -211,6 +211,17 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	if !validPullPolicy(pullPolicy) {
 		return fmt.Errorf("invalid --pull %q, expected missing, always or never", pullPolicy)
 	}
+	// Fail before the pull when the flag already names the backend. The same
+	// check runs again once the image is resolved, because the backend can
+	// come from an annotation instead, and only then is it known -- but making
+	// the caller wait for a download to be told the flags contradict each
+	// other is a poor trade when the answer is already in hand.
+	if hypervisorOverride != "" {
+		named := hypervisors.VmmType(normalizeVmmName(hypervisorOverride))
+		if err := checkHviNetworking(named, netMode, gatewaySock); err != nil {
+			return err
+		}
+	}
 	gui := cmd.Bool("gui")
 	guiTitle := cmd.String("gui-title")
 	platform := cmd.String("platform")
@@ -455,14 +466,7 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 		log.Debugf("No hypervisor override or annotation, using default: qemu")
 	}
 
-	// Normalize hypervisor names
-	switch vmmName {
-	case "qemu-hvf":
-		vmmName = "qemu"
-	case "virtualization", "apple":
-		vmmName = "vz"
-	}
-
+	vmmName = normalizeVmmName(vmmName)
 	vmmType = hypervisors.VmmType(vmmName)
 	telemetryBackendSource = vmmSource
 	telemetryBackend = vmmName
@@ -478,6 +482,10 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	rosetta := cmd.Bool("rosetta") || ociSpec.Annotations["com.urunc.darwin.rosetta"] == "true"
 	if rosetta && vmmType != hypervisors.VzVmm {
 		return fmt.Errorf("--rosetta is only supported with the Vz hypervisor (got %q)", vmmName)
+	}
+
+	if err := checkHviNetworking(vmmType, netMode, gatewaySock); err != nil {
+		return err
 	}
 
 	// An image that carries no kernel of its own can still boot, on a backend
@@ -1742,6 +1750,55 @@ func vzNetArgs(netMode string) []string {
 		return []string{"--no-net"}
 	}
 	return nil
+}
+
+// normalizeVmmName folds the accepted spellings of a backend onto its
+// canonical name. Extracted so the pre-pull check and the post-resolve one
+// agree about what "qemu-hvf" means; two copies of this list would be one
+// copy too many.
+func normalizeVmmName(name string) string {
+	switch name {
+	case "qemu-hvf":
+		return "qemu"
+	case "virtualization", "apple":
+		return "vz"
+	}
+	return name
+}
+
+// checkHviNetworking refuses a net mode the hvi backend cannot honor.
+//
+// `--net shared` promises egress, and on hvi there is none to give without the
+// gateway. hvi's built-in stack answers ARP, ICMP, DHCP and DNS from inside
+// the VMM and forwards nothing: its TCP path ends at `None // no egress yet`,
+// and any other UDP is dropped the same way.
+//
+// That is not an unfinished feature waiting on forwarding code. hvi installs a
+// `(deny default)` Seatbelt profile as the last thing before the guest runs,
+// and under it connect(2) and sendto(2) both return EPERM, so the confined VMM
+// cannot originate traffic at all. Its own resolver is caught by the same
+// rule: getaddrinfo needs mDNSResponder, nothing in the boot warms that
+// connection first, and the query fails. The gateway path works precisely
+// because its socket is connected before confinement.
+//
+// So refuse, rather than boot a guest that takes an address and reaches
+// nothing. hvi itself takes the same line, refusing --net-tap on macOS and
+// naming --net-gateway in the error.
+//
+// This deliberately does not fire when a gateway socket is given: that is the
+// supported way to network an hvi guest, and `hull compose` uses it.
+func checkHviNetworking(vmm hypervisors.VmmType, netMode, gatewaySock string) error {
+	if vmm != hypervisors.HviVmm || netMode == "none" || gatewaySock != "" {
+		return nil
+	}
+	return fmt.Errorf("--net %s cannot work on the hvi hypervisor without the network gateway: "+
+		"hvi's built-in stack forwards no traffic, so the guest would take an address and "+
+		"reach nothing. Start a gateway and join it:\n"+
+		"    hull network-gateway --socket /tmp/gw.sock &\n"+
+		"    hull run --hypervisor hvi --net shared --gateway-sock /tmp/gw.sock "+
+		"--gateway-cidr 10.87.0.10/24 ...\n"+
+		"`hull compose` starts one per project. Use --net none for a guest that needs no network",
+		netMode)
 }
 
 // verifyContainerBootAssets checks the kernel and initrd this run is about to
