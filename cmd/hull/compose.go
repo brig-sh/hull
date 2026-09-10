@@ -1750,15 +1750,50 @@ func stopGatewayDaemon(proj *composeProject) {
 	}
 }
 
-// gatewayProcessMatches reports whether pid's argv looks like the gateway
-// that owns sockPath.
+// gatewayProcessMatches reports whether pid is the network-gateway daemon that
+// owns sockPath.
+//
+// Identity comes from argv tokens, never from a substring of the whole command
+// line: the base name of argv[0] must be this binary (startGatewayDaemon spawns
+// the daemon as a re-exec of os.Executable), "network-gateway" must appear as
+// its own subcommand token, and sockPath must be the exact value of the
+// --socket flag.
+//
+// Substring matching is the shape this replaced, and it is the same mistake the
+// vmmExecutables comment in stop.go records. It let any process whose command
+// line merely mentioned the two strings pass, and it confused nested socket
+// paths: "/tmp/p/gw.sock" is a substring of "/tmp/p/gw.sock.bak", so one
+// project's gateway matched another's path -- and project names, which the path
+// is built from, are user-supplied.
 func gatewayProcessMatches(pid int, sockPath string) bool {
+	if pid <= 0 {
+		return false
+	}
 	out, err := exec.Command("/bin/ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
 	if err != nil {
 		return false
 	}
-	argv := string(out)
-	return strings.Contains(argv, "network-gateway") && strings.Contains(argv, sockPath)
+	fields := strings.Fields(string(out))
+	if len(fields) == 0 {
+		return false
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	if filepath.Base(fields[0]) != filepath.Base(exe) {
+		return false
+	}
+	subcommand, socket := false, false
+	for i, f := range fields {
+		switch {
+		case f == "network-gateway":
+			subcommand = true
+		case f == "--socket" && i+1 < len(fields) && fields[i+1] == sockPath:
+			socket = true
+		}
+	}
+	return subcommand && socket
 }
 
 // waitHealthy polls the gateway probe API until the TCP address answers.
