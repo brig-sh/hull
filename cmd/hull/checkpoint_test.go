@@ -69,7 +69,7 @@ func write(t *testing.T, dir, reason string) {
 }
 
 // The checkpoint directory as vz-runner leaves it, per
-// docs/checkpoint-restore.md:36-43 and vz-runner/Sources/main.swift:1059-1067.
+// docs/checkpoint-restore.md:42-49 and vz-runner/Sources/main.swift:1059-1067.
 // stateFile/diskImage carry the artifact names; savedAt and durationMs are
 // there because the runner writes them and the CLI has to tolerate them.
 func putCkptManifest(t *testing.T, dir, stateFile, diskImage string) {
@@ -110,7 +110,7 @@ func completeCheckpointDir(t *testing.T) string {
 	return dir
 }
 
-// docs/checkpoint-restore.md:43 -- "| `latest.json`| manifest, written last --
+// docs/checkpoint-restore.md:49 -- "| `latest.json`| manifest, written last;
 // its mtime marks checkpoint completion |". Written last is not the same as
 // written only when the checkpoint worked: vz-runner publishes the manifest
 // whenever the machine state saved (main.swift:1057 gates the write on
@@ -182,7 +182,7 @@ func TestCheckpointWithEveryNamedArtifactPresentSucceeds(t *testing.T) {
 // The checkpoint directory outlives a single attempt, so the manifest a
 // previous checkpoint left behind must not end this one -- it names artifacts
 // that are all present, which is exactly what makes it convincing. This is the
-// freshness half of docs/checkpoint-restore.md:43 ("its mtime marks checkpoint
+// freshness half of docs/checkpoint-restore.md:49 ("its mtime marks checkpoint
 // completion"). Catches a completeness check that forgets to also be a
 // freshness check.
 func TestStaleCheckpointManifestDoesNotEndThisAttempt(t *testing.T) {
@@ -263,7 +263,7 @@ func TestCheckpointArtifactOutsideTheCheckpointDirIsRejected(t *testing.T) {
 // it prints "no disk image in checkpoint, keeping current rootfs" and carries
 // on (main.swift:1091-1094). The guest wakes with memory from the checkpoint
 // moment against a disk that has moved on, which is the inconsistency the
-// block-rootfs requirement exists to prevent (docs/checkpoint-restore.md:45-47).
+// block-rootfs requirement exists to prevent (docs/checkpoint-restore.md:51-53).
 // Catches restore accepting a saved machine state whose rootfs.img is gone.
 func TestRestoreRefusesACheckpointWhoseDiskImageIsGone(t *testing.T) {
 	dir := t.TempDir()
@@ -294,7 +294,7 @@ func TestRestoreRefusesACheckpointThatRecordedNoDiskClone(t *testing.T) {
 }
 
 // A checkpoint with no manifest is one no runner ever finished: latest.json is
-// written last (docs/checkpoint-restore.md:43), so a directory holding
+// written last (docs/checkpoint-restore.md:49), so a directory holding
 // vm.vzstate alone is a save that never became a checkpoint.
 func TestRestoreRefusesACheckpointWithNoManifest(t *testing.T) {
 	dir := t.TempDir()
