@@ -108,7 +108,7 @@ func runCommand() *cli.Command {
 			&cli.StringFlag{
 				Name:  "rootfs-type",
 				Value: "",
-				Usage: "rootfs sharing mode: 'block' (ext4 disk image), 'virtiofs' (Vz default), '9pfs' (QEMU default)",
+				Usage: "rootfs sharing mode: 'block' (ext4 disk image), 'virtiofs' (Vz and HVI default), '9pfs' (QEMU default)",
 			},
 			&cli.StringSliceFlag{
 				Name:  "annotation",
