@@ -171,7 +171,7 @@ type checkpointManifest struct {
 // checkpointCompleted reports whether ckptDir holds a finished checkpoint from
 // the attempt that began at started.
 //
-// docs/checkpoint-restore.md:43 defines the marker: "latest.json | manifest,
+// docs/checkpoint-restore.md:49 defines the marker: "latest.json | manifest,
 // written last — its mtime marks checkpoint completion". A fresh manifest
 // therefore says the runner is done, but not that it succeeded: it publishes
 // one whenever the machine state was saved, whether or not the disk clone
@@ -225,7 +225,7 @@ func readCheckpointManifest(ckptDir string) (checkpointManifest, error) {
 // before it makes the new one (main.swift:1049), so this is not a checkpoint
 // that fell back on an older disk. It is a machine state with no rootfs to go
 // with it, and the pair has to rewind together for the guest to survive
-// (docs/checkpoint-restore.md:45-47).
+// (docs/checkpoint-restore.md:51-53).
 func verifyCheckpointArtifacts(ckptDir string, m checkpointManifest) error {
 	if err := checkpointArtifact(ckptDir, "machine state", m.StateFile); err != nil {
 		return err
