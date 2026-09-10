@@ -66,6 +66,34 @@ expect_exit() {
     fi
 }
 
+# with_deadline <seconds> <command...>
+#
+# `timeout` is GNU coreutils and is NOT on a stock macOS host, so calling it
+# here exited 127 on the CI runner while passing on a developer box with
+# Homebrew coreutils installed. Every case in this file asserts on an exit
+# code, and 127 is not one of them, so the whole pty section failed for a
+# reason that had nothing to do with the harnesses under test.
+#
+# The deadline matters and cannot just be dropped: pty-jobcontrol-test.py
+# blocks on os.waitpid with no timeout of its own, so a stand-in that ignores
+# the interrupt would hang this script instead of failing it. Poll instead,
+# with only builtins and kill.
+with_deadline() {
+    local secs=$1; shift
+    "$@" &
+    local p=$! n=0
+    while kill -0 "$p" 2>/dev/null; do
+        if [ "$n" -ge "$((secs * 10))" ]; then
+            kill -9 "$p" 2>/dev/null
+            wait "$p" 2>/dev/null
+            return 124
+        fi
+        sleep 0.1
+        n=$((n + 1))
+    done
+    wait "$p"
+}
+
 # skip_case <label> <reason>
 #
 # A skipped case is reported and counted, never silently passed. The hvi
@@ -223,7 +251,7 @@ echo "== pty-jobcontrol-test.py =="
 # NO-BOOT-EVIDENCE without it. The same command against today's harness
 # prints a tail holding the FileNotFoundError line and "FAKESHELL: job ended
 # cleanly", then "verdict: NO-BOOT-EVIDENCE", and exits 1.
-out=$(timeout 60 python3 "$HERE/pty-jobcontrol-test.py" "$WORK/does-not-exist-hull" vz selftest-noboot 2>&1); rc=$?
+out=$(with_deadline 60 python3 "$HERE/pty-jobcontrol-test.py" "$WORK/does-not-exist-hull" vz selftest-noboot 2>&1); rc=$?
 expect_exit "case 6: nonexistent hull binary must not pass" 1 "$rc"
 # Assert the verdict positively. "not CLEAN" would also be satisfied by a
 # harness that hung until `timeout` killed it (exit 124, no output at all),
@@ -246,7 +274,7 @@ except KeyboardInterrupt:
     sys.exit(0)
 PYEOF
 chmod +x "$WORK/fake-boot-hull"
-out=$(timeout 60 python3 "$HERE/pty-jobcontrol-test.py" "$WORK/fake-boot-hull" vz selftest-clean 2>&1); rc=$?
+out=$(with_deadline 60 python3 "$HERE/pty-jobcontrol-test.py" "$WORK/fake-boot-hull" vz selftest-clean 2>&1); rc=$?
 expect_exit "case 7: genuine boot still verdicts CLEAN" 0 "$rc"
 expect_contains "case 7: reports CLEAN" "$out" "verdict: CLEAN"
 
@@ -261,7 +289,7 @@ os.kill(os.getpid(), signal.SIGTTOU)
 time.sleep(30)
 PYEOF
 chmod +x "$WORK/fake-stop-hull"
-out=$(timeout 60 python3 "$HERE/pty-jobcontrol-test.py" "$WORK/fake-stop-hull" vz selftest-stop 2>&1); rc=$?
+out=$(with_deadline 60 python3 "$HERE/pty-jobcontrol-test.py" "$WORK/fake-stop-hull" vz selftest-stop 2>&1); rc=$?
 expect_exit "case 8: SIGTTOU before any boot marker" 1 "$rc"
 expect_contains "case 8: reports SUSPENDED-BUG" "$out" "verdict: SUSPENDED-BUG"
 
