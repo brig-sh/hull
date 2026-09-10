@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/hull-lockup-on-dark.svg">
-    <img alt="hull" src="assets/hull-lockup-on-light.svg" width="300">
+    <img alt="hull" src="assets/hull-lockup-on-light.svg" width="210">
   </picture>
 </p>
 
