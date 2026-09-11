@@ -7,6 +7,49 @@ release. History before v0.1.0-rc21 predates the import of this tree and
 is kept below as it was generated then; v0.1.0-rc19 and rc20 were re-cut
 imports of the same tree as rc21, and rc23 was a version bump only.
 
+## [0.1.0-rc28] - 2026-09-11
+
+### Bug Fixes
+
+- Depend on cosign from the generated cask
+- Accept a comma decimal separator from ps
+- Rearm the sampler after the interval settles, not before
+- Let the qemu script's CPU check actually run
+- Measure cpu_pct as a rate, not ps' %cpu column
+- Refuse to unlink a socket we cannot classify
+- Require a checkpoint's named artifacts to exist
+
+### Documentation
+
+- Stop cpu_pct's table row promising a 100 ceiling
+- Describe cpu_pct as a rate, and name the hvi backend
+- Refresh the brand marks to the pixel wordmark
+- Describe the self-test cases as they run now
+- Correct what the harnesses and CI actually do
+- Repoint the checkpoint citations at the rewritten page
+- Correct claims the reference pages made about the code
+- Replace the README with a task-oriented documentation set
+- Correct three flag help strings that had drifted
+
+### Features
+
+- Promote schema_version to an OTLP attribute
+
+### Tests
+
+- Cover the metrics sample and its failure modes
+- Pin the terminal filter policy across Go and Swift
+- Drop the timeout dependency from the harness self-test
+- Address review findings on the harness and guard tests
+- Call hull ps, not hull ps -a
+- Give the fuzz targets real invariants and seeds
+- Make the boot harnesses fail on real failures
+- Stop skipping the stop-intent guard tests
+
+### Miscellaneous
+
+- Validate the release config on every change, rather than first reading it on a tag
+
 ## [0.1.0-rc27] - 2026-09-08
 
 ### Build
