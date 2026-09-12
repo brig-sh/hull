@@ -27,7 +27,7 @@ the version through ldflags and has the flag.
 
 ## Commands
 
-There are sixteen top-level commands. `network-gateway` is the only hidden one:
+There are eighteen top-level commands. `network-gateway` is the only hidden one:
 it does not appear in `hull --help`, but it runs and prints its own help when
 named. No flag anywhere in the tree is hidden.
 
@@ -44,6 +44,8 @@ named. No flag anywhere in the tree is hidden.
 | `logs <id>` | show an instance's log |
 | `inspect <id>` | print instance details as JSON |
 | `images` | list pulled images |
+| `rmi <image>` | remove images from the store |
+| `prune` | remove images and pull leftovers nothing needs |
 | `assets` | manage the boot assets used for images that carry no kernel |
 | `store` | manage the volume the store lives on |
 | `compose` | run a multi-service compose file, one VM per service |
@@ -138,12 +140,15 @@ as a default that an explicit `--env TERM` beats.
 | `logs <id>` | `--follow`, `-f`; `--tail`, `-n <lines>` |
 | `inspect <id>` | none. Always prints JSON |
 | `images` | `--json` prints the store's records with full digests |
+| `rmi <image>...` | `--force`, `-f` remove one a stopped instance refers to; `--platform <p>` narrow to one platform |
+| `prune` | `--all` also remove every image no instance refers to; `--dry-run` print and remove nothing |
 | `checkpoint <id>` | `--timeout <secs>`, default 60 |
 | `restore <id>` | `--detach`, `-d`; `--stop-grace <secs>`, default 10; `--wait-ip`; `--gateway-sock <path>` |
 | `assets show` | none |
 | `assets dir` | none. Prints the directory and nothing else, for scripts |
 | `assets pull [REF]` | `--force` download even when the assets are present |
 | `store detach` | `--force` detach even with files still open |
+| `store compact` | `--force` detach even with files still open, before compacting |
 | `telemetry on\|off\|status` | none |
 
 `-t` means two different things: a pseudo-terminal on `exec`, and a force-kill
@@ -154,7 +159,13 @@ timeout in seconds on `stop`.
 not on a block rootfs.
 
 `hull images` prints `No images found` and `hull ps` prints
-`No instances found` on an empty store. Both exit 0.
+`No instances found` on an empty store. Both exit 0. `hull prune` prints
+`Nothing to prune` and exits 0 the same way.
+
+`hull rmi` and `hull prune` remove from the image cache; `hull rm` removes an
+instance and never touches the cache. Neither returns space to the host on its
+own -- the store's sparse image only shrinks under `hull store compact`. See
+[storage.md](storage.md#disk-space-and-how-to-get-it-back).
 
 ## `hull compose`
 

@@ -98,8 +98,10 @@ hull rm "$ID"
 ```
 
 `hull rm` deletes that instance's root filesystem. It leaves the image cache
-and the boot assets in the store, so the next run is fast. To reclaim the
-whole store, see [docs/storage.md](docs/storage.md).
+and the boot assets in the store, so the next run is fast. `hull rmi` and
+`hull prune` clear the cache, and `hull store compact` returns the freed space
+to the host -- the store is a sparse image that otherwise only grows. See
+[docs/storage.md](docs/storage.md).
 
 ## Backends
 

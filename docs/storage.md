@@ -83,7 +83,7 @@ first. Detaching a directory with no hull store mounted prints a message and
 succeeds, so an unconditional cleanup step cannot fail a build for having
 nothing to do. A directory that is not hull's own is left untouched.
 
-### Disk space, and two things that do not reclaim it
+### Disk space, and how to get it back
 
 hull mounts a store when it opens one and never unmounts it. A CI runner giving
 every job its own `--store-dir` accumulates one mounted sparse image per job,
@@ -91,16 +91,86 @@ and a script pointing hull at a temporary directory cannot delete that
 directory afterwards while the volume is still attached. Run
 `hull store detach` in your cleanup step.
 
-Two limits to plan around:
+Reclaiming space takes two steps, and the second is the one that is easy to
+forget:
 
-- **Nothing calls `hdiutil compact`.** Deleting data inside the volume does not
-  shrink the sparse image on the host. The image only grows.
-- **There is no `hull rmi` and no `hull prune`.** The image cache can only be
-  reclaimed by removing `<store>/images/<digest>` by hand, or by deleting the
-  whole store.
+```bash
+hull rmi ghcr.io/nofireai/urunc-ubuntu:aarch64   # or: hull prune [--all]
+hull store compact                               # give the space back to the host
+```
+
+**Deleting inside the volume frees nothing on the host by itself.** A sparse
+image only grows; `hdiutil compact` is what shrinks it, and that needs the
+volume unmounted. `hull store compact` does both: it refuses while an instance
+is running, detaches the volume, compacts the image, and leaves the store
+detached for the next command to mount again.
 
 The 200 GB size is a nominal capacity, not an allocation. A sparse image
 occupies what its contents occupy.
+
+#### `hull rmi`
+
+```bash
+hull rmi ubuntu:latest            # every stored digest that answers the tag
+hull rmi sha256:c408baae42f5     # by digest, or by the prefix `hull images` prints
+hull rmi --platform linux/amd64 ubuntu:latest
+hull rmi --force ubuntu:latest    # take it from a stopped instance
+```
+
+A tag can answer several stored images -- a republished tag, or two platforms
+of one tag -- and `rmi` removes all of them, because that set is what the tag
+means to the store. A digest **prefix** that matches more than one image is
+refused as ambiguous instead, and prints the digests to choose from.
+
+An image a **running** instance is booting is never removed, `--force` or not:
+on the `vz` generic path that VM is reading the image cache directly over
+virtiofs. An image a **stopped** instance refers to is removed only with
+`--force`. What that costs depends on the rootfs mode: a `vz` generic-container
+instance keeps a bare symlink into the cache and loses its root filesystem,
+while the 9pfs, virtiofs-copy, `hvi` clone and block modes hold their own copy
+and are unaffected. Restore reads the instance directory, not the cache.
+
+#### `hull prune`
+
+```bash
+hull prune             # what cannot be used
+hull prune --all       # everything no instance refers to
+hull prune --dry-run   # print it and remove nothing
+```
+
+Without `--all`, prune removes only what no run could ever choose:
+
+| Removed | Why it is dead |
+|---|---|
+| `<digest>.tmp-<pid>` | a half-unpacked image from an interrupted pull. Otherwise swept only at the start of the next pull |
+| `<digest>.old-<pid>` | the previous image, renamed aside by a pull that died before deleting it |
+| an image with no `rootfs/`, or one stamped with an older unpack schema | it satisfies no cache lookup; the next run re-pulls it |
+| an image directory whose `image.json` cannot be read | invisible to `hull images`, and to everything else |
+| a digest superseded by a later **complete** pull of the same reference and platform | `hull run` already resolves that group to the newest complete entry. A run that pins the older digest re-pulls it |
+
+With `--all` it also removes every image no instance refers to, which is the
+whole cache on a machine with nothing running. Nothing prune removes is
+unrecoverable: every image can be pulled again.
+
+An image any instance refers to is never pruned, running or stopped. Use
+`hull rmi --force` for that case. Prune does not touch instances, boot assets
+or named volumes.
+
+Only a complete image supersedes another. An incomplete newer entry is removed
+on its own account and never takes the last usable entry of a tag with it.
+
+A staging directory is left alone while it may still belong to a pull in
+flight: its pid names a live process **and** it is younger than an hour. The
+pid alone is not enough, because pid numbers are recycled and the entry would
+then be immortal.
+
+The two staging kinds are dated differently. A `.tmp-<pid>` is written into for
+as long as the pull runs, so its age is the newest mtime anywhere in the tree;
+the directory's own mtime moves about four times over a whole pull and would
+make a long one look abandoned. A `.old-<pid>` is never written into: it
+arrives by rename and carries the displaced image's mtimes, which say when that
+image was unpacked, so its age is the directory's own ctime, which the rename
+sets.
 
 ## Layout
 
@@ -240,11 +310,15 @@ Both 0600 modes depend on the store being mounted with `-owners on`. See above.
 | `hull ps` reconciles a dead record | **Nothing.** It rewrites the status to stopped |
 | `hull stop` | **Nothing.** It signals the VMM and rewrites `state.json` |
 | `hull rm <id>` | exactly `<store>/instances/<id>`, recursively: the record, the per-instance rootfs, the log, the sockets, the staged boot files and the checkpoint |
+| `hull rmi <image>` | exactly `<store>/images/<digest>` for every stored image the reference names. No instance directory is touched |
+| `hull prune` | image directories nothing can use, and pull staging leftovers. With `--all`, every image no instance refers to |
+| `hull store compact` | **nothing.** It unmounts the volume and shrinks its backing image around what is already there |
 | `hull compose down` | `stop` then `rm` for each service in reverse start order, plus the gateway daemon and the project state file. Named volumes stay |
 | `hull compose down --volumes` | the above, plus exactly `<store>/volumes/<project>_<name>` for each volume the compose file declares |
 
 `hull rm` never touches the image cache, the boot assets or named volumes, so
-the next run of the same image needs no re-pull. It is structurally incapable
+the next run of the same image needs no re-pull. `hull rmi` and `hull prune`
+are the commands for the cache. It is structurally incapable
 of touching anything else in the store: it removes one directory path.
 
 `hull rm` refuses a running instance without `--force`, and removes nothing on
@@ -367,8 +441,12 @@ version is 3; bumping it makes every older rootfs a miss that gets re-unpacked.
 A pull commits by directory rename, not by deleting in place. Layers unpack into
 `<digest>.tmp-<pid>`, any existing image is displaced to `<digest>.old-<pid>`,
 and the slow recursive delete happens only after the new image is published.
-Leftover staging directories are swept at the start of the next pull, never
-satisfy a cache lookup, and never appear in `hull images`.
+Leftover staging directories are swept at the start of the next pull and by
+`hull prune`, never satisfy a cache lookup, and never appear in `hull images`.
+
+`hull rmi` and `hull prune` remove an image the same way, renaming the
+directory aside before deleting it, so an interrupted removal leaves a staging
+name rather than an image with half a rootfs.
 
 Pulling a republished tag adds a new digest without retiring the old one, so
 several image directories can answer one tag. The most recently pulled complete
