@@ -15,6 +15,7 @@
 package store
 
 import (
+	"regexp"
 	"strings"
 
 	"github.com/google/go-containerregistry/pkg/name"
@@ -84,6 +85,32 @@ func SameRepository(a, b string) bool {
 	}
 	second, ok := canonicalRepository(b)
 	return ok && first == second
+}
+
+// digestPrefixPattern matches the leading part of a digest: an algorithm, a
+// colon, and at least six hex characters.
+//
+// Six is the shortest prefix worth accepting. It is not a claim about
+// collisions: the caller reports an ambiguous prefix as ambiguous.
+var digestPrefixPattern = regexp.MustCompile(`^[a-z0-9]+:[a-f0-9]{6,}$`)
+
+// IsDigestPrefix reports whether raw could name an image by the front of its
+// digest. A full digest matches this too; it is simply matched as a whole
+// before anything gets here.
+func IsDigestPrefix(raw string) bool {
+	return digestPrefixPattern.MatchString(raw)
+}
+
+// HasDigestPrefix reports whether either digest this record carries starts
+// with raw.
+//
+// The index digest is included because that is the digest a user pinning a
+// multi-arch image sees in a registry, and `hull images --json` prints it. It
+// keys nothing on disk, so a match there still resolves to this record's
+// manifest digest, which is the directory.
+func (m *ImageMetadata) HasDigestPrefix(raw string) bool {
+	return strings.HasPrefix(m.Digest, raw) ||
+		(m.IndexDigest != "" && strings.HasPrefix(m.IndexDigest, raw))
 }
 
 // Answers reports whether this image is what the reference asked for.
