@@ -588,6 +588,19 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 		netParams.UnixSocket = qsock
 		netParams.TapDev = ""
 	}
+	// The address the guest is told to take. Only the Linux path consumed
+	// this before, as an ip= kernel argument built below; a unikernel needs
+	// the same three values in its own family's spelling, which urunc renders
+	// from these fields.
+	if gatewayIP != "" {
+		addr, gw, mask, err := gatewayNetConfig(gatewayIP)
+		if err != nil {
+			return err
+		}
+		netParams.IP = addr
+		netParams.Gateway = gw
+		netParams.Mask = mask
+	}
 
 	// Extract kernel and rootfs paths from annotations (for Linux kernels on darwin).
 	// bootKernel is a host artifact; binary remains an image-relative path.
@@ -1237,6 +1250,23 @@ exec %s "$@"
 			kernelCmdline = cmdline
 		}
 	}
+	// A unikernel does not read a Linux command line; see
+	// unikernelCommandLine. Scoped to the non-Linux types on purpose: the
+	// Linux path above is what every container image takes, and it is
+	// untouched.
+	if unikernelType != "linux" {
+		rootfsType := ""
+		if initrdPath != "" {
+			rootfsType = "initrd"
+		}
+		line, err := unikernelCommandLine(unikernel, unikernelType, ociSpec.Annotations,
+			ociSpec.Process.Env, string(vmmType), initrdPath, rootfsType, netParams)
+		if err != nil {
+			return err
+		}
+		kernelCmdline = line
+	}
+
 	_ = mountRootfs
 
 	// Wire the parsed shares into the VMM arguments: each share is a tagged
@@ -2644,4 +2674,47 @@ func procConfig(uid, gid uint32, cwd string) types.ProcessConfig {
 		cwd = "/"
 	}
 	return types.ProcessConfig{UID: uid, GID: gid, WorkDir: cwd}
+}
+
+// unikernelCommandLine renders the guest command line for a unikernel, in the
+// spelling its family expects.
+//
+// hull builds a Linux command line everywhere else: rdinit=, console=, and an
+// ip= argument for the address. A unikernel reads none of that. urunc knows
+// each family's convention -- Unikraft takes netdev.* and vfs.* library
+// parameters ahead of a "--" separator -- and hull already depends on it for
+// the monitor arguments, so the line comes from there rather than from a
+// second implementation here.
+func unikernelCommandLine(unikernel types.Unikernel, unikernelType string,
+	annotations map[string]string, env []string, monitor, initrdPath,
+	rootfsType string, net types.NetDevParams) (string, error) {
+	var appArgs []string
+	if cmdline, ok := annotations["com.urunc.unikernel.cmdline"]; ok && cmdline != "" {
+		appArgs = strings.Fields(cmdline)
+	}
+	// A missing or unparsable version is not fatal: the builder falls back to
+	// the current argument spelling and says so, which beats refusing to boot
+	// a guest over the version string in its own annotation.
+	err := unikernel.Init(types.UnikernelParams{
+		CmdLine:    appArgs,
+		EnvVars:    env,
+		Monitor:    monitor,
+		Version:    annotations["com.urunc.unikernel.version"],
+		InitrdPath: initrdPath,
+		Net:        net,
+		Rootfs:     types.RootfsParams{Type: rootfsType},
+	})
+	switch {
+	case err == nil:
+	case errors.Is(err, unikernels.ErrUndefinedVersion),
+		errors.Is(err, unikernels.ErrVersionParsing):
+		log.Warnf("unikernel %s: %v", unikernelType, err)
+	default:
+		return "", fmt.Errorf("failed to configure the %s unikernel: %w", unikernelType, err)
+	}
+	line, err := unikernel.CommandString()
+	if err != nil {
+		return "", fmt.Errorf("failed to build the %s command line: %w", unikernelType, err)
+	}
+	return line, nil
 }

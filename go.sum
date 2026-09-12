@@ -213,8 +213,8 @@ github.com/u-root/uio v0.0.0-20240224005618-d2acac8f3701/go.mod h1:P3a5rG4X7tI17
 github.com/urfave/cli v1.22.12/go.mod h1:sSBEIC79qR6OvcmsD4U3KABeOTxDqQtdDnaFuUN30b8=
 github.com/urfave/cli/v3 v3.10.1 h1:7Kx9H50hrHbRbyxgO1KP6/BcbiGRz0uYh5YyQ30JEEY=
 github.com/urfave/cli/v3 v3.10.1/go.mod h1:ysVLtOEmg2tOy6PknnYVhDoouyC/6N42TMeoMzskhso=
-github.com/urunc-dev/urunc v0.8.1-0.20260907203506-f02da0c7e57a h1:/zuRfHbBCqTK/Gta2GRGWnSHE54ORo/+oyh7+8+6W44=
-github.com/urunc-dev/urunc v0.8.1-0.20260907203506-f02da0c7e57a/go.mod h1:CqCuV1DG/U4HDOg0TDUS1lENsT5xE1UbOuLUT8xnhp8=
+github.com/urunc-dev/urunc v0.8.1-0.20260912220515-ddc98b772f21 h1:dLRJko7Spajvc8f5xiXZ3wVK2/s7jy/LQn3L9Y9KqIw=
+github.com/urunc-dev/urunc v0.8.1-0.20260912220515-ddc98b772f21/go.mod h1:CqCuV1DG/U4HDOg0TDUS1lENsT5xE1UbOuLUT8xnhp8=
 github.com/vbatts/tar-split v0.11.3 h1:hLFqsOLQ1SsppQNTMpkpPXClLDfC2A3Zgy9OUU+RVck=
 github.com/vbatts/tar-split v0.11.3/go.mod h1:9QlHN18E+fEH7RdG+QAJJcuya3rqT7eXSTY7wGrAokY=
 github.com/vishvananda/netlink v1.3.1 h1:3AEMt62VKqz90r0tmNhog0r/PpWKmrEShJU0wJW6bV0=
