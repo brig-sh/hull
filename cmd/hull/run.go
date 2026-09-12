@@ -30,6 +30,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -2416,6 +2417,20 @@ func launchVMM(cmd *cli.Command, s *store.Store, state *store.InstanceState, cmd
 				}
 			}()
 		}
+	}
+
+	// Measure the boot: time from the spawn above to the guest agent's
+	// first answer, reported as the telemetry `ready` event. Foreground
+	// only, and concurrent with the console attach below, so the probe
+	// never delays the user; a detached run returns to its caller right
+	// here and has no process left to wait in. A restore is not a boot
+	// (the guest resumes with its memory), so it does not report one.
+	if !detach && !slices.Contains(cmdArgs, "--restore") {
+		go func(id, backend string, startTime time.Time) {
+			if probeGuestReady(s, id, readyProbeBudget) {
+				sendReadyEvent(backend, time.Since(startTime))
+			}
+		}(state.ID, string(vmmType), state.StartTime)
 	}
 
 	if detach {

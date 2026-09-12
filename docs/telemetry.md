@@ -92,7 +92,7 @@ All events share a common envelope:
 | field | example | notes |
 |---|---|---|
 | `schema_version` | `2` | bumped on any schema change, with this page updated |
-| `event` | `command` | one of `command`, `start`, `end`, `metrics`, `crash` |
+| `event` | `command` | one of `command`, `start`, `ready`, `end`, `metrics`, `crash` |
 | `product` | `brig` | set by the wrapper driving hull; defaults to `hull` |
 | `version` | `0.1.0-rc14` | tool version |
 | `os` | `26.0` | macOS major.minor only |
@@ -112,13 +112,38 @@ All events share a common envelope:
 
 ### `start` events
 
-Emitted when a VMM launch is attempted.
+Emitted when a VMM launch is attempted. This is about the host-side
+process only: `boot: ok` means the VMM process spawned, not that the
+guest came up. Whether and how fast the guest came up is the `ready`
+event below.
 
 | field | example | notes |
 |---|---|---|
 | `backend` | `qemu` / `vz` / `hvi` | the VMM backend used |
 | `backend_source` | `default` | `flag`, `annotation` or `default` |
-| `boot` | `ok` / `fail` | whether the VMM process started |
+| `boot` | `ok` / `fail` | whether the VMM process started (`fail`: the spawn itself failed) |
+
+### `ready` events
+
+Emitted once per foreground `run`, when the guest first answers. The two
+ends of the measurement are the VMM process spawn (the same instant the
+`start` event describes, recorded as the instance's start time) and the
+guest agent's first reply to a `/bin/true` probe, so the number covers
+firmware, kernel, init and the agent coming up, on every backend alike.
+An agent that replies with an error (a minimal image with no `/bin/true`)
+counts as up.
+
+The probe runs beside the console for up to two minutes. A guest that
+ships no agent, or one that exits before the agent answers, sends no
+`ready` event at all rather than a made-up number, so an absent `ready`
+after a `start` is itself the signal. Detached runs return before the
+guest is up and do not report one; a `restore` resumes a guest instead
+of booting it and does not either.
+
+| field | example | notes |
+|---|---|---|
+| `backend` | `vz` | |
+| `ready_ms` | `412` | milliseconds from VMM spawn to the guest agent's first answer; whole milliseconds, truncated |
 
 ### `end` events
 
