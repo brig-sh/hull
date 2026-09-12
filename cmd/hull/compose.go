@@ -916,6 +916,60 @@ func selfExec(cmd *cli.Command, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
+// teardownProject unwinds everything composeUp created: recorded instances,
+// the possibly half-created instance of a failing service, the gateway, and
+// the project state. run is the command runner (selfExec, in production), warn
+// receives any diagnostics. failingInstance is the not-yet-recorded instance of
+// the service whose start failed, or "" when the unwind is not tied to one.
+//
+// proj.Name equals composeUp's local project variable (projectName(cmd)): proj
+// is built with Name: project at compose.go and neither is reassigned, so
+// projectStatePath(s, proj.Name) names the same state file the closure removed.
+func teardownProject(s *store.Store, proj *composeProject, run func(args ...string) (string, error), warn io.Writer, failingInstance string) {
+	// Supervision goes first, on disk: a service that is about to be
+	// stopped must not be restarted underneath this unwind.
+	pauseSupervision(s, proj, warn)
+	stopRemove := func(inst string) {
+		if out, err := run("stop", inst); err != nil {
+			composeWarn(warn, "stop %s: %v: %s", inst, err, out)
+		}
+		// A failed stop leaves the instance running, so rm refuses it without
+		// --force and removes nothing (docs/storage.md:250-251: "hull rm
+		// refuses a running instance without --force, and removes nothing on
+		// refusal."). composeDown reports both at compose.go; this unwind used
+		// to swallow them, so a stuck instance vanished from the logs.
+		if out, err := run("rm", inst); err != nil {
+			composeWarn(warn, "rm %s: %v: %s", inst, err, out)
+		}
+	}
+	for _, inst := range teardownOrder(proj) {
+		stopRemove(inst)
+	}
+	if failingInstance != "" {
+		stopRemove(failingInstance)
+	}
+	stopGatewayDaemon(proj)
+	_ = os.Remove(projectStatePath(s, proj.Name))
+}
+
+// teardownOrder returns the recorded instances composeUp's failure unwind must
+// stop, in stop order: the reverse of proj.Order, restricted to service names
+// with a recorded instance in proj.Services. Reverse mirrors the only written
+// stop-order contract in this repository, docs/storage.md:243: "`hull compose
+// down` | `stop` then `rm` for each service in reverse start order [...]".
+// That line governs `down`; nothing documents the order for a failed `up`, so
+// this aligns the two teardown paths rather than following a rule written for
+// `up`.
+func teardownOrder(proj *composeProject) []string {
+	insts := make([]string, 0, len(proj.Order))
+	for i := len(proj.Order) - 1; i >= 0; i-- {
+		if inst, ok := proj.Services[proj.Order[i]]; ok {
+			insts = append(insts, inst)
+		}
+	}
+	return insts
+}
+
 func composeUp(ctx context.Context, cmd *cli.Command) error {
 	file, err := findComposeFile(cmd)
 	if err != nil {
@@ -1043,24 +1097,10 @@ func composeUp(ctx context.Context, cmd *cli.Command) error {
 
 	// teardown unwinds everything up created: recorded instances, the
 	// possibly half-created instance of a failing service, the gateway,
-	// and the project state.
-	teardown := func(failingInstance string) {
-		// Supervision goes first, on disk: a service that is about to be
-		// stopped must not be restarted underneath this unwind.
-		pauseSupervision(s, proj, os.Stderr)
-		for _, started := range proj.Order {
-			if inst, ok := proj.Services[started]; ok {
-				_, _ = selfExec(cmd, "stop", inst)
-				_, _ = selfExec(cmd, "rm", inst)
-			}
-		}
-		if failingInstance != "" {
-			_, _ = selfExec(cmd, "stop", failingInstance)
-			_, _ = selfExec(cmd, "rm", failingInstance)
-		}
-		stopGatewayDaemon(proj)
-		_ = os.Remove(projectStatePath(s, project))
-	}
+	// and the project state. The body lives in teardownProject so a test can
+	// address it directly; composeUp cannot be driven far enough to reach it.
+	run := func(a ...string) (string, error) { return selfExec(cmd, a...) }
+	teardown := func(fi string) { teardownProject(s, proj, run, os.Stderr, fi) }
 
 	for _, svcName := range order {
 		svc := p.Services[svcName]
@@ -1710,15 +1750,50 @@ func stopGatewayDaemon(proj *composeProject) {
 	}
 }
 
-// gatewayProcessMatches reports whether pid's argv looks like the gateway
-// that owns sockPath.
+// gatewayProcessMatches reports whether pid is the network-gateway daemon that
+// owns sockPath.
+//
+// Identity comes from argv tokens, never from a substring of the whole command
+// line: the base name of argv[0] must be this binary (startGatewayDaemon spawns
+// the daemon as a re-exec of os.Executable), "network-gateway" must appear as
+// its own subcommand token, and sockPath must be the exact value of the
+// --socket flag.
+//
+// Substring matching is the shape this replaced, and it is the same mistake the
+// vmmExecutables comment in stop.go records. It let any process whose command
+// line merely mentioned the two strings pass, and it confused nested socket
+// paths: "/tmp/p/gw.sock" is a substring of "/tmp/p/gw.sock.bak", so one
+// project's gateway matched another's path -- and project names, which the path
+// is built from, are user-supplied.
 func gatewayProcessMatches(pid int, sockPath string) bool {
+	if pid <= 0 {
+		return false
+	}
 	out, err := exec.Command("/bin/ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
 	if err != nil {
 		return false
 	}
-	argv := string(out)
-	return strings.Contains(argv, "network-gateway") && strings.Contains(argv, sockPath)
+	fields := strings.Fields(string(out))
+	if len(fields) == 0 {
+		return false
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	if filepath.Base(fields[0]) != filepath.Base(exe) {
+		return false
+	}
+	subcommand, socket := false, false
+	for i, f := range fields {
+		switch {
+		case f == "network-gateway":
+			subcommand = true
+		case f == "--socket" && i+1 < len(fields) && fields[i+1] == sockPath:
+			socket = true
+		}
+	}
+	return subcommand && socket
 }
 
 // waitHealthy polls the gateway probe API until the TCP address answers.
