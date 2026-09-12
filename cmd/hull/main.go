@@ -96,6 +96,7 @@ func main() {
 			logsCommand(),
 			inspectCommand(),
 			imagesCommand(),
+			rmiCommand(),
 			assetsCommand(),
 			storeCommand(),
 			composeCommand(),

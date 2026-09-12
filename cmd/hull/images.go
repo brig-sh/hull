@@ -109,21 +109,30 @@ func writeImageTable(out io.Writer, images []*store.ImageMetadata, now time.Time
 			tag = "latest"
 		}
 
-		digestStr := img.Digest
-		if len(digestStr) > 19 {
-			digestStr = digestStr[:19]
-		}
-
 		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
 			ref.Repository,
 			tag,
-			digestStr,
+			shortDigest(img.Digest),
 			formatSize(img.Size),
 			formatAge(now.Sub(img.PulledAt)),
 		)
 	}
 
 	return w.Flush()
+}
+
+// shortDigest is how a digest is named where the whole thing would be noise:
+// the algorithm and the first twelve hex characters.
+//
+// It is also what `hull rmi` accepts as a prefix, and that is not a
+// coincidence -- this listing is where a user gets the digest they then paste
+// into a command.
+func shortDigest(digest string) string {
+	const shortLen = len("sha256:") + 12
+	if len(digest) <= shortLen {
+		return digest
+	}
+	return digest[:shortLen]
 }
 
 func formatAge(age time.Duration) string {
