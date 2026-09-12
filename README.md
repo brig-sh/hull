@@ -116,17 +116,18 @@ Three backends exist. They are not equivalent, and the gaps are real:
 | Ships with hull | yes, as `vz-runner` | yes, as `hvi` | no, `brew install qemu` |
 | Rootfs modes | virtiofs, ext4 block | virtiofs on an APFS clone, ext4 block | 9pfs, ext4 block |
 | Boots a plain image with no kernel | yes | yes | **no** |
-| `--net shared` | NAT, works with no extra privilege | **no TCP egress**, see below | vmnet, needs root or a QEMU signed for `com.apple.vm.networking` |
+| `--net shared` | NAT, works with no extra privilege | **refused**, see below | vmnet, needs root or a QEMU signed for `com.apple.vm.networking` |
 | `--gateway-sock` | yes | yes | yes |
 | `exec` | yes | yes | yes |
 | Checkpoint and restore | yes, with a block rootfs | no | no |
 | GUI window, Rosetta | yes | no | no |
 
-**The `hvi` networking gap is the one to know.** With `--net shared`, hvi's
-built-in stack answers ARP, ICMP, DHCP and DNS, but it does not forward TCP.
-A guest gets an address and resolves names, and then cannot connect to
-anything. For real egress on hvi, use the network gateway. hvi's own
-documentation lists this under its known limits.
+**The `hvi` networking gap is the one to know.** hvi's built-in stack answers
+ARP, ICMP and DHCP from inside the VMM and forwards nothing, and its own
+deny-default sandbox denies the VMM outbound traffic anyway. So `--net shared`
+on `hvi` without `--gateway-sock` is **refused**, with an error naming the
+gateway, rather than booting a guest that takes an address and reaches nothing.
+For networking on `hvi`, use the gateway.
 
 `--gateway-sock` works on all three backends and needs no entitlement and no
 root. Compose starts a gateway for you, one per project. That makes the gateway
