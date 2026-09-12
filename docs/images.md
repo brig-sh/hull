@@ -32,6 +32,25 @@ Pulling a republished tag adds a new digest without retiring the old one, so
 several image directories can answer one tag. The most recently pulled complete
 entry wins, and an incomplete newer entry does not hide an older usable one.
 
+### Removing a pulled image
+
+```bash
+hull rmi ubuntu:latest         # every stored digest that answers the tag
+hull rmi sha256:c408baae42f5  # by digest, or by the prefix `hull images` prints
+hull prune                     # pull leftovers, unusable and superseded entries
+hull prune --all               # every image no instance refers to
+hull store compact             # return the freed space to the host
+```
+
+Because a tag can answer several stored images, `hull rmi <tag>` removes all of
+them; `--platform` narrows that to one platform's entries. A digest prefix that
+matches more than one image is refused as ambiguous.
+
+`hull store compact` is not optional bookkeeping. The store is a sparse image
+that only grows, so removing an image inside it frees space on the store volume
+and nothing on the host until the image is compacted. See
+[storage.md](storage.md#disk-space-and-how-to-get-it-back).
+
 ### Tags versus digests
 
 The image cache is keyed by manifest digest, at
