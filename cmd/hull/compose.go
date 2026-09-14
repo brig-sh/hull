@@ -1183,6 +1183,13 @@ func composeUp(ctx context.Context, cmd *cli.Command) error {
 		}
 		fmt.Printf("  %s is up at %s\n", svcName, proj.IPs[svcName])
 	}
+	// One lease read for the whole project. Each service was given a static
+	// address; a guest that ignored it and leased another one is running and
+	// healthy-looking at an address nothing else names, and `up` is the last
+	// point that can say so. Per-service waiting would cost the budget once
+	// per service on the good path, where no guest asks at all.
+	warnProjectLeaseMismatch(s, proj, gatewayAPI)
+
 	jobs := 0
 	for _, svcName := range order {
 		if isOneShot(p, svcName) {
@@ -1195,6 +1202,32 @@ func composeUp(ctx context.Context, cmd *cli.Command) error {
 		fmt.Printf("Project %s: %d service(s) running\n", project, len(order))
 	}
 	return nil
+}
+
+// warnProjectLeaseMismatch reports services whose guest took a different
+// address from the one the project assigned it.
+func warnProjectLeaseMismatch(s *store.Store, proj *composeProject, apiSock string) {
+	leases, err := gatewayLeases(apiSock)
+	if err != nil || len(leases) == 0 {
+		return
+	}
+	for _, svcName := range proj.Order {
+		instance, ok := proj.Services[svcName]
+		if !ok {
+			continue
+		}
+		st, err := s.GetInstance(instance)
+		if err != nil || st == nil || st.MAC == "" {
+			continue
+		}
+		configured := proj.IPs[svcName]
+		if configured == "" {
+			continue
+		}
+		if ip, ok := leaseFor(leases, st.MAC); ok && ip != configured {
+			composeWarn(os.Stderr, "service %q: %s", svcName, leaseMismatchMessage(st.MAC, ip, configured))
+		}
+	}
 }
 
 func composeDown(ctx context.Context, cmd *cli.Command) error {

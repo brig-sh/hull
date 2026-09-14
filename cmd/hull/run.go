@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	goversion "github.com/hashicorp/go-version"
 	"io"
 	"net"
 	"os"
@@ -134,7 +135,7 @@ func runCommand() *cli.Command {
 			},
 			&cli.BoolFlag{
 				Name:  "wait-ip",
-				Usage: "with --detach and NAT networking, wait for the DHCP lease and record the IP before returning",
+				Usage: "with --detach, wait before returning: on NAT networking for the DHCP lease, to record the address; on a gateway, to check the guest took the address it was given",
 			},
 			&cli.StringFlag{
 				Name:  "gateway-sock",
@@ -520,13 +521,7 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	// metadata or urunc.json: an image must not be able to nominate host files.
 	containerBoot := annotationOverrides["com.urunc.unikernel.bootKernel"] != "" ||
 		annotationOverrides["com.urunc.unikernel.bootInitrd"] != ""
-	unikernelType := "rumprun"
-	if containerBoot {
-		unikernelType = "linux"
-	}
-	if uk, ok := ociSpec.Annotations["com.urunc.unikernel.unikernelType"]; ok {
-		unikernelType = uk
-	}
+	unikernelType, unikernelTypeDeclared := unikernelFamily(ociSpec.Annotations, containerBoot)
 
 	// Create VMM instance
 	vmm, err := hypervisors.NewVMM(vmmType, uruncCfg.Monitors)
@@ -1263,25 +1258,44 @@ exec %s "$@"
 			kernelCmdline = cmdline
 		}
 	}
+	// Set inside the block below, and read by the shared-filesystem wiring
+	// after it: a 9pfs root has to be exported as well as named.
+	unikernelRootfs := ""
 	// A unikernel does not read a Linux command line; see
-	// unikernelCommandLine. Scoped to the non-Linux types on purpose: the
-	// Linux path above is what every container image takes, and it is
-	// untouched.
-	if unikernelType != "linux" {
+	// unikernelCommandLine. Gated on a declared family, not on "not linux":
+	// the default is rumprun, and an image with a kernel and a hypervisor
+	// label but no unikernelType is usually a Linux kernel. Handing one
+	// Rumprun's Solo5 JSON would drop its root=, init= and console=.
+	if unikernelTypeDeclared && unikernelType != "linux" {
 		// urunc renders the Unikraft address with a hardcoded /24
 		// (unikernels/unikraft.go: "netdev.ip="+ip+"/24:"+gw), and Unikraft
 		// >= 0.16.1 has no separate mask parameter to correct it with. Any
 		// other prefix would reach the guest as a /24 and be wrong without
 		// saying so, so refuse it here rather than misconfigure the guest.
-		if err := unikernelGatewayCIDRSupported(unikernelType, gatewayIP); err != nil {
+		if err := unikernelGatewayCIDRSupported(unikernelType,
+			ociSpec.Annotations["com.urunc.unikernel.version"], gatewayIP); err != nil {
 			return err
 		}
-		rootfsType := unikernelRootfsType(initrdPath, rootfsDiskImage, rootfsDir, vmmType)
-		line, err := unikernelCommandLine(unikernel, unikernelType, ociSpec.Annotations,
+		if err := unikernelEnvSupported(unikernelType, ociSpec.Process.Env); err != nil {
+			return err
+		}
+		unikernelRootfs = unikernelRootfsType(initrdPath, rootfsDiskImage, rootfsDir, vmmType)
+		warnUnikernelRootfsUnusable(unikernel, unikernelType, unikernelRootfs)
+		rootfsType := unikernelRootfs
+		line, err := unikernelCommandLine(unikernelType, ociSpec.Annotations,
 			ociSpec.Process.Env, string(vmmType), initrdPath, rootfsType, netParams,
 			userCmdOverride)
 		if err != nil {
 			return err
+		}
+		// urunc has no DNS field to render, so it writes a fixed 8.8.8.8 into
+		// netdev.ip. On a gateway that is a resolver the guest cannot reach
+		// the way a Linux guest does: the gateway's own DNS, and any --host
+		// records or egress policy on it, do not apply to this guest.
+		if netParams.IP != "" && strings.Contains(line, publicResolver) {
+			log.Warnf("%s guest resolver is fixed at %s: the gateway's DNS, its --host records "+
+				"and its egress policy do not apply to it (urunc renders no DNS field)",
+				unikernelType, publicResolver)
 		}
 		kernelCmdline = line
 	}
@@ -1291,9 +1305,18 @@ exec %s "$@"
 	// Wire the parsed shares into the VMM arguments: each share is a tagged
 	// export (virtiofs on Vz, 9p on QEMU) mounted by the init wrapper.
 	sharedfsParams := types.SharedfsParams{}
-	if containerBoot && rootfsDir != "" {
+	switch {
+	case containerBoot && rootfsDir != "":
 		sharedfsParams = types.SharedfsParams{
 			Type: "virtiofs", Path: rootfsDir, Tag: "rootfs", ReadOnly: !containerRootfsDirect,
+		}
+	case unikernelRootfs == "9pfs" && rootfsDir != "":
+		// Naming 9pfs in the command line is not enough: the export has to
+		// exist, under the tag the guest's fstab names. Unikraft's renderer
+		// writes vfs.fstab=[ "fs0:/:9pfs:::" ], so the tag is fs0, not the
+		// "rootfs" the container path uses.
+		sharedfsParams = types.SharedfsParams{
+			Type: "9pfs", Path: rootfsDir, Tag: "fs0",
 		}
 	}
 	var sharedDirParams []types.SharedDirParams
@@ -2448,11 +2471,19 @@ func launchVMM(cmd *cli.Command, s *store.Store, state *store.InstanceState, cmd
 			// The address above is what the runtime asked for. Check that the
 			// guest agreed, because nothing else does: a guest that ignores it
 			// and leases instead comes up healthy at the wrong address.
+			//
+			// A guest that agreed never asks the gateway for anything, so the
+			// wait is paid in full on the good path. Foreground runs spend it
+			// in the background while the console is attached. Detached runs
+			// return as soon as the id is printed, so waiting there would add
+			// the whole budget to every healthy run and to every service
+			// `compose up` starts; they wait only when the caller asked to.
+			// `compose up` covers its own services in one sweep instead.
 			apiSock := gatewayAPISock(cmd.String("gateway-sock"))
-			if detach {
-				warnOnLeaseMismatch(apiSock, state.MAC, addr, 5*time.Second)
-			} else {
+			if !detach {
 				go warnOnLeaseMismatch(apiSock, state.MAC, addr, 15*time.Second)
+			} else if cmd.Bool("wait-ip") {
+				warnOnLeaseMismatch(apiSock, state.MAC, addr, 5*time.Second)
 			}
 		}
 	}
@@ -2721,9 +2752,18 @@ func procConfig(uid, gid uint32, cwd string) types.ProcessConfig {
 // application is handed the "--" itself and rejects it -- the observed
 // symptom is `nginx: invalid option: "-"`. The console= token is what
 // guarantees the count is never zero.
-func unikernelCommandLine(unikernel types.Unikernel, unikernelType string,
+func unikernelCommandLine(unikernelType string,
 	annotations map[string]string, env []string, monitor, initrdPath,
 	rootfsType string, net types.NetDevParams, userArgs []string) (string, error) {
+	// Its own instance, not the caller's. Init writes Monitor and the network
+	// and rootfs fields onto the Unikernel it is given, and the caller hands
+	// the same value to vmm.BuildExecCmd, which switches on those fields to
+	// pick a family's monitor arguments. Mutating it here would change how
+	// the VMM is invoked as a side effect of rendering a string.
+	builder, err := unikernels.New(unikernelType)
+	if err != nil {
+		return "", fmt.Errorf("failed to create %s unikernel instance: %w", unikernelType, err)
+	}
 	// Two sources can name the application's arguments and they disagree.
 	// urunc's own path uses Spec.Process.Args; the image's cmdline annotation
 	// is what a bunny-built unikernel carries.
@@ -2746,7 +2786,7 @@ func unikernelCommandLine(unikernel types.Unikernel, unikernelType string,
 	// A missing or unparsable version is not fatal: the builder falls back to
 	// the current argument spelling and says so, which beats refusing to boot
 	// a guest over the version string in its own annotation.
-	err := unikernel.Init(types.UnikernelParams{
+	err = builder.Init(types.UnikernelParams{
 		CmdLine:    appArgs,
 		EnvVars:    env,
 		Monitor:    monitor,
@@ -2763,11 +2803,37 @@ func unikernelCommandLine(unikernel types.Unikernel, unikernelType string,
 	default:
 		return "", fmt.Errorf("failed to configure the %s unikernel: %w", unikernelType, err)
 	}
-	line, err := unikernel.CommandString()
+	line, err := builder.CommandString()
 	if err != nil {
 		return "", fmt.Errorf("failed to build the %s command line: %w", unikernelType, err)
 	}
 	return line, nil
+}
+
+// publicResolver is the resolver urunc renders into netdev.ip when it has no
+// DNS field to render, and the string that identifies that rendering.
+const publicResolver = "8.8.8.8"
+
+// unikernelFamily names the guest family and reports whether the image
+// declared it, rather than inheriting the default.
+//
+// The distinction matters because the default is rumprun, not linux, and it
+// stands for images that are in fact Linux: ociclient injects the linux
+// defaults only when an image carries none of unikernelType, hypervisor or
+// binary, so an image with a kernel and a hypervisor label but no
+// unikernelType keeps the rumprun default. hull's own test images have that
+// shape. Only a declared family may divert the command line away from the
+// Linux one.
+func unikernelFamily(annotations map[string]string, containerBoot bool) (string, bool) {
+	family := "rumprun"
+	if containerBoot {
+		family = "linux"
+	}
+	declared, ok := annotations["com.urunc.unikernel.unikernelType"]
+	if ok {
+		family = declared
+	}
+	return family, ok
 }
 
 // unikernelGatewayCIDRSupported refuses a gateway CIDR a unikernel family
@@ -2780,8 +2846,17 @@ func unikernelCommandLine(unikernel types.Unikernel, unikernelType string,
 // broadcast and on-link range, with nothing on the console to say so. Failing
 // the run is the honest outcome until urunc renders the real prefix.
 //
+// The refusal follows urunc's own dispatch rather than applying to every
+// unikraft image (unikernels/unikraft.go): a version that parses and is below
+// 0.16.1 takes the compatibility path, which renders the real mask from
+// netdev.ipv4_subnet_mask and so can be told about any prefix. An absent or
+// unparsable version takes the current path, like a modern one, and is
+// refused with it. Without this, `compose up --subnet 10.87.0.0/16` -- the
+// remedy compose recommends when a /24 is too small -- would refuse every
+// unikraft service in the project, including ones urunc renders correctly.
+//
 // An empty cidr means no gateway was configured and there is nothing to check.
-func unikernelGatewayCIDRSupported(unikernelType, cidr string) error {
+func unikernelGatewayCIDRSupported(unikernelType, uruncVersion, cidr string) error {
 	if cidr == "" || unikernelType != "unikraft" {
 		return nil
 	}
@@ -2789,12 +2864,93 @@ func unikernelGatewayCIDRSupported(unikernelType, cidr string) error {
 	if err != nil {
 		return fmt.Errorf("invalid gateway CIDR %q: %w", cidr, err)
 	}
-	if ones, bits := ipnet.Mask.Size(); ones != 24 || bits != 32 {
-		return fmt.Errorf(
-			"unikraft guests support only a /24 gateway CIDR, got %q: urunc renders the address with a hardcoded /24 and Unikraft has no mask parameter to correct it",
-			cidr)
+	if ones, bits := ipnet.Mask.Size(); ones == 24 && bits == 32 {
+		return nil
+	}
+	if unikraftRendersRealMask(uruncVersion) {
+		return nil
+	}
+	return fmt.Errorf(
+		"unikraft guests support only a /24 gateway CIDR, got %q: urunc renders the address with a hardcoded /24 and Unikraft >= %s has no mask parameter to correct it",
+		cidr, unikernels.UnikraftCompatVersion)
+}
+
+// unikraftRendersRealMask reports whether urunc would render the guest's real
+// subnet mask for this image's declared Unikraft version, which it does only
+// on the pre-0.16.1 compatibility path.
+func unikraftRendersRealMask(uruncVersion string) bool {
+	if uruncVersion == "" {
+		return false
+	}
+	have, err := goversion.NewVersion(uruncVersion)
+	if err != nil {
+		return false
+	}
+	compat, err := goversion.NewVersion(unikernels.UnikraftCompatVersion)
+	if err != nil {
+		return false
+	}
+	return have.LessThan(compat)
+}
+
+// unikernelEnvSupported refuses an environment entry the rendering cannot
+// carry intact.
+//
+// Unikraft only. Its renderer joins the entries with a space inside
+// env.vars=[ ... ] and quotes nothing (unikernels/unikraft.go), so
+// FOO=-c /etc/app.conf reaches the guest as FOO=-c plus a stray element, and
+// the application sees a truncated value with no error anywhere. No other
+// family shares the defect: rumprun marshals each entry as JSON, which quotes
+// and escapes it, and hermit_rs, mewz and mirage carry no environment at all.
+//
+// Refusing follows the same rule as the gateway CIDR above: a limitation in
+// the rendering is reported rather than passed on as a guest that comes up
+// subtly wrong. Quoting is not the fix here until it is known whether
+// uklibparam strips quotes inside the array.
+func unikernelEnvSupported(family string, env []string) error {
+	if family != "unikraft" {
+		return nil
+	}
+	for _, e := range env {
+		if strings.ContainsAny(e, " \t") {
+			name, _, _ := strings.Cut(e, "=")
+			return fmt.Errorf(
+				"unikraft guests cannot carry whitespace in an environment value (%s): urunc joins them unquoted, so the guest would see a truncated value",
+				name)
+		}
 	}
 	return nil
+}
+
+// warnUnikernelRootfsUnusable reports a root filesystem the family will not
+// mount, so the run says something rather than nothing.
+//
+// It warns instead of refusing because hull cannot tell whether the guest
+// needs a filesystem at all. The renderer's default arm emits no rootfs
+// argument, which is correct for a self-contained unikernel (httpreply is one
+// binary and boots with no rootfs) and wrong for an application that expects
+// its files. Refusing would break the first; staying silent leaves the second
+// failing wherever it first opens a file, with nothing on the console.
+//
+// "initrd" is not asked of SupportsFS. It is not a shared filesystem, and the
+// renderers act on it directly: Unikraft emits vfs.fstab=[ "initrd0:..." ]
+// for it while SupportsFS reports only 9pfs.
+func warnUnikernelRootfsUnusable(unikernel types.Unikernel, family, rootfsType string) {
+	switch rootfsType {
+	case "", "initrd":
+		return
+	case "block":
+		if unikernel.SupportsBlock() {
+			return
+		}
+	default:
+		if unikernel.SupportsFS(rootfsType) {
+			return
+		}
+	}
+	log.Warnf("%s guests do not mount a %s root filesystem: this guest gets no rootfs argument. "+
+		"An application that needs its files wants an initrd (com.urunc.unikernel.initrd)",
+		family, rootfsType)
 }
 
 // unikernelRootfsType names what hull prepared in urunc's vocabulary.
