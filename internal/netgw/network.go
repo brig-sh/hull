@@ -91,6 +91,7 @@ type Config struct {
 type Network struct {
 	stack         *stack.Stack
 	networkSwitch *tap.Switch
+	ipPool        *tap.IPPool
 	egress        *Policy
 	resolver      resolver
 	egressRefresh time.Duration
@@ -127,10 +128,20 @@ func New(cfg Config) (*Network, error) {
 	return &Network{
 		stack:         s,
 		networkSwitch: networkSwitch,
+		ipPool:        ipPool,
 		egress:        cfg.Egress,
 		resolver:      upstreamResolver(cfg),
 		egressRefresh: cfg.EgressRefresh,
 	}, nil
+}
+
+// Leases returns the DHCP leases the gateway has handed out, keyed by address
+// with the MAC that holds each one. The gateway's own reservation is in there.
+//
+// A guest given a static address never asks, so an address here for a guest
+// the runtime configured statically means the guest ignored what it was told.
+func (n *Network) Leases() map[string]string {
+	return n.ipPool.Leases()
 }
 
 // Start runs the network's background work until ctx is done. It is separate

@@ -2445,6 +2445,15 @@ func launchVMM(cmd *cli.Command, s *store.Store, state *store.InstanceState, cmd
 	if gatewayIP != "" {
 		if addr, _, _, err := gatewayNetConfig(gatewayIP); err == nil {
 			recordInstanceIP(s, state.ID, addr)
+			// The address above is what the runtime asked for. Check that the
+			// guest agreed, because nothing else does: a guest that ignores it
+			// and leases instead comes up healthy at the wrong address.
+			apiSock := gatewayAPISock(cmd.String("gateway-sock"))
+			if detach {
+				warnOnLeaseMismatch(apiSock, state.MAC, addr, 5*time.Second)
+			} else {
+				go warnOnLeaseMismatch(apiSock, state.MAC, addr, 15*time.Second)
+			}
 		}
 	}
 
