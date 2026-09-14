@@ -7,12 +7,13 @@ require (
 	github.com/containerd/containerd v1.7.33
 	github.com/containers/gvisor-tap-vsock v0.8.9
 	github.com/google/go-containerregistry v0.20.1
+	github.com/hashicorp/go-version v1.9.0
 	github.com/inetaf/tcpproxy v0.0.0-20250222171855-c4b9df066048
 	github.com/miekg/dns v1.1.72
 	github.com/opencontainers/runtime-spec v1.2.1
 	github.com/sirupsen/logrus v1.9.4
 	github.com/urfave/cli/v3 v3.10.1
-	github.com/urunc-dev/urunc v0.8.1-0.20260907203506-f02da0c7e57a
+	github.com/urunc-dev/urunc v0.8.1-0.20260912220515-ddc98b772f21
 	golang.org/x/sys v0.47.0
 	golang.org/x/term v0.44.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -51,7 +52,6 @@ require (
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
 	github.com/google/btree v1.1.2 // indirect
 	github.com/google/gopacket v1.1.19 // indirect
-	github.com/hashicorp/go-version v1.9.0 // indirect
 	github.com/insomniacslk/dhcp v0.0.0-20240710054256-ddd8a41251c9 // indirect
 	github.com/jackpal/gateway v1.2.0 // indirect
 	github.com/klauspost/compress v1.18.6 // indirect
@@ -100,3 +100,8 @@ require (
 // urunc-dev/urunc branch feat/initrd-hvi-backend-v0.8.0: the darwin commits
 // rebased onto the v0.8.0 release. The require below is that branch's tip.
 // No replace: the module is the upstream repository itself.
+//
+// hull tracks that branch rather than urunc main. main has no hvi backend at
+// all and renders netdev.* with no guard for an empty address, so it cannot
+// run a darwin guest. The branch is the pin to hold until that work is
+// upstream; a bump is a move along the branch, not a move to main.
