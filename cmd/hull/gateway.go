@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -225,6 +226,13 @@ func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, ga
 			_ = conn.Close()
 			w.WriteHeader(http.StatusOK)
 		})
+		// Leases, as gvisor-tap-vsock's own mux serves them: the address a
+		// guest was given, keyed by address. A runtime that configured a
+		// guest statically reads this to find out whether the guest agreed.
+		mux.HandleFunc("/leases", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(vn.Leases())
+		})
 		srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 		go func() { _ = srv.Serve(apiL) }()
 	}
@@ -424,6 +432,62 @@ func claimUnixSocket(path string) (net.Listener, error) {
 // socket path — the one place this convention lives.
 func qemuGatewaySock(controlSock string) string {
 	return controlSock + ".qemu"
+}
+
+// gatewayAPISock names the HTTP API socket beside a gateway's control socket.
+// compose builds both from the project name, so the mapping is that pair's;
+// a control socket named otherwise gets the suffix appended.
+func gatewayAPISock(controlSock string) string {
+	if rest, ok := strings.CutSuffix(controlSock, ".gateway.sock"); ok {
+		return rest + ".api.sock"
+	}
+	return controlSock + ".api"
+}
+
+// warnOnLeaseMismatch reports a guest that took a DHCP address after the
+// runtime configured a static one. A configured guest never asks, so any lease
+// for its MAC is the guest overriding what it was told, and every host-side
+// record then names an address the guest does not answer on. Unikraft images
+// built without CONFIG_LIBUKNETDEV_EINFO_LIBPARAM fail exactly this way.
+//
+// Best effort. It reads the gateway's own lease table, which hull serves only
+// when it started the gateway with an API socket, and it stops looking after
+// budget whether or not the guest has asked by then.
+func warnOnLeaseMismatch(apiSock, mac, configured string, budget time.Duration) {
+	client := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "unix", apiSock)
+			},
+		},
+		Timeout: 3 * time.Second,
+	}
+	deadline := time.Now().Add(budget)
+	for {
+		resp, err := client.Get("http://gateway/leases")
+		if err == nil {
+			var leases map[string]string
+			decodeErr := json.NewDecoder(resp.Body).Decode(&leases)
+			_ = resp.Body.Close()
+			if decodeErr == nil {
+				for ip, holder := range leases {
+					if !strings.EqualFold(holder, mac) || ip == configured {
+						continue
+					}
+					log.Warnf("guest %s took %s from the gateway although it was configured with %s; "+
+						"host-side records name %s, which the guest does not answer on "+
+						"(a Unikraft image built without CONFIG_LIBUKNETDEV_EINFO_LIBPARAM ignores netdev.ip)",
+						mac, ip, configured, configured)
+					return
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 // joinGateway connects to a gateway's control socket, creates the datagram
