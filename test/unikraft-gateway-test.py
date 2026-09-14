@@ -34,6 +34,8 @@ BUDGET = int(os.environ.get("HULL_TEST_BOOT_TIMEOUT", "180"))
 
 workdir = None
 gateway = None
+gateway_log = None
+gateway_out = None
 instance = None
 
 
@@ -47,7 +49,7 @@ def die(reason, output=""):
     print(f"FAIL: {reason}")
     if output:
         print("---- transcript ----")
-        print(output[-4000:])
+        print(output[-12000:])
     cleanup()
     sys.exit(1)
 
@@ -56,6 +58,8 @@ def cleanup():
     if instance:
         subprocess.run([BIN, *GLOBAL_ARGS, "rm", "-f", instance],
                        capture_output=True, timeout=120)
+    if gateway_out:
+        gateway_out.close()
     if gateway and gateway.poll() is None:
         gateway.terminate()
         try:
@@ -64,6 +68,14 @@ def cleanup():
             gateway.kill()
     if workdir:
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+def read_gateway_log():
+    try:
+        with open(gateway_log) as f:
+            return f.read()
+    except OSError:
+        return ""
 
 
 def free_port():
@@ -89,27 +101,34 @@ pull = subprocess.run([BIN, *GLOBAL_ARGS, "pull", IMAGE],
 if pull.returncode != 0:
     skip(f"cannot pull {IMAGE}: {pull.stderr.strip()[:300]}")
 
+# To a file, not a PIPE: nothing drains a PIPE here, and the transcript has
+# to be readable while the gateway is still running.
+gateway_log = os.path.join(workdir, "gateway.log")
+gateway_out = open(gateway_log, "w")
 gateway = subprocess.Popen(
     [BIN, *GLOBAL_ARGS, "network-gateway", "--socket", sock, "--api", api,
      "--qemu-socket", sock + ".qemu",
      "--forward", f"127.0.0.1:{port}={GUEST_IP}:{GUEST_PORT}"],
-    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    stdout=gateway_out, stderr=subprocess.STDOUT, text=True)
 for _ in range(100):
     if os.path.exists(sock):
         break
     if gateway.poll() is not None:
-        die("the gateway exited before it created its socket", gateway.stdout.read())
+        die("the gateway exited before it created its socket", read_gateway_log())
     time.sleep(0.1)
 else:
-    die("the gateway never created its control socket")
+    die("the gateway never created its control socket", read_gateway_log())
 
+# --wait-ip so the run pays for the lease check: hull only compares the
+# gateway's lease with the configured address when the caller asked to wait,
+# and that warning is the diagnosis this harness points the reader at.
 run = subprocess.run(
-    [BIN, *GLOBAL_ARGS, "run", "--detach", "--hypervisor", "hvi",
+    [BIN, *GLOBAL_ARGS, "run", "--detach", "--wait-ip", "--hypervisor", "hvi",
      "--net", "shared", "--gateway-sock", sock,
      "--gateway-cidr", f"{GUEST_IP}/24", IMAGE],
     capture_output=True, text=True, timeout=300)
 if run.returncode != 0:
-    die(f"hull run failed: {run.stderr.strip()[:600]}", run.stdout)
+    die(f"hull run failed: {run.stderr.strip()[:600]}", run.stdout + run.stderr)
 instance = run.stdout.strip().splitlines()[-1].strip() if run.stdout.strip() else ""
 if not instance:
     die("hull run printed no instance id", run.stderr)
@@ -134,10 +153,14 @@ if body is None:
     # different repositories.
     inspect = subprocess.run([BIN, *GLOBAL_ARGS, "inspect", instance],
                              capture_output=True, text=True, timeout=60)
+    # hull's own lease warning is the diagnosis, and it goes to run's stderr.
+    # Print it, rather than telling the reader to go and look for it.
     die(f"no page through the forward after {BUDGET}s (last: {last}); "
-        f"if hull's run output warned that the guest took a different address, "
-        f"the image ignores netdev.ip and needs CONFIG_LIBUKNETDEV_EINFO_LIBPARAM",
-        inspect.stdout + (gateway.stdout.read() if gateway.poll() is not None else ""))
+        f"a 'took ... from the gateway' warning below means the image ignores "
+        f"netdev.ip and needs CONFIG_LIBUKNETDEV_EINFO_LIBPARAM",
+        "---- hull run stderr ----\n" + run.stderr +
+        "\n---- instance ----\n" + inspect.stdout +
+        "\n---- gateway ----\n" + read_gateway_log())
 
 # The host's record has to name the address the guest actually answered on,
 # not merely some address.

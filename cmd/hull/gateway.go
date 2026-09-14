@@ -153,10 +153,15 @@ const egressRefreshDefault = 30 * time.Second
 
 func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, gatewayIP string, forwards map[string]string, hosts []string, policy *netgw.Policy, egressRefresh time.Duration, sup *supervisor) error {
 	// Serve service names from the gateway's DNS in addition to the
-	// /etc/hosts injection: guests that resolve via plain DNS (unikernel
-	// flavors without an nsswitch) get name resolution for free, and images
-	// that bypass /etc/hosts keep working. Non-matching queries fall through
-	// to the host resolver.
+	// /etc/hosts injection, so images that bypass /etc/hosts keep working.
+	// Non-matching queries fall through to the host resolver.
+	//
+	// This reaches a guest only if the guest resolves against the gateway.
+	// Unikernels placed by urunc do not: NetDevParams carries no DNS field,
+	// so urunc renders a fixed 8.8.8.8 and the records below are invisible
+	// to them. run warns when it sees that rendering. Giving them these
+	// records needs a DNS field on urunc's NetDevParams defaulting to the
+	// gateway address.
 	var records []gvntypes.Record
 	for _, h := range hosts {
 		parts := strings.SplitN(h, "=", 2)
@@ -444,16 +449,18 @@ func gatewayAPISock(controlSock string) string {
 	return controlSock + ".api"
 }
 
-// warnOnLeaseMismatch reports a guest that took a DHCP address after the
-// runtime configured a static one. A configured guest never asks, so any lease
-// for its MAC is the guest overriding what it was told, and every host-side
-// record then names an address the guest does not answer on. Unikraft images
-// built without CONFIG_LIBUKNETDEV_EINFO_LIBPARAM fail exactly this way.
-//
-// Best effort. It reads the gateway's own lease table, which hull serves only
-// when it started the gateway with an API socket, and it stops looking after
-// budget whether or not the guest has asked by then.
-func warnOnLeaseMismatch(apiSock, mac, configured string, budget time.Duration) {
+// gatewayLeases reads the gateway's DHCP lease table: the address a guest was
+// given, keyed by address. Returns nothing when the gateway serves no API
+// socket, which is the common case for a gateway hull did not start.
+func gatewayLeases(apiSock string) (map[string]string, error) {
+	if apiSock == "" {
+		return nil, errors.New("no gateway API socket")
+	}
+	// Stat first. Without it a gateway started without --api costs the caller
+	// its whole polling budget on connections that can only fail.
+	if _, err := os.Stat(apiSock); err != nil {
+		return nil, err
+	}
 	client := &http.Client{
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -463,25 +470,56 @@ func warnOnLeaseMismatch(apiSock, mac, configured string, budget time.Duration) 
 		},
 		Timeout: 3 * time.Second,
 	}
+	resp, err := client.Get("http://gateway/leases")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var leases map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&leases); err != nil {
+		return nil, err
+	}
+	return leases, nil
+}
+
+// leaseFor returns the address the gateway gave mac, if it gave one.
+func leaseFor(leases map[string]string, mac string) (string, bool) {
+	for ip, holder := range leases {
+		if strings.EqualFold(holder, mac) {
+			return ip, true
+		}
+	}
+	return "", false
+}
+
+// leaseMismatchMessage describes a guest that took a DHCP address after the
+// runtime configured a static one. A configured guest never asks, so a lease
+// for its MAC is the guest overriding what it was told, and every host-side
+// record then names an address the guest does not answer on. Unikraft images
+// built without CONFIG_LIBUKNETDEV_EINFO_LIBPARAM fail exactly this way.
+func leaseMismatchMessage(mac, leased, configured string) string {
+	return fmt.Sprintf("guest %s took %s from the gateway although it was configured with %s; "+
+		"host-side records name %s, which the guest does not answer on "+
+		"(a Unikraft image built without CONFIG_LIBUKNETDEV_EINFO_LIBPARAM ignores netdev.ip)",
+		mac, leased, configured, configured)
+}
+
+// warnOnLeaseMismatch polls the gateway until the guest has asked for an
+// address or budget runs out, and warns if it asked for a different one.
+//
+// A healthy guest never asks, so the whole budget is spent on the good path.
+// Callers that cannot afford that pass a zero budget, which makes it a single
+// probe, or run it where the wait is already being paid.
+func warnOnLeaseMismatch(apiSock, mac, configured string, budget time.Duration) {
 	deadline := time.Now().Add(budget)
 	for {
-		resp, err := client.Get("http://gateway/leases")
-		if err == nil {
-			var leases map[string]string
-			decodeErr := json.NewDecoder(resp.Body).Decode(&leases)
-			_ = resp.Body.Close()
-			if decodeErr == nil {
-				for ip, holder := range leases {
-					if !strings.EqualFold(holder, mac) || ip == configured {
-						continue
-					}
-					log.Warnf("guest %s took %s from the gateway although it was configured with %s; "+
-						"host-side records name %s, which the guest does not answer on "+
-						"(a Unikraft image built without CONFIG_LIBUKNETDEV_EINFO_LIBPARAM ignores netdev.ip)",
-						mac, ip, configured, configured)
-					return
-				}
+		if leases, err := gatewayLeases(apiSock); err == nil {
+			if ip, ok := leaseFor(leases, mac); ok && ip != configured {
+				log.Warn(leaseMismatchMessage(mac, ip, configured))
+				return
 			}
+		} else if os.IsNotExist(err) {
+			return // no API socket: nothing to read, now or later
 		}
 		if time.Now().After(deadline) {
 			return
