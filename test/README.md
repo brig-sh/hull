@@ -60,6 +60,14 @@ Harnesses CI runs:
   and asserts the image's own entrypoint ran and the instance stopped with
   no VMM left. Skips without the `hull` binary, the `hvi` binary, the boot
   assets or Apple Silicon.
+- `unikraft-gateway-test.py` runs a Unikraft OCI image through `hull run` on
+  a static gateway address and fetches a page from it through a host port
+  forward. The fetch is the assertion: it succeeds only if the guest took the
+  address the runtime told it to take, which a Unikraft image built without
+  `CONFIG_LIBUKNETDEV_EINFO_LIBPARAM` does not. Skips without the `hull`
+  binary, Apple Silicon, or the image. Override the image with
+  `HULL_UNIKRAFT_IMAGE`; it defaults to the digest hvi-vmm's Unikraft CI job
+  pins.
 - `share-test.py <vz|qemu> <name> <mode>` boots a detached run with
   `--shared-dir` from the user's home, seeds a script into the share, and
   reads the result back from the instance log. Modes: `readwrite`,
