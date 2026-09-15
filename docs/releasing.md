@@ -107,3 +107,30 @@ Both signing jobs create a keychain under `$RUNNER_TEMP` and delete it in an
 user -s` is a per-user setting, so a concurrent build that sets its own search
 list evicts this one, and `codesign` then fails with
 `errSecInternalComponent` part way through a run.
+
+## The prerelease channels
+
+`.github/workflows/channel.yml` publishes two casks that are not releases:
+`hull@main`, rebuilt on every merge to `main`, and `hull@experimental`,
+promoted by hand from any ref with a `workflow_dispatch`. brig has the same
+pair and depends on the matching one, because a feature usually spans both.
+
+Each publishes to a moving tag -- `channel-main`, `channel-experimental` --
+whose assets are replaced in place. Neither matches `v*`, so neither starts
+the release workflow.
+
+The job runs on the same `notary` runner and signs and notarizes the same way
+a release does. It has to: vz-runner and hvi carry the virtualization and
+hypervisor entitlements, and macOS refuses either without a Developer ID
+signature, so an unsigned channel build would install and then fail to boot a
+VM.
+
+The two signing steps are copied from `release.yml` rather than shared. A
+composite action is the right end state; it is not done here because it would
+edit the release path to add a channel, and that path is not one to change
+without a dry run. Factor it out once the channel workflow has proven itself,
+and change both together.
+
+To promote a branch: `gh workflow run channel.yml -f ref=<branch>`, and the
+same on `brig-sh/brig` if the feature needs both.
+
