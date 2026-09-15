@@ -19,7 +19,7 @@ connected at all.
 | a guest that can reach the internet, least setup | `--hypervisor vz --net shared` |
 | the same behavior on every backend | `--gateway-sock` |
 | a guest on `hvi` that can reach anything | `--gateway-sock`. `--net shared` will not work |
-| host ports forwarded into a guest | the gateway, with `--forward` |
+| host ports forwarded into a guest | the gateway, with `--forward` or the `/forwards` API |
 | several services that talk to each other by name | `hull compose`, which sets up a gateway for you |
 | an egress policy | the gateway. A policy is a gateway flag |
 | no network at all | `--net none`, the default |
@@ -153,10 +153,47 @@ hull network-gateway --socket /tmp/gw.sock \
 
 `--forward` exposes a guest port on the host, as
 `hostaddr:port=guestip:port`. It is ingress, and no egress rule applies to it.
+Prefix the host address with `udp:` for a UDP forward.
 
 `--host name=ip` adds a static A record the gateway's resolver serves. That is
 how services find each other by name. `hull compose` writes these for you from
 the service names.
+
+### Publishing a port on a running gateway
+
+The forwards a gateway starts with are not the only ones it can have. With
+`--api` it serves `/forwards` on that socket, and the set can be changed while
+guests are attached:
+
+```bash
+hull network-gateway --socket /tmp/gw.sock --api /tmp/gw.api &
+
+# what is published
+curl --unix-socket /tmp/gw.api http://gw/forwards
+
+# publish 10.87.0.10:3000 on the host's 127.0.0.1:3000
+curl --unix-socket /tmp/gw.api -X POST http://gw/forwards \
+  -d '{"protocol":"tcp","local":"127.0.0.1:3000","remote":"10.87.0.10:3000"}'
+
+# take it away again
+curl --unix-socket /tmp/gw.api -X DELETE \
+  'http://gw/forwards?protocol=tcp&local=127.0.0.1:3000'
+```
+
+`protocol` may be left out and means `tcp`. A `POST` answers 201 with the
+forward **as installed** -- the defaults filled in, so a request that omitted
+the protocol is answered `tcp` and a later `GET` agrees with it. It answers 409
+when something is already published on that local address, and 400 for a
+forward the gateway cannot read. A `DELETE` answers 200 with the forward that
+went, and 404 when nothing holds that address.
+
+The guest side must be an IPv4 address. The gateway forwards no IPv6 and the
+guest network is IPv4-only, so an IPv6 remote is refused with a 400 rather than
+reaching the forwarder and failing there.
+
+This is the one thing about a running gateway that can change. The subnet and
+the egress rules are read once at startup, so changing either means restarting
+the gateway, which drops every member of its network.
 
 ### IPv6 is not forwarded
 

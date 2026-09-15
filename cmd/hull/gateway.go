@@ -92,11 +92,17 @@ guests share a switch, and traffic between them never reaches the filter.
 And --forward is ingress, not egress; it exposes a guest port on the host
 and no egress rule applies to it.
 
+With --api the gateway serves /forwards on that socket, which publishes a
+guest port and withdraws it again while the guest is running. GET lists what
+is published, POST takes {protocol, local, remote}, and DELETE takes protocol
+and local as query parameters. This is the only part of a running gateway
+that can change; the network and the rules are read once at startup.
+
 IPv6 is dropped outright. The netstack does not forward IPv6 yet, so no
 guest reaches the outside world over it, with or without a policy.`),
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "socket", Required: true, Usage: "control socket path (required)"},
-			&cli.StringFlag{Name: "api", Usage: "HTTP API socket path (probe endpoint)"},
+			&cli.StringFlag{Name: "api", Usage: "HTTP API socket path (probe, leases and the /forwards endpoint)"},
 			&cli.StringFlag{Name: "qemu-socket", Usage: "unix socket for the QEMU stream netdev, used by both the QEMU and HVI backends"},
 			&cli.StringFlag{Name: "subnet", Value: "10.87.0.0/24", Usage: "virtual subnet CIDR"},
 			&cli.StringFlag{Name: "gateway-ip", Value: "10.87.0.1", Usage: "gateway IP on the subnet"},
@@ -116,13 +122,13 @@ guest reaches the outside world over it, with or without a policy.`),
 			if err != nil {
 				return err
 			}
-			forwards := map[string]string{}
+			var forwards []netgw.Forward
 			for _, f := range cmd.StringSlice("forward") {
-				parts := strings.SplitN(f, "=", 2)
-				if len(parts) != 2 {
-					return fmt.Errorf("invalid --forward %q, expected hostaddr:port=guestip:port", f)
+				forward, err := netgw.ParseForward(f)
+				if err != nil {
+					return err
 				}
-				forwards[parts[0]] = parts[1]
+				forwards = append(forwards, forward)
 			}
 			// Restart policies are honored only for a project: a gateway
 			// started by hand has no project state to supervise.
@@ -151,7 +157,7 @@ const gatewayShutdownGrace = 20 * time.Second
 // handful of rules is not a source of DNS traffic worth noticing.
 const egressRefreshDefault = 30 * time.Second
 
-func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, gatewayIP string, forwards map[string]string, hosts []string, policy *netgw.Policy, egressRefresh time.Duration, sup *supervisor) error {
+func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, gatewayIP string, forwards []netgw.Forward, hosts []string, policy *netgw.Policy, egressRefresh time.Duration, sup *supervisor) error {
 	// Serve service names from the gateway's DNS in addition to the
 	// /etc/hosts injection, so images that bypass /etc/hosts keep working.
 	// Non-matching queries fall through to the host resolver.
@@ -238,6 +244,7 @@ func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, ga
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(vn.Leases())
 		})
+		mux.Handle("/forwards", forwardsHandler(vn))
 		srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 		go func() { _ = srv.Serve(apiL) }()
 	}
@@ -566,4 +573,89 @@ func joinGateway(sockPath string) (*os.File, *net.UnixConn, error) {
 	_ = syscall.Close(pair[1])
 
 	return os.NewFile(uintptr(pair[0]), "vm-net"), conn, nil
+}
+
+// forwardsHandler serves the gateway's host port forwards: what is published,
+// and the two verbs that change it.
+//
+//	GET    /forwards                              every forward, as JSON
+//	POST   /forwards  {protocol, local, remote}   publish one
+//	DELETE /forwards?protocol=tcp&local=addr:port withdraw one
+//
+// A forward is the one thing about a running gateway that can change. The
+// network and the egress rules are read once at startup, so a caller that
+// wants either of those restarts the gateway; a caller that wants a port
+// published does not, because restarting drops every member of the network
+// and the guest whose port this is would be one of them.
+//
+// Publishing a port is widening the boundary of the sandbox behind it, so the
+// endpoint reports what it did rather than only that it worked: the forward
+// comes back on the response, and the conflict cases are told apart. A local
+// address already taken is 409, one nothing holds is 404, and a request the
+// gateway cannot parse is 400.
+func forwardsHandler(vn forwarder) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodGet:
+			_ = json.NewEncoder(w).Encode(vn.Forwards())
+		case http.MethodPost:
+			var f netgw.Forward
+			if err := json.NewDecoder(r.Body).Decode(&f); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			installed, err := vn.Expose(f)
+			if err != nil {
+				http.Error(w, err.Error(), forwardStatus(err))
+				return
+			}
+			// What was installed, not what was asked for: a request that left
+			// the protocol out is answered with the tcp it actually got, so
+			// this and a later GET cannot describe one forward two ways.
+			log.Infof("network-gateway: published %s", installed)
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(installed)
+		case http.MethodDelete:
+			gone, err := vn.Unexpose(r.URL.Query().Get("protocol"), r.URL.Query().Get("local"))
+			if err != nil {
+				http.Error(w, err.Error(), forwardStatus(err))
+				return
+			}
+			log.Infof("network-gateway: withdrew %s", gone)
+			_ = json.NewEncoder(w).Encode(gone)
+		default:
+			http.Error(w, "use GET, POST or DELETE", http.StatusMethodNotAllowed)
+		}
+	})
+}
+
+// forwarder is what the endpoint needs of a gateway's network: the three
+// operations on its host port forwards, and nothing else.
+//
+// An interface rather than *netgw.Network, so that a test of this handler does
+// not stand up a netstack. Building one starts the DHCP and DNS servers and
+// their goroutines, and those live as long as the test binary -- enough of
+// them in one package to perturb a test elsewhere in it that measures elapsed
+// time, which is what happened to the sampler test.
+type forwarder interface {
+	Expose(netgw.Forward) (netgw.Forward, error)
+	Unexpose(protocol, local string) (netgw.Forward, error)
+	Forwards() []netgw.Forward
+}
+
+// forwardStatus maps a forwarding failure to the status a caller can act on.
+// Anything that is neither a conflict nor a miss is the gateway's own
+// failure to install a forward it accepted.
+func forwardStatus(err error) int {
+	switch {
+	case errors.Is(err, netgw.ErrForwardExists):
+		return http.StatusConflict
+	case errors.Is(err, netgw.ErrForwardNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, netgw.ErrForwardInvalid):
+		return http.StatusBadRequest
+	default:
+		return http.StatusInternalServerError
+	}
 }
