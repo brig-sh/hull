@@ -33,6 +33,27 @@ Check the result:
 hull --help
 ```
 
+### Trying something before it is released
+
+Two more casks carry builds that are not releases:
+
+```bash
+brew install --cask brig-sh/brig/hull@main           # the tip of main
+brew install --cask brig-sh/brig/hull@experimental   # a branch someone promoted
+```
+
+`hull@main` is rebuilt on every merge to `main`. `hull@experimental` moves only
+when a maintainer promotes a particular ref to it, which is how an unmerged
+branch reaches a tester.
+
+brig has the same pair, and `brig@main` pulls `hull@main` rather than the
+released hull, because a feature usually spans both.
+
+These are signed and notarized exactly as a release is -- they have to be, or
+macOS would refuse the entitlements vz-runner and hvi carry. What they are not
+is supported: they can break, they move without notice, and only one of the
+three hull casks can be installed at a time.
+
 ### What the cask puts on disk
 
 The cask installs three executables and links them into your Homebrew prefix:
