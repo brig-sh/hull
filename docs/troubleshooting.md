@@ -144,18 +144,17 @@ no plain-copy fallback. Keep both under one `--store-dir`.
 
 ## Networking
 
-### The guest has an address but reaches nothing, on `hvi`
+### `--net shared cannot work on the hvi hypervisor without the network gateway`
 
-This is expected with `--net shared` on `hvi`, and it is the single most
-common surprise in hull.
+hull refuses the combination rather than booting a guest that takes an address
+and reaches nothing. Two reasons, neither fixable by flags: `hvi`'s built-in
+stack forwards no traffic, and its `(deny default)` Seatbelt profile denies the
+VMM `connect(2)` and `sendto(2)` anyway.
 
-`hvi`'s built-in stack answers ARP, ICMP, DHCP and DNS, and **drops guest
-TCP**. `hvi`'s own documentation lists "no egress from the built-in network
-stack" among its known limits. Its built-in DNS is also expected to return
-empty answers, because the resolver calls the host's `getaddrinfo` after `hvi`
-installs a deny-by-default Seatbelt sandbox that blocks outbound sockets.
+Older versions accepted it and produced a guest with an address and no
+connectivity. If you are on one of those and seeing that symptom, this is why.
 
-Use the gateway instead:
+Use the gateway:
 
 ```bash
 hull network-gateway --socket /tmp/gw.sock &

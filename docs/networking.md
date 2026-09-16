@@ -18,7 +18,7 @@ connected at all.
 |---|---|
 | a guest that can reach the internet, least setup | `--hypervisor vz --net shared` |
 | the same behavior on every backend | `--gateway-sock` |
-| a guest on `hvi` that can reach anything | `--gateway-sock`. `--net shared` will not work |
+| a guest on `hvi` that can reach anything | `--gateway-sock`. `--net shared` alone is refused |
 | host ports forwarded into a guest | the gateway, with `--forward` |
 | several services that talk to each other by name | `hull compose`, which sets up a gateway for you |
 | an egress policy | the gateway. A policy is a gateway flag |
@@ -31,7 +31,7 @@ connected at all.
 | | `vz` | `qemu` | `hvi` |
 |---|---|---|---|
 | Served by | `VZNATNetworkDeviceAttachment`, Apple NAT | `-netdev vmnet-shared` with a `virtio-net-pci` device | a responder inside the VMM |
-| Real TCP egress | yes | yes | **no** |
+| Real TCP egress | yes | yes | **no**, and the combination is refused |
 | Guest address | DHCP on `192.168.64.0/24` | DHCP on `192.168.64.0/24` | fixed `10.0.2.15` |
 | Gateway | `192.168.64.1` | `192.168.64.1` | `10.0.2.2` |
 | DNS | from the DHCP answer, via `/proc/net/pnp` | from the DHCP answer, via `/proc/net/pnp` | `10.0.2.3`, and see below |
@@ -66,30 +66,38 @@ In practice, on `qemu`, use the gateway. See
 [troubleshooting.md](troubleshooting.md#cannot-create-vmnet-interface-general-failure)
 for the full list of options.
 
-### `hvi --net shared` gives no egress
+### `hvi --net shared` is refused
 
-This is the most important thing on this page.
+`hull run --hypervisor hvi --net shared IMAGE`, with no `--gateway-sock`, fails
+with an error naming the gateway. It used to boot a guest that took an address
+and reached nothing.
 
-`hvi`'s built-in stack is a user-space responder inside the VMM. It answers
-ARP, ICMP echo, DHCP and DNS for a fixed address set, and it **drops guest TCP
-after logging it**. ARP is answered only for the gateway and DNS addresses.
-`hvi`'s own documentation lists "no egress from the built-in network stack"
-among its known limits.
+Two independent reasons, and neither is a missing feature:
 
-A guest there gets an address, and cannot open a connection to anything.
+**The built-in stack forwards nothing.** It is a user-space responder inside
+the VMM. It answers ARP, ICMP echo, DHCP and DNS for a fixed address set, guest
+`10.0.2.15`, gateway `10.0.2.2`, resolver `10.0.2.3`, and its TCP path ends at
+the literal source line `None // no egress yet`. Any UDP that is not DHCP or a
+query to its own resolver is dropped the same way. `hvi`'s own documentation
+lists "no egress from the built-in network stack" among its known limits.
 
-Its DNS has a second problem. The handler resolves names by calling the host's
-`getaddrinfo`, and it runs after `hvi` installs its Seatbelt sandbox. That
-profile is deny-by-default with no network grant, and `hvi`'s own selftest
-asserts that opening an outbound socket fails once the sandbox is entered. So
-built-in DNS is expected to answer with an empty record set. hull never passes
-`--no-sandbox`, so every `hvi` instance hull starts runs confined.
+**The VMM confines itself before the guest runs, and could not forward even if
+the code existed.** `hvi` installs a `(deny default)` Seatbelt profile as the
+last thing before starting the vCPUs. Under that profile `socket(2)` still
+succeeds, but `connect(2)` and `sendto(2)` both fail with `EPERM`. So the
+confined VMM cannot originate traffic at all.
 
-hull still writes `nameserver 10.0.2.3` into the boot initrd for an `hvi`
-generic container boot with any net mode other than `none`, so the guest is
-pointed at that resolver whether or not it can answer.
+Its own resolver is caught by the same rule. `handle_dns` resolves through the
+host's `getaddrinfo`, which needs to reach `mDNSResponder`; nothing earlier in
+the boot warms that connection, so the query fails and the guest gets an answer
+with no records.
 
-Use the gateway on `hvi`.
+That is also why the gateway path works. `hvi` opens the gateway socket
+**before** confinement, and the sandbox comment names it explicitly among the
+host authority acquired above that line. Everything after only services guest
+I/O with what is already open.
+
+So the gateway is not a workaround on `hvi`. It is the design.
 
 ## The user-mode gateway
 

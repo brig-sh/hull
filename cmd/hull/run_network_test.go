@@ -94,3 +94,53 @@ func TestVzRunnerHonoursNoNet(t *testing.T) {
 		t.Error("vz-runner does not act on --no-net by leaving the network devices empty")
 	}
 }
+
+// A guest on hvi with `--net shared` and no gateway takes an address and
+// reaches nothing: hvi's built-in stack forwards no traffic, and its own
+// deny-default Seatbelt profile denies connect(2) and sendto(2) outright, so
+// there is no version of that configuration that works. Refusing beats booting
+// something that looks networked.
+//
+// The gateway case must keep working, because it is the supported path and the
+// one `hull compose` drives.
+func TestCheckHviNetworking(t *testing.T) {
+	const sock = "/tmp/gw.sock"
+	tests := []struct {
+		name        string
+		vmm         hypervisors.VmmType
+		netMode     string
+		gatewaySock string
+		wantErr     bool
+	}{
+		{name: "hvi shared without a gateway is refused", vmm: hypervisors.HviVmm, netMode: "shared", wantErr: true},
+		{name: "hvi shared with a gateway is allowed", vmm: hypervisors.HviVmm, netMode: "shared", gatewaySock: sock},
+		{name: "hvi none needs no gateway", vmm: hypervisors.HviVmm, netMode: "none"},
+		{name: "hvi none with a gateway", vmm: hypervisors.HviVmm, netMode: "none", gatewaySock: sock},
+		// --net is not validated against a set, so an unrecognised value is
+		// treated as "networking on" everywhere else in the run path. It has
+		// to be refused here too, or the check is bypassed by a typo.
+		{name: "hvi unrecognised net mode is refused", vmm: hypervisors.HviVmm, netMode: "shred", wantErr: true},
+		{name: "vz shared is untouched", vmm: hypervisors.VzVmm, netMode: "shared"},
+		{name: "qemu shared is untouched", vmm: hypervisors.QemuVmm, netMode: "shared"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkHviNetworking(tc.vmm, tc.netMode, tc.gatewaySock)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected a refusal, got nil")
+				}
+				// The message has to name the way out, or it just blocks.
+				for _, want := range []string{"--gateway-sock", "network-gateway", "--net none"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("refusal does not mention %q: %v", want, err)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("expected no error, got %v", err)
+			}
+		})
+	}
+}
