@@ -94,7 +94,7 @@ All events share a common envelope:
 | `schema_version` | `2` | bumped on any schema change, with this page updated |
 | `event` | `command` | one of `command`, `start`, `end`, `metrics`, `crash` |
 | `product` | `brig` | set by the wrapper driving hull; defaults to `hull` |
-| `version` | `0.1.0-rc14` | tool version |
+| `version` | `0.1.0-rc14` | tool version, as `hull version` reports it without the leading `v`: the tag for a release, a pseudo-version such as `0.1.0-rc28.0.20260916191606-8a431dc1aaae` for a build after one, `+dirty` on a modified tree, `dev` for a build with no VCS data |
 | `os` | `26.0` | macOS major.minor only |
 | `arch` | `arm64` | |
 | `install_id` | random UUID | generated locally on first run; not derived from the machine; delete `<store>/telemetry.json` to rotate it |

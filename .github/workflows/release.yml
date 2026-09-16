@@ -54,11 +54,9 @@ jobs:
           # The ref belongs HERE, on the checkout. It used to sit on the
           # setup-go step below, which has no such input and silently ignores
           # unknown ones -- so a workflow_dispatch built whatever branch it was
-          # started from while the tag-matches-VERSION check below compared that
-          # branch's VERSION against the typed tag, both chosen by the same
-          # person. The result was signed, notarized, uploaded under the tag and
-          # sent to the Homebrew tap. The dmg job further down always had this
-          # right.
+          # started from, and the result was signed, notarized, uploaded under
+          # the typed tag and sent to the Homebrew tap. The dmg job further
+          # down always had this right.
           ref: ${{ github.event.inputs.tag || github.ref }}
 
       # Pin the toolchain rather than inheriting whatever Go happens to be
@@ -84,19 +82,24 @@ jobs:
       # without it.
       - uses: ./.github/actions/fetch-hvi-vmm
 
-      - name: Check the tag matches VERSION
-        # Through env, not interpolated into the script. A dispatch input that
-        # lands inside the shell source is a shell on the machine holding the
-        # signing certificate and the notary key -- gated on write access, but
-        # a free one, and there is no reason to leave it open.
-        env:
-          INPUT_TAG: ${{ github.event.inputs.tag }}
+      # goreleaser checks the tree before its hooks run, so its `go mod tidy`
+      # hook could change go.mod or go.sum afterwards and nothing would fail.
+      # Every binary would then embed +dirty and the release would say it was
+      # built from a modified tree. Tidy here first, and stop on any change.
+      - name: Check the tree stays clean after go mod tidy
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
-          [ -z "$INPUT_TAG" ] || TAG="$INPUT_TAG"
-          TAG="${TAG#v}"
-          [ "$(cat VERSION)" = "$TAG" ] || {
-            echo "VERSION file ($(cat VERSION)) does not match tag $TAG" >&2; exit 1; }
+          set -euo pipefail
+          go mod tidy
+          # status, not diff: Go keys its dirty flag on what `git status
+          # --porcelain` reports, which counts a staged or an untracked file
+          # and a plain diff does not. Scoped to the two files tidy can touch,
+          # so unrelated untracked content on a persistent runner -- or inside
+          # the hvi-vmm submodule -- does not fail a release.
+          changed="$(git status --porcelain -- go.mod go.sum)"
+          [ -z "$changed" ] || {
+            echo "go mod tidy changed the module files:" >&2
+            echo "$changed" >&2
+            exit 1; }
 
       - name: Import the Developer ID certificate into an ephemeral keychain
         env:
