@@ -89,8 +89,8 @@ jobs:
               # it is a code change like any other. It was not listed here, and
               # the consequence was immediate: a bump carrying a virtio-fs fix
               # went to main with "unit + e2e (boots real VMs): skipped",
-              # because the only files that changed were VERSION and a
-              # submodule pointer. The one job that boots hvi is the one that
+              # because the only files that changed were a version bump and
+              # a submodule pointer. The one job that boots hvi is the one that
               # did not run.
               #
               # A gitlink shows up in a diff as the submodule's own path, so

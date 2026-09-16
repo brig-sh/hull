@@ -13,8 +13,17 @@
 # limitations under the License.
 
 # Versioning variables
-COMMIT         := $(shell git describe --dirty --long --always 2>/dev/null || echo dev)
-VERSION        := $(shell cat $(CURDIR)/VERSION 2>/dev/null || echo 0.0.0)-$(COMMIT)
+#
+# No version is stamped: the binary reads the tag, the commit and the modified
+# flag the Go toolchain embeds from the checkout (see internal/buildinfo). In
+# a linked git worktree the toolchain embeds none, so git's own answers are
+# passed as well; the binary reads them only when the toolchain's are missing.
+BUILDINFO      := github.com/brig-sh/hull/internal/buildinfo
+GITFLAGS       := \
+	-X $(BUILDINFO).gitCommit=$(shell git rev-parse HEAD 2>/dev/null) \
+	-X $(BUILDINFO).gitCommitTime=$(shell git log -1 --format=%cI 2>/dev/null) \
+	-X $(BUILDINFO).gitDescribe=$(shell git describe --tags --long --match 'v[0-9]*' 2>/dev/null) \
+	-X $(BUILDINFO).gitModified=$(shell test -z "$$(git status --porcelain 2>/dev/null)" || echo true)
 
 # Path variables
 #? BUILD_DIR Directory to place produced binaries (default: ${CWD}/dist)
@@ -40,7 +49,7 @@ CARGO           ?= cargo
 
 # Golang variables
 GO             ?= go
-LDFLAGS        := -X main.version=$(VERSION) -s -w
+LDFLAGS        := $(GITFLAGS) -s -w
 # Telemetry ingestion endpoint (NOFireAI/engineering#1002). Left empty
 # (dev builds), the client never sends anything.
 ifneq ($(TELEMETRY_ENDPOINT),)
@@ -74,7 +83,15 @@ CODESIGN_FLAGS    := --force --options runtime $(if $(CODESIGN_KEYCHAIN),--keych
 #? NOTARY_PROFILE notarytool keychain profile created with `xcrun notarytool store-credentials`
 NOTARY_PROFILE    ?= urunc-notary
 DMG               := $(BUILD_DIR)/hull.dmg
-RELEASE_VERSION   := $(shell cat $(CURDIR)/VERSION 2>/dev/null || echo 0.0.0)
+# The tag is the version. `make release` is a local dry run of what goreleaser
+# does on a tag, and goreleaser takes its version from the tag too.
+#
+# The fallback is make's, not the shell's. A `|| echo` here would bind to the
+# whole pipeline and never fire, because the pipeline's status is the last
+# command's and that one succeeds on empty input -- which is how a clone with
+# no tags would name its tarball hull--arm64.tar.gz.
+RELEASE_TAG       := $(shell git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null)
+RELEASE_VERSION   := $(or $(patsubst v%,%,$(RELEASE_TAG)),0.0.0)
 TARBALL           := $(BUILD_DIR)/hull-$(RELEASE_VERSION)-arm64.tar.gz
 
 ## default Build and sign hull + vz-runner.

@@ -75,7 +75,7 @@ func initTelemetry(cmd *cli.Command) {
 	}
 	telemetryClient = telemetry.Init(telemetry.Config{
 		StoreDir:  cmd.String("store-dir"),
-		Version:   version,
+		Version:   build.Version,
 		OSVersion: osProductVersion(),
 		Uname:     unameString(),
 		// CI counts as non-interactive (the conventional CI env var,

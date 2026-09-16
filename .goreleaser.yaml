@@ -24,6 +24,12 @@ before:
   hooks:
     - go mod tidy
 
+# No version is stamped into the binary. `hull version` reads the tag, the
+# commit and the modified flag the Go toolchain embeds from the checkout, so
+# what a release reports depends on two things here: a full clone, or the tag
+# is not reachable and the version reads as a bare pseudo-version; and a
+# `go mod tidy` hook that leaves the tree clean, or every release reads as
+# +dirty.
 builds:
   - id: hull
     main: ./cmd/hull
@@ -32,7 +38,7 @@ builds:
     goos: [darwin]
     goarch: [arm64]
     ldflags:
-      - -s -w -X main.version={{.Version}}
+      - -s -w
       # The Makefile bakes this in but GoReleaser builds the released binary,
       # so without it every published hull shipped with telemetry inert.
       - -X github.com/brig-sh/hull/internal/telemetry.Endpoint={{ .Env.TELEMETRY_ENDPOINT }}

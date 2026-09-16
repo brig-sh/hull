@@ -137,17 +137,26 @@ A **rebuild** does invalidate a signature, because it produces different bytes.
 `make macos` handles that by signing after it builds. A **copy** does not: see
 [signing.md](signing.md#does-copying-a-binary-break-its-signature).
 
-## `--version` is absent from a plain `go build`
+## What `hull version` reports, and the one build that cannot say
 
-The version string arrives through an `-ldflags -X`, which the Makefile and
-goreleaser supply and a bare `go build` does not. The CLI library hides the
-version flag when the string is empty, so a hand-built binary answers:
+No version is stamped at link time. `hull version` and `hull --version` read
+what the Go toolchain embedded from the checkout: the version it derives from
+the nearest reachable tag, the commit, its time, and whether the tree was
+modified. A bare `go build` reports all of it, the same as a `make` build or a
+released binary.
+
+The exception is a build in a **linked git worktree**. Its `.git` is a file
+rather than a directory, which the toolchain does not read as a repository, so
+it embeds no VCS data at all and the binary says:
 
 ```
-flag provided but not defined: -version
+hull dev (go1.26.5, darwin/arm64)
 ```
 
-That is expected. Build with `make` if you need `hull --version`.
+`make` passes git's own commit, time, nearest tag and modified flag for that
+case, and the binary uses them only when the toolchain embedded nothing. So
+build with `make` in a worktree if the version matters. See
+`internal/buildinfo`.
 
 ## Testing
 
