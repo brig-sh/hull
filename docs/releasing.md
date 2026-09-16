@@ -15,29 +15,34 @@ build, see [signing.md](signing.md).
 
 ## Cutting a release
 
-1. Bump `VERSION`. The tag must match it.
-2. Commit, tag and push:
+1. Tag and push. The tag is the version -- there is no file to bump, and
+   nothing to keep in step with it:
 
    ```bash
-   git tag "v$(cat VERSION)"
-   git push origin "v$(cat VERSION)"
+   git tag v0.1.0-rc29
+   git push origin v0.1.0-rc29
    ```
 
-3. Wait for `release.yml`. It signs and notarizes `vz-runner` and `hvi`, then
+   `hull version` reports what the Go toolchain derived from the checkout, so
+   a binary built at that tag says the tag, and one built after it says a
+   pseudo-version naming the commit it came from. A build from a tree with
+   uncommitted changes says `+dirty`.
+
+2. Wait for `release.yml`. It signs and notarizes `vz-runner` and `hvi`, then
    runs goreleaser, which builds and notarizes `hull`, packs all three into
    `hull-<version>-arm64.tar.gz`, writes `checksums.txt` with a keyless cosign
    signature, generates an SBOM for the archive, and drafts the GitHub release
    with notes from the pull request titles.
-4. A separate `dmg` job builds `hull.dmg`, notarizes and staples it, signs it
+3. A separate `dmg` job builds `hull.dmg`, notarizes and staples it, signs it
    with cosign, and attaches `hull.dmg`, `hull.dmg.sig` and `hull.dmg.pem` to
    the release.
-5. Publish the draft release.
-6. Update the tap. For a stable tag, goreleaser opens a pull request against
+4. Publish the draft release.
+5. Update the tap. For a stable tag, goreleaser opens a pull request against
    `brig-sh/homebrew-brig` with a new `Casks/hull.rb`; review and merge it. For
    a release candidate the cask is not published, because `skip_upload` is set
    to `auto`. If the candidate should be installable, edit `version` and
    `sha256` in the tap's `Casks/hull.rb` by hand.
-7. Regenerate the changelog. `release.yml` does not touch `CHANGELOG.md`:
+6. Regenerate the changelog. `release.yml` does not touch `CHANGELOG.md`:
 
    ```bash
    scripts/changelog.sh          # or: git-cliff --config cliff.toml -o CHANGELOG.md

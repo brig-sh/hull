@@ -26,14 +26,18 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/brig-sh/hull/internal/buildinfo"
 	"github.com/brig-sh/hull/pkg/store"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v3"
 )
 
+// build is what this binary reports about itself: the version the Go
+// toolchain derived from the checkout, the commit, and whether the tree was
+// modified. Nothing is stamped at link time; see internal/buildinfo.
 var (
-	version string
-	log     = logrus.WithField("subsystem", "hull")
+	build = buildinfo.Read()
+	log   = logrus.WithField("subsystem", "hull")
 )
 
 func main() {
@@ -57,7 +61,7 @@ func main() {
 	app := &cli.Command{
 		Name:    "hull",
 		Usage:   "native macOS container CLI for unikernels",
-		Version: version,
+		Version: build.String(),
 		Flags: []cli.Flag{
 			&cli.BoolFlag{
 				Name:  "debug",
@@ -103,6 +107,7 @@ func main() {
 			composeCommand(),
 			networkGatewayCommand(),
 			telemetryCommand(),
+			versionCommand(),
 		},
 	}
 

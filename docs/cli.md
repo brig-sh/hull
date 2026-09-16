@@ -18,16 +18,16 @@ These are accepted on every command and subcommand.
 | `--unattended` | off | skip the telemetry consent prompt. **Telemetry stays on.** Combine with `--dnt` to opt out |
 | `--dnt` | off | record a telemetry opt-out, persisted. Same effect as `DO_NOT_TRACK=1` |
 | `--help`, `-h` | | show help |
-| `--version` | | print the version. **Present only in a release build**, see below |
+| `--version` | | print the version and the build behind it; the same line as `hull version` |
 
-A plain `go build` leaves the version string empty, and the CLI library then
-hides the flag, so a locally built binary answers
-`flag provided but not defined: -version`. A `make` or released build injects
-the version through ldflags and has the flag.
+Every build has the flag, a plain `go build` included: the version is what the
+Go toolchain derived from the checkout, not a string stamped at link time. See
+[build.md](build.md#what-hull-version-reports-and-the-one-build-that-cannot-say)
+for the one build that reports `dev`.
 
 ## Commands
 
-There are eighteen top-level commands. `network-gateway` is the only hidden one:
+There are nineteen top-level commands. `network-gateway` is the only hidden one:
 it does not appear in `hull --help`, but it runs and prints its own help when
 named. No flag anywhere in the tree is hidden.
 
@@ -50,6 +50,7 @@ named. No flag anywhere in the tree is hidden.
 | `store` | manage the volume the store lives on |
 | `compose` | run a multi-service compose file, one VM per service |
 | `telemetry` | control usage and crash telemetry |
+| `version` | print the version and the build behind this binary |
 | `network-gateway` | run the user-mode network gateway daemon (hidden) |
 
 ## `hull run`
@@ -150,6 +151,7 @@ as a default that an explicit `--env TERM` beats.
 | `store detach` | `--force` detach even with files still open |
 | `store compact` | `--force` detach even with files still open, before compacting |
 | `telemetry on\|off\|status` | none |
+| `version` | `--json` prints the version, full commit, commit time, modified flag, Go version and platform |
 
 `-t` means two different things: a pseudo-terminal on `exec`, and a force-kill
 timeout in seconds on `stop`.
@@ -237,8 +239,11 @@ workload's status.
 
 ## JSON output
 
-Two commands emit JSON: `hull images --json` and `hull inspect`, which always
-does and takes no flags.
+Three commands emit JSON: `hull images --json`, `hull version --json`, and
+`hull inspect`, which always does and takes no flags.
+
+`hull version --json` leaves `commit` and `commitTime` out, rather than
+printing them empty, for a build that carried no VCS data.
 
 `hull images --json` prints one record per stored image with whole digests, and
 omits `indexDigest` and `platform` from a record that has none rather than

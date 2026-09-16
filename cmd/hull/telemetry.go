@@ -73,6 +73,10 @@ func initTelemetry(cmd *cli.Command) {
 	if telemetryCmdName == "telemetry" || telemetryCmdName == "network-gateway" {
 		return
 	}
+	// Without the leading v, as goreleaser's {{.Version}} spelled it when it was
+	// stamped: every release before this one reported 0.1.0-rcN, and a v on the
+	// next would split one series in two for anything that groups by version.
+	version := strings.TrimPrefix(build.Version, "v")
 	telemetryClient = telemetry.Init(telemetry.Config{
 		StoreDir:  cmd.String("store-dir"),
 		Version:   version,
