@@ -171,6 +171,54 @@ func sendStartEvent(backend string, started bool) {
 	})
 }
 
+// readyProbeBudget bounds how long the run path keeps asking the guest
+// agent whether it is up. The probe runs on its own goroutine, so the
+// budget costs the user nothing; it exists so a guest that ships no agent
+// stops being dialed once a second forever. readyProbePerTry bounds one
+// session, the same as the compose pre-warms: on vz a dial succeeds as
+// soon as the host-side bridge is up, and a session opened before the
+// guest listener exists can hang rather than EOF.
+const (
+	readyProbeBudget = 2 * time.Minute
+	readyProbePerTry = 10 * time.Second
+)
+
+// probeGuestReady asks the guest agent to run /bin/true until it answers or
+// budget runs out, and reports whether it answered. An agent-side error
+// reply (a minimal rootfs with no /bin/true) counts as an answer: the agent
+// is up, which is all the probe asks. Only transport-class failures are
+// retried; any other error (the instance is not running any more, or has
+// no record) ends the probe as "never answered".
+func probeGuestReady(s *store.Store, instanceID string, budget time.Duration) bool {
+	_, _, err := execCaptureRetry(s, instanceID, []string{"/bin/true"}, nil, "", readyProbePerTry, budget)
+	return err == nil || errors.Is(err, errGuestAgent)
+}
+
+// readyEventFields builds the `ready` event: how long the guest took to
+// become usable, in whole milliseconds, measured from the VMM spawn
+// (InstanceState.StartTime) to the guest agent's first answer. A negative
+// duration (a clock that stepped) is reported as 0 rather than as a
+// meaningless negative number.
+func readyEventFields(backend string, sinceStart time.Duration) map[string]string {
+	if sinceStart < 0 {
+		sinceStart = 0
+	}
+	return map[string]string{
+		"backend":  backend,
+		"ready_ms": strconv.FormatInt(sinceStart.Milliseconds(), 10),
+	}
+}
+
+// sendReadyEvent reports that the guest came up, and how long after the
+// VMM spawn. It is a separate event from `start` on purpose: `start` is
+// sent the instant the process exists and says nothing about the guest,
+// and holding it back until the probe resolved would either delay it by
+// the whole budget on an agent-less guest or force a bogus value. A guest
+// that never answers sends nothing, so an absent event is the signal.
+func sendReadyEvent(backend string, sinceStart time.Duration) {
+	telemetryClient.Send("ready", readyEventFields(backend, sinceStart))
+}
+
 // sendEndEvent reports the instance lifetime.
 func sendEndEvent(backend string, lifetime time.Duration) {
 	telemetryClient.Send("end", map[string]string{
