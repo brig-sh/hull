@@ -100,12 +100,16 @@ homebrew_casks:
     repository:
       owner: brig-sh
       name: homebrew-brig
-      branch: main
+      # The branch the cask is pushed to, and the head of the pull request
+      # below. `main` here would mean a direct push to the tap, with no PR.
+      branch: hull-{{ .Version }}
       # Open a pull request rather than pushing to the tap. The cask is what
       # people install; a bad one is worth a second pair of eyes, and the PR
       # is a place to see the diff.
       pull_request:
         enabled: true
+        base:
+          branch: main
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     homepage: https://github.com/brig-sh/hull
     description: Run unikernels and sandboxed Linux containers as microVMs on Apple Silicon
