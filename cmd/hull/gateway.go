@@ -316,6 +316,13 @@ func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, ga
 	for {
 		conn, err := l.Accept()
 		if err != nil {
+			// The goroutine above closes the listener to unblock this Accept,
+			// so a closed listener after a signal is the shutdown working.
+			// Returned as an error it leaves every clean stop reporting
+			// "use of closed network connection" and a non-zero exit.
+			if sigCtx.Err() != nil && errors.Is(err, net.ErrClosed) {
+				return nil
+			}
 			return err
 		}
 		go handleGatewayMember(ctx, vn, conn.(*net.UnixConn))
