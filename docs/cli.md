@@ -201,7 +201,7 @@ Hidden from `hull --help`. `hull compose` starts one per project; a standalone
 | Flag | Default | What it does |
 |---|---|---|
 | `--socket <path>` | required | control socket path |
-| `--api <path>` | | HTTP API socket path, a probe endpoint |
+| `--api <path>` | | HTTP API socket path: the health probe, and `/forwards`, which publishes and withdraws host ports. Chmodded `0600` |
 | `--qemu-socket <path>` | derived from `--socket` plus `.qemu` | stream netdev socket. Carries **both QEMU and hvi** members |
 | `--subnet <cidr>` | `10.87.0.0/24` | virtual subnet |
 | `--gateway-ip <ip>` | `10.87.0.1` | gateway address on that subnet |

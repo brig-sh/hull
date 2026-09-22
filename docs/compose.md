@@ -65,6 +65,17 @@ each service a static IP on the subnet (gateway at `.1`, services from
 - **NAT egress** to the outside world;
 - **host port forwards** from `ports:`.
 
+One host address carries one service. Two services publishing `8080:80` claim
+`127.0.0.1:8080` twice, and `compose config` and `compose up` both refuse the
+file and name both services. Two different addresses on one port are left to
+the gateway, which offers the pair to the host kernel: macOS takes
+`127.0.0.1:8080:80` beside `0.0.0.0:8080:81` for TCP and refuses the pair for
+UDP.
+
+`config` reads each published port by the gateway's own grammar, so a port the
+gateway would refuse -- `0:80`, say -- is named here rather than at `up`,
+where the only report is a pointer to the gateway's log.
+
 This is the same user-mode gateway path described in
 [`networking.md`](./networking.md): unix-socket networking, **no vmnet, no
 `com.apple.vm.networking` entitlement, no root, no re-signed QEMU**. For
