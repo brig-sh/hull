@@ -19,7 +19,7 @@ connected at all.
 | a guest that can reach the internet, least setup | `--hypervisor vz --net shared` |
 | the same behavior on every backend | `--gateway-sock` |
 | a guest on `hvi` that can reach anything | `--gateway-sock`. `--net shared` will not work |
-| host ports forwarded into a guest | the gateway, with `--forward` |
+| host ports forwarded into a guest | the gateway, with `--forward` or the `/forwards` API |
 | several services that talk to each other by name | `hull compose`, which sets up a gateway for you |
 | an egress policy | the gateway. A policy is a gateway flag |
 | no network at all | `--net none`, the default |
@@ -153,10 +153,75 @@ hull network-gateway --socket /tmp/gw.sock \
 
 `--forward` exposes a guest port on the host, as
 `hostaddr:port=guestip:port`. It is ingress, and no egress rule applies to it.
+Prefix the host address with `udp:` for a UDP forward.
+
+Leaving the host address out, as `:8080=10.87.0.10:80`, means every interface.
+It is recorded as `0.0.0.0:8080`, so a read of the set names the address the
+gateway bound. The host must be an address and not a name: a forward published
+as `localhost:8080` binds `127.0.0.1:8080`, and could then not be withdrawn
+under either spelling.
+
+Two forwards cannot share a local address, and the gateway refuses the second
+rather than starting. Whether two *different* addresses can share a port is
+the host kernel's answer, not the gateway's: macOS binds `0.0.0.0:8080` beside
+`127.0.0.1:8080` for TCP, because Go asks for `SO_REUSEADDR` on every TCP
+listener, and refuses the same pair for UDP. Linux refuses both. So the
+gateway offers the pair to the kernel and reports what it says.
 
 `--host name=ip` adds a static A record the gateway's resolver serves. That is
 how services find each other by name. `hull compose` writes these for you from
 the service names.
+
+### Publishing a port on a running gateway
+
+The forwards a gateway starts with are not the only ones it can have. With
+`--api` it serves `/forwards` on that socket, and the set can be changed while
+guests are attached:
+
+```bash
+hull network-gateway --socket /tmp/gw.sock --api /tmp/gw.api &
+
+# what is published
+curl --unix-socket /tmp/gw.api http://gw/forwards
+
+# publish 10.87.0.10:3000 on the host's 127.0.0.1:3000
+curl --unix-socket /tmp/gw.api -X POST http://gw/forwards \
+  -d '{"protocol":"tcp","local":"127.0.0.1:3000","remote":"10.87.0.10:3000"}'
+
+# take it away again
+curl --unix-socket /tmp/gw.api -X DELETE \
+  'http://gw/forwards?protocol=tcp&local=127.0.0.1:3000'
+```
+
+`protocol` may be left out and means `tcp`. A `POST` answers 201 with the
+forward **as installed** -- the defaults filled in, so a request that omitted
+the protocol is answered `tcp` and a later `GET` agrees with it. It answers 409
+when something is already published on that local address -- including a
+a port the host already holds, whether this gateway published it or
+something else did -- and 400 for a forward the gateway cannot read. A
+`DELETE` answers 200 with the forward that went, 404 when nothing holds that
+address, and 400 for a protocol or an address it cannot read, which is what
+`POST` answers for the same input.
+
+`local` takes the spellings the flag takes, so `:3000` means every interface
+and reads back as `0.0.0.0:3000`, and a host named rather than addressed is a
+400.
+
+The guest side must be an IPv4 address. The gateway forwards no IPv6 and the
+guest network is IPv4-only, so an IPv6 remote is refused with a 400 rather than
+reaching the forwarder and failing there.
+
+The `--api` socket binds host ports, so treat it as a control socket rather
+than a probe. Anything that can open it can publish a port, `0.0.0.0`
+included. The gateway gives it mode `0600` before it answers under that name,
+so the gate is the owner rather than whatever the umask happened to leave.
+Keep it that way, and do not hand it to a guest. The control and QEMU sockets
+are not narrowed: a member connects to those, and what may reach them is a
+separate question from who may publish a port.
+
+This is the one thing about a running gateway that can change. The subnet and
+the egress rules are read once at startup, so changing either means restarting
+the gateway, which drops every member of its network.
 
 ### IPv6 is not forwarded
 

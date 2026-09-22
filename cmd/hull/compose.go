@@ -37,6 +37,8 @@ import (
 	"time"
 
 	"github.com/compose-spec/compose-go/v2/types"
+
+	"github.com/brig-sh/hull/internal/netgw"
 	"github.com/urfave/cli/v3"
 	"gopkg.in/yaml.v3"
 
@@ -333,8 +335,9 @@ func resolveServiceVolume(v types.ServiceVolumeConfig, volRoot, project string) 
 // deliberate security choice; an explicit 0.0.0.0 exposes a port beyond the
 // machine.
 func resolvePort(p types.ServicePortConfig) (hostAddr, hostPort, guestPort string, err error) {
-	// Named as the file writes the mapping. `80/udp` is not a string the
-	// reader can find when what they wrote was `0:80/udp`.
+	// Named as the file writes the mapping, the way the refusals below it
+	// are. `80/udp` is not a string the reader can find when they wrote
+	// `0:80/udp`.
 	if p.Protocol != "" && !strings.EqualFold(p.Protocol, "tcp") {
 		return "", "", "", fmt.Errorf("port %q: %s port mappings are not supported yet (TCP only)", portSpec(p), p.Protocol)
 	}
@@ -348,8 +351,34 @@ func resolvePort(p types.ServicePortConfig) (hostAddr, hostPort, guestPort strin
 	return hostAddr, p.Published, strconv.Itoa(int(p.Target)), nil
 }
 
+// projectPortLocal reads one published port and renders the host address as
+// the gateway records it.
+//
+// netgw.ParseLocal is the gateway's own grammar, so a port it would refuse is
+// refused here instead of at up, where the only report is a pointer to the
+// gateway's log.
+//
+// # Errors
+//
+// Returns an error naming the service for a mapping run cannot forward, and
+// for a host address outside what a forward can carry.
+func projectPortLocal(service string, port types.ServicePortConfig) (local, guestPort string, err error) {
+	hostAddr, hostPort, guestPort, err := resolvePort(port)
+	if err != nil {
+		return "", "", fmt.Errorf("service %q: %w", service, err)
+	}
+	local, err = netgw.ParseLocal(net.JoinHostPort(hostAddr, hostPort))
+	if err != nil {
+		// Named as the file writes it. The refusal reads the resolved
+		// address, and `127.0.0.1:0` is not a string the reader can find in
+		// their compose file when all they wrote was `0:80`.
+		return "", "", fmt.Errorf("service %q: port %q: %w", service, portSpec(port), err)
+	}
+	return local, guestPort, nil
+}
+
 // portSpec renders a published port the way a compose file writes one, for a
-// message about the port rather than about what it was resolved to.
+// message about the port rather than about the forward it became.
 func portSpec(p types.ServicePortConfig) string {
 	spec := p.Published + ":" + strconv.Itoa(int(p.Target))
 	if p.HostIP != "" {
@@ -359,6 +388,37 @@ func portSpec(p types.ServicePortConfig) string {
 		spec += "/" + p.Protocol
 	}
 	return spec
+}
+
+// checkProjectPorts validates every published port in startup order, and
+// refuses two services that publish one host address.
+//
+// The gateway starts before any instance is created, so a forward it refuses
+// stops the project with a pointer to its log and nothing else. Reading the
+// ports here names the service and the address instead, and config runs the
+// same check, so a file that fails at up does not pass config clean.
+//
+// Only an identical address is refused. Whether two different addresses can
+// share a port is the host kernel's answer -- darwin binds 0.0.0.0:8080
+// beside 127.0.0.1:8080 for TCP and Linux does not -- so the pair goes to the
+// gateway, which lets the bind decide. Both services are named: the file
+// claims the address twice and neither line is more at fault than the other.
+func checkProjectPorts(p *types.Project, order []string) error {
+	claimedBy := map[string]string{}
+	for _, name := range order {
+		for _, port := range p.Services[name].Ports {
+			local, _, err := projectPortLocal(name, port)
+			if err != nil {
+				return err
+			}
+			if first, taken := claimedBy[local]; taken {
+				return fmt.Errorf("services %q and %q both publish %s; a host address carries one service",
+					first, name, local)
+			}
+			claimedBy[local] = name
+		}
+	}
+	return nil
 }
 
 func composeCommand() *cli.Command {
@@ -985,17 +1045,20 @@ func composeUp(ctx context.Context, cmd *cli.Command) error {
 		return fmt.Errorf("%d services exceed the %s subnet's capacity (%d usable service addresses); use a larger --subnet", len(order), subnet, hostSpace-10)
 	}
 	gatewayAddr := offsetIP(subnetNet.IP, 1).String()
+	if err := checkProjectPorts(p, order); err != nil {
+		return err
+	}
 	ips := map[string]string{}
 	var forwards []string
 	for i, svcName := range order {
 		ip := offsetIP(subnetNet.IP, 10+i).String()
 		ips[svcName] = ip
 		for _, port := range p.Services[svcName].Ports {
-			hostAddr, hostPort, guestPort, err := resolvePort(port)
+			local, guestPort, err := projectPortLocal(svcName, port)
 			if err != nil {
-				return fmt.Errorf("service %q: %w", svcName, err)
+				return err
 			}
-			forwards = append(forwards, fmt.Sprintf("%s:%s=%s:%s", hostAddr, hostPort, ip, guestPort))
+			forwards = append(forwards, fmt.Sprintf("%s=%s", local, net.JoinHostPort(ip, guestPort)))
 		}
 	}
 	hostEntries := projectHostEntries(order, ips, project, p.Services)
@@ -1450,15 +1513,10 @@ func composeConfigYAML(ctx context.Context, cmd *cli.Command) ([]byte, error) {
 	if err := checkInstanceNames(p, projectName(cmd)); err != nil {
 		return nil, err
 	}
-	// Mirrors the pass composeUp runs while computing its gateway forwards:
-	// every port mapping is validated up front, in startup order, before
-	// anything is rendered.
-	for _, name := range order {
-		for _, port := range p.Services[name].Ports {
-			if _, _, _, err := resolvePort(port); err != nil {
-				return nil, fmt.Errorf("service %q: %w", name, err)
-			}
-		}
+	// The pass composeUp runs before it computes its gateway forwards, so a
+	// port this file cannot forward is named here rather than at up.
+	if err := checkProjectPorts(p, order); err != nil {
+		return nil, err
 	}
 	hydrated, err := hydrateConfigOutput(p)
 	if err != nil {

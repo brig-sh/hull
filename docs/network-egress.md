@@ -209,7 +209,7 @@ type it. It can be run by hand, and the flags beyond the egress policy are:
 
 ```
 --socket PATH               control socket (required); guests and `run --gateway-sock` connect here
---api PATH                  HTTP API socket for the healthcheck probe endpoint
+--api PATH                  HTTP API socket: healthcheck probe, and /forwards
 --qemu-socket PATH          unix socket for QEMU (and hvi) stream-netdev members
 --subnet CIDR               virtual subnet, default 10.87.0.0/24
 --gateway-ip ADDR           the gateway's own address on it, default 10.87.0.1

@@ -303,3 +303,97 @@ func TestClaimUnixSocketRefusesANonSocketPath(t *testing.T) {
 		t.Errorf("file at %s = %q, want %q", path, got, content)
 	}
 }
+
+// Claiming the API socket disturbs no other socket in its directory.
+//
+// It used to stage on path+"~", and remove that name unconditionally first.
+// A gateway serving a socket of that name -- a legal path somebody may have
+// chosen -- had its socket file unlinked while it stayed alive and
+// unreachable. The staging name is in a directory of this gateway's own now,
+// so nothing a caller could be serving shares it.
+func TestClaimOwnerOnlyUnixSocketLeavesNeighbouringSocketsAlone(t *testing.T) {
+	dir := shortSocketDir(t)
+	path := socketPath(t, dir, "api")
+
+	neighbour := path + "~"
+	nl, err := net.Listen("unix", neighbour)
+	if err != nil {
+		t.Fatalf("listen on %s: %v", neighbour, err)
+	}
+	defer func() { _ = nl.Close() }()
+
+	l, err := claimOwnerOnlyUnixSocket(path)
+	if err != nil {
+		t.Fatalf("claimOwnerOnlyUnixSocket: %v", err)
+	}
+	closeReturnedListener(t, l)
+
+	if _, err := os.Stat(neighbour); err != nil {
+		t.Fatalf("the neighbouring socket %s is gone: %v", neighbour, err)
+	}
+	c, err := net.Dial("unix", neighbour)
+	if err != nil {
+		t.Fatalf("the neighbouring socket %s no longer answers: %v", neighbour, err)
+	}
+	_ = c.Close()
+}
+
+// The API socket answers only its owner, whatever the umask.
+func TestClaimOwnerOnlyUnixSocketIsOwnerOnly(t *testing.T) {
+	path := socketPath(t, shortSocketDir(t), "api")
+	l, err := claimOwnerOnlyUnixSocket(path)
+	if err != nil {
+		t.Fatalf("claimOwnerOnlyUnixSocket: %v", err)
+	}
+	defer closeReturnedListener(t, l)
+
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("%s is mode %v, want 0600", path, perm)
+	}
+	if c, err := net.Dial("unix", path); err != nil {
+		t.Fatalf("the socket does not answer its owner: %v", err)
+	} else {
+		_ = c.Close()
+	}
+}
+
+// Nothing is left behind in the directory but the socket itself.
+func TestClaimOwnerOnlyUnixSocketStagesNothingPermanent(t *testing.T) {
+	dir := shortSocketDir(t)
+	path := socketPath(t, dir, "api")
+	l, err := claimOwnerOnlyUnixSocket(path)
+	if err != nil {
+		t.Fatalf("claimOwnerOnlyUnixSocket: %v", err)
+	}
+	defer closeReturnedListener(t, l)
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	for _, e := range entries {
+		if e.Name() != filepath.Base(path) {
+			t.Fatalf("%s left behind in %s", e.Name(), dir)
+		}
+	}
+}
+
+// A live gateway keeps its API socket.
+func TestClaimOwnerOnlyUnixSocketRefusesALiveListener(t *testing.T) {
+	path := socketPath(t, shortSocketDir(t), "api")
+	first, err := claimOwnerOnlyUnixSocket(path)
+	if err != nil {
+		t.Fatalf("first claim: %v", err)
+	}
+	defer closeReturnedListener(t, first)
+
+	second, err := claimOwnerOnlyUnixSocket(path)
+	closeReturnedListener(t, second)
+	if err == nil {
+		t.Fatal("a second claim took a socket a live gateway is serving")
+	}
+}

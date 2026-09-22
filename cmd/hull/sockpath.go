@@ -30,10 +30,21 @@ const unixSocketPathMax = len(unix.RawSockaddrUnix{}.Path) - 1
 // the path, its length and the way out. The store directory is the only
 // part of the path a user controls, so that is what the message points at.
 func checkUnixSocketPath(what, path string) error {
+	return checkUnixSocketPathRemedy(what, path,
+		"move the store to a shorter path (--store-dir) or use a shorter instance name")
+}
+
+// checkUnixSocketPathRemedy is checkUnixSocketPath for a socket whose path a
+// flag gives directly, where --store-dir is not the way out.
+//
+// # Errors
+//
+// Returns an error naming the path, its length and remedy, for a path the
+// kernel cannot bind.
+func checkUnixSocketPathRemedy(what, path, remedy string) error {
 	if len(path) <= unixSocketPathMax {
 		return nil
 	}
-	return fmt.Errorf("%s socket path is %d bytes, the limit for a unix socket on this OS is %d: %s\n"+
-		"move the store to a shorter path (--store-dir) or use a shorter instance name",
-		what, len(path), unixSocketPathMax, path)
+	return fmt.Errorf("%s socket path is %d bytes, the limit for a unix socket on this OS is %d: %s\n%s",
+		what, len(path), unixSocketPathMax, path, remedy)
 }

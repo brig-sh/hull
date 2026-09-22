@@ -31,7 +31,6 @@ import (
 	"math"
 	"net"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/containers/gvisor-tap-vsock/pkg/services/dhcp"
@@ -67,8 +66,9 @@ type Config struct {
 	GatewayIP string
 	// GatewayMacAddress is the gateway's MAC on the virtual switch.
 	GatewayMacAddress string
-	// Forwards maps hostaddr:port to guestip:port for host port forwarding.
-	Forwards map[string]string
+	// Forwards are the host listeners the gateway starts with. More can be
+	// installed on a running gateway; see forward.go.
+	Forwards []Forward
 	// DNSZones are records the gateway's own resolver answers from.
 	DNSZones []gvntypes.Zone
 	// Egress is the policy every connection out of the virtual network is
@@ -92,6 +92,7 @@ type Network struct {
 	stack         *stack.Stack
 	networkSwitch *tap.Switch
 	ipPool        *tap.IPPool
+	forwards      *forwards
 	egress        *Policy
 	resolver      resolver
 	egressRefresh time.Duration
@@ -121,7 +122,8 @@ func New(cfg Config) (*Network, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot create network stack: %w", err)
 	}
-	if err := addServices(cfg, s, ipPool); err != nil {
+	fwd, err := addServices(cfg, s, ipPool)
+	if err != nil {
 		return nil, fmt.Errorf("cannot add network services: %w", err)
 	}
 
@@ -129,6 +131,7 @@ func New(cfg Config) (*Network, error) {
 		stack:         s,
 		networkSwitch: networkSwitch,
 		ipPool:        ipPool,
+		forwards:      fwd,
 		egress:        cfg.Egress,
 		resolver:      upstreamResolver(cfg),
 		egressRefresh: cfg.EgressRefresh,
@@ -230,7 +233,7 @@ func createStack(cfg Config, endpoint stack.LinkEndpoint) (*stack.Stack, error) 
 	return s, nil
 }
 
-func addServices(cfg Config, s *stack.Stack, ipPool *tap.IPPool) error {
+func addServices(cfg Config, s *stack.Stack, ipPool *tap.IPPool) (*forwards, error) {
 	dial := cfg.dial
 	if dial == nil {
 		dial = net.Dial
@@ -240,10 +243,10 @@ func addServices(cfg Config, s *stack.Stack, ipPool *tap.IPPool) error {
 	s.SetTransportProtocolHandler(udp.ProtocolNumber, udpForwarder(s, cfg.Egress, dial, rejects).HandlePacket)
 
 	if err := dnsServer(cfg, s); err != nil {
-		return err
+		return nil, err
 	}
 	if err := dhcpServer(cfg, s, ipPool); err != nil {
-		return err
+		return nil, err
 	}
 	return forwardHostVM(cfg, s)
 }
@@ -300,16 +303,14 @@ func dhcpServer(cfg Config, s *stack.Stack, ipPool *tap.IPPool) error {
 	return nil
 }
 
-func forwardHostVM(cfg Config, s *stack.Stack) error {
-	fw := forwarder.NewPortsForwarder(s)
-	for local, remote := range cfg.Forwards {
-		if strings.HasPrefix(local, "udp:") {
-			if err := fw.Expose(gvntypes.UDP, strings.TrimPrefix(local, "udp:"), remote); err != nil {
-				return err
-			}
-		} else if err := fw.Expose(gvntypes.TCP, local, remote); err != nil {
-			return err
+// forwardHostVM installs the forwards the gateway was started with, and hands
+// back the set so more can be installed while it runs.
+func forwardHostVM(cfg Config, s *stack.Stack) (*forwards, error) {
+	set := newForwards(forwarder.NewPortsForwarder(s))
+	for _, f := range cfg.Forwards {
+		if _, err := set.expose(f); err != nil {
+			return nil, err
 		}
 	}
-	return nil
+	return set, nil
 }

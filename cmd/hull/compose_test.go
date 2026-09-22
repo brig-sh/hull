@@ -772,6 +772,83 @@ func TestComposeConfigValidatesPorts(t *testing.T) {
 	mustContain(t, callErr.Error(), "udp", "the error must say why the mapping was rejected")
 }
 
+// Two services publishing one host address used to reach the gateway, which
+// refuses the second forward and exits while starting. up reports that as a
+// pointer to the gateway's log and nothing else, so the pass names the two
+// services instead, for the same reason it catches a mapping run cannot
+// forward.
+func TestComposeConfigRefusesTwoServicesOnOneHostAddress(t *testing.T) {
+	src := "services:\n" +
+		"  web:\n    image: img:1\n    ports:\n      - \"8080:80\"\n" +
+		"  api:\n    image: img:2\n    ports:\n      - \"8080:81\"\n"
+	_, err := runComposeConfigYAML(t, t.TempDir(), src)
+	if err == nil {
+		t.Fatal("two services on one host address must fail composeConfigYAML")
+	}
+	mustContain(t, err.Error(), `"web"`, "the error must name the first service")
+	mustContain(t, err.Error(), `"api"`, "the error must name the second service")
+	mustContain(t, err.Error(), "127.0.0.1:8080", "the error must name the address they share")
+}
+
+// A host address claimed twice by one service is the same collision.
+func TestComposeConfigRefusesOneServiceClaimingAnAddressTwice(t *testing.T) {
+	src := "services:\n" +
+		"  web:\n    image: img:1\n    ports:\n      - \"8080:80\"\n      - \"8080:81\"\n"
+	_, err := runComposeConfigYAML(t, t.TempDir(), src)
+	if err == nil {
+		t.Fatal("one service claiming a host address twice must fail composeConfigYAML")
+	}
+	mustContain(t, err.Error(), `"web"`, "the error must name the service")
+	mustContain(t, err.Error(), "127.0.0.1:8080", "the error must name the address")
+}
+
+// 0.0.0.0:8080 beside 127.0.0.1:8080 is the host kernel's call, not this
+// pass's. Go sets SO_REUSEADDR on every TCP listener and darwin takes the
+// pair in either order, so refusing the file here would refuse one that runs.
+// The gateway lets the bind decide.
+func TestComposeConfigLeavesAWildcardBesideASpecificAddressToTheGateway(t *testing.T) {
+	for _, src := range []string{
+		"services:\n" +
+			"  web:\n    image: img:1\n    ports:\n      - \"127.0.0.1:8080:80\"\n" +
+			"  api:\n    image: img:2\n    ports:\n      - \"0.0.0.0:8080:81\"\n",
+		"services:\n" +
+			"  web:\n    image: img:1\n    ports:\n      - \"0.0.0.0:8080:80\"\n" +
+			"  api:\n    image: img:2\n    ports:\n      - \"127.0.0.1:8080:81\"\n",
+	} {
+		if _, err := runComposeConfigYAML(t, t.TempDir(), src); err != nil {
+			t.Fatalf("a wildcard beside a specific address must pass composeConfigYAML: %v\n%s", err, src)
+		}
+	}
+}
+
+// The pass reads a host address by the gateway's grammar, so a port the
+// gateway refuses is named here rather than at up, where the only report is a
+// pointer to the gateway's log. go-connections has no lower bound, so `0:80`
+// reaches the forward as port 0.
+func TestComposeConfigRefusesAPortTheGatewayCannotForward(t *testing.T) {
+	src := "services:\n  web:\n    image: img:1\n    ports:\n      - \"0:80\"\n"
+	_, err := runComposeConfigYAML(t, t.TempDir(), src)
+	if err == nil {
+		t.Fatal("a host port of 0 must fail composeConfigYAML, not only the gateway")
+	}
+	mustContain(t, err.Error(), `"web"`, "the error must name the service")
+	mustContain(t, err.Error(), "65535", "the error must say what a port may be")
+	// The mapping as the file writes it. Naming the resolved 127.0.0.1:0
+	// sends the reader looking for a string their compose file does not have.
+	mustContain(t, err.Error(), `"0:80"`, "the error must name the port as written")
+}
+
+// Two specific addresses on one port do not overlap, and the check keys on
+// the whole address rather than the port alone.
+func TestComposeConfigAllowsOnePortOnTwoSpecificAddresses(t *testing.T) {
+	src := "services:\n" +
+		"  web:\n    image: img:1\n    ports:\n      - \"127.0.0.1:8080:80\"\n" +
+		"  api:\n    image: img:2\n    ports:\n      - \"127.0.0.2:8080:81\"\n"
+	if _, err := runComposeConfigYAML(t, t.TempDir(), src); err != nil {
+		t.Fatalf("two specific host addresses on one port must be accepted: %v", err)
+	}
+}
+
 // runComposeConfigYAML drives the real composeConfigYAML production entry
 // point through cli flag parsing, the same pattern
 // TestComposeConfigValidatesPorts uses and for the same reason: renderConfig

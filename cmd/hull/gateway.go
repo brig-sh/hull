@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -92,11 +93,17 @@ guests share a switch, and traffic between them never reaches the filter.
 And --forward is ingress, not egress; it exposes a guest port on the host
 and no egress rule applies to it.
 
+With --api the gateway serves /forwards on that socket, which publishes a
+guest port and withdraws it again while the guest is running. GET lists what
+is published, POST takes {protocol, local, remote}, and DELETE takes protocol
+and local as query parameters. This is the only part of a running gateway
+that can change; the network and the rules are read once at startup.
+
 IPv6 is dropped outright. The netstack does not forward IPv6 yet, so no
 guest reaches the outside world over it, with or without a policy.`),
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "socket", Required: true, Usage: "control socket path (required)"},
-			&cli.StringFlag{Name: "api", Usage: "HTTP API socket path (probe endpoint)"},
+			&cli.StringFlag{Name: "api", Usage: "HTTP API socket path (probe, leases and the /forwards endpoint)"},
 			&cli.StringFlag{Name: "qemu-socket", Usage: "unix socket for the QEMU stream netdev, used by both the QEMU and HVI backends"},
 			&cli.StringFlag{Name: "subnet", Value: "10.87.0.0/24", Usage: "virtual subnet CIDR"},
 			&cli.StringFlag{Name: "gateway-ip", Value: "10.87.0.1", Usage: "gateway IP on the subnet"},
@@ -116,13 +123,13 @@ guest reaches the outside world over it, with or without a policy.`),
 			if err != nil {
 				return err
 			}
-			forwards := map[string]string{}
+			var forwards []netgw.Forward
 			for _, f := range cmd.StringSlice("forward") {
-				parts := strings.SplitN(f, "=", 2)
-				if len(parts) != 2 {
-					return fmt.Errorf("invalid --forward %q, expected hostaddr:port=guestip:port", f)
+				forward, err := netgw.ParseForward(f)
+				if err != nil {
+					return err
 				}
-				forwards[parts[0]] = parts[1]
+				forwards = append(forwards, forward)
 			}
 			// Restart policies are honored only for a project: a gateway
 			// started by hand has no project state to supervise.
@@ -151,7 +158,7 @@ const gatewayShutdownGrace = 20 * time.Second
 // handful of rules is not a source of DNS traffic worth noticing.
 const egressRefreshDefault = 30 * time.Second
 
-func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, gatewayIP string, forwards map[string]string, hosts []string, policy *netgw.Policy, egressRefresh time.Duration, sup *supervisor) error {
+func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, gatewayIP string, forwards []netgw.Forward, hosts []string, policy *netgw.Policy, egressRefresh time.Duration, sup *supervisor) error {
 	// Serve service names from the gateway's DNS in addition to the
 	// /etc/hosts injection, so images that bypass /etc/hosts keep working.
 	// Non-matching queries fall through to the host resolver.
@@ -209,7 +216,7 @@ func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, ga
 	// Probe API: the gateway is the only process that can dial into the
 	// virtual network, so TCP healthchecks run here.
 	if apiPath != "" {
-		apiL, err := claimUnixSocket(apiPath)
+		apiL, err := claimOwnerOnlyUnixSocket(apiPath)
 		if err != nil {
 			return err
 		}
@@ -238,6 +245,7 @@ func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, ga
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(vn.Leases())
 		})
+		mux.Handle("/forwards", forwardsHandler(vn))
 		srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 		go func() { _ = srv.Serve(apiL) }()
 	}
@@ -413,31 +421,158 @@ func recvFD(conn *net.UnixConn) (int, error) {
 // a wedged-but-live gateway can still read as stale. Narrowing "unreachable"
 // to "refused" does not make dialling a sound liveness test.
 func claimUnixSocket(path string) (net.Listener, error) {
-	if err := checkUnixSocketPath("gateway", path); err != nil {
+	if err := clearStaleUnixSocket("gateway", path,
+		"move the store to a shorter path (--store-dir) or use a shorter instance name"); err != nil {
 		return nil, err
-	}
-	conn, err := net.DialTimeout("unix", path, time.Second)
-	switch {
-	case err == nil:
-		_ = conn.Close()
-		return nil, fmt.Errorf("socket %s is in use by a running gateway", path)
-	case errors.Is(err, syscall.ECONNREFUSED):
-		// Nobody is listening: the file the last gateway left behind is
-		// ours to clear.
-		if rmErr := os.Remove(path); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
-			return nil, fmt.Errorf("failed to remove stale socket %s: %w", path, rmErr)
-		}
-	case errors.Is(err, fs.ErrNotExist):
-		// Nothing at the path. net.Listen creates it.
-	default:
-		return nil, fmt.Errorf("cannot tell whether socket %s is in use: %w\n"+
-			"refusing to remove it; if no gateway is running, remove the socket by hand", path, err)
 	}
 	l, err := net.Listen("unix", path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to listen on %s: %w", path, err)
 	}
 	return l, nil
+}
+
+// claimOwnerOnlyUnixSocket claims path the way claimUnixSocket does, and
+// leaves it readable and writable by its owner alone.
+//
+// Only the API socket takes this. It publishes host ports, so its mode is the
+// gate on who may, and net.Listen leaves whatever the umask leaves -- under
+// umask 000, any user on the machine. The control and QEMU sockets are what a
+// member connects to, and what may reach those is not this function's to
+// narrow.
+//
+// The socket is bound in a directory of this gateway's own, given its mode
+// there, and hard-linked to path. Listening on path and chmodding after would
+// leave a window where the socket answers at the name callers use with the
+// mode the umask left.
+//
+// A crash between making that directory and removing it leaves one behind,
+// three syscalls wide. Nothing sweeps it: a sweep would have to tell debris
+// from the staging directory of a gateway claiming a path right now, and
+// removing one of those breaks a claim that was going to succeed.
+//
+// Two things the staging name has to be, both learned by getting them wrong.
+// It is a fresh directory rather than a name beside path, because a name
+// derived from path can be a socket another gateway is serving, and claiming
+// it would unlink a live one. And it is linked rather than renamed, because
+// rename replaces whatever it lands on: a gateway that bound path while this
+// one was staging would be silently displaced, where a plain Listen would
+// have refused. link fails with EEXIST instead, so that gateway keeps it.
+//
+// # Errors
+//
+// Returns an error when another process holds path, when path or the staged
+// name is too long for a socket, or when the socket cannot be bound,
+// restricted or linked.
+func claimOwnerOnlyUnixSocket(path string) (net.Listener, error) {
+	if err := clearStaleUnixSocket("gateway API", path,
+		"pass a shorter --api path"); err != nil {
+		return nil, err
+	}
+	// Beside path rather than in TMPDIR: link works within one filesystem.
+	parent := filepath.Dir(path)
+	if err := checkStagedSocketPath(path, parent); err != nil {
+		return nil, err
+	}
+	dir, err := os.MkdirTemp(parent, stagingPrefix)
+	if err != nil {
+		// The directory, not the name inside it that MkdirTemp invented and
+		// the caller cannot act on.
+		return nil, fmt.Errorf("cannot stage the gateway API socket in %s: %w\n"+
+			"pass an --api path in a directory this user can write", parent, bareErr(err))
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+
+	staging := filepath.Join(dir, stagedSocketName)
+	l, err := net.Listen("unix", staging)
+	if err != nil {
+		return nil, fmt.Errorf("failed to listen on %s: %w", path, err)
+	}
+	if err := os.Chmod(staging, 0o600); err != nil {
+		_ = l.Close()
+		return nil, fmt.Errorf("failed to restrict %s: %w", path, err)
+	}
+	if err := os.Link(staging, path); err != nil {
+		_ = l.Close()
+		return nil, fmt.Errorf("failed to name %s: %w", path, err)
+	}
+	return l, nil
+}
+
+// stagingPrefix names the directory the API socket is bound in before it is
+// linked to the path a caller gave.
+const stagingPrefix = ".hull-api"
+
+// stagedSocketName is the socket's name inside that directory.
+const stagedSocketName = "s"
+
+// stagedSocketOverhead is what staging adds to a socket's directory: the
+// prefix, the ten digits MkdirTemp appends, the socket's own name and the two
+// separators.
+const stagedSocketOverhead = len(stagingPrefix) + 10 + len(stagedSocketName) + 2
+
+// checkStagedSocketPath rejects an API socket path whose directory leaves no
+// room to stage it.
+//
+// The refusal names the path the caller gave and the length staging needs.
+// Naming the staged path instead reports a directory this gateway invented
+// and has already removed, and a byte count for a string the caller never
+// typed.
+//
+// # Errors
+//
+// Returns an error when the staged path would exceed what the kernel binds.
+func checkStagedSocketPath(path, parent string) error {
+	staged := len(parent) + stagedSocketOverhead
+	if staged <= unixSocketPathMax {
+		return nil
+	}
+	return fmt.Errorf("gateway API socket path is %d bytes and staging it needs %d, "+
+		"over the %d a unix socket takes on this OS: %s\n"+
+		"pass an --api path in a shorter directory",
+		len(path), staged, unixSocketPathMax, path)
+}
+
+// bareErr strips the path a syscall wrapper repeats back, leaving the reason.
+// The paths in this file are ones the caller did not choose, so repeating
+// them buries the part they can act on.
+func bareErr(err error) error {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return pe.Err
+	}
+	return err
+}
+
+// clearStaleUnixSocket reports whether path is free to bind, and removes the
+// socket file when the last listener is gone.
+//
+// # Errors
+//
+// Returns an error when another process is listening, and when the outcome
+// cannot be classified.
+func clearStaleUnixSocket(what, path, remedy string) error {
+	if err := checkUnixSocketPathRemedy(what, path, remedy); err != nil {
+		return err
+	}
+	conn, err := net.DialTimeout("unix", path, time.Second)
+	switch {
+	case err == nil:
+		_ = conn.Close()
+		return fmt.Errorf("socket %s is in use by a running gateway", path)
+	case errors.Is(err, syscall.ECONNREFUSED):
+		// Nobody is listening: the file the last gateway left behind is
+		// ours to clear.
+		if rmErr := os.Remove(path); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
+			return fmt.Errorf("failed to remove stale socket %s: %w", path, rmErr)
+		}
+	case errors.Is(err, fs.ErrNotExist):
+		// Nothing at the path. net.Listen creates it.
+	default:
+		return fmt.Errorf("cannot tell whether socket %s is in use: %w\n"+
+			"refusing to remove it; if no gateway is running, remove the socket by hand", path, err)
+	}
+	return nil
 }
 
 // qemuGatewaySock derives the QEMU stream socket path from the control
@@ -573,4 +708,89 @@ func joinGateway(sockPath string) (*os.File, *net.UnixConn, error) {
 	_ = syscall.Close(pair[1])
 
 	return os.NewFile(uintptr(pair[0]), "vm-net"), conn, nil
+}
+
+// forwardsHandler serves the gateway's host port forwards: what is published,
+// and the two verbs that change it.
+//
+//	GET    /forwards                              every forward, as JSON
+//	POST   /forwards  {protocol, local, remote}   publish one
+//	DELETE /forwards?protocol=tcp&local=addr:port withdraw one
+//
+// A forward is the one thing about a running gateway that can change. The
+// network and the egress rules are read once at startup, so a caller that
+// wants either of those restarts the gateway; a caller that wants a port
+// published does not, because restarting drops every member of the network
+// and the guest whose port this is would be one of them.
+//
+// Publishing a port is widening the boundary of the sandbox behind it, so the
+// endpoint reports what it did rather than only that it worked: the forward
+// comes back on the response, and the conflict cases are told apart. A local
+// address already taken is 409, one nothing holds is 404, and a request the
+// gateway cannot parse is 400.
+func forwardsHandler(vn forwarder) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodGet:
+			_ = json.NewEncoder(w).Encode(vn.Forwards())
+		case http.MethodPost:
+			var f netgw.Forward
+			if err := json.NewDecoder(r.Body).Decode(&f); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			installed, err := vn.Expose(f)
+			if err != nil {
+				http.Error(w, err.Error(), forwardStatus(err))
+				return
+			}
+			// What was installed, not what was asked for: a request that left
+			// the protocol out is answered with the tcp it actually got, so
+			// this and a later GET cannot describe one forward two ways.
+			log.Infof("network-gateway: published %s", installed)
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(installed)
+		case http.MethodDelete:
+			gone, err := vn.Unexpose(r.URL.Query().Get("protocol"), r.URL.Query().Get("local"))
+			if err != nil {
+				http.Error(w, err.Error(), forwardStatus(err))
+				return
+			}
+			log.Infof("network-gateway: withdrew %s", gone)
+			_ = json.NewEncoder(w).Encode(gone)
+		default:
+			http.Error(w, "use GET, POST or DELETE", http.StatusMethodNotAllowed)
+		}
+	})
+}
+
+// forwarder is what the endpoint needs of a gateway's network: the three
+// operations on its host port forwards, and nothing else.
+//
+// An interface rather than *netgw.Network, so that a test of this handler does
+// not stand up a netstack. Building one starts the DHCP and DNS servers and
+// their goroutines, and those live as long as the test binary -- enough of
+// them in one package to perturb a test elsewhere in it that measures elapsed
+// time, which is what happened to the sampler test.
+type forwarder interface {
+	Expose(netgw.Forward) (netgw.Forward, error)
+	Unexpose(protocol, local string) (netgw.Forward, error)
+	Forwards() []netgw.Forward
+}
+
+// forwardStatus maps a forwarding failure to the status a caller can act on.
+// Anything that is neither a conflict nor a miss is the gateway's own
+// failure to install a forward it accepted.
+func forwardStatus(err error) int {
+	switch {
+	case errors.Is(err, netgw.ErrForwardExists):
+		return http.StatusConflict
+	case errors.Is(err, netgw.ErrForwardNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, netgw.ErrForwardInvalid):
+		return http.StatusBadRequest
+	default:
+		return http.StatusInternalServerError
+	}
 }
