@@ -6,7 +6,7 @@ require (
 	github.com/compose-spec/compose-go/v2 v2.14.0
 	github.com/containerd/containerd v1.7.33
 	github.com/containers/gvisor-tap-vsock v0.8.9
-	github.com/google/go-containerregistry v0.20.1
+	github.com/google/go-containerregistry v0.20.6
 	github.com/hashicorp/go-version v1.9.0
 	github.com/inetaf/tcpproxy v0.0.0-20250222171855-c4b9df066048
 	github.com/miekg/dns v1.1.72
@@ -28,23 +28,22 @@ require (
 	github.com/apparentlymart/go-cidr v1.1.1 // indirect
 	github.com/cavaliergopher/cpio v1.0.1 // indirect
 	github.com/checkpoint-restore/go-criu/v6 v6.3.0 // indirect
-	github.com/cilium/ebpf v0.17.3 // indirect
+	github.com/cilium/ebpf v0.22.0 // indirect
 	github.com/containerd/cgroups/v3 v3.1.0 // indirect
 	github.com/containerd/console v1.0.5 // indirect
 	github.com/containerd/continuity v0.5.0 // indirect
 	github.com/containerd/errdefs v1.0.0 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
 	github.com/containerd/log v0.1.0 // indirect
-	github.com/containerd/stargz-snapshotter/estargz v0.14.3 // indirect
+	github.com/containerd/stargz-snapshotter/estargz v0.16.3 // indirect
 	github.com/containerd/typeurl/v2 v2.3.0 // indirect
 	github.com/coreos/go-systemd/v22 v22.7.0 // indirect
 	github.com/cyphar/filepath-securejoin v0.7.0 // indirect
 	github.com/distribution/reference v0.6.0 // indirect
-	github.com/docker/cli v24.0.0+incompatible // indirect
+	github.com/docker/cli v29.2.0+incompatible // indirect
 	github.com/docker/distribution v2.8.3+incompatible // indirect
-	github.com/docker/docker v27.3.1+incompatible // indirect
-	github.com/docker/docker-credential-helpers v0.7.0 // indirect
-	github.com/docker/go-connections v0.4.0 // indirect
+	github.com/docker/docker-credential-helpers v0.9.3 // indirect
+	github.com/docker/go-connections v0.5.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/elastic/go-seccomp-bpf v1.6.0 // indirect
 	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
@@ -77,7 +76,7 @@ require (
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.1 // indirect
 	github.com/seccomp/libseccomp-golang v0.10.0 // indirect
 	github.com/u-root/uio v0.0.0-20240224005618-d2acac8f3701 // indirect
-	github.com/vbatts/tar-split v0.11.3 // indirect
+	github.com/vbatts/tar-split v0.12.1 // indirect
 	github.com/vishvananda/netlink v1.3.1 // indirect
 	github.com/vishvananda/netns v0.0.5 // indirect
 	github.com/xhit/go-str2duration/v2 v2.1.0 // indirect
