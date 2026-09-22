@@ -333,17 +333,32 @@ func resolveServiceVolume(v types.ServiceVolumeConfig, volRoot, project string) 
 // deliberate security choice; an explicit 0.0.0.0 exposes a port beyond the
 // machine.
 func resolvePort(p types.ServicePortConfig) (hostAddr, hostPort, guestPort string, err error) {
+	// Named as the file writes the mapping. `80/udp` is not a string the
+	// reader can find when what they wrote was `0:80/udp`.
 	if p.Protocol != "" && !strings.EqualFold(p.Protocol, "tcp") {
-		return "", "", "", fmt.Errorf("port %d/%s: %s port mappings are not supported yet (TCP only)", p.Target, p.Protocol, p.Protocol)
+		return "", "", "", fmt.Errorf("port %q: %s port mappings are not supported yet (TCP only)", portSpec(p), p.Protocol)
 	}
 	if p.Published == "" {
-		return "", "", "", fmt.Errorf("port %d: single-port form (ephemeral host port) is not supported yet, use HOST:GUEST", p.Target)
+		return "", "", "", fmt.Errorf("port %q: single-port form (ephemeral host port) is not supported yet, use HOST:GUEST", portSpec(p))
 	}
 	hostAddr = p.HostIP
 	if hostAddr == "" {
 		hostAddr = "127.0.0.1"
 	}
 	return hostAddr, p.Published, strconv.Itoa(int(p.Target)), nil
+}
+
+// portSpec renders a published port the way a compose file writes one, for a
+// message about the port rather than about what it was resolved to.
+func portSpec(p types.ServicePortConfig) string {
+	spec := p.Published + ":" + strconv.Itoa(int(p.Target))
+	if p.HostIP != "" {
+		spec = net.JoinHostPort(p.HostIP, p.Published) + ":" + strconv.Itoa(int(p.Target))
+	}
+	if p.Protocol != "" && !strings.EqualFold(p.Protocol, "tcp") {
+		spec += "/" + p.Protocol
+	}
+	return spec
 }
 
 func composeCommand() *cli.Command {
