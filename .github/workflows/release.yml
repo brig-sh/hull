@@ -21,12 +21,13 @@ on:
         required: true
 
 concurrency:
-  # ci and release both import a Developer ID certificate and rewrite the
-  # user keychain search list, and every self-hosted runner here is the same
-  # physical Mac. Two jobs signing at once is errSecInternalComponent, so
-  # they queue rather than race. Never cancel-in-progress: cancelling a job
-  # mid-sign leaves the search list pointing at a keychain that is gone.
-  group: macos-signing
+  # One release at a time, in a group no other workflow joins. A group keeps
+  # one pending run, and a newer pending run cancels it, so a group shared
+  # with ci or the channel publish let an unrelated merge cancel a waiting
+  # release. The keychain is serialised by scripts/keychain-lock.sh instead.
+  # Never cancel-in-progress: cancelling mid-sign leaves the search list
+  # pointing at a keychain that is gone.
+  group: release
   cancel-in-progress: false
 
 permissions:
@@ -45,6 +46,9 @@ jobs:
     # v0.1.0-rc26 failed three times with HTTPClientError.connectTimeout on
     # the mac-dev-01 runners, which cannot, while the msuch ones can.
     runs-on: [self-hosted, macOS, ARM64, notary]
+    # Under keychain-lock.sh's STALE, so a lock older than that cannot belong
+    # to a job that is still running.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -93,6 +97,16 @@ jobs:
             echo "go mod tidy changed the module files:" >&2
             echo "$changed" >&2
             exit 1; }
+
+      # One signing job at a time on the shared Mac. See
+      # scripts/keychain-lock.sh for why this is not a concurrency group. The
+      # script comes from the workflow's own commit, because the tag being
+      # released may predate it.
+      - name: Take the keychain lock
+        run: |
+          git show "$GITHUB_WORKFLOW_SHA:scripts/keychain-lock.sh" \
+            > "$RUNNER_TEMP/keychain-lock.sh"
+          sh "$RUNNER_TEMP/keychain-lock.sh" acquire
 
       - name: Import the Developer ID certificate into an ephemeral keychain
         env:
@@ -257,12 +271,17 @@ jobs:
       - name: Delete the ephemeral keychain
         if: always()
         run: |
-          if [ -n "$KEYCHAIN" ] && [ -f "$KEYCHAIN" ]; then
-            security delete-keychain "$KEYCHAIN"
+          # KEYCHAIN is set only once this job holds the keychain lock and is
+          # about to replace the search list. A job without it must leave the
+          # list alone, or it drops the lock holder's keychain mid-sign.
+          if [ -n "${KEYCHAIN:-}" ]; then
+            if [ -f "$KEYCHAIN" ]; then
+              security delete-keychain "$KEYCHAIN"
+            fi
+            # The import replaced the user's search list wholesale; put the
+            # login keychain back whatever happened above.
+            security list-keychains -d user -s login.keychain-db
           fi
-          # The import replaced the user's search list wholesale; put the
-          # login keychain back whatever happened above.
-          security list-keychains -d user -s login.keychain-db
 
   # The drag-to-Applications installer, built after the release exists and
   # attached to it.
@@ -277,6 +296,10 @@ jobs:
   # differ by construction. The DMG is notarized and stapled as a whole, which
   # is what makes it verifiable offline -- the tarball's bare binaries can only
   # be checked online.
+      - name: Release the keychain lock
+        if: always()
+        run: '[ ! -f "$RUNNER_TEMP/keychain-lock.sh" ] || sh "$RUNNER_TEMP/keychain-lock.sh" release'
+
   dmg:
     name: installer image
     needs: release
@@ -292,6 +315,9 @@ jobs:
     # label: a runner re-registered without a session would otherwise fail
     # twenty minutes in, at the dmg, instead of at once.
     runs-on: [self-hosted, macOS, ARM64, gui]
+    # Under keychain-lock.sh's STALE, so a lock older than that cannot belong
+    # to a job that is still running.
+    timeout-minutes: 75
     steps:
       - name: Assert a console session, which Finder needs
         run: |
@@ -320,6 +346,16 @@ jobs:
 
       - name: Install create-dmg
         run: test -x "$(brew --prefix)/bin/create-dmg" || brew install create-dmg
+
+      # One signing job at a time on the shared Mac. See
+      # scripts/keychain-lock.sh for why this is not a concurrency group. The
+      # script comes from the workflow's own commit, because the tag being
+      # released may predate it.
+      - name: Take the keychain lock
+        run: |
+          git show "$GITHUB_WORKFLOW_SHA:scripts/keychain-lock.sh" \
+            > "$RUNNER_TEMP/keychain-lock.sh"
+          sh "$RUNNER_TEMP/keychain-lock.sh" acquire
 
       - name: Import the Developer ID certificate into an ephemeral keychain
         env:
@@ -391,7 +427,15 @@ jobs:
       - name: Delete the ephemeral keychain
         if: always()
         run: |
-          if [ -n "$KEYCHAIN" ] && [ -f "$KEYCHAIN" ]; then
-            security delete-keychain "$KEYCHAIN"
+          # KEYCHAIN is set only once this job holds the keychain lock and is
+          # about to replace the search list. A job without it must leave the
+          # list alone, or it drops the lock holder's keychain mid-sign.
+          if [ -n "${KEYCHAIN:-}" ]; then
+            if [ -f "$KEYCHAIN" ]; then
+              security delete-keychain "$KEYCHAIN"
+            fi
+            security list-keychains -d user -s login.keychain-db
           fi
-          security list-keychains -d user -s login.keychain-db
+      - name: Release the keychain lock
+        if: always()
+        run: '[ ! -f "$RUNNER_TEMP/keychain-lock.sh" ] || sh "$RUNNER_TEMP/keychain-lock.sh" release'

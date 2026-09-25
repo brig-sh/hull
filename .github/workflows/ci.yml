@@ -40,21 +40,12 @@ on:
   # this change lands on main.
   workflow_dispatch:
 
-concurrency:
-  # ci and release both import a Developer ID certificate and rewrite the
-  # user keychain search list, and every self-hosted runner here is the same
-  # physical Mac. Two jobs signing at once is errSecInternalComponent, so
-  # they queue rather than race. Never cancel-in-progress: cancelling a job
-  # mid-sign leaves the search list pointing at a keychain that is gone.
-  #
-  # This queues separate runs of this workflow (and of release) against each
-  # other, but a single run's own jobs are scheduled by their needs graph,
-  # not by this block -- so e2e and boot-sip, which only share a `needs:
-  # changes` dependency, can still land on the shared Mac at the same time.
-  # They carry their own job-level `concurrency: group:
-  # macos-signing-shared-mac` for that.
-  group: macos-signing
-  cancel-in-progress: false
+# No concurrency group, at workflow or job level. The two jobs that sign,
+# e2e and boot-sip, take scripts/keychain-lock.sh from before the keychain
+# import to their last step, and that is what keeps them apart from each
+# other, from release and from the channel publish on the shared Mac. A group
+# holds one pending job and cancels the one before it, so with two runs queued
+# it cancelled whichever e2e was waiting, and a pending release with them.
 
 permissions:
   contents: read
@@ -244,8 +235,8 @@ jobs:
     name: unit tests (fast lane)
     # No VM boot, no keychain, no Developer ID -- so this needs neither the
     # `gui` label (that's e2e, for checkpoint's console-session requirement,
-    # see its comment below) nor the macos-signing-shared-mac concurrency
-    # group. That group exists for one specific corruption: two jobs on the
+    # see its comment below) nor scripts/keychain-lock.sh. That lock exists
+    # for one specific corruption: two jobs on the
     # same Mac each calling `security list-keychains -d user -s ...` and
     # replacing the other's search list mid-sign. No step below runs
     # `security`, and none signs with an identity -- `swift build` gets the
@@ -419,17 +410,10 @@ jobs:
     # note above `unit` before requiring either new name.
     needs: changes
     if: needs.changes.outputs.code == 'true' || github.event_name == 'workflow_dispatch'
-    # This job and boot-sip land on the same physical Mac (see the note on the
-    # workflow-level concurrency block) and both rewrite the user keychain
-    # search list. The workflow-level group only queues separate workflow
-    # runs -- it does nothing for two jobs racing within the SAME run -- so
-    # pin the two keychain-touching jobs to their own group here. Never
-    # cancel-in-progress, for the same reason as the workflow-level block:
-    # cancelling mid-sign leaves the search list pointing at a keychain that
-    # is gone.
-    concurrency:
-      group: macos-signing-shared-mac
-      cancel-in-progress: false
+    # This job and boot-sip land on the same physical Mac and both boot VMs
+    # there. scripts/keychain-lock.sh, held from before the keychain import to
+    # the last step, is what keeps them from running side by side, and apart
+    # from release and the channel publish; see the note at the top.
     # Fork pull requests run on a GitHub-hosted macOS runner; pushes and
     # same-repo (branch) PRs run on ours -- so a maintainer's branch PR
     # exercises the full build-and-boot path before merge, while a fork PR
@@ -470,6 +454,9 @@ jobs:
     # question is why VZ save needs one; if msuch still trips occasionally,
     # what is left is load on the shared Mac.
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","macOS","ARM64","gui"]') || fromJSON('["macos-15"]') }}
+    # Under keychain-lock.sh's STALE, so a lock older than that cannot belong
+    # to a job that is still running.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -490,6 +477,11 @@ jobs:
       # self-disables and this job does nothing beyond fetching the
       # submodule: `unit` above already covered the test suite by then, on
       # the same routing.
+      # One signing job at a time on the shared Mac. See
+      # scripts/keychain-lock.sh for why this is not a concurrency group.
+      - name: Take the keychain lock
+        run: sh scripts/keychain-lock.sh acquire
+
       - name: Import Developer ID certificate into ephemeral keychain
         if: runner.environment == 'self-hosted'
         env:
@@ -645,15 +637,19 @@ jobs:
       - name: Delete ephemeral keychain
         if: always() && runner.environment == 'self-hosted'
         run: |
-          if [ -n "$KEYCHAIN" ] && [ -f "$KEYCHAIN" ]; then
-            security delete-keychain "$KEYCHAIN"
+          # KEYCHAIN is set only once this job holds the keychain lock and is
+          # about to replace the search list. A job without it must leave the
+          # list alone, or it drops the lock holder's keychain mid-sign.
+          if [ -n "${KEYCHAIN:-}" ]; then
+            if [ -f "$KEYCHAIN" ]; then
+              security delete-keychain "$KEYCHAIN"
+            fi
+            # The import step replaced the list wholesale, so a job that dies
+            # between the two leaves this user with no login keychain in
+            # scope -- which breaks signing, and more besides, for the person
+            # whose Mac this is.
+            security list-keychains -d user -s login.keychain-db
           fi
-          # Put the login keychain back in the search list unconditionally.
-          # The import step replaced the list wholesale, so a job that dies
-          # between the two leaves this user with no login keychain in scope
-          # -- which breaks signing, and more besides, for the person whose
-          # Mac this is. Cheap to reassert, expensive to discover.
-          security list-keychains -d user -s login.keychain-db
 
   # A microVM on Apple Silicon boots through one of two signed VMMs, and SIP is
   # what makes that signature load-bearing. vz-runner drives
@@ -673,6 +669,10 @@ jobs:
   # self-hosted runner. The protections the e2e job documents apply unchanged:
   # the fork-PR approval gate and the runner group's own restrictions, both in
   # org settings, are what keep a stranger off the machine, not this line.
+      - name: Release the keychain lock
+        if: always()
+        run: '[ ! -f scripts/keychain-lock.sh ] || sh scripts/keychain-lock.sh release'
+
   boot-sip:
     name: microVM boot (SIP-enabled)
     # Docs-only changes cannot move a boot, so the same code filter the VM tier
@@ -690,11 +690,10 @@ jobs:
       && (github.event_name != 'pull_request'
           || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ["self-hosted", "macOS", "ARM64", "sip-enabled"]
-    # Same physical Mac as e2e, same keychain race -- see the note on
-    # e2e's concurrency block.
-    concurrency:
-      group: macos-signing-shared-mac
-      cancel-in-progress: false
+    # Under keychain-lock.sh's STALE, so a lock older than that cannot belong
+    # to a job that is still running.
+    timeout-minutes: 75
+    # Same physical Mac as e2e, kept apart from it by the keychain lock.
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -730,6 +729,11 @@ jobs:
       # with SIP off and is refused the entitlement with SIP on. Sign with the
       # Developer ID from an ephemeral keychain, as the e2e job does, so what we
       # boot is what a release would ship.
+      # One signing job at a time on the shared Mac. See
+      # scripts/keychain-lock.sh for why this is not a concurrency group.
+      - name: Take the keychain lock
+        run: sh scripts/keychain-lock.sh acquire
+
       - name: Import Developer ID certificate into ephemeral keychain
         env:
           MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
@@ -812,13 +816,18 @@ jobs:
       - name: Delete ephemeral keychain
         if: always()
         run: |
-          if [ -n "$KEYCHAIN" ] && [ -f "$KEYCHAIN" ]; then
-            security delete-keychain "$KEYCHAIN"
+          # KEYCHAIN is set only once this job holds the keychain lock and is
+          # about to replace the search list. A job without it must leave the
+          # list alone, or it drops the lock holder's keychain mid-sign.
+          if [ -n "${KEYCHAIN:-}" ]; then
+            if [ -f "$KEYCHAIN" ]; then
+              security delete-keychain "$KEYCHAIN"
+            fi
+            # The import replaced the list wholesale, and a job that died
+            # mid-way would otherwise leave this user's Mac with no login
+            # keychain in scope.
+            security list-keychains -d user -s login.keychain-db
           fi
-          # Restore the login keychain in the search list no matter what: the
-          # import replaced the list wholesale, and a job that died mid-way would
-          # otherwise leave this user's Mac with no login keychain in scope.
-          security list-keychains -d user -s login.keychain-db
 
   # The non-SIP half of the pair. Same question -- does hull boot a real microVM
   # on both backends -- asked of the other posture: an ad-hoc-signed binary on a
@@ -835,6 +844,10 @@ jobs:
   # proves it), and with SIP off those are honored without a real signature. So
   # this job is cheaper than boot-sip, and it runs on a different Mac (the msuch
   # fleet), so the two boot jobs overlap rather than queue.
+      - name: Release the keychain lock
+        if: always()
+        run: '[ ! -f scripts/keychain-lock.sh ] || sh scripts/keychain-lock.sh release'
+
   boot-nosip:
     name: microVM boot (SIP-disabled)
     needs: changes
