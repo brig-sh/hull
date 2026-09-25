@@ -7,6 +7,43 @@ release. History before v0.1.0-rc21 predates the import of this tree and
 is kept below as it was generated then; v0.1.0-rc19 and rc20 were re-cut
 imports of the same tree as rc21, and rc23 was a version bump only.
 
+## [0.1.0-rc29] - 2026-09-25
+
+### Bug Fixes
+
+- Open the cask PR from its own branch
+- Name a refused port mapping as the file writes it
+- Exit clean on a signalled shutdown
+- Divert on a declared family, and say what is not rendered
+
+### Documentation
+
+- Say each point once, and say what the code does
+- Describe removing images and reclaiming disk space
+- Add the rc28 changelog section
+
+### Features
+
+- Publish a main and an experimental Homebrew channel
+- Report the build behind the binary
+- Publish a guest port while the gateway is running
+- Warn when a guest ignores the address it was given
+- Build the guest command line with urunc
+- Add hull store compact
+- Add hull prune
+- Add hull rmi
+- Add an image-removal API to the store
+
+### Miscellaneous
+
+- Bump hvi-vmm for the SYNCFS shutdown hang
+- Bump hvi-vmm to main
+- Pin hvi to main and urunc to the unikraft branch
+
+### Tests
+
+- Fetch a page from a unikernel through the gateway
+
 ## [0.1.0-rc28] - 2026-09-11
 
 ### Bug Fixes
