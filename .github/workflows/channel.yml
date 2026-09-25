@@ -43,21 +43,16 @@ jobs:
     name: build, sign, notarize, publish a channel
     # Every self-hosted runner here is the same physical Mac, and this job
     # rewrites the user keychain search list exactly as ci and release do.
-    # The workflow-level group above keeps two publishes of one channel apart;
-    # it does nothing about this job signing while another workflow signs.
-    #
-    # macos-signing is the group ci and release take, both at workflow level,
-    # so taking it here queues this job behind either. The narrower
-    # macos-signing-shared-mac would not: ci's e2e and boot-sip jobs carry it
-    # to keep one run's own jobs apart, and release carries it nowhere, so a
-    # release could sign while this job did. Never cancel-in-progress:
-    # cancelling mid-sign leaves the search list pointing at a keychain that
-    # is gone.
-    concurrency:
-      group: macos-signing
-      cancel-in-progress: false
+    # The workflow-level group above keeps two publishes of one channel apart.
+    # Signing beside another workflow is kept apart by scripts/keychain-lock.sh
+    # around the keychain steps below, not by a shared concurrency group: a
+    # group keeps one pending run and a newer one cancels it, so joining the
+    # group release takes would let a merge cancel a waiting release.
     # notary: a runner whose egress reaches Apple's notarization service.
     runs-on: [self-hosted, macOS, ARM64, notary]
+    # Under keychain-lock.sh's STALE, so a lock older than that cannot belong
+    # to a job that is still running.
+    timeout-minutes: 75
     steps:
       # The dispatch input reaches bash through the environment, never through
       # a ${{ }} substitution: an expression is pasted into the script before
@@ -166,6 +161,11 @@ jobs:
             echo "go mod tidy changed the module files:" >&2
             echo "$changed" >&2
             exit 1; }
+
+      # One signing job at a time on the shared Mac. See
+      # scripts/keychain-lock.sh for why this is not a concurrency group.
+      - name: Take the keychain lock
+        run: sh .workflow/scripts/keychain-lock.sh acquire
 
       - name: Import the Developer ID certificate into an ephemeral keychain
         env:
@@ -353,14 +353,23 @@ jobs:
       - name: Delete the ephemeral keychain and the notary key
         if: always()
         run: |
-          if [ -n "${KEYCHAIN:-}" ] && [ -f "$KEYCHAIN" ]; then
-            security delete-keychain "$KEYCHAIN"
+          # KEYCHAIN is set only once this job holds the keychain lock and is
+          # about to replace the search list. A job without it must leave the
+          # list alone, or it drops the lock holder's keychain mid-sign.
+          if [ -n "${KEYCHAIN:-}" ]; then
+            if [ -f "$KEYCHAIN" ]; then
+              security delete-keychain "$KEYCHAIN"
+            fi
+            security list-keychains -d user -s login.keychain-db
           fi
-          security list-keychains -d user -s login.keychain-db
           # The runner clears RUNNER_TEMP when the next job starts, not when
           # this one ends, so the key goreleaser was given would otherwise sit
           # on a shared Mac until something else runs.
           rm -f "$RUNNER_TEMP/notary-key.p8"
+
+      - name: Release the keychain lock
+        if: always()
+        run: '[ ! -f .workflow/scripts/keychain-lock.sh ] || sh .workflow/scripts/keychain-lock.sh release'
 
       - name: Render the cask
         env:
