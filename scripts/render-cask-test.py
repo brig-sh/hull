@@ -143,6 +143,23 @@ class RenderCaskTest(unittest.TestCase):
         self.assertEqual(refused, [], cask)
         self.assertEqual(installs, {("macos", "arm"), ("macos", "intel")}, cask)
 
+    def test_url_names_the_version(self):
+        # brew audit takes a url without #{version} for an unversioned one.
+        code, out, cask = render([f"on_macos:on_arm:hull-{VERSION}-arm64.tar.gz"])
+        self.assertEqual(code, 0, out)
+        self.assertEqual(evaluate(cask, "macos", "arm")["url"],
+                         "https://github.com/brig-sh/hull/releases/download/"
+                         "channel-main-#{version}/hull-#{version}-arm64.tar.gz")
+
+    def test_url_names_only_the_version_fields(self):
+        # "6" is also in "arm64", which has to stay as it is.
+        code, out, cask = render(["on_macos:on_arm:hull-6-arm64.tar.gz"],
+                                 ["--version=6", "--tag=channel-main-6"])
+        self.assertEqual(code, 0, out)
+        self.assertEqual(evaluate(cask, "macos", "arm")["url"],
+                         "https://github.com/brig-sh/hull/releases/download/"
+                         "channel-main-#{version}/hull-#{version}-arm64.tar.gz")
+
     def test_refuses_an_os_with_one_arch(self):
         code, out, _ = render(["on_macos:on_arm:arm.tar.gz", "on_linux:on_arm:linux-arm.tar.gz",
                                "on_linux:on_intel:linux-intel.tar.gz"])
