@@ -82,10 +82,16 @@ def platform_stanzas(args, archives):
         archive = dist / name
         if not archive.exists():
             sys.exit(f"{archive} was not built, so the cask would be missing {name}")
+        # brew audit takes a url without #{version} for an unversioned one,
+        # and then wants `sha256 :no_check`. The version is substituted in the
+        # tag and in the file name only, once in each, so a version such as
+        # "6" leaves the "64" of "arm64" as it is.
+        tag = args.tag.replace(args.version, "#{version}", 1)
+        name = archive.name.replace(args.version, "#{version}", 1)
         out.append((
             os_stanza,
             arch_stanza,
-            f"https://github.com/{args.repo}/releases/download/{args.tag}/{archive.name}",
+            f"https://github.com/{args.repo}/releases/download/{tag}/{name}",
             hashlib.sha256(archive.read_bytes()).hexdigest(),
         ))
     return out
