@@ -17,6 +17,8 @@ import sys
 
 # The os stanzas a cask can nest, in the order they must appear.
 OS_ORDER = ["on_macos", "on_linux"]
+# The arch stanzas, and the `depends_on arch:` value for each.
+ARCHES = {"on_arm": "arm64", "on_intel": "x86_64"}
 
 
 def parse_archives(specs):
@@ -32,11 +34,43 @@ def parse_archives(specs):
         parts = spec.split(":")
         if len(parts) != 3:
             sys.exit(f"--archive {spec!r} is not <os stanza>:<arch stanza>:<file name>")
+        if parts[0] not in OS_ORDER or parts[1] not in ARCHES:
+            sys.exit(f"--archive {spec!r}: the os stanza is one of {OS_ORDER}"
+                     f" and the arch stanza one of {list(ARCHES)}")
         out.append(tuple(parts))
-    return sorted(out, key=lambda a: (OS_ORDER.index(a[0]) if a[0] in OS_ORDER else 9, a[1]))
+    return sorted(out, key=lambda a: (OS_ORDER.index(a[0]), a[1]))
 
 
-def platform_stanzas(args):
+def requirements(archives):
+    """The OS and the arch the cask has to depend on, or None for either.
+
+    Homebrew 7 loads every cask in a tap on each OS and arch it can simulate,
+    and refuses the whole tap when one of them fails. On macOS every arch
+    needs a url, whatever `depends_on arch:` says. On Linux every arch needs a
+    sha256, unless the cask depends on macOS or leaves that arch out.
+
+    So a single archive goes at the top level, where every OS and arch sees
+    it, and the cask depends on its OS and its arch. More than one are nested,
+    and each OS they name needs an archive for both arches. Archives for one
+    OS alone make the cask depend on that OS.
+    """
+    seen = {}
+    for os_stanza, arch_stanza, name in archives:
+        if arch_stanza in seen.setdefault(os_stanza, set()):
+            sys.exit(f"two archives for {os_stanza} {arch_stanza}, the second is {name}")
+        seen[os_stanza].add(arch_stanza)
+    if len(archives) > 1:
+        for os_stanza, arches in seen.items():
+            for arch_stanza in ARCHES:
+                if arch_stanza not in arches:
+                    sys.exit(f"no archive for {os_stanza} {arch_stanza}: Homebrew would"
+                             " find no url there and refuse the whole tap")
+    os_dep = next(iter(seen)).removeprefix("on_") if len(seen) == 1 else None
+    arch_dep = ARCHES[archives[0][1]] if len(archives) == 1 else None
+    return os_dep, arch_dep
+
+
+def platform_stanzas(args, archives):
     """The url and sha256 for each archive this build produced.
 
     An archive that is not there stops the render. A cask silently missing one
@@ -44,7 +78,7 @@ def platform_stanzas(args):
     """
     dist = pathlib.Path(args.dist)
     out = []
-    for os_stanza, arch_stanza, name in parse_archives(args.archive):
+    for os_stanza, arch_stanza, name in archives:
         archive = dist / name
         if not archive.exists():
             sys.exit(f"{archive} was not built, so the cask would be missing {name}")
@@ -57,21 +91,23 @@ def platform_stanzas(args):
     return out
 
 
-def depends_on(args):
-    """The depends_on stanza, or nothing when this cask needs neither kind."""
+def depends_on(args, os_dep, arch_dep):
+    """The depends_on stanzas, or nothing when this cask needs none."""
     groups = []
-    if args.depends_arch:
-        groups.append(("arch:   ", [f":{args.depends_arch}"], False))
+    if arch_dep:
+        groups.append(("arch:", [f":{arch_dep}"], False))
     if args.depends_cask:
-        groups.append(("cask:   ", args.depends_cask, True))
+        groups.append(("cask:", args.depends_cask, True))
     if args.depends_formula:
         groups.append(("formula:", args.depends_formula, True))
-    if not groups:
-        return []
+    # brew style aligns the values of the keys that are there, and calls any
+    # other spacing extra.
+    width = max((len(label) for label, _, _ in groups), default=0)
     lines = []
     for i, (label, names, quote) in enumerate(groups):
         head = "  depends_on " if i == 0 else "             "
         tail = "," if i < len(groups) - 1 else ""
+        label = label.ljust(width)
         if not quote and len(names) == 1:
             # A symbol, and a single one: written inline the way hull's own
             # cask writes it rather than as a one-element array.
@@ -80,7 +116,11 @@ def depends_on(args):
         lines.append(f"{head}{label} [")
         lines += [f'               "{n}",' for n in names]
         lines.append("             ]" + tail)
-    return lines + [""]
+    # The bare form Homebrew asks for, on a line of its own. brew style sorts
+    # it after the keyword form above.
+    if os_dep:
+        lines.append(f"  depends_on :{os_dep}")
+    return lines + [""] if lines else []
 
 
 def generator():
@@ -98,6 +138,10 @@ def generator():
 
 
 def render(args):
+    archives = parse_archives(args.archive)
+    os_dep, arch_dep = requirements(archives)
+    stanzas = platform_stanzas(args, archives)
+
     lines = [
         "# frozen_string_literal: true",
         "",
@@ -108,23 +152,31 @@ def render(args):
         f"# `brew install --cask {args.project}` gives you.",
         f'cask "{args.project}@{args.channel}" do',
         f'  version "{args.version}"',
-        "",
     ]
 
-    last_os = None
-    for os_stanza, arch_stanza, url, digest in platform_stanzas(args):
-        if os_stanza != last_os:
-            if last_os is not None:
-                lines.append("  end")
-            lines.append(f"  {os_stanza} do")
-            last_os = os_stanza
+    if len(stanzas) == 1:
+        _, _, url, digest = stanzas[0]
         lines += [
-            f"    {arch_stanza} do",
-            f'      sha256 "{digest}"',
-            f'      url "{url}"',
-            "    end",
+            f'  sha256 "{digest}"',
+            "",
+            f'  url "{url}"',
         ]
-    lines += ["  end", ""]
+    else:
+        lines.append("")
+        last_os = None
+        for os_stanza, arch_stanza, url, digest in stanzas:
+            if os_stanza != last_os:
+                if last_os is not None:
+                    lines.append("  end")
+                lines.append(f"  {os_stanza} do")
+                last_os = os_stanza
+            lines += [
+                f"    {arch_stanza} do",
+                f'      sha256 "{digest}"',
+                f'      url "{url}"',
+                "    end",
+            ]
+        lines += ["  end", ""]
 
     lines += [
         f'  name "{args.project} ({args.channel})"',
@@ -148,7 +200,7 @@ def render(args):
 
     # No blank line before depends_on: brew style groups the two together and
     # a separator between them is an offence.
-    on = depends_on(args)
+    on = depends_on(args, os_dep, arch_dep)
     if not on:
         # conflicts_with and depends_on are one stanza group, so the blank line
         # that separates the group from what follows belongs to whichever of
@@ -190,7 +242,6 @@ def main():
     p.add_argument("--dist", default="dist")
     p.add_argument("--archive", action="append", default=[], required=True,
                    help="<os stanza>:<arch stanza>:<file name>, repeatable")
-    p.add_argument("--depends-arch", default="", help="arm64, for a single-arch cask")
     p.add_argument("--desc", required=True)
     p.add_argument("--source", required=True, help="what this build came from, for the caveat")
     p.add_argument("--binary", action="append", default=[])

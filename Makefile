@@ -144,7 +144,7 @@ codesign_verify:
 
 ## test Run the Go unit suite.
 .PHONY: test
-test: test-harness
+test: test-harness test-cask
 	$(GO) test -count=1 ./...
 
 # The harness self-test proves the VM-boot harnesses can still fail. It needs
@@ -154,6 +154,12 @@ test: test-harness
 .PHONY: test-harness
 test-harness:
 	bash test/harness-selftest.sh
+
+# The channel cask renderer, checked against the rules Homebrew applies when
+# it taps brig-sh/brig. Needs python3 and nothing else.
+.PHONY: test-cask
+test-cask:
+	python3 scripts/render-cask-test.py
 
 ## macos Build hull + vz-runner + hvi, then sign all three.
 .PHONY: macos
