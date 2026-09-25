@@ -140,6 +140,13 @@ jobs:
           version: "~> v2"
           args: check
 
+      # The channel workflow pushes what scripts/render-cask.py writes
+      # straight to the tap, and a cask Homebrew cannot load stops
+      # `brew tap brig-sh/brig` for every user. This is the only check it
+      # gets before a merge.
+      - name: Check the cask renderer
+        run: python3 scripts/render-cask-test.py
+
   build:
     name: build (go + swift, ad-hoc signed)
     # Fork pull requests run on a GitHub-hosted macOS runner; pushes and

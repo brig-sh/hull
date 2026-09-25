@@ -399,7 +399,7 @@ jobs:
             --desc "Run unikernels and sandboxed Linux containers as microVMs on Apple Silicon" \
             --source "$SOURCE" \
             --binary hull --binary vz-runner --binary hvi \
-            --depends-arch arm64 --depends-formula cosign \
+            --depends-formula cosign \
             --conflicts-with "$OTHER" \
             --out "hull@$CHANNEL.rb"
 
