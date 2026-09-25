@@ -33,18 +33,13 @@ import (
 func init() { cli.VersionPrinter = printVersion }
 
 // printVersion writes the one line both spellings answer with.
-//
-// urfave's own printer would write "hull version <v>", which reads oddly once
-// the version carries a parenthesised build. Replacing it is what keeps
-// `hull --version` and `hull version` from answering one question two ways.
 func printVersion(*cli.Command) { fmt.Printf("hull %s\n", build) }
 
 // versionCommand is `hull version`: one line naming the build, or the same
 // build as JSON.
 //
-// `hull --version` prints the same line. The two are spellings of one
-// question, so neither is a retirement of the other; the subcommand exists
-// because it can take --json and a global flag cannot.
+// `hull --version` prints the same line. The subcommand exists because it
+// can take --json; a global flag cannot.
 func versionCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "version",
