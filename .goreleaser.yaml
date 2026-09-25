@@ -169,6 +169,9 @@ homebrew_casks:
 
         brew install e2fsprogs
 
+# Not what a release publishes. release.yml hands goreleaser the notes git-cliff
+# renders from cliff-notes.toml, with --release-notes, and goreleaser then
+# writes no changelog of its own.
 changelog:
   use: github
   sort: asc
