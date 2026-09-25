@@ -6,10 +6,11 @@
 #
 #   scripts/changelog.sh                 # rewrite CHANGELOG.md (all tags)
 #   scripts/changelog.sh --tag vX.Y.Z    # rewrite, treating unreleased as vX.Y.Z
-#   scripts/changelog.sh --notes vX.Y.Z  # print notes for a single tag to stdout
+#   scripts/changelog.sh --notes vX.Y.Z  # print a release's notes to stdout
 #
-# Nothing in CI runs this. The release workflow takes its notes from GitHub
-# through goreleaser, so CHANGELOG.md is regenerated and committed by hand.
+# CHANGELOG.md comes from cliff.toml and nothing in CI regenerates it, so it
+# is committed by hand. --notes renders from cliff-notes.toml, the config the
+# release workflow publishes, so it shows what a release will say.
 # Without docker, `git-cliff --config cliff.toml -o CHANGELOG.md` is the same
 # thing with a host install (brew install git-cliff).
 set -euo pipefail
@@ -18,17 +19,17 @@ IMAGE="${GIT_CLIFF_IMAGE:-orhunp/git-cliff:latest}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 cliff() {
-  docker run --rm -v "$ROOT:/app" -w /app --entrypoint git-cliff "$IMAGE" "$@"
+  docker run --rm -e GITHUB_TOKEN -v "$ROOT:/app" -w /app --entrypoint git-cliff "$IMAGE" "$@"
 }
 
 case "${1:-}" in
   --notes)
     tag="${2:?usage: changelog.sh --notes <tag>}"
-    # Just the section for this tag, stripped of the file header. At release
-    # time HEAD is the tag commit, so --current returns that tag's section;
-    # before tagging (local preview) fall back to folding unreleased into it.
-    cliff --config cliff.toml --current --strip header 2>/dev/null \
-      || cliff --config cliff.toml --unreleased --tag "$tag" --strip header
+    # At a tag, --current renders that tag's notes; before tagging (a local
+    # preview) fall back to folding unreleased into it. The contributor lists
+    # use GITHUB_TOKEN when it is set and the anonymous API limit otherwise.
+    cliff --config cliff-notes.toml --current 2>/dev/null \
+      || cliff --config cliff-notes.toml --unreleased --tag "$tag"
     ;;
   --tag)
     tag="${2:?usage: changelog.sh --tag <tag>}"

@@ -31,8 +31,11 @@ build, see [signing.md](signing.md).
 2. Wait for `release.yml`. It signs and notarizes `vz-runner` and `hvi`, then
    runs goreleaser, which builds and notarizes `hull`, packs all three into
    `hull-<version>-arm64.tar.gz`, writes `checksums.txt` with a keyless cosign
-   signature, generates an SBOM for the archive, and drafts the GitHub release
-   with notes from the pull request titles.
+   signature, generates an SBOM for the archive, and drafts the GitHub release.
+   Its notes are rendered first, by git-cliff on a GitHub-hosted runner, from
+   `cliff-notes.toml`: breaking changes, features, fixes, docs and pin bumps,
+   each linked to its commit. `scripts/changelog.sh --notes v<version>` shows
+   what they will say before you tag.
 3. A separate `dmg` job builds `hull.dmg`, notarizes and staples it, signs it
    with cosign, and attaches `hull.dmg`, `hull.dmg.sig` and `hull.dmg.pem` to
    the release.

@@ -5,8 +5,8 @@ name: Release
 # vz-runner first, because GoReleaser cannot build a Swift binary and cannot
 # import one in the open-source edition. It is signed with the virtualization
 # entitlement and notarized here, then GoReleaser picks it up as an extra file
-# in the archive, notarizes the Go binary, publishes the cask and writes the
-# changelog.
+# in the archive, notarizes the Go binary, publishes the cask, and drafts
+# the release with the notes the notes job rendered.
 #
 # Runs on our own macOS runner: swift build and codesign need a Mac. Tag
 # builds only, so a fork can never reach it.
@@ -40,8 +40,45 @@ permissions:
   id-token: write
 
 jobs:
+  # The release notes, rendered by git-cliff from the conventional-commit
+  # subjects since the previous tag; cliff-notes.toml decides the sections.
+  # --current renders the tag that is checked out, so a workflow_dispatch of an
+  # older tag gets that tag's notes rather than the newest one's.
+  #
+  # A job of its own on a GitHub-hosted runner. The action downloads git-cliff
+  # when it runs, and the release job below is on the Mac that holds the
+  # signing certificate and the notary key, so only the rendered file crosses
+  # over.
+  notes:
+    name: render the release notes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # git-cliff needs the tag history to find the previous release.
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          persist-credentials: false
+
+      # A third-party action whose output the release publishes, so it is
+      # pinned to a commit. The contributor lists need the GitHub API; the
+      # action passes the job token.
+      - uses: orhun/git-cliff-action@3d96a18cc4ec17e9dc69ddcc424ccafaf1f78ce2 # v4.9.0
+        with:
+          config: cliff-notes.toml
+          args: --current --output release-notes.md
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-notes
+          path: release-notes.md
+          if-no-files-found: error
+
   release:
     name: build, sign, notarize, publish
+    needs: notes
     # notary: a runner whose egress reaches Apple's notarization service.
     # v0.1.0-rc26 failed three times with HTTPClientError.connectTimeout on
     # the mac-dev-01 runners, which cannot, while the msuch ones can.
@@ -226,10 +263,17 @@ jobs:
           owner: brig-sh
           repositories: homebrew-brig
 
+      # The notes job's output, published in place of the commit list
+      # goreleaser would write itself.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}/release-notes
+
       - uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
         with:
           version: "~> v2"
-          args: release --clean
+          args: release --clean --release-notes=${{ runner.temp }}/release-notes/release-notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ steps.tap-token.outputs.token || secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
