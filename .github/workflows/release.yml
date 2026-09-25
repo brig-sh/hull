@@ -82,19 +82,12 @@ jobs:
       # without it.
       - uses: ./.github/actions/fetch-hvi-vmm
 
-      # goreleaser checks the tree before its hooks run, so its `go mod tidy`
-      # hook could change go.mod or go.sum afterwards and nothing would fail.
-      # Every binary would then embed +dirty and the release would say it was
-      # built from a modified tree. Tidy here first, and stop on any change.
+      # goreleaser checks the tree before its tidy hook runs, so a hook that
+      # changes go.mod or go.sum would ship every binary as +dirty. Tidy first.
       - name: Check the tree stays clean after go mod tidy
         run: |
           set -euo pipefail
           go mod tidy
-          # status, not diff: Go keys its dirty flag on what `git status
-          # --porcelain` reports, which counts a staged or an untracked file
-          # and a plain diff does not. Scoped to the two files tidy can touch,
-          # so unrelated untracked content on a persistent runner -- or inside
-          # the hvi-vmm submodule -- does not fail a release.
           changed="$(git status --porcelain -- go.mod go.sum)"
           [ -z "$changed" ] || {
             echo "go mod tidy changed the module files:" >&2

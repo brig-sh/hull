@@ -22,7 +22,7 @@ These are accepted on every command and subcommand.
 
 Every build has the flag, a plain `go build` included: the version is what the
 Go toolchain derived from the checkout, not a string stamped at link time. See
-[build.md](build.md#what-hull-version-reports-and-the-one-build-that-cannot-say)
+[build.md](build.md#what-hull-version-reports)
 for the one build that reports `dev`.
 
 ## Commands

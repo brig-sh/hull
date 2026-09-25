@@ -84,12 +84,8 @@ CODESIGN_FLAGS    := --force --options runtime $(if $(CODESIGN_KEYCHAIN),--keych
 NOTARY_PROFILE    ?= urunc-notary
 DMG               := $(BUILD_DIR)/hull.dmg
 # The tag is the version. `make release` is a local dry run of what goreleaser
-# does on a tag, and goreleaser takes its version from the tag too.
-#
-# The fallback is make's, not the shell's. A `|| echo` here would bind to the
-# whole pipeline and never fire, because the pipeline's status is the last
-# command's and that one succeeds on empty input -- which is how a clone with
-# no tags would name its tarball hull--arm64.tar.gz.
+# does on a tag, and goreleaser takes its version from the tag too. make's
+# $(or) supplies the fallback; git describe prints nothing without a tag.
 RELEASE_TAG       := $(shell git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null)
 RELEASE_VERSION   := $(or $(patsubst v%,%,$(RELEASE_TAG)),0.0.0)
 TARBALL           := $(BUILD_DIR)/hull-$(RELEASE_VERSION)-arm64.tar.gz

@@ -19,8 +19,8 @@ build, see [signing.md](signing.md).
    nothing to keep in step with it:
 
    ```bash
-   git tag v0.1.0-rc29
-   git push origin v0.1.0-rc29
+   git tag v<version>
+   git push origin v<version>
    ```
 
    `hull version` reports what the Go toolchain derived from the checkout, so

@@ -137,7 +137,7 @@ A **rebuild** does invalidate a signature, because it produces different bytes.
 `make macos` handles that by signing after it builds. A **copy** does not: see
 [signing.md](signing.md#does-copying-a-binary-break-its-signature).
 
-## What `hull version` reports, and the one build that cannot say
+## What `hull version` reports
 
 No version is stamped at link time. `hull version` and `hull --version` read
 what the Go toolchain embedded from the checkout: the version it derives from
