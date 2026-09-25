@@ -1,0 +1,8 @@
+macOS 26 (Tahoe) on Apple Silicon is the recommended platform, and the
+only one we test. hull installs on earlier macOS releases, but they are
+untested: if you run one, please tell us whether it worked.
+
+hull boots VMs through Virtualization.framework. Block-rootfs mode wants
+e2fsprogs:
+
+  brew install e2fsprogs

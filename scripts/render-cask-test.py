@@ -26,14 +26,16 @@ import sys
 import tempfile
 import unittest
 
-RENDER = pathlib.Path(__file__).resolve().parent / "render-cask.py"
+REPO = pathlib.Path(__file__).resolve().parent.parent
+RENDER = REPO / "scripts" / "render-cask.py"
 VERSION = "0.1.0-main.20260925161254.3448252"
 TAG = f"channel-main-{VERSION}"
+CHANNEL = ["--channel=main", "--source=the tip of main"]
 PLATFORMS = [(os, arch) for os in ("macos", "linux") for arch in ("arm", "intel")]
 ARCH_DEP = {"arm": "arm64", "intel": "x86_64"}
 
 
-def render(archives, extra=()):
+def render(archives, extra=(), version=VERSION, tag=TAG, kind=CHANNEL):
     """Runs the renderer on empty archives and returns its exit code, output and cask."""
     with tempfile.TemporaryDirectory() as tmp:
         dist = pathlib.Path(tmp)
@@ -42,9 +44,9 @@ def render(archives, extra=()):
         out = dist / "cask.rb"
         args = [
             sys.executable, str(RENDER),
-            "--project", "hull", "--channel", "main", "--version", VERSION,
-            "--repo", "brig-sh/hull", "--tag", TAG, "--dist", str(dist),
-            "--desc", "Run microVMs", "--source", "the tip of main",
+            "--project", "hull", "--version", version, *kind,
+            "--repo", "brig-sh/hull", "--tag", tag, "--dist", str(dist),
+            "--desc", "Run microVMs",
             *[f"--archive={a}" for a in archives], *extra,
             "--out", str(out),
         ]
@@ -128,6 +130,46 @@ class RenderCaskTest(unittest.TestCase):
         refused, installs = check(cask)
         self.assertEqual(refused, [], cask)
         self.assertEqual(installs, {("macos", "arm")}, cask)
+
+    def test_hull_stable(self):
+        # The arguments release.yml passes for a stable tag.
+        code, out, cask = render(
+            ["on_macos:on_arm:hull-0.2.0-arm64.tar.gz"],
+            ["--binary=hull", "--binary=vz-runner", "--binary=hvi",
+             "--depends-formula=cosign",
+             "--conflicts-with=main", "--conflicts-with=experimental",
+             f"--caveats-file={REPO / 'packaging' / 'cask-caveats.txt'}"],
+            version="0.2.0", tag="v0.2.0", kind=[])
+        self.assertEqual(code, 0, out)
+        refused, installs = check(cask)
+        self.assertEqual(refused, [], cask)
+        self.assertEqual(installs, {("macos", "arm")}, cask)
+        self.assertIn('\ncask "hull" do\n', cask)
+        self.assertEqual(evaluate(cask, "macos", "arm")["url"],
+                         "https://github.com/brig-sh/hull/releases/download/"
+                         "v#{version}/hull-#{version}-arm64.tar.gz")
+        self.assertIn('  conflicts_with cask: [\n    "hull@experimental",\n'
+                      '    "hull@main",\n  ]\n', cask)
+        self.assertIn("    strategy :github_latest\n", cask)
+        self.assertIn('\n  binary "hull"\n  binary "vz-runner"\n  binary "hvi"\n', cask)
+        self.assertIn('             formula: [\n               "cosign",\n             ]\n', cask)
+        self.assertIn("      brew install e2fsprogs\n", cask)
+        self.assertNotIn("channel", cask)
+
+    def test_one_conflict_is_a_string(self):
+        code, out, cask = render(["on_macos:on_arm:hull-0.2.0-arm64.tar.gz"],
+                                 ["--conflicts-with=main"],
+                                 version="0.2.0", tag="v0.2.0", kind=[])
+        self.assertEqual(code, 0, out)
+        self.assertIn('\n  conflicts_with cask: "hull@main"\n', cask)
+
+    def test_stable_needs_its_caveats_file(self):
+        code, out, _ = render(["on_macos:on_arm:hull-0.2.0-arm64.tar.gz"],
+                              ["--caveats-file=/nonexistent/cask-caveats.txt"],
+                              version="0.2.0", tag="v0.2.0", kind=[])
+        self.assertEqual(code, 1, out)
+        self.assertIn("/nonexistent/cask-caveats.txt was not found", out)
+        self.assertNotIn("Traceback", out)
 
     def test_every_platform(self):
         code, out, cask = render([f"on_{os}:on_{arch}:{os}-{arch}.tar.gz" for os, arch in PLATFORMS])
