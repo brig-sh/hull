@@ -5,8 +5,9 @@ name: Release
 # vz-runner first, because GoReleaser cannot build a Swift binary and cannot
 # import one in the open-source edition. It is signed with the virtualization
 # entitlement and notarized here, then GoReleaser picks it up as an extra file
-# in the archive, notarizes the Go binary, publishes the cask and writes the
-# changelog.
+# in the archive, notarizes the Go binary and writes the changelog. For a
+# stable tag the `tap` job then renders the cask and opens it against the tap
+# as a pull request.
 #
 # Runs on our own macOS runner: swift build and codesign need a Mac. Tag
 # builds only, so a fork can never reach it.
@@ -213,26 +214,12 @@ jobs:
           printf '%s' "$NOTARY_KEY_P8" > "$RUNNER_TEMP/notary-key.p8"
           chmod 600 "$RUNNER_TEMP/notary-key.p8"
 
-      # A token for the tap, minted from the bot App rather than a long-lived
-      # PAT. continue-on-error because a release must not fail just because
-      # the App is not installed yet -- goreleaser then falls back to the PAT
-      # secret, and skips publishing the cask if neither exists.
-      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
-        id: tap-token
-        continue-on-error: true
-        with:
-          app-id: ${{ vars.NOFIRE_BOT_APP_ID }}
-          private-key: ${{ secrets.NOFIRE_BOT_PRIVATE_KEY }}
-          owner: brig-sh
-          repositories: homebrew-brig
-
       - uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
         with:
           version: "~> v2"
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HOMEBREW_TAP_GITHUB_TOKEN: ${{ steps.tap-token.outputs.token || secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
           MACOS_SIGN_P12: ${{ secrets.MACOS_CERT_P12 }}
           MACOS_SIGN_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
           MACOS_NOTARY_KEY: ${{ runner.temp }}/notary-key.p8
@@ -299,6 +286,116 @@ jobs:
       - name: Release the keychain lock
         if: always()
         run: '[ ! -f "$RUNNER_TEMP/keychain-lock.sh" ] || sh "$RUNNER_TEMP/keychain-lock.sh" release'
+
+  # The stable cask, rendered from the release the job above drafted and
+  # opened against the tap as a pull request. GoReleaser does not write it;
+  # see the header of .goreleaser.yaml. A release candidate leaves the tap
+  # alone, so `brew upgrade` follows stable versions only.
+  #
+  # A job of its own, so a tap that cannot be reached does not stop the
+  # installer image, and "Re-run failed jobs" retries it alone. Nothing here
+  # needs a Mac.
+  tap:
+    name: tap pull request
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Reading a draft release needs write access. This job signs nothing, so
+    # it does not take the workflow's id-token.
+    permissions:
+      contents: write
+    steps:
+      - name: Work out whether this tag goes to the tap
+        id: tap
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          V="${TAG#v}"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          case "$V" in
+            *-*)
+              echo "stable=false" >> "$GITHUB_OUTPUT"
+              echo "$TAG is a prerelease; the tap is left alone" ;;
+            *)
+              echo "stable=true" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      # The workflow's own commit, for the renderer, the caveats and the tap
+      # script. For a tag push that is the tag. A workflow_dispatch of an
+      # older tag would otherwise run that tag's renderer, which may not know
+      # the stable cask.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: steps.tap.outputs.stable == 'true'
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        if: steps.tap.outputs.stable == 'true'
+
+      # The release is still a draft, so its assets need this token. cosign
+      # checks that checksums.txt is the one this workflow signed, and
+      # sha256sum ties the archive to it, so the cask names the bytes the
+      # release signed.
+      - name: Fetch the archive and verify it against the signed checksums
+        if: steps.tap.outputs.stable == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          V: ${{ steps.tap.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release download "v$V" -R "$GITHUB_REPOSITORY" -D dist \
+            -p "hull-$V-arm64.tar.gz" \
+            -p checksums.txt -p checksums.txt.sig -p checksums.txt.pem
+          cd dist
+          # A tag push signs as the tag. A workflow_dispatch signs as the
+          # branch it ran from, which for a release is main.
+          VRE="$(printf '%s' "$V" | sed 's/\./\\./g')"
+          cosign verify-blob \
+            --certificate checksums.txt.pem --signature checksums.txt.sig \
+            --certificate-identity-regexp "^https://github\.com/${GITHUB_REPOSITORY}/\.github/workflows/release\.yml@refs/(tags/v${VRE}|heads/main)\$" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            checksums.txt
+          sha256sum -c --ignore-missing checksums.txt
+
+      # Minted here, after the release job: an App token lasts an hour, and
+      # signing and notarizing can take most of that. continue-on-error so a
+      # missing App falls back to the PAT secret below.
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        id: tap-token
+        if: steps.tap.outputs.stable == 'true'
+        continue-on-error: true
+        with:
+          app-id: ${{ vars.NOFIRE_BOT_APP_ID }}
+          private-key: ${{ secrets.NOFIRE_BOT_PRIVATE_KEY }}
+          owner: brig-sh
+          repositories: homebrew-brig
+
+      # conflicts_with names both channels, because Homebrew reads only the
+      # conflicts of the cask being installed. cosign checks the signature on
+      # the boot bundle; without it on PATH, hull boots the bundle with a
+      # warning instead.
+      - name: Render the cask and open the tap pull request
+        if: steps.tap.outputs.stable == 'true'
+        env:
+          GH_TOKEN: ${{ steps.tap-token.outputs.token || secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          V: ${{ steps.tap.outputs.version }}
+        run: |
+          set -euo pipefail
+          [ -n "$GH_TOKEN" ] || { echo "no token for the tap" >&2; exit 1; }
+          python3 scripts/render-cask.py \
+            --project hull --version "$V" \
+            --repo brig-sh/hull --tag "v$V" --dist dist \
+            --archive "on_macos:on_arm:hull-$V-arm64.tar.gz" \
+            --desc "Run unikernels and sandboxed Linux containers as microVMs on Apple Silicon" \
+            --caveats-file packaging/cask-caveats.txt \
+            --binary hull --binary vz-runner --binary hvi \
+            --depends-formula cosign \
+            --conflicts-with main --conflicts-with experimental \
+            --out "$RUNNER_TEMP/hull.rb"
+          cat "$RUNNER_TEMP/hull.rb"
+          bash scripts/open-tap-pr.sh brig-sh/homebrew-brig "$V" "$RUNNER_TEMP/hull.rb"
 
   dmg:
     name: installer image

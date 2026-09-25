@@ -36,12 +36,22 @@ build, see [signing.md](signing.md).
 3. A separate `dmg` job builds `hull.dmg`, notarizes and staples it, signs it
    with cosign, and attaches `hull.dmg`, `hull.dmg.sig` and `hull.dmg.pem` to
    the release.
+
+   For a stable tag, a `tap` job checks the draft release's `checksums.txt`
+   against its cosign signature and the archive against `checksums.txt`. It
+   renders `Casks/hull.rb` with `scripts/render-cask.py` from that archive, and
+   opens it against `brig-sh/homebrew-brig` as a pull request from the branch
+   `hull-<version>`. Running the release again for the
+   same tag updates that branch and pull request. A release candidate leaves
+   the tap alone.
 4. Publish the draft release.
-5. Update the tap. For a stable tag, goreleaser opens a pull request against
-   `brig-sh/homebrew-brig` with a new `Casks/hull.rb`; review and merge it. For
-   a release candidate the cask is not published, because `skip_upload` is set
-   to `auto`. If the candidate should be installable, edit `version` and
-   `sha256` in the tap's `Casks/hull.rb` by hand.
+5. Merge the tap pull request, after step 4. The pull request opens while the
+   release is still a draft, and a draft's assets cannot be downloaded
+   anonymously: until the release is published, the cask does not install
+   and the tap's checksum check fails. Re-run that check once the release is
+   out, then merge. For a release candidate there is no pull request. If the
+   candidate should be installable, edit `version` and `sha256` in the tap's
+   `Casks/hull.rb` by hand.
 6. Regenerate the changelog. `release.yml` does not touch `CHANGELOG.md`:
 
    ```bash
@@ -67,7 +77,7 @@ release is usable; only the DMG is missing.
 | `NOTARY_KEY_P8` | App Store Connect API private key, the plain `.p8` contents | App Store Connect, Users and Access, Integrations, App Store Connect API |
 | `NOTARY_KEY_ID` | that key's ID | shown next to the key |
 | `NOTARY_ISSUER_ID` | the issuer UUID | shown on the same page |
-| `NOFIRE_BOT_PRIVATE_KEY` | private key of the GitHub App that mints the tap token | the App's settings page |
+| `NOFIRE_BOT_PRIVATE_KEY` | private key of the GitHub App that mints the tap token, for the `tap` job's pull request | the App's settings page |
 | `HOMEBREW_TAP_GITHUB_TOKEN` | fallback token for the tap, used when the App token is unavailable | a fine-grained PAT with contents and pull-requests write on `homebrew-brig` |
 
 CI reads two more secrets: `HULL_ASSETS_TOKEN`, which pulls the boot bundle on

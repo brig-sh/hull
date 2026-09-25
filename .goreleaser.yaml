@@ -1,11 +1,17 @@
 # hull's single release path, the same shape brig uses.
 #
-# GoReleaser builds and notarizes the Go binary, assembles the archive,
-# publishes the cask and writes the changelog. vz-runner is Swift, which
-# GoReleaser cannot build and cannot import in the open-source edition (the
-# prebuilt builder is a Pro feature), so the release workflow builds, signs
-# and notarizes it just before this runs, and it travels in the archive as an
-# extra file.
+# GoReleaser builds and notarizes the Go binary, assembles the archive and
+# writes the changelog. vz-runner is Swift, which GoReleaser cannot build and
+# cannot import in the open-source edition (the prebuilt builder is a Pro
+# feature), so the release workflow builds, signs and notarizes it just before
+# this runs, and it travels in the archive as an extra file.
+#
+# GoReleaser does not write the cask. Its cask template nests each archive's
+# url under on_macos and on_arm, and hull has one arm64 archive. Homebrew 7
+# loads a cask on every OS and arch, and refuses the whole tap when one of
+# them has no url, as macOS on Intel would have none. The release workflow
+# renders the cask with scripts/render-cask.py instead, the same way the
+# channel casks are rendered.
 #
 # The styled DMG is gone with the old workflow: notarizing an app bundle
 # inside a DMG is also Pro-only, and nobody installed that way -- the Homebrew
@@ -114,51 +120,6 @@ signs:
 
 sboms:
   - artifacts: archive
-
-homebrew_casks:
-  - name: hull
-    ids: [hull]
-    binaries: [hull, vz-runner, hvi]
-    repository:
-      owner: brig-sh
-      name: homebrew-brig
-      # The branch the cask is pushed to, and the head of the pull request
-      # below. `main` here would mean a direct push to the tap, with no PR.
-      branch: hull-{{ .Version }}
-      # Open a pull request rather than pushing to the tap. The cask is what
-      # people install; a bad one is worth a second pair of eyes, and the PR
-      # is a place to see the diff.
-      pull_request:
-        enabled: true
-        base:
-          branch: main
-      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    homepage: https://github.com/brig-sh/hull
-    description: Run unikernels and sandboxed Linux containers as microVMs on Apple Silicon
-    # The channel casks declare a conflict with this one, and Homebrew reads
-    # only the conflicts of the cask being installed. So without this half,
-    # `brew install --cask hull` over an installed hull@main is not stopped:
-    # it fails later, while linking the binaries, with a message about a link
-    # rather than about the two casks. brig's cask carries the same pair.
-    conflicts:
-      - cask: hull@main
-      - cask: hull@experimental
-    dependencies:
-      # cosign is what checks the signature on the boot bundle: the kernel,
-      # initrd and guest agent every sandbox boots. Without it on PATH hull's
-      # check returns "no tooling", and under the default mode that is not a
-      # refusal -- the bundle is fetched, written and booted with a printed
-      # warning. So without this line the one control over the boot chain is
-      # off by default on the shipped install path, purely because nothing
-      # pulls the binary in. brig's cask has always depended on it; hull, the
-      # thing doing the verifying, did not.
-      - formula: cosign
-    skip_upload: auto
-    caveats: |
-      hull boots VMs through Virtualization.framework. Block-rootfs mode wants
-      e2fsprogs:
-
-        brew install e2fsprogs
 
 changelog:
   use: github
