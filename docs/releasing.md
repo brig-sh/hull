@@ -120,14 +120,20 @@ list evicts this one, and `codesign` then fails with
 promoted by hand from any ref with a `workflow_dispatch`. brig has the same
 pair and depends on the matching one, because a feature usually spans both.
 
-Each publishes to a moving tag -- `channel-main`, `channel-experimental` --
-whose assets are replaced in place. Neither matches `v*`, so neither starts
-the release workflow.
+Each build is a prerelease of its own, tagged `channel-<channel>-<version>`.
+Releases in this repository are immutable: once published, a release takes
+no more assets, and its tag can neither move nor be deleted while the release
+exists. So a build is drafted, given its assets, and then published, and the
+tap's cask names that build's release. Once the tap has moved, older builds of
+the same channel are deleted with their tags, and the newest three stay. No
+channel tag matches `v*`, so none starts the release workflow.
 
-Both are named in `git.ignore_tags` in `.goreleaser.yaml`. goreleaser reads the
-nearest tag for the version and for where a changelog starts, and a re-pointed
-channel tag is nearer than any release tag. Rename a channel and that list has
-to follow, or the next release's notes begin at the channel tag.
+A channel tag points at a commit made for it: the build's tree, with the
+commit it was built from as its parent. Nothing is built on that commit, so
+it is never an ancestor of `main`. goreleaser reads the nearest tag for the
+version and for where a changelog starts, and `git.ignore_tags` only matches
+whole names, so a per-build tag on `main` itself would become the nearest tag
+for the next release.
 
 The job runs on the same `notary` runner and signs and notarizes the same way
 a release does. It has to: vz-runner and hvi carry the virtualization and
