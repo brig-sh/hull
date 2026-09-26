@@ -4,7 +4,7 @@ go 1.26.4
 
 require (
 	github.com/compose-spec/compose-go/v2 v2.14.0
-	github.com/containerd/containerd v1.7.33
+	github.com/containerd/containerd v1.7.36
 	github.com/containers/gvisor-tap-vsock v0.8.9
 	github.com/google/go-containerregistry v0.20.1
 	github.com/hashicorp/go-version v1.9.0
@@ -73,6 +73,7 @@ require (
 	github.com/opencontainers/selinux v1.13.1 // indirect
 	github.com/pierrec/lz4/v4 v4.1.14 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
+	github.com/rogpeppe/go-internal v1.14.1 // indirect
 	github.com/rs/zerolog v1.35.1 // indirect
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.1 // indirect
 	github.com/seccomp/libseccomp-golang v0.10.0 // indirect
