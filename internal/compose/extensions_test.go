@@ -157,3 +157,61 @@ services:
 		t.Fatalf("error = %q, want it to mention interval", err.Error())
 	}
 }
+
+// TestHealthTCPProbeBudget pins ProbeBudget's documented defaults: docs/compose.md:105-106
+// ("Defaults: a 1 s interval and 60 retries. There is no `timeout` key")
+// -- a 1s interval and 60 retries when unset, and StartPeriod added
+// untouched to the total. This is the only uncovered function in this
+// package and its numbers are a published contract; a regression here
+// silently changes how long `depends_on: service_healthy` waits before
+// giving up, with no compile-time signal.
+func TestHealthTCPProbeBudget(t *testing.T) {
+	cases := []struct {
+		name         string
+		h            HealthTCP
+		wantInterval time.Duration
+		wantTotal    time.Duration
+	}{
+		{
+			name:         "zero value uses both defaults",
+			h:            HealthTCP{},
+			wantInterval: time.Second,
+			wantTotal:    60 * time.Second,
+		},
+		{
+			name:         "interval set, retries defaulted",
+			h:            HealthTCP{Interval: 5 * time.Second},
+			wantInterval: 5 * time.Second,
+			wantTotal:    5 * time.Second * 60,
+		},
+		{
+			name:         "retries set, interval defaulted",
+			h:            HealthTCP{Retries: 3},
+			wantInterval: time.Second,
+			wantTotal:    3 * time.Second,
+		},
+		{
+			name:         "start period adds to the total untouched",
+			h:            HealthTCP{StartPeriod: 10 * time.Second, Interval: 2 * time.Second, Retries: 4},
+			wantInterval: 2 * time.Second,
+			wantTotal:    10*time.Second + 2*time.Second*4,
+		},
+		{
+			name:         "negative interval and retries are treated as unset",
+			h:            HealthTCP{Interval: -1, Retries: -1},
+			wantInterval: time.Second,
+			wantTotal:    60 * time.Second,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			interval, total := tc.h.ProbeBudget()
+			if interval != tc.wantInterval {
+				t.Fatalf("interval = %v, want %v", interval, tc.wantInterval)
+			}
+			if total != tc.wantTotal {
+				t.Fatalf("total = %v, want %v", total, tc.wantTotal)
+			}
+		})
+	}
+}
