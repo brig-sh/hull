@@ -1529,37 +1529,18 @@ func composeConfigYAML(ctx context.Context, cmd *cli.Command) ([]byte, error) {
 	return collapseNamedVolumes(raw, volumesRoot(cmd), projectName(cmd))
 }
 
-// hypervisorAliasCanonical mirrors the normalization switch run.go applies
-// to the value serviceRunArgs passes it as --hypervisor (run.go, the
-// "Normalize hypervisor names" switch): the only place that currently owns
-// this mapping. x-hypervisor accepts these names because validateProject's
-// supportedHypervisors allows them, but the backend that actually boots is
-// the canonical name on the right. compose config's hydration needs the
-// same fold so its rendered x-hypervisor matches what 'up' will actually
-// run, not the literal alias the file wrote. Duplicated by hand rather than
-// extracted into a shared function because the only other owner is deep
-// inside run's VM-boot path, and reaching into that runtime code from the
-// config-rendering path is a larger, riskier change than keeping these
-// three lines in sync.
-var hypervisorAliasCanonical = map[string]string{
-	"qemu-hvf":       "qemu",
-	"virtualization": "vz",
-	"apple":          "vz",
-}
-
 // effectiveHypervisor returns the backend a booted service actually gets:
-// compose.Hypervisor's literal value normalized through
-// hypervisorAliasCanonical, or "vz" when the extension is unset entirely —
-// the same default serviceRunArgs falls back to.
+// compose.Hypervisor's literal value folded through normalizeHypervisor, the
+// same fold `hull run` applies to the --hypervisor serviceRunArgs passes, so
+// compose config renders the backend 'up' will run and not the alias the
+// file wrote. "vz" when the extension is unset entirely, the same default
+// serviceRunArgs falls back to.
 func effectiveHypervisor(svc types.ServiceConfig) string {
 	hv := compose.Hypervisor(svc)
 	if hv == "" {
 		return "vz"
 	}
-	if canon, ok := hypervisorAliasCanonical[hv]; ok {
-		return canon
-	}
-	return hv
+	return normalizeHypervisor(hv)
 }
 
 // impliedOneShotJobs returns the set of services that run as jobs only
