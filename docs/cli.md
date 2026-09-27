@@ -27,7 +27,7 @@ for the one build that reports `dev`.
 
 ## Commands
 
-There are nineteen top-level commands. `network-gateway` is the only hidden one:
+There are twenty top-level commands. `network-gateway` is the only hidden one:
 it does not appear in `hull --help`, but it runs and prints its own help when
 named. No flag anywhere in the tree is hidden.
 
@@ -47,6 +47,7 @@ named. No flag anywhere in the tree is hidden.
 | `rmi <image>` | remove images from the store |
 | `prune` | remove images and pull leftovers nothing needs |
 | `assets` | manage the boot assets used for images that carry no kernel |
+| `capabilities` | report what this host can offer a guest: today, nested virtualization |
 | `store` | manage the volume the store lives on |
 | `compose` | run a multi-service compose file, one VM per service |
 | `telemetry` | control usage and crash telemetry |
@@ -59,7 +60,7 @@ The image reference is the first positional argument. Everything after it
 replaces the image's `Cmd`, the way `docker run` does. The image entrypoint is
 kept when that entrypoint is `urunit`.
 
-Twenty-three flags:
+Twenty-four flags:
 
 | Flag | Default | What it does |
 |---|---|---|
@@ -85,6 +86,7 @@ Twenty-three flags:
 | `--gui` | off | open a graphical window. `vz` only |
 | `--gui-title <text>` | | title for that window. Requires `--gui` |
 | `--rosetta` | off | run an amd64 rootfs under Rosetta translation. `vz` only; the kernel stays arm64 |
+| `--nested-virt` | off | give the guest EL2, so its kernel has KVM and `/dev/kvm`. `hvi` only, and only on a host `hull capabilities` says supports it |
 | `--platform <os/arch>` | `linux/arm64` | image platform to pull |
 
 ### Combinations hull rejects
@@ -96,6 +98,8 @@ These fail before anything starts, rather than being documented and ignored:
 - `--gateway-sock` together with `--net none`
 - `--gui` or `--rosetta` on any backend but `vz`
 - `--gui-title` without `--gui`
+- `--nested-virt` on any backend but `hvi`, or on a host without nested
+  virtualization. See [below](#--nested-virt)
 - `--rosetta` without the virtiofs rootfs mode, a `urunit` init, and a static
   arm64 `busybox` at `/.rosetta/busybox` in the image
 
@@ -110,6 +114,63 @@ turns on translation, and if you give it without an explicit `--platform` it
 defaults the pull to `linux/amd64`. An explicit `--platform` wins. The image
 annotation `com.urunc.darwin.rosetta` also turns the path on, but cannot change
 the pull platform, because the platform is decided before the pull.
+
+### `--nested-virt`
+
+The guest boots at EL2 and owns a hypervisor of its own: its kernel initialises
+KVM and exposes `/dev/kvm`, and it can run virtual machines inside the sandbox.
+Without the flag the guest boots at EL1 and has no `/dev/kvm`. The flag is the
+only way to turn this on.
+
+It needs the `hvi` backend and a Mac whose Hypervisor.framework offers EL2
+(macOS 15 or later, on a chip that has it). Before starting, hull runs
+`hvi caps --json` on the hvi it would boot and refuses with
+`nested virtualization requested but not supported by this host: <detail>`
+when the answer is no or there is no answer. With `--hypervisor hvi` on the
+command line that check happens before the store is opened or anything is
+pulled.
+
+`hull inspect` shows `"nestedVirt": true` for an instance started this way.
+The VMs a nested guest runs are memory and vCPUs of that guest, so stopping
+the instance ends them, and every limit set from the host (shared
+directories, the network gateway, memory, vCPUs) still bounds them. What
+changes is what the host can see: hvi describes the outer guest only, and a
+VM inside it shows up only as that guest's work. See
+[backends.md](backends.md#hvi).
+
+## `hull capabilities`
+
+```
+hull capabilities [--json]
+```
+
+Reports whether this host can give a guest nested virtualization, and which
+backend would. It asks the same hvi `hull run` would start, with a five second
+limit, and always exits 0.
+
+```
+$ hull capabilities
+nested virtualization: supported (hvi)
+$ hull capabilities --json
+{
+  "schemaVersion": 1,
+  "nestedVirt": {
+    "supported": true,
+    "answered": true,
+    "backend": "hvi",
+    "detail": "Hypervisor.framework reports EL2"
+  }
+}
+```
+
+When the answer is no, the text line adds the reason after a colon and the
+JSON carries `"supported": false` with the reason in `detail`. `answered`
+says which kind of no it is. `true` means hvi answered the question and this
+host has no nested virtualization. `false` means hull got no answer (no hvi,
+no reply in time, an error, output hull cannot read), so nothing said yes;
+`detail` is the failure, and the text line reads
+`not supported (hvi did not answer): <detail>`. Key on `answered`, not on the
+wording of `detail`.
 
 ## `hull exec`
 

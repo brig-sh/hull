@@ -53,6 +53,7 @@ Start with `vz`. Move to another backend only for a reason on this list.
 | Checkpoint and restore | yes, with a block rootfs | **no** | **no** |
 | `--gui`, `--gui-title` | yes | no | no |
 | `--rosetta` | yes | no | no |
+| `--nested-virt` (KVM in the guest) | no | yes, where the host offers EL2 | no |
 
 Read the gaps as gaps. Three backends existing does not make them
 interchangeable, and hull does not emulate a missing feature on a backend that
@@ -213,6 +214,31 @@ One disk and one NIC, no hotplug, no PCI. virtio-fs on macOS only. It has had
 no external security audit. The boundary it is built to hold is the one around
 the guest; it does not claim to defend against a guest that hangs its own VM,
 or against CPU side channels.
+
+**Nested virtualization.** `hull run --hypervisor hvi --nested-virt` asks
+`hvi boot --nested-virt` to enable EL2 in Hypervisor.framework and boot the
+guest there. The guest kernel then initialises KVM (on the Apple silicon
+tested, in nVHE mode: `kvm [1]: Hyp nVHE mode initialized successfully`) and
+exposes `/dev/kvm`, so a VMM such as Firecracker or QEMU inside the guest can
+run VMs of its own. Without the flag the guest starts at EL1 and its kernel
+reports `kvm [1]: HYP mode not available`.
+
+Whether the host can do this is a property of the chip and macOS, not of hull.
+`hull capabilities` answers it by running `hvi caps --json`, and `hull run`
+asks the same question before it starts and refuses with
+`nested virtualization requested but not supported by this host: <detail>`.
+See [cli.md](cli.md#--nested-virt).
+
+The VMs a nested guest runs live in its memory and on its vCPUs. Stopping the
+instance ends them, and every host-side limit still bounds them: the shares
+hull exported, the gateway and its egress rules, memory and vCPU count. What
+changes is observation: `hvi` describes the outer guest only. Its event
+ledger and plugins see what that guest does, and the processes, memory and
+I/O of a VM inside it show up only as the outer guest's work. In nVHE mode
+the outer guest's kernel still runs at EL1, with only KVM's stub at EL2, so
+plugins can walk its page tables as before; a register view taken while a
+nested VM is running is that VM's own. hvi's `docs/security.md` has the
+detail.
 
 **No clock device.** `hvi` has no emulated RTC on macOS, so hull seeds the
 guest clock once at boot by writing the host epoch into the boot initrd. A
