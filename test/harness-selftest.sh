@@ -1,5 +1,5 @@
 #!/bin/bash
-# Self-test for the two VM-boot harnesses: proves each one can actually FAIL,
+# Self-test for three VM-boot harnesses: proves each one can actually FAIL,
 # using fake `hull` binaries instead of a real VM.
 #
 # hvi-boot-test.py and pty-jobcontrol-test.py both used to report a clean
@@ -13,6 +13,11 @@
 #
 # One case here is not about that regression: case 3 covers a check in
 # hvi-boot-test.py that predates the fix and had no coverage at all.
+#
+# Cases 9 to 12 hold hvi-nested-test.py's skip rule: it may skip only when
+# `hull capabilities` says hvi answered and the answer was no. A probe that
+# got no answer is hull or hvi broken, and a harness that skipped on it
+# would report a clean run on every Mac where the probe is missing.
 #
 # It is cheap because it needs no VM, no hypervisor, no boot assets, no `hvi`
 # binary, no built `hull`, no network and no code signing: every case drives
@@ -149,6 +154,9 @@ elif sub == "ps":
     if out:
         print(out)
     sys.exit(int(os.environ.get("FAKE_PS_EXIT", "0")))
+elif sub == "capabilities":
+    print(os.environ.get("FAKE_CAPS", ""))
+    sys.exit(0)
 else:
     sys.exit(0)  # stop / rm cleanup calls: always succeed quietly
 PYEOF
@@ -292,6 +300,46 @@ chmod +x "$WORK/fake-stop-hull"
 out=$(with_deadline 60 python3 "$HERE/pty-jobcontrol-test.py" "$WORK/fake-stop-hull" vz selftest-stop 2>&1); rc=$?
 expect_exit "case 8: SIGTTOU before any boot marker" 1 "$rc"
 expect_contains "case 8: reports SUSPENDED-BUG" "$out" "verdict: SUSPENDED-BUG"
+
+echo
+echo "== hvi-nested-test.py =="
+if [ "$HOST_OS" != "Darwin" ] || [ "$HOST_ARCH" != "arm64" ]; then
+    for c in "case 9: probe got no answer" "case 10: hvi answered no" \
+             "case 11: hvi answered no, HULL_REQUIRE_NESTED=1" \
+             "case 12: document without answered"; do
+        skip_case "$c" "hvi-nested-test.py needs Darwin/arm64; this is $HOST_OS/$HOST_ARCH"
+    done
+else
+
+# Case 9 (required): hvi never answered. Before `answered` existed the
+# harness could only tell this from a host without EL2 by hvi's wording.
+out=$(HULL_BIN="$WORK/hull" HULL_BOOT_ASSETS="$WORK/assets" \
+      FAKE_CAPS='{"schemaVersion":1,"nestedVirt":{"supported":false,"answered":false,"backend":"hvi","detail":"hvi caps failed: exit status 1"}}' \
+      python3 "$HERE/hvi-nested-test.py" c9 2>&1); rc=$?
+expect_exit "case 9: probe got no answer" 1 "$rc"
+expect_contains "case 9: says hvi did not answer" "$out" "got no answer from hvi"
+
+# Case 10: hvi answered, and the answer was no. The one legitimate skip.
+out=$(HULL_BIN="$WORK/hull" HULL_BOOT_ASSETS="$WORK/assets" \
+      FAKE_CAPS='{"schemaVersion":1,"nestedVirt":{"supported":false,"answered":true,"backend":"hvi","detail":"no EL2 here"}}' \
+      python3 "$HERE/hvi-nested-test.py" c10 2>&1); rc=$?
+expect_exit "case 10: hvi answered no" 0 "$rc"
+expect_contains "case 10: skips naming the reason" "$out" "SKIP: this host has no nested virtualization: no EL2 here"
+
+# Case 11: the same answer on a runner declared to have EL2.
+out=$(HULL_BIN="$WORK/hull" HULL_BOOT_ASSETS="$WORK/assets" HULL_REQUIRE_NESTED=1 \
+      FAKE_CAPS='{"schemaVersion":1,"nestedVirt":{"supported":false,"answered":true,"backend":"hvi","detail":"no EL2 here"}}' \
+      python3 "$HERE/hvi-nested-test.py" c11 2>&1); rc=$?
+expect_exit "case 11: hvi answered no, HULL_REQUIRE_NESTED=1" 1 "$rc"
+expect_contains "case 11: names the requirement" "$out" "HULL_REQUIRE_NESTED=1"
+
+# Case 12: a document with no `answered` field is not an answer.
+out=$(HULL_BIN="$WORK/hull" HULL_BOOT_ASSETS="$WORK/assets" \
+      FAKE_CAPS='{"schemaVersion":1,"nestedVirt":{"supported":false,"backend":"hvi","detail":"no EL2 here"}}' \
+      python3 "$HERE/hvi-nested-test.py" c12 2>&1); rc=$?
+expect_exit "case 12: document without answered" 1 "$rc"
+expect_contains "case 12: says hvi did not answer" "$out" "got no answer from hvi"
+fi
 
 echo
 echo "$pass passed, $fail failed, $skip skipped"
