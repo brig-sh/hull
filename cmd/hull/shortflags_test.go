@@ -72,6 +72,7 @@ func TestNoCommaFlagNames(t *testing.T) {
 		checkpointCommand(), restoreCommand(), rmCommand(), logsCommand(),
 		inspectCommand(), imagesCommand(), assetsCommand(), storeCommand(),
 		composeCommand(), networkGatewayCommand(), telemetryCommand(),
+		capabilitiesCommand(),
 	} {
 		walk("hull "+c.Name, c)
 	}
