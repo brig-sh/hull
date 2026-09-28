@@ -110,6 +110,20 @@ Or use `make install`, which copies all three into `PREFIX` and re-signs
 `vz-runner` and `hvi` there. It does not re-sign `hull`, which needs no
 entitlement.
 
+A symlink is enough, and it can point anywhere, for example at an hvi built in
+a separate checkout while you work on both. hull checks the path with a stat
+that follows the link, and macOS applies the code signature of the file the
+link resolves to, so sign that file and not the link:
+
+```bash
+ln -sf ~/src/hvi-vmm/target/release/hvi dist/hvi
+./dist/hull_arm64 capabilities   # asks that hvi, so it shows which one is used
+```
+
+When nothing named `hvi` sits next to hull, hull falls back to the first `hvi`
+on `PATH`, which on a machine with a release installed is the release. A
+local hull then boots the released hvi without saying so.
+
 Putting only `hull` on your PATH is the most common local-build mistake. The
 `vz` and `hvi` backends then fail with a message about not finding the runner.
 
@@ -157,6 +171,17 @@ hull dev (go1.26.5, darwin/arm64)
 case, and the binary uses them only when the toolchain embedded nothing. So
 build with `make` in a worktree if the version matters. See
 `internal/buildinfo`.
+
+A worktree placed **inside** the main checkout, such as the ones under
+`.claude/worktrees/`, is the opposite case. Looking upwards from the worktree,
+the toolchain finds the main checkout's `.git` directory and embeds that
+checkout's commit and modified flag, so the binary names a commit that is not
+the one it was built from. Turn the toolchain's stamping off and `make`'s
+values are used:
+
+```bash
+GOFLAGS=-buildvcs=false make urunc_macos
+```
 
 ## Testing
 

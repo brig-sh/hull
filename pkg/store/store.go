@@ -89,6 +89,11 @@ type InstanceState struct {
 	// later `exec` attach or `stop` emits. Empty on instances created
 	// before this field existed.
 	Backend string `json:"backend,omitempty"`
+	// NestedVirt records that the guest was booted with EL2 (hvi
+	// --nested-virt) and so can run virtual machines of its own. Kept
+	// here so `hull inspect` answers without parsing CmdLine; absent when
+	// false, which is also every instance created before the field.
+	NestedVirt bool `json:"nestedVirt,omitempty"`
 	// TelemetryEndSent guards the telemetry `end` event to exactly once
 	// across the foreground exit path and `stop`.
 	TelemetryEndSent bool `json:"telemetryEndSent,omitempty"`

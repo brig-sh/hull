@@ -604,6 +604,19 @@ jobs:
           HULL_STORE_DIR: ${{ runner.temp }}/../urunc-ci-store
         run: python3 test/hvi-boot-test.py ci-hvi-${GITHUB_RUN_ID}
 
+      # Nested virtualization: boots the same image with --nested-virt and
+      # asserts the guest kernel started at EL2 with KVM and /dev/kvm, then
+      # boots it without the flag and asserts it reports EL1 and no KVM.
+      # Skips only when hvi says Hypervisor.framework offers no EL2; an hvi
+      # without the caps probe fails it, so this needs the submodule to
+      # carry the probe.
+      - name: HVI nested virtualization (boots a real VM)
+        if: runner.environment == 'self-hosted'
+        env:
+          HULL_BIN: ${{ github.workspace }}/dist/hull_arm64
+          HULL_STORE_DIR: ${{ runner.temp }}/../urunc-ci-store
+        run: python3 test/hvi-nested-test.py ci-hvi-nested-${GITHUB_RUN_ID}
+
       # The store is a mounted volume, and nothing unmounts it on its own. This
       # runner is one long-lived Mac, so without this it collects a mounted
       # sparse image per store, forever. always(): a job that failed still
@@ -806,6 +819,14 @@ jobs:
         env:
           HULL_BIN: ${{ github.workspace }}/dist/hull_arm64
         run: python3 test/hvi-boot-test.py ci-sip-hvi-${GITHUB_RUN_ID}
+
+      # The same boot with --nested-virt, under SIP: EL2 is asked of
+      # Hypervisor.framework by a Developer ID signed hvi, the way a release
+      # runs it. Skips only when the runner has no EL2 (see hvi-nested-test.py).
+      - name: Boot a nested-virtualization microVM on hvi (real VM under SIP)
+        env:
+          HULL_BIN: ${{ github.workspace }}/dist/hull_arm64
+        run: python3 test/hvi-nested-test.py ci-sip-hvi-nested-${GITHUB_RUN_ID}
 
       # The store is a mounted sparse image and nothing unmounts it on its own;
       # on a long-lived self-hosted Mac that would leave one mount per run behind.

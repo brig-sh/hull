@@ -103,6 +103,7 @@ func main() {
 			rmiCommand(),
 			pruneCommand(),
 			assetsCommand(),
+			capabilitiesCommand(),
 			storeCommand(),
 			composeCommand(),
 			networkGatewayCommand(),

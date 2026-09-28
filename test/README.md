@@ -2,16 +2,18 @@
 
 The six `.py` harnesses here boot a real VM through a built `hull`. Two of
 the shell scripts boot nothing: `compose-config-smoke.sh` only runs `compose
-config`, and `harness-selftest.sh` drives two of the harnesses against fake
+config`, and `harness-selftest.sh` drives three of the harnesses against fake
 `hull` binaries. The rest are image builders and hand-run scripts, listed
 under Files below. The Go unit tests live next to the code and run with
 `make test`; these scripts are the end-to-end layer on top of them, and the
 ones that boot a VM need an Apple Silicon host with working HVF.
 
-Two harnesses skip with a named reason, exit 0, when the host cannot run
+Three harnesses skip with a named reason, exit 0, when the host cannot run
 them: `hvi-boot-test.py`, when the host is not Apple Silicon, or the `hull`
-binary, the `hvi` binary or a boot artifact is missing, and
-`rosetta-test.py`, when Rosetta is not installed. The other four --
+binary, the `hvi` binary or a boot artifact is missing;
+`hvi-nested-test.py`, for the same reasons and also when `hull capabilities`
+says hvi answered and the answer was no (a probe that got no answer is a
+failure); and `rosetta-test.py`, when Rosetta is not installed. The other four --
 `pty-terminal-test.py`, `pty-jobcontrol-test.py`, `pty-checkpoint-test.py`
 and `share-test.py` -- have no skip path at all: their only exits are a
 success and a failure, so pointing one of them at a host that cannot run it
@@ -23,7 +25,7 @@ fails rather than reporting a clean skip.
 |---|---|---|
 | `HULL_BIN` | every `.py` harness except `pty-jobcontrol-test.py`, which takes the binary as its first argument | the `hull` binary to drive; default `dist/hull_arm64`, the `make macos` output |
 | `HULL_STORE_DIR` | every `.py` harness | passed as `--store-dir` when set, so a run never touches `~/.hull/store`. CI uses a store beside the runner's temp dir; the SIP jobs use `$HOME/hull-ci-store` because a long path overflows a unix socket address |
-| `HULL_TEST_BOOT_TIMEOUT` | every `.py` harness except `hvi-boot-test.py` | seconds to wait for the guest to come up before giving up on the boot; default 180. What is waited for differs: the `Run /.` boot marker in `pty-terminal-test.py` and `pty-jobcontrol-test.py`, a shell prompt in `pty-checkpoint-test.py`, the seeded script's marker in `share-test.py`, the guest agent's first answer in `rosetta-test.py` |
+| `HULL_TEST_BOOT_TIMEOUT` | every `.py` harness except `hvi-boot-test.py` | seconds to wait for the guest to come up before giving up on the boot; default 180. What is waited for differs: the `Run /.` boot marker in `pty-terminal-test.py` and `pty-jobcontrol-test.py`, a shell prompt in `pty-checkpoint-test.py`, the seeded script's marker in `share-test.py`, the guest agent's first answer in `rosetta-test.py` and `hvi-nested-test.py` |
 | `HULL_TEST_LOG_DIR` | `pty-checkpoint-test.py` | when set, the console transcript is written to `<dir>/<name>.log`; CI uploads that directory as an artifact when the matrix fails |
 
 hull itself reads none of these. A detached instance's console lands in the
@@ -34,7 +36,8 @@ back.
 The table covers what a caller is expected to set. Four more override one
 harness's own defaults: `HULL_TEST_IMAGE` in `pty-checkpoint-test.py` and
 `share-test.py`, `HULL_ROSETTA_TEST_IMAGE` in `rosetta-test.py`, and
-`HULL_HVI_IMAGE` and `HULL_BOOT_ASSETS` in `hvi-boot-test.py`.
+`HULL_HVI_IMAGE` and `HULL_BOOT_ASSETS` in `hvi-boot-test.py` and
+`hvi-nested-test.py`.
 `HULL_BOOT_ASSETS` is the one of those that is not test-only: hull reads it
 as well, in `internal/bootassets`, so setting it points the harness and the
 binary it drives at the same directory.
@@ -60,6 +63,15 @@ Harnesses CI runs:
   and asserts the image's own entrypoint ran and the instance stopped with
   no VMM left. Skips without the `hull` binary, the `hvi` binary, the boot
   assets or Apple Silicon.
+- `hvi-nested-test.py <name>` boots an OCI image on hvi with `--nested-virt`
+  and asserts the guest kernel started at EL2, initialised KVM and has
+  `/dev/kvm`, and that `hull inspect` records it; then boots it without the
+  flag and asserts the kernel reports EL1 and `HYP mode not available`, with
+  no `/dev/kvm`. After each stop it checks no hvi is left for the instance,
+  and both instances are removed however the run ends. Skips as
+  `hvi-boot-test.py` does, and on `answered: true, supported: false` from
+  `hull capabilities`; `HULL_REQUIRE_NESTED=1` turns that skip into a
+  failure.
 - `unikraft-gateway-test.py` runs a Unikraft OCI image through `hull run` on
   a static gateway address and fetches a page from it through a host port
   forward. The fetch is the assertion: it succeeds only if the guest took the
@@ -85,8 +97,8 @@ Harnesses CI runs:
 
 Self-test for the harnesses themselves:
 
-- `harness-selftest.sh` drives `hvi-boot-test.py` and `pty-jobcontrol-test.py`
-  against fake `hull` binaries and asserts each one fails on input that is
+- `harness-selftest.sh` drives `hvi-boot-test.py`, `pty-jobcontrol-test.py`
+  and `hvi-nested-test.py` against fake `hull` binaries and asserts each one fails on input that is
   not clean, then that each still passes on a genuine success, so a harness
   rewritten to fail on everything cannot satisfy it either. Three of its
   cases pin regressions: `hvi-boot-test.py` once reported PASS both for a
@@ -94,8 +106,10 @@ Self-test for the harnesses themselves:
   nonzero, and `pty-jobcontrol-test.py` once reported CLEAN for a `hull`
   binary that did not exist. Two more cover checks that already worked and
   had no coverage: a `hull ps` that still lists the instance as running, and
-  a job suspended by SIGTTOU. No VM, no hypervisor, no boot assets and no
-  built `hull`.
+  a job suspended by SIGTTOU. Four hold `hvi-nested-test.py`'s skip rule:
+  it skips only when hvi answered no, and fails when hvi never answered or
+  `HULL_REQUIRE_NESTED=1` is set. No VM, no hypervisor, no boot assets and
+  no built `hull`.
 
   It does need a Darwin/arm64 host for its five `hvi-boot-test.py` cases,
   because that harness skips on any other host and cases expecting a failure
@@ -152,7 +166,8 @@ runners, so a fork pull request, which lands on a GitHub-hosted runner for
 - `e2e` runs, signed with the Developer ID, the PTY matrix
   (`pty-terminal-test.py` vz `type`/`intr`/`double`/`term` and qemu
   `type`/`intr`, `pty-jobcontrol-test.py` on vz and qemu,
-  `pty-checkpoint-test.py`), `hvi-boot-test.py`, the share matrix
+  `pty-checkpoint-test.py`), `hvi-boot-test.py`, `hvi-nested-test.py`, the
+  share matrix
   (`share-test.py` on vz in all seven modes, on qemu in `readwrite`,
   `ownership` and `persist`), and `rosetta-test.py`. It asks for a runner
   with a console session (`gui` label): checkpoint has never passed without
@@ -160,7 +175,7 @@ runners, so a fork pull request, which lands on a GitHub-hosted runner for
 - `microVM boot (SIP-enabled)` and `microVM boot (SIP-disabled)` each boot
   `pty-terminal-test.py vz ... type` and `hvi-boot-test.py`, the first with a
   Developer ID signature, the second ad-hoc signed, on runners labelled for
-  their SIP state.
+  their SIP state. The SIP-enabled one also runs `hvi-nested-test.py`.
 
 Run the same thing locally against a fresh build:
 
@@ -170,5 +185,6 @@ export HULL_BIN=$PWD/dist/hull_arm64 HULL_STORE_DIR=$HOME/hull-test-store
 python3 test/pty-terminal-test.py vz t1 type
 python3 test/share-test.py vz s1 readwrite
 python3 test/hvi-boot-test.py h1
+python3 test/hvi-nested-test.py n1
 test/compose-config-smoke.sh "$HULL_BIN"
 ```

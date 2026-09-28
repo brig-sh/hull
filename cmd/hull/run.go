@@ -157,6 +157,10 @@ func runCommand() *cli.Command {
 				Name:  "rosetta",
 				Usage: "run an amd64 rootfs under Rosetta translation (Vz only; the kernel stays arm64)",
 			},
+			&cli.BoolFlag{
+				Name:  "nested-virt",
+				Usage: "expose hardware virtualization to the guest (hvi only): the guest kernel gets EL2 and /dev/kvm",
+			},
 			&cli.StringFlag{
 				Name:  "platform",
 				Value: ociclient.DefaultPlatform,
@@ -226,6 +230,19 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	}
 	if guiTitle != "" && !gui {
 		return errors.New("--gui-title requires --gui")
+	}
+	// Nested virtualization is settled here when the backend is named on
+	// the command line, as brig names it: before the store is opened or
+	// anything is pulled, so a host without EL2 costs the caller one probe
+	// and nothing else. When the backend comes from the image, the same
+	// check runs below once the image says which backend it is.
+	nested := nestedVirtGate{requested: cmd.Bool("nested-virt")}
+	if probe, err := nested.beforeStore(hypervisorOverride); err != nil {
+		return err
+	} else if probe {
+		if err := requireNestedVirt(ctx); err != nil {
+			return err
+		}
 	}
 
 	// Generate instance ID if not provided
@@ -443,35 +460,9 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 		}
 	}
 
-	// Determine VMM and unikernel types from annotations or CLI override
-	// Default to QEMU for backward compatibility
-	var vmmType hypervisors.VmmType
-	vmmName := ""
-
-	// CLI override takes precedence
-	vmmSource := "default"
-	if hypervisorOverride != "" {
-		vmmName = hypervisorOverride
-		vmmSource = "flag"
-		log.Debugf("Using hypervisor from --hypervisor flag: %s", vmmName)
-	} else if annotation, ok := ociSpec.Annotations["com.urunc.unikernel.hypervisor"]; ok {
-		vmmName = annotation
-		vmmSource = "annotation"
-		log.Debugf("Using hypervisor from annotation: %s", vmmName)
-	} else {
-		vmmName = "qemu"
-		log.Debugf("No hypervisor override or annotation, using default: qemu")
-	}
-
-	// Normalize hypervisor names
-	switch vmmName {
-	case "qemu-hvf":
-		vmmName = "qemu"
-	case "virtualization", "apple":
-		vmmName = "vz"
-	}
-
-	vmmType = hypervisors.VmmType(vmmName)
+	vmmName, vmmSource := resolveHypervisor(hypervisorOverride, ociSpec.Annotations)
+	log.Debugf("Using hypervisor %s (from %s)", vmmName, vmmSource)
+	vmmType := hypervisors.VmmType(vmmName)
 	telemetryBackendSource = vmmSource
 	telemetryBackend = vmmName
 	// Graphics is only supported on the Vz backend; the QEMU darwin builder
@@ -486,6 +477,17 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	rosetta := cmd.Bool("rosetta") || ociSpec.Annotations["com.urunc.darwin.rosetta"] == "true"
 	if rosetta && vmmType != hypervisors.VzVmm {
 		return fmt.Errorf("--rosetta is only supported with the Vz hypervisor (got %q)", vmmName)
+	}
+
+	// The backend is known now. If it came from the image, this is the
+	// first chance to refuse or probe, still before boot assets are fetched
+	// or a rootfs is prepared for a guest that cannot have EL2.
+	if probe, err := nested.atBackend(vmmName); err != nil {
+		return err
+	} else if probe {
+		if err := requireNestedVirt(ctx); err != nil {
+			return err
+		}
 	}
 
 	// An image that carries no kernel of its own can still boot, on a backend
@@ -1417,8 +1419,7 @@ exec %s "$@"
 			cmdArgs = append(cmdArgs, "--rosetta")
 		}
 	}
-
-	state := &store.InstanceState{
+	cmdArgs, state := launchRecord(cmdArgs, store.InstanceState{
 		ID:          instanceName,
 		ImageDigest: imageDigest,
 		QMPSocket:   qmpSocket,
@@ -1426,10 +1427,97 @@ exec %s "$@"
 		BundleDir:   bundleDir,
 		MAC:         mac,
 		Backend:     string(vmmType),
-	}
+	}, vmmType, nested.requested)
 	started, err := launchVMM(cmd, s, state, cmdArgs, append(gatewayFiles, shareFiles...), vmmType, detach, netMode, gatewayIP)
 	instanceStarted = started
 	return err
+}
+
+// resolveHypervisor picks the backend a run boots and says where the choice
+// came from: --hypervisor, then the image's com.urunc.unikernel.hypervisor
+// annotation, then qemu, the default kept for older images. Aliases are
+// folded to urunc's VMM names.
+func resolveHypervisor(override string, annotations map[string]string) (name, source string) {
+	switch annotation, ok := annotations["com.urunc.unikernel.hypervisor"]; {
+	case override != "":
+		return normalizeHypervisor(override), "flag"
+	case ok:
+		return normalizeHypervisor(annotation), "annotation"
+	default:
+		return "qemu", "default"
+	}
+}
+
+// normalizeHypervisor maps the other spellings hull accepts for a backend
+// onto urunc's VMM names.
+func normalizeHypervisor(name string) string {
+	switch name {
+	case "qemu-hvf":
+		return "qemu"
+	case "virtualization", "apple":
+		return "vz"
+	}
+	return name
+}
+
+// nestedVirtGate is the decision --nested-virt needs at the two points in
+// runInstance where the backend may become known: on the command line,
+// before the store is opened, and from the image, after the pull. It
+// returns whether to probe the host at each; the probe itself runs in the
+// caller. Kept free of I/O so every path through it is table-tested.
+type nestedVirtGate struct {
+	requested bool
+	probed    bool
+}
+
+// beforeStore handles --hypervisor. hvi is the one backend hull asks
+// Hypervisor.framework for EL2 through; on any other the guest would boot
+// without what the caller asked for, so it is refused here, before hvi is
+// run or anything is pulled.
+func (g *nestedVirtGate) beforeStore(hypervisorOverride string) (probe bool, err error) {
+	if !g.requested || hypervisorOverride == "" {
+		return false, nil
+	}
+	if name := normalizeHypervisor(hypervisorOverride); name != string(hypervisors.HviVmm) {
+		return false, nestedVirtBackendError(name)
+	}
+	g.probed = true
+	return true, nil
+}
+
+// atBackend handles the backend once it is resolved. A host already probed
+// before the store is not probed twice.
+func (g *nestedVirtGate) atBackend(vmmName string) (probe bool, err error) {
+	if !g.requested {
+		return false, nil
+	}
+	if vmmName != string(hypervisors.HviVmm) {
+		return false, nestedVirtBackendError(vmmName)
+	}
+	if g.probed {
+		return false, nil
+	}
+	g.probed = true
+	return true, nil
+}
+
+func nestedVirtBackendError(vmmName string) error {
+	return fmt.Errorf("--nested-virt is only supported with the hvi hypervisor (got %q)", vmmName)
+}
+
+// launchRecord is the last step before launchVMM: it appends the hvi flag
+// the shared exec builder does not know, host-side the way --rosetta is for
+// vz-runner, and writes the same fact into the instance record. One function
+// so the argv and the record cannot disagree, and so a test reaches both
+// without booting anything. It checks the backend itself as well as trusting
+// the gate, so no other runner is ever handed a flag that means nothing to it.
+func launchRecord(cmdArgs []string, base store.InstanceState, vmmType hypervisors.VmmType, nestedVirt bool) ([]string, *store.InstanceState) {
+	state := base
+	if nestedVirt && vmmType == hypervisors.HviVmm {
+		cmdArgs = append(cmdArgs, "--nested-virt")
+		state.NestedVirt = true
+	}
+	return cmdArgs, &state
 }
 
 // hostShare is one host directory exported to the guest: where it comes from,
