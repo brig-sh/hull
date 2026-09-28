@@ -22,6 +22,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/urfave/cli/v3"
 
@@ -35,14 +36,23 @@ import (
 // sentinel in its own TestMain before any test runs and, instead of running
 // tests, records its argv and exits.
 //
-// Other tests in this package reuse this TestMain: do not add a second one,
-// there can be only one.
+// The teardown and gateway identity tests reuse this TestMain: do not add a
+// second one to this package, there can be only one.
 const (
 	SelfExecChildEnv = "HULL_TEST_SELFEXEC_CHILD"
 	SelfExecLogEnv   = "HULL_TEST_SELFEXEC_LOG"
 )
 
+// SleepChildEnv makes a re-exec'd test binary block instead of running tests.
+// The gateway identity tests use it to hold a process whose kernel argv is
+// whatever they chose, since the matcher reads argv from the kernel.
+const SleepChildEnv = "HULL_TEST_SLEEP_CHILD"
+
 func TestMain(m *testing.M) {
+	if os.Getenv(SleepChildEnv) != "" {
+		time.Sleep(time.Hour)
+		os.Exit(0)
+	}
 	if os.Getenv(SelfExecChildEnv) != "" {
 		logPath := os.Getenv(SelfExecLogEnv)
 		f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)

@@ -17,6 +17,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,6 +41,7 @@ import (
 
 	"github.com/brig-sh/hull/internal/netgw"
 	"github.com/urfave/cli/v3"
+	"golang.org/x/sys/unix"
 	"gopkg.in/yaml.v3"
 
 	"github.com/brig-sh/hull/internal/compose"
@@ -1857,15 +1859,88 @@ func stopGatewayDaemon(proj *composeProject) {
 	}
 }
 
-// gatewayProcessMatches reports whether pid's argv looks like the gateway
-// that owns sockPath.
+// gatewayProcessMatches reports whether pid is the network-gateway daemon that
+// owns sockPath.
+//
+// Identity comes from argv tokens, never from a substring of the whole command
+// line: the base name of argv[0] must be this binary (startGatewayDaemon spawns
+// the daemon as a re-exec of os.Executable), "network-gateway" must appear as
+// its own subcommand token, and sockPath must be the exact value of the
+// --socket flag.
+//
+// Substring matching is the shape this replaced, and it is the same mistake the
+// vmmExecutables comment in stop.go records. It let any process whose command
+// line merely mentioned the two strings pass: an editor or a log tail with the
+// socket path in its arguments, or an unrelated process that reused a stale
+// SwitchPID. It also confused nested store roots, where one store's socket path
+// is a substring of another's.
+//
+// argv comes from the kernel (processArgv), not from `ps -o command=`: ps joins
+// argv with spaces, so a store dir or binary path with a space in it could not
+// be split back into the right tokens, and the real gateway went unmatched.
 func gatewayProcessMatches(pid int, sockPath string) bool {
-	out, err := exec.Command("/bin/ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+	if pid <= 0 {
+		return false
+	}
+	argv, err := processArgv(pid)
+	if err != nil || len(argv) == 0 {
+		return false
+	}
+	exe, err := os.Executable()
 	if err != nil {
 		return false
 	}
-	argv := string(out)
-	return strings.Contains(argv, "network-gateway") && strings.Contains(argv, sockPath)
+	if filepath.Base(argv[0]) != filepath.Base(exe) {
+		return false
+	}
+	subcommand, socket := false, false
+	for i, a := range argv {
+		switch {
+		case a == "network-gateway":
+			subcommand = true
+		case a == "--socket" && i+1 < len(argv) && argv[i+1] == sockPath:
+			socket = true
+		}
+	}
+	return subcommand && socket
+}
+
+// processArgv returns the argv of pid as the kernel holds it, via the
+// kern.procargs2 sysctl. The buffer is argc (a native int32), then the exec
+// path, NUL padding, and argc NUL-terminated argv strings, then the
+// environment, which is not read.
+func processArgv(pid int) ([]string, error) {
+	buf, err := unix.SysctlRaw("kern.procargs2", pid)
+	if err != nil {
+		return nil, err
+	}
+	if len(buf) < 4 {
+		return nil, fmt.Errorf("procargs2 for pid %d: short buffer", pid)
+	}
+	argc := int(int32(binary.NativeEndian.Uint32(buf)))
+	if argc < 0 {
+		return nil, fmt.Errorf("procargs2 for pid %d: argc %d", pid, argc)
+	}
+	rest := buf[4:]
+	// Skip the exec path, then the NUL padding after it.
+	i := bytes.IndexByte(rest, 0)
+	if i < 0 {
+		return nil, fmt.Errorf("procargs2 for pid %d: no exec path", pid)
+	}
+	rest = rest[i:]
+	for len(rest) > 0 && rest[0] == 0 {
+		rest = rest[1:]
+	}
+	argv := make([]string, 0, argc)
+	for range argc {
+		j := bytes.IndexByte(rest, 0)
+		if j < 0 {
+			return nil, fmt.Errorf("procargs2 for pid %d: truncated argv", pid)
+		}
+		argv = append(argv, string(rest[:j]))
+		rest = rest[j+1:]
+	}
+	return argv, nil
 }
 
 // waitHealthy polls the gateway probe API until the TCP address answers.
