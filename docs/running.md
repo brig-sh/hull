@@ -78,8 +78,8 @@ echo "$ID"
 `-d` detaches and prints the instance id. Use it for anything you want to
 inspect or exec into.
 
-`--net shared` gives the guest NAT on `vz`. It does **not** give egress on
-`hvi`. Read [networking.md](networking.md) before you run a server.
+`--net shared` gives the guest NAT on `vz`. On `hvi` it is refused without
+`--gateway-sock`. Read [networking.md](networking.md) before you run a server.
 
 ### Look at it
 

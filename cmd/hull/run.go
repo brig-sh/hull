@@ -1841,25 +1841,13 @@ func normalizeVmmName(name string) string {
 
 // checkHviNetworking refuses a net mode the hvi backend cannot honor.
 //
-// `--net shared` promises egress, and on hvi there is none to give without the
-// gateway. hvi's built-in stack answers ARP, ICMP, DHCP and DNS from inside
-// the VMM and forwards nothing: its TCP path ends at `None // no egress yet`,
-// and any other UDP is dropped the same way.
+// `--net shared` promises egress, and on hvi there is none without the gateway:
+// the built-in stack forwards no traffic, and the VMM's sandbox denies it the
+// syscalls it would need to. docs/networking.md has the detail.
 //
-// That is not an unfinished feature waiting on forwarding code. hvi installs a
-// `(deny default)` Seatbelt profile as the last thing before the guest runs,
-// and under it connect(2) and sendto(2) both return EPERM, so the confined VMM
-// cannot originate traffic at all. Its own resolver is caught by the same
-// rule: getaddrinfo needs mDNSResponder, nothing in the boot warms that
-// connection first, and the query fails. The gateway path works precisely
-// because its socket is connected before confinement.
-//
-// So refuse, rather than boot a guest that takes an address and reaches
-// nothing. hvi itself takes the same line, refusing --net-tap on macOS and
-// naming --net-gateway in the error.
-//
-// This deliberately does not fire when a gateway socket is given: that is the
-// supported way to network an hvi guest, and `hull compose` uses it.
+// A gateway socket exempts the run. That is the supported way to network an
+// hvi guest, it works because the socket is connected before hvi confines
+// itself, and `hull compose` depends on it.
 func checkHviNetworking(vmm hypervisors.VmmType, netMode, gatewaySock string) error {
 	if vmm != hypervisors.HviVmm || netMode == "none" || gatewaySock != "" {
 		return nil

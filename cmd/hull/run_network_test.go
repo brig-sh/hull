@@ -91,14 +91,9 @@ func TestVzRunnerHonoursNoNet(t *testing.T) {
 	}
 }
 
-// A guest on hvi with `--net shared` and no gateway takes an address and
-// reaches nothing: hvi's built-in stack forwards no traffic, and its own
-// deny-default Seatbelt profile denies connect(2) and sendto(2) outright, so
-// there is no version of that configuration that works. Refusing beats booting
-// something that looks networked.
-//
-// The gateway case must keep working, because it is the supported path and the
-// one `hull compose` drives.
+// hvi cannot honor a net mode other than none without the gateway; see
+// checkHviNetworking. The gateway case must keep working, because `hull
+// compose` drives it.
 func TestCheckHviNetworking(t *testing.T) {
 	const sock = "/tmp/gw.sock"
 	tests := []struct {
