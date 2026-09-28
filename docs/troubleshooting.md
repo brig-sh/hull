@@ -183,8 +183,10 @@ QEMU only. The `vmnet` framework requires the caller to be **root** or to hold
 
 ### `failed to reach network gateway at <path>`
 
-Nothing is listening on that socket. Start `hull network-gateway --socket
-<path>` first, or let compose manage it.
+Nothing is listening on that socket. On `qemu` and `hvi` the path in the
+error is the one you gave `--gateway-sock` plus `.qemu`, the socket those
+backends join through. Start `hull network-gateway --socket` with the
+`--gateway-sock` path, not the one in the error, or let compose manage it.
 
 hull dials the socket before starting the VM on purpose. Without that check,
 `hvi` would only log a warning and fall back to its no-egress built-in stack,
