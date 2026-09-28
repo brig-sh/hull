@@ -104,7 +104,7 @@ guest reaches the outside world over it, with or without a policy.`),
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "socket", Required: true, Usage: "control socket path (required)"},
 			&cli.StringFlag{Name: "api", Usage: "HTTP API socket path (probe, leases and the /forwards endpoint)"},
-			&cli.StringFlag{Name: "qemu-socket", Usage: "unix socket for the QEMU stream netdev, used by both the QEMU and HVI backends"},
+			&cli.StringFlag{Name: "qemu-socket", Usage: "unix socket for the QEMU stream netdev, used by both the QEMU and HVI backends (default: --socket plus .qemu)"},
 			&cli.StringFlag{Name: "subnet", Value: "10.87.0.0/24", Usage: "virtual subnet CIDR"},
 			&cli.StringFlag{Name: "gateway-ip", Value: "10.87.0.1", Usage: "gateway IP on the subnet"},
 			&cli.StringSliceFlag{Name: "forward", Usage: "host port forward, hostaddr:port=guestip:port (repeatable)"},
@@ -141,7 +141,14 @@ guest reaches the outside world over it, with or without a policy.`),
 				}
 				sup = s
 			}
-			return runGateway(ctx, cmd.String("socket"), cmd.String("api"), cmd.String("qemu-socket"), cmd.String("subnet"), cmd.String("gateway-ip"), forwards, cmd.StringSlice("host"), policy, cmd.Duration("egress-refresh"), sup)
+			// hull run dials qemuGatewaySock(--gateway-sock) for qemu and hvi
+			// members, so a gateway that does not listen there by default
+			// cannot be joined by those backends at all.
+			qemuSock := cmd.String("qemu-socket")
+			if qemuSock == "" {
+				qemuSock = qemuGatewaySock(cmd.String("socket"))
+			}
+			return runGateway(ctx, cmd.String("socket"), cmd.String("api"), qemuSock, cmd.String("subnet"), cmd.String("gateway-ip"), forwards, cmd.StringSlice("host"), policy, cmd.Duration("egress-refresh"), sup)
 		},
 	}
 }
