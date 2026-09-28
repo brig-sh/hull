@@ -967,7 +967,7 @@ exec %s "$@"
 				return fmt.Errorf("select direct writable rootfs in boot initrd: %w", err)
 			}
 		}
-		resolver, err := containerBootResolver(vmmType, netMode, gatewayIP)
+		resolver, err := containerBootResolver(gatewayIP)
 		if err != nil {
 			return err
 		}
@@ -1793,16 +1793,17 @@ func restoreClonedHardlinks(source, destination string) error {
 
 // containerBootResolver returns the resolver that the generic boot initrd can
 // install before switch_root. A static kernel ip= configuration does not fill
-// /proc/net/pnp, while HVI's built-in stack has a fixed DNS endpoint.
-func containerBootResolver(vmmType hypervisors.VmmType, netMode, gatewayCIDR string) (string, error) {
-	if gatewayCIDR != "" {
-		_, gateway, _, err := gatewayNetConfig(gatewayCIDR)
-		return gateway, err
+// /proc/net/pnp, so a gateway guest is handed the gateway's resolver here.
+//
+// There is no hvi case. hvi's built-in stack answers DNS at 10.0.2.3, but its
+// resolver cannot reach anything from inside the VMM's sandbox, and
+// checkHviNetworking refuses every hvi run that would have used it.
+func containerBootResolver(gatewayCIDR string) (string, error) {
+	if gatewayCIDR == "" {
+		return "", nil
 	}
-	if vmmType == hypervisors.HviVmm && netMode != "none" {
-		return "10.0.2.3", nil
-	}
-	return "", nil
+	_, gateway, _, err := gatewayNetConfig(gatewayCIDR)
+	return gateway, err
 }
 
 // vzNetArgs returns the vz-runner flags that carry `--net none` to the backend.

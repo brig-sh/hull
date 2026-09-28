@@ -27,21 +27,17 @@ import (
 func TestContainerBootResolver(t *testing.T) {
 	tests := []struct {
 		name        string
-		vmm         hypervisors.VmmType
-		netMode     string
 		gatewayCIDR string
 		want        string
 		wantErr     bool
 	}{
-		{name: "gateway", vmm: hypervisors.HviVmm, netMode: "shared", gatewayCIDR: "10.87.0.9/24", want: "10.87.0.1"},
-		{name: "hvi built in", vmm: hypervisors.HviVmm, netMode: "shared", want: "10.0.2.3"},
-		{name: "hvi disabled", vmm: hypervisors.HviVmm, netMode: "none"},
-		{name: "vz dhcp", vmm: hypervisors.VzVmm, netMode: "shared"},
-		{name: "invalid gateway", vmm: hypervisors.HviVmm, netMode: "shared", gatewayCIDR: "bad", wantErr: true},
+		{name: "gateway", gatewayCIDR: "10.87.0.9/24", want: "10.87.0.1"},
+		{name: "no gateway", gatewayCIDR: ""},
+		{name: "invalid gateway", gatewayCIDR: "bad", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := containerBootResolver(tt.vmm, tt.netMode, tt.gatewayCIDR)
+			got, err := containerBootResolver(tt.gatewayCIDR)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("containerBootResolver error = %v, wantErr %t", err, tt.wantErr)
 			}
