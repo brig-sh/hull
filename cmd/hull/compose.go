@@ -998,24 +998,51 @@ func selfExec(cmd *cli.Command, args ...string) (string, error) {
 // the service whose start failed, or "" when the unwind is not tied to one.
 //
 // proj.Name equals composeUp's local project variable (projectName(cmd)): proj
-// is built with Name: project at compose.go and neither is reassigned, so
+// is built with Name: project in composeUp and neither is reassigned, so
 // projectStatePath(s, proj.Name) names the same state file the closure removed.
 func teardownProject(s *store.Store, proj *composeProject, run func(args ...string) (string, error), warn io.Writer, failingInstance string) {
 	// Supervision goes first, on disk: a service that is about to be
 	// stopped must not be restarted underneath this unwind.
 	pauseSupervision(s, proj, warn)
-	for _, started := range proj.Order {
-		if inst, ok := proj.Services[started]; ok {
-			_, _ = run("stop", inst)
-			_, _ = run("rm", inst)
+	stopRemove := func(inst string) {
+		if out, err := run("stop", inst); err != nil {
+			composeWarn(warn, "stop %s: %v: %s", inst, err, out)
+		}
+		// A failed stop leaves the instance running, so rm refuses it without
+		// --force and removes nothing (docs/storage.md: "hull rm refuses a
+		// running instance without --force, and removes nothing on
+		// refusal."). composeDown reports both; this unwind used to swallow
+		// them, so a stuck instance vanished from the logs.
+		if out, err := run("rm", inst); err != nil {
+			composeWarn(warn, "rm %s: %v: %s", inst, err, out)
 		}
 	}
+	for _, inst := range teardownOrder(proj) {
+		stopRemove(inst)
+	}
 	if failingInstance != "" {
-		_, _ = run("stop", failingInstance)
-		_, _ = run("rm", failingInstance)
+		stopRemove(failingInstance)
 	}
 	stopGatewayDaemon(proj)
 	_ = os.Remove(projectStatePath(s, proj.Name))
+}
+
+// teardownOrder returns the recorded instances composeUp's failure unwind must
+// stop, in stop order: the reverse of proj.Order, restricted to service names
+// with a recorded instance in proj.Services. Reverse mirrors the only written
+// stop-order contract in this repository, docs/storage.md: "`hull compose
+// down` | `stop` then `rm` for each service in reverse start order [...]".
+// That line governs `down`; nothing documents the order for a failed `up`, so
+// this aligns the two teardown paths rather than following a rule written for
+// `up`.
+func teardownOrder(proj *composeProject) []string {
+	insts := make([]string, 0, len(proj.Order))
+	for i := len(proj.Order) - 1; i >= 0; i-- {
+		if inst, ok := proj.Services[proj.Order[i]]; ok {
+			insts = append(insts, inst)
+		}
+	}
+	return insts
 }
 
 func composeUp(ctx context.Context, cmd *cli.Command) error {
@@ -1233,7 +1260,8 @@ func composeUp(ctx context.Context, cmd *cli.Command) error {
 		}
 		proj.Services[svcName] = instance
 		if err := saveProject(s, proj); err != nil {
-			teardown(instance)
+			// instance is recorded now, so teardownOrder already covers it.
+			teardown("")
 			return fmt.Errorf("failed to save project state: %w", err)
 		}
 
