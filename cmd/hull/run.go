@@ -115,6 +115,10 @@ func runCommand() *cli.Command {
 				Name:  "annotation",
 				Usage: "set an OCI runtime annotation: KEY=VALUE (repeatable)",
 			},
+			&cli.StringSliceFlag{
+				Name:  "label",
+				Usage: "record host-side instance metadata: KEY=VALUE (repeatable or comma-separated; not inherited from the image)",
+			},
 			&cli.BoolFlag{
 				Name:  "no-boot-assets",
 				Usage: "do not fall back to the published boot assets when the image carries no kernel",
@@ -187,6 +191,10 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	hypervisorOverride := cmd.String("hypervisor")
 	qemuPath := cmd.String("qemu-path")
 	rootfsTypeOverride := cmd.String("rootfs-type")
+	labels, err := parseLabelEntries(cmd.StringSlice("label"))
+	if err != nil {
+		return err
+	}
 	annotationOverrides, err := parseAnnotationEntries(cmd.StringSlice("annotation"))
 	if err != nil {
 		return err
@@ -1428,6 +1436,8 @@ exec %s "$@"
 
 	state := &store.InstanceState{
 		ID:          instanceName,
+		CreationID:  rand.Text(),
+		Labels:      labels,
 		ImageDigest: imageDigest,
 		QMPSocket:   qmpSocket,
 		LogFile:     logFile,

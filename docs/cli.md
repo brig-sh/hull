@@ -59,7 +59,7 @@ The image reference is the first positional argument. Everything after it
 replaces the image's `Cmd`, the way `docker run` does. The image entrypoint is
 kept when that entrypoint is `urunit`.
 
-Twenty-three flags:
+Twenty-four flags:
 
 | Flag | Default | What it does |
 |---|---|---|
@@ -75,6 +75,7 @@ Twenty-three flags:
 | `--qemu-path <path>` | auto-detect, prefers a signed copy | path to `qemu-system-aarch64` |
 | `--rootfs-type <mode>` | `virtiofs` on `vz` and `hvi`, `9pfs` on `qemu` | `block`, `virtiofs` or `9pfs` |
 | `--annotation <k=v>` | | set an OCI runtime annotation. Repeatable |
+| `--label <k=v>` | | record host-side instance metadata, visible in `inspect`. Repeatable or comma-separated; never inherited from the image |
 | `--no-boot-assets` | off | do not fall back to the published boot assets when the image carries no kernel |
 | `--env`, `-e <spec>` | | `KEY=VALUE`, or a bare `KEY` to inherit it from the host without putting the value in argv. Repeatable |
 | `--add-host <host:ip>` | | add an entry to the guest's `/etc/hosts`. Repeatable |
@@ -87,10 +88,31 @@ Twenty-three flags:
 | `--rosetta` | off | run an amd64 rootfs under Rosetta translation. `vz` only; the kernel stays arm64 |
 | `--platform <os/arch>` | `linux/arm64` | image platform to pull |
 
+### Instance labels
+
+`--label KEY=VALUE` records metadata in the instance's host-side state. Keys
+must be nonempty; values may be empty or contain `=`. As with `--annotation`,
+commas separate entries. Repeating a key keeps the last value. Labels are not inherited from image labels or OCI annotations,
+and hull does not pass them to the guest or the VMM.
+
+`hull inspect` returns them under `labels`, alongside `creationId`, a random
+identity generated for each new instance. Both survive stop and
+checkpoint/restore. Removing the instance removes them; running another VM
+with the same name generates a new identity and uses only its own labels.
+Older records have neither field, and reading or restoring them does not
+invent either one.
+
+Labels are caller assertions. They do not change or verify networking, and
+restoring through another gateway does not update them. A consumer must not
+treat a retained label or creation ID as proof that the network is unchanged.
+See [networking.md](networking.md#recording-a-callers-network-choice) for an
+example. Compose service labels remain unsupported.
+
 ### Combinations hull rejects
 
 These fail before anything starts, rather than being documented and ignored:
 
+- `--label` without `=` or with an empty key
 - `--pull` with any value other than `missing`, `always` or `never`
 - `--gateway-sock` without `--gateway-cidr`, and the reverse
 - `--gateway-sock` together with `--net none`
