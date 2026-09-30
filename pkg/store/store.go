@@ -71,6 +71,15 @@ type InstanceState struct {
 	BundleDir   string    `json:"bundleDir"`
 	MAC         string    `json:"mac,omitempty"`
 	IP          string    `json:"ip,omitempty"`
+	// CreationID distinguishes successive instances using the same name.
+	// Run generates it once; stop and checkpoint/restore keep it. Empty on
+	// older records: reading or restoring one must not invent an identity.
+	CreationID string `json:"creationId,omitempty"`
+	// Labels are supplied only by the host caller of run, never inherited
+	// from image labels or OCI annotations. They live with the instance so
+	// tools can recover their configuration without guessing from VMM argv.
+	// They are caller assertions, not network enforcement or verification.
+	Labels map[string]string `json:"labels,omitempty"`
 	// ExitCode is the guest process's exit status when one could be
 	// observed, nil otherwise. A stopped instance with a nil code ended
 	// without a reportable status: today only one-shot jobs, which run
