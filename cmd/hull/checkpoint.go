@@ -76,7 +76,7 @@ func checkpointInstance(_ context.Context, cmd *cli.Command) error {
 	}
 	state, err := s.GetInstance(instanceID)
 	if err != nil {
-		return fmt.Errorf("instance not found: %s", instanceID)
+		return instanceReadError(instanceID, err)
 	}
 	if state.Status != "running" || state.PID <= 0 {
 		return fmt.Errorf("instance %s is not running", instanceID)
@@ -342,7 +342,7 @@ func restoreInstance(_ context.Context, cmd *cli.Command) error {
 	}
 	state, err := s.GetInstance(instanceID)
 	if err != nil {
-		return fmt.Errorf("instance not found: %s", instanceID)
+		return instanceReadError(instanceID, err)
 	}
 	if state.Status == "running" && state.PID > 0 && processIsAVMM(state.PID, state) {
 		return fmt.Errorf("instance %s is still running; stop it first (the checkpoint is kept)", instanceID)
