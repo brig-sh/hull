@@ -23,6 +23,8 @@ import (
 	"os"
 
 	"github.com/urfave/cli/v3"
+
+	"github.com/brig-sh/hull/pkg/store"
 )
 
 func inspectCommand() *cli.Command {
@@ -50,10 +52,23 @@ func inspectInstance(ctx context.Context, cmd *cli.Command) error {
 
 	state, err := s.GetInstance(instanceID)
 	if err != nil {
-		return fmt.Errorf("instance not found: %s", instanceID)
+		return instanceReadError(instanceID, err)
 	}
 
 	// An instance name can carry a C1 control; printJSON keeps it off the
 	// terminal.
 	return printJSON(os.Stdout, state)
+}
+
+// instanceReadError reports a GetInstance failure.
+//
+// Only ErrInstanceNotFound becomes "instance not found". Every other
+// failure, including an unreadable state file, keeps its own text. Callers
+// match that sentence when they decide a VM is gone, so a broken record
+// must not wear it.
+func instanceReadError(id string, err error) error {
+	if errors.Is(err, store.ErrInstanceNotFound) {
+		return fmt.Errorf("instance not found: %s", id)
+	}
+	return fmt.Errorf("instance %s: %w", id, err)
 }

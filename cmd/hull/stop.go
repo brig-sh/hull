@@ -114,7 +114,7 @@ func stopInstanceIn(s *store.Store, instanceID string, timeoutSecs int) error {
 
 	state, err := s.GetInstance(instanceID)
 	if err != nil {
-		return fmt.Errorf("instance not found: %s", instanceID)
+		return instanceReadError(instanceID, err)
 	}
 
 	if state.Status == "stopped" {

@@ -7,6 +7,8 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -76,5 +78,29 @@ func TestPsKeepsALiveVMMRunning(t *testing.T) {
 	}
 	if state.Status != "running" || state.PID != pid {
 		t.Fatalf("a live instance was reaped: status=%q pid=%d", state.Status, state.PID)
+	}
+}
+
+// A state file that is not JSON still occupies the name. ps has to show
+// that, and it must not write a stub back over the only copy of the record.
+func TestPsShowsAnUnreadableRecordWithoutRewritingIt(t *testing.T) {
+	s := storeWithInstance(t, "broken", &store.InstanceState{
+		ID: "broken", Status: "running", PID: 1,
+	})
+	path := filepath.Join(s.InstanceDir("broken"), "state.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	row := psRow(t, s, "broken")
+	if !strings.Contains(row, store.StatusUnreadable) || strings.Contains(row, "running") {
+		t.Fatalf("broken record: %q", row)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != "{not json" {
+		t.Fatalf("ps rewrote the broken record: %q", after)
 	}
 }

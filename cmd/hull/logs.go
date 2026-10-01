@@ -68,7 +68,7 @@ func viewLogs(ctx context.Context, cmd *cli.Command) error {
 
 	state, err := s.GetInstance(instanceID)
 	if err != nil {
-		return fmt.Errorf("instance not found: %s", instanceID)
+		return instanceReadError(instanceID, err)
 	}
 
 	logFile := state.LogFile
