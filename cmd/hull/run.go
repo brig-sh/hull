@@ -753,6 +753,10 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	rootfsDiskImage := "" // path to ext4 disk image (block mode)
 	containerRootfsDirect := false
 	containerMetadataRootfs := ""
+	// The overlay upper layer an hvi container boot keeps per instance: its
+	// kind ("virtiofs" or "block") and the directory or disk that holds it.
+	containerRootfsUpper := ""
+	containerRootfsUpperPath := ""
 	mountRootfs := ociSpec.Annotations["com.urunc.unikernel.mountRootfs"] == "true"
 
 	if containerBoot {
@@ -817,7 +821,19 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 			if resolveErr != nil {
 				return fmt.Errorf("resolve unpacked OCI rootfs: %w", resolveErr)
 			}
-			if vmmType == hypervisors.HviVmm {
+			if upper := os.Getenv("HULL_HVI_ROOTFS_UPPER"); vmmType == hypervisors.HviVmm && upper != "" {
+				// Overlay: the cached image is the read-only lower and every
+				// guest write lands in the instance's own upper layer, so
+				// nothing is copied before the VMM starts.
+				upperPath, err := prepareRootfsUpper(s.InstanceDir(instanceName), upper)
+				if err != nil {
+					return err
+				}
+				rootfsDir = resolved
+				containerMetadataRootfs = resolved
+				containerRootfsUpper = upper
+				containerRootfsUpperPath = upperPath
+			} else if vmmType == hypervisors.HviVmm {
 				// HVI's writable virtio-fs backend can use an unpacked directory as
 				// the real root. Replace only the instance bundle's cache symlink
 				// with an APFS copy-on-write clone: guest changes then persist with
@@ -1012,6 +1028,11 @@ exec %s "$@"
 		if containerRootfsDirect {
 			if err := initrd.AddFileToInitrd(initrdPath, "true\n", "/urunc-rootfs-direct"); err != nil {
 				return fmt.Errorf("select direct writable rootfs in boot initrd: %w", err)
+			}
+		}
+		if containerRootfsUpper != "" {
+			if err := initrd.AddFileToInitrd(initrdPath, containerRootfsUpper+"\n", "/urunc-rootfs-upper"); err != nil {
+				return fmt.Errorf("select overlay upper layer in boot initrd: %w", err)
 			}
 		}
 		resolver, err := containerBootResolver(gatewayIP)
@@ -1382,6 +1403,17 @@ exec %s "$@"
 		log.Debugf("Shared directory: host=%s guest=%s tag=%s readOnly=%t",
 			sh.host, sh.guest, sh.tag, sh.readOnly)
 	}
+	// vz-init mounts the upper layer by kind: a writable tag named
+	// rootfs-upper, or the guest's only disk.
+	blockDevPath := rootfsDiskImage
+	switch containerRootfsUpper {
+	case "virtiofs":
+		sharedDirParams = append(sharedDirParams, types.SharedDirParams{
+			Path: containerRootfsUpperPath, Tag: "rootfs-upper",
+		})
+	case "block":
+		blockDevPath = containerRootfsUpperPath
+	}
 
 	// "unikernel" is hull's own default name, but the file it names would come
 	// out of the image and is handed to the monitor as a binary to load, so it
@@ -1405,7 +1437,7 @@ exec %s "$@"
 		KernelPath:    kernelPath,
 		InitrdPath:    initrdPath,
 		RootfsPath:    rootfsDir,
-		BlockDevPath:  rootfsDiskImage,
+		BlockDevPath:  blockDevPath,
 		LogFile:       logFile,
 		AgentSockPath: s.InstanceAgentSocket(instanceName),
 		GUI:           gui,
