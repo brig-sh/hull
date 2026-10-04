@@ -214,6 +214,12 @@ func (c *Client) uploadQueue(dir string, budget *int) bool {
 			_ = os.Rename(claimed, f)
 			return false
 		}
+		if c.debug {
+			// Printed, not sent: it stays queued for a run that sends.
+			_ = os.Rename(claimed, f)
+			*budget--
+			continue
+		}
 		_ = os.Remove(claimed)
 		*budget--
 	}
