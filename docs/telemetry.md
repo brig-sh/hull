@@ -108,7 +108,7 @@ All events share a common envelope:
 | `platform` | `macos` | the OS family: `macos` or `linux` |
 | `os` | `26.3.1` | the OS version: the full macOS product version, or `ID VERSION_ID` from os-release on Linux (eg. `ubuntu 24.04`) |
 | `arch` | `arm64` | |
-| `install_id` | random UUID | generated locally on first run; not derived from the machine; delete `<store>/telemetry.json` to rotate it |
+| `install_id` | random UUID | generated locally on first run; not derived from the machine; delete `telemetry.json` (see [Where the state lives](#where-the-state-lives)) to rotate it |
 | `uname` | `Darwin 25.3.0 arm64` | the kernel's name, the version at the start of its release, and the machine (`Linux 6.8.0-45 aarch64` on Linux, for a release of `6.8.0-45-generic`). Not the hostname, not the kernel's build string, and not the rest of the release, which whoever built the kernel sets |
 | `captured_at` | RFC 3339 timestamp | when the event happened (for crash reports: the crash, not the upload) |
 | `checksum` | hex SHA-256 | integrity checksum over `event\|product\|version\|install_id\|captured_at` with a fixed salt; ingestion drops payloads whose checksum does not match -- a soft guard against naive forgery, not a security boundary |
@@ -190,23 +190,43 @@ version 1 are not comparable with later ones and should not be mixed.
 | `panic_type` | the Go type of the panic value (eg. `*errors.errorString`); never the panic message, which can embed paths |
 | `stack` | Go stack trace, file paths trimmed to module-relative form |
 
-Crash reports are written to `<store>/crashes/` when a panic happens
+Crash reports are written to the `crashes/` directory next to
+`telemetry.json` when a panic happens
 and uploaded on the next invocation. You can inspect or delete the files at
 any time; the directory is the full queue.
 
 ## Where the state lives
 
-The consent answer and the install id are in `<store>/telemetry.json`, and
-the crash queue in `<store>/crashes/`, where `<store>` is the `--store-dir`
-(default `~/.hull/store`). The store is the isolation boundary for
-everything else hull keeps, and telemetry follows it: a command run with
-another `--store-dir` has its own consent state and its own install id.
+With the default store, the consent answer and the install id are in
+`~/.hull/telemetry.json`, and the crash queue in `~/.hull/crashes/`. They sit
+next to the store, `~/.hull/store`, and not inside it: hull mounts a
+case-sensitive volume over the store, which would hide a file written there
+before the mount and show it again after a reboot.
 
-brig keeps its answer in the default store too, and sends its own events
-through the same client (`pkg/telemetry`, a Go module of its own). One
-answer and one install id cover both tools, and `hull telemetry off`
-stops brig's events as well. brig does this on Linux too, where hull does
-not run yet: it creates `~/.hull/store` for that file alone.
+A command run with another `--store-dir` keeps its own consent state and its
+own install id inside that store, as `<store>/telemetry.json` and
+`<store>/crashes/`. hull mounts that store too, so an answer recorded there
+before the mount is hidden by it, and the next command that cannot ask
+sends events as if nobody had answered. `DO_NOT_TRACK=1` is not affected.
+
+Earlier versions kept the default store's state in `~/.hull/store`. The
+first run of this version copies the install id and the recorded answer from
+there, and leaves the old file in place. A no recorded later is written to the
+old file too, so an older hull reads it as well. A no that an older hull
+records in the old file after the copy is read too, when that file is the
+newer of the two.
+
+The move reads the old file before the store is mounted. If the store is not
+mounted at that moment, hull reads the copy underneath the mount, which can
+predate an answer you gave while it was mounted. A no given then may need to
+be given once more with `hull telemetry off`. A yes is asked again anyway,
+because it was given to an older consent version.
+
+brig keeps its answer in `~/.hull` too, and sends its own events through the
+same client (`pkg/telemetry`, a Go module of its own). One answer and one
+install id cover both tools, and `hull telemetry off` stops brig's events as
+well. brig does this on Linux too, where hull does not run yet, and creates
+`~/.hull` for those files alone.
 
 ## What is never sent
 

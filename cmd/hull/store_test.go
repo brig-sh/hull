@@ -165,6 +165,22 @@ func TestEnsureStoreIgnoresAQueuedCrash(t *testing.T) {
 	}
 }
 
+// The telemetry client writes a temporary file and renames it. One left by a
+// process killed in between is the client's, not the user's.
+func TestEnsureStoreIgnoresATelemetryTempFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".telemetry-123456.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	empty, err := dirIsEmpty(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !empty {
+		t.Fatal("a telemetry temp file counted as content worth protecting")
+	}
+}
+
 // Anything else in there is a user's, and mounting would hide it.
 func TestEnsureStoreStillProtectsRealContent(t *testing.T) {
 	dir := t.TempDir()
