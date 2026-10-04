@@ -73,7 +73,7 @@ Individual targets:
 | `make hvi_vmm` | `cargo build --release` in `hvi-vmm/` |
 | `make sign` | sign all three and strip quarantine |
 | `make codesign_verify` | print each binary's authority chain and entitlements |
-| `make test` | `go test -count=1 ./...` |
+| `make test` | `go test -count=1 ./...`, then the same in `pkg/telemetry` |
 | `make app` | assemble `hull.app` with both runners inside `Contents/MacOS` |
 | `make dmg_image` | build and sign the installer image, no notarization |
 | `make dmg` | `dmg_image` plus notarize and staple |
@@ -225,6 +225,31 @@ use (
 	/path/to/urunc
 )
 ```
+
+## The telemetry module
+
+`pkg/telemetry` is a Go module of its own,
+`github.com/brig-sh/hull/pkg/telemetry`, because brig links it too. Its only
+dependency is `golang.org/x/sys`, so brig does not take hull's module graph
+along.
+
+hull requires it at a placeholder version and builds it from the tree:
+
+```
+require github.com/brig-sh/hull/pkg/telemetry v0.0.0-00010101000000-000000000000
+replace github.com/brig-sh/hull/pkg/telemetry => ./pkg/telemetry
+```
+
+So a change to the client and its use land in one commit. The `replace` also
+means hull itself cannot be installed with `go install <module>@<version>`;
+build it from a clone.
+
+`go test ./...` at the root does not reach a nested module. `make test` runs
+its tests too, and CI tests it on macOS and Linux.
+
+brig requires the module by version. Tag a release of it as
+`pkg/telemetry/vX.Y.Z`; until then brig requires a pseudo-version of a commit
+on `main`.
 
 ## The app bundle and installer
 

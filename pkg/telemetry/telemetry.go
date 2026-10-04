@@ -34,7 +34,7 @@ const SchemaVersion = 2
 const ConsentVersion = 1
 
 // Endpoint is the ingestion endpoint URL, injected at build time via
-// -X github.com/brig-sh/hull/internal/telemetry.Endpoint=...
+// -X github.com/brig-sh/hull/pkg/telemetry.Endpoint=...
 // When empty (dev builds, or until the prod endpoint ships), nothing is
 // ever sent; the debug mode still prints payloads.
 var Endpoint = ""
@@ -76,8 +76,7 @@ const DefaultProduct = "hull"
 // Overridable at build time next to Endpoint if we ever rotate it.
 //
 // This is a wire contract, not a name: the collector recomputes the checksum
-// with the same literal (telemetry-gate values.yaml in NOFireAI/gitops) and
-// drops anything that does not match. Changing it on one side alone silently
+// with the same literal and drops anything that does not match. Changing it on one side alone silently
 // discards every event, so the two move together or not at all. The rename
 // from urunc-telemetry-v1 was a clean cutover taken before launch, which
 // costs the events from any client still carrying the old salt.

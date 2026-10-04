@@ -72,8 +72,8 @@ jobs:
             code:
               - '**/*.go'
               - '**/*.swift'
-              - 'go.mod'
-              - 'go.sum'
+              - '**/go.mod'
+              - '**/go.sum'
               - 'Makefile'
               - 'vz-runner/**'
               # The hvi submodule is a VMM we build, sign and ship, so a bump to
@@ -146,6 +146,35 @@ jobs:
       # gets before a merge.
       - name: Check the cask renderer
         run: python3 scripts/render-cask-test.py
+
+  telemetry:
+    name: telemetry module (linux)
+    # pkg/telemetry is a module of its own, so `go test ./...` and the lint
+    # above, both run from the root module, never reach it. It is also the
+    # one part of this repository that builds for Linux, because brig links
+    # it there: this job is where that is checked, natively rather than with
+    # GOOS set.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: pkg/telemetry
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: pkg/telemetry/go.mod
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Unit tests
+        run: go test -count=1 -race ./...
+
+      - uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9 # v8
+        with:
+          version: v2.12.2
+          working-directory: pkg/telemetry
 
   build:
     name: build (go + swift, ad-hoc signed)
@@ -373,6 +402,13 @@ jobs:
       - name: Race detector
         timeout-minutes: 15
         run: go test -count=1 -p 2 -race -timeout=10m ./...
+
+      # pkg/telemetry is a module of its own, which the two runs above do not
+      # reach. The telemetry job covers Linux; this is where the darwin build
+      # of it is tested.
+      - name: Telemetry module
+        working-directory: pkg/telemetry
+        run: go test -count=1 -race ./...
 
       # Renders the README badge and the per-file view on codecov.io. Never
       # fails the run: a coverage service that cannot be reached is not a

@@ -124,7 +124,7 @@ with `--gateway-sock`. See [networking.md](networking.md) and
 | `internal/bootassets` | fetching and verifying the generic kernel and initrd |
 | `internal/compose` | Compose file loading and the unsupported-key warnings |
 | `internal/netgw` | the gateway's netstack, DNS and egress filter |
-| `internal/telemetry` | the telemetry client |
+| `pkg/telemetry` | the telemetry client, a module of its own that brig links too |
 | `vz-runner` | the Swift runner for the `vz` backend |
 | `hvi-vmm` | the `hvi` VMM, a git submodule pinned to a commit |
 
