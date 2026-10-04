@@ -44,8 +44,8 @@ To see every payload instead of sending it:
 export HULL_TELEMETRY_DEBUG=1
 ```
 
-An event a wrapper would queue is printed and not written, so no later run
-sends it.
+Queued crash reports and events are printed too, and stay queued. An event a
+wrapper would queue is printed and not written, so no later run sends it.
 
 ## The consent prompt
 

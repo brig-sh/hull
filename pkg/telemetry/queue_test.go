@@ -220,3 +220,22 @@ func TestANoClearsTheQueues(t *testing.T) {
 		}
 	}
 }
+
+// Debug mode prints instead of sending. A report it printed was never sent,
+// and must still be there for a run that sends.
+func TestDebugModeKeepsTheQueue(t *testing.T) {
+	dir := t.TempDir()
+	consentOn(t, dir)
+	Init(Config{StoreDir: dir}).CapturePanic("boom", []byte("goroutine 1 [running]:\n"), "run", "")
+
+	t.Setenv(EnvDebug, "1")
+	var out bytes.Buffer
+	Init(Config{StoreDir: dir, Stderr: &out}).UploadPending()
+
+	if !strings.Contains(out.String(), `"event":"crash"`) {
+		t.Fatalf("debug mode did not print the queued report:\n%s", out.String())
+	}
+	if files := queuedFiles(filepath.Join(dir, crashDirName)); len(files) != 1 {
+		t.Fatalf("debug mode emptied the queue: %v", files)
+	}
+}
