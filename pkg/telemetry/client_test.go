@@ -180,6 +180,9 @@ func TestEOFIsNotConsent(t *testing.T) {
 }
 
 func TestUnwritableStateDisablesTelemetry(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes through the read-only mode this test relies on")
+	}
 	// Fresh install, unwritable store: the ID would differ on every
 	// invocation, so telemetry must stay off.
 	dir := t.TempDir()

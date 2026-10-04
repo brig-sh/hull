@@ -45,8 +45,8 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/brig-sh/hull/internal/compose"
-	"github.com/brig-sh/hull/internal/telemetry"
 	"github.com/brig-sh/hull/pkg/store"
+	"github.com/brig-sh/hull/pkg/telemetry"
 )
 
 // namedVolumeRe is compose-spec's own JSON-schema pattern for a top-level

@@ -50,10 +50,10 @@ CARGO           ?= cargo
 # Golang variables
 GO             ?= go
 LDFLAGS        := $(GITFLAGS) -s -w
-# Telemetry ingestion endpoint (NOFireAI/engineering#1002). Left empty
-# (dev builds), the client never sends anything.
+# Telemetry ingestion endpoint. Left empty (dev builds), the client never
+# sends anything.
 ifneq ($(TELEMETRY_ENDPOINT),)
-LDFLAGS        += -X github.com/brig-sh/hull/internal/telemetry.Endpoint=$(TELEMETRY_ENDPOINT)
+LDFLAGS        += -X github.com/brig-sh/hull/pkg/telemetry.Endpoint=$(TELEMETRY_ENDPOINT)
 endif
 
 # macOS code-signing
@@ -146,6 +146,7 @@ codesign_verify:
 .PHONY: test
 test: test-harness test-cask
 	$(GO) test -count=1 ./...
+	cd pkg/telemetry && $(GO) test -count=1 ./...
 
 # The harness self-test proves the VM-boot harnesses can still fail. It needs
 # no VM and takes seconds, so it runs with the unit suite rather than sitting

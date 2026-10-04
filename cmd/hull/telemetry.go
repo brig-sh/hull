@@ -28,8 +28,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/brig-sh/hull/internal/telemetry"
 	"github.com/brig-sh/hull/pkg/store"
+	"github.com/brig-sh/hull/pkg/telemetry"
 	"github.com/urfave/cli/v3"
 	"golang.org/x/sys/unix"
 	"golang.org/x/term"

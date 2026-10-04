@@ -3,6 +3,7 @@ module github.com/brig-sh/hull
 go 1.26.4
 
 require (
+	github.com/brig-sh/hull/pkg/telemetry v0.0.0-00010101000000-000000000000
 	github.com/compose-spec/compose-go/v2 v2.14.0
 	github.com/containerd/containerd v1.7.36
 	github.com/containers/gvisor-tap-vsock v0.8.9
@@ -106,3 +107,9 @@ require (
 // all and renders netdev.* with no guard for an empty address, so it cannot
 // run a darwin guest. The branch is the pin to hold until that work is
 // upstream; a bump is a move along the branch, not a move to main.
+
+// The telemetry client is a module of its own so that brig, which sends its
+// own events through it, can link it without taking hull's dependencies along.
+// hull builds it from this tree: a change to the client and its use here land
+// in one commit, and the version above is a placeholder the replace resolves.
+replace github.com/brig-sh/hull/pkg/telemetry => ./pkg/telemetry

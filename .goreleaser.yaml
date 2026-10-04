@@ -44,7 +44,7 @@ builds:
       - -s -w
       # The Makefile bakes this in but GoReleaser builds the released binary,
       # so without it every published hull shipped with telemetry inert.
-      - -X github.com/brig-sh/hull/internal/telemetry.Endpoint={{ .Env.TELEMETRY_ENDPOINT }}
+      - -X github.com/brig-sh/hull/pkg/telemetry.Endpoint={{ .Env.TELEMETRY_ENDPOINT }}
     mod_timestamp: "{{ .CommitTimestamp }}"
 
 # Developer ID signing and notarization for the Go binary. vz-runner is

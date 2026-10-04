@@ -31,7 +31,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/brig-sh/hull/internal/telemetry"
+	"github.com/brig-sh/hull/pkg/telemetry"
 	"golang.org/x/sys/unix"
 )
 
