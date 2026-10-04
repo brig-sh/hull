@@ -176,6 +176,17 @@ jobs:
           version: v2.12.2
           working-directory: pkg/telemetry
 
+      # The darwin sources are built and tested on the Mac in the unit job,
+      # which runs no linter. This lints them here.
+      - name: golangci-lint (darwin)
+        uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9 # v8
+        env:
+          GOOS: darwin
+          GOARCH: arm64
+        with:
+          version: v2.12.2
+          working-directory: pkg/telemetry
+
   build:
     name: build (go + swift, ad-hoc signed)
     # Fork pull requests run on a GitHub-hosted macOS runner; pushes and

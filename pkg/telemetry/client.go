@@ -45,14 +45,13 @@ const sendTimeout = 2 * time.Second
 const FlushTimeout = sendTimeout
 
 // Config carries everything the client needs from the caller. The
-// caller decides interactivity (TTY checks live in cmd, where the
-// darwin-specific bits already are) and passes version/OS info in, so
-// this package stays OS-agnostic.
+// caller decides interactivity and passes version and OS info in, which
+// HostOS and HostUname read for it.
 type Config struct {
 	StoreDir  string
 	Version   string
-	OSVersion string // macOS major.minor, eg. "26.0"
-	Uname     string // full uname, hostname excluded
+	OSVersion string // HostOS, eg. "26.3.1" or "ubuntu 24.04"
+	Uname     string // HostUname: kernel name, release and machine
 
 	// Interactive is true when stdin and stderr are both terminals.
 	Interactive bool
@@ -213,8 +212,9 @@ func Init(cfg Config) *Client {
 // false): consent must never be recorded from a Ctrl-D.
 func (c *Client) ask() (answer, answered bool) {
 	_, _ = fmt.Fprintf(c.cfg.Stderr, `%s collects anonymous usage events and crash reports to help us
-improve it: command names, backend choice, versions and stack traces --
-never file paths, arguments, image names or anything that identifies you.
+improve it: command names, which agent and backend you run, OS and tool
+versions, and stack traces. An agent of your own goes out as a salted
+hash of its name. File paths, arguments and image names are never sent.
 Docs: %s
 Enable telemetry? [Y/n] `, c.product, c.cfg.DocsURL)
 	line, err := bufio.NewReader(c.cfg.Stdin).ReadString('\n')
@@ -294,6 +294,7 @@ func (c *Client) payload(event string, fields map[string]string) map[string]any 
 		"event":          event,
 		"product":        c.product,
 		"version":        c.version,
+		"platform":       Platform(),
 		"os":             c.cfg.OSVersion,
 		"arch":           runtime.GOARCH,
 		"install_id":     c.st.InstallID,
