@@ -23,9 +23,16 @@ import (
 // environment it sets and not the one of whoever runs it. A shell with
 // DO_NOT_TRACK=1, or a wrapper's product, would otherwise change the
 // outcome of tests that never mention either.
+//
+// The endpoint is a closed local port: a test build has none baked in, and
+// one with no endpoint queues nothing. An upload there fails at once.
 func TestMain(m *testing.M) {
 	for _, v := range []string{EnvDisabled, EnvDoNotTrack, EnvDebug, EnvProduct, EnvEndpoint, EnvSuppress, "HULL_TELEMETRY_VERSION"} {
 		_ = os.Unsetenv(v)
 	}
+	_ = os.Setenv(EnvEndpoint, deadEndpoint)
 	os.Exit(m.Run())
 }
+
+// deadEndpoint is an endpoint nothing listens on.
+const deadEndpoint = "http://127.0.0.1:1"

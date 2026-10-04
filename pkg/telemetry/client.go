@@ -206,6 +206,15 @@ func Init(cfg Config) *Client {
 	return c
 }
 
+// endpoint returns where events go: HULL_TELEMETRY_ENDPOINT, else the one
+// baked in at build time, else "" for a build that sends nothing.
+func endpoint() string {
+	if env := os.Getenv(EnvEndpoint); env != "" {
+		return env
+	}
+	return Endpoint
+}
+
 // ask prints the consent prompt and reads one line. Empty input (a
 // single enter) or anything starting with y/Y approves; an explicit
 // n/N declines. EOF or a read failure is no answer at all (answered
@@ -333,10 +342,7 @@ func (c *Client) deliver(body []byte) bool {
 		_, _ = fmt.Fprintf(c.cfg.Stderr, "telemetry (not sent): %s\n", body)
 		return true
 	}
-	endpoint := Endpoint
-	if env := os.Getenv(EnvEndpoint); env != "" {
-		endpoint = env
-	}
+	endpoint := endpoint()
 	if endpoint == "" {
 		return false
 	}

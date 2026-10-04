@@ -60,7 +60,7 @@ func TestCapturePanicQueuesScrubbedReport(t *testing.T) {
 	c := Init(Config{StoreDir: dir, Version: "0.1.0-test"})
 	c.CapturePanic(fmt.Errorf("boom: /Users/somebody/secret"), []byte(fakeStack), "run", "vz")
 
-	files := sortedCrashFiles(filepath.Join(dir, crashDirName))
+	files := queuedFiles(filepath.Join(dir, crashDirName))
 	if len(files) != 1 {
 		t.Fatalf("expected 1 queued crash file, got %d", len(files))
 	}
@@ -91,12 +91,12 @@ func TestCapturePanicDisabledWritesNothing(t *testing.T) {
 	dir := t.TempDir()
 	c := Init(Config{StoreDir: dir, DNT: true})
 	c.CapturePanic("boom", []byte(fakeStack), "run", "")
-	if files := sortedCrashFiles(filepath.Join(dir, crashDirName)); len(files) != 0 {
+	if files := queuedFiles(filepath.Join(dir, crashDirName)); len(files) != 0 {
 		t.Fatal("disabled telemetry must not queue crash files")
 	}
 	var nilClient *Client
 	nilClient.CapturePanic("boom", []byte(fakeStack), "run", "") // must not panic
-	nilClient.UploadPendingCrashes()
+	nilClient.UploadPending()
 }
 
 func TestCrashQueueIsCapped(t *testing.T) {
@@ -105,7 +105,7 @@ func TestCrashQueueIsCapped(t *testing.T) {
 	for i := 0; i < maxCrashFiles+3; i++ {
 		c.CapturePanic("boom", []byte(fakeStack), "run", "")
 	}
-	if files := sortedCrashFiles(filepath.Join(dir, crashDirName)); len(files) > maxCrashFiles {
+	if files := queuedFiles(filepath.Join(dir, crashDirName)); len(files) > maxCrashFiles {
 		t.Fatalf("queue not pruned: %d files, cap %d", len(files), maxCrashFiles)
 	}
 }
@@ -115,7 +115,7 @@ func TestCrashStackIsCapped(t *testing.T) {
 	c := Init(Config{StoreDir: dir})
 	huge := strings.Repeat("goroutine 1 [running]:\nmain.recurse(...)\n\t/tmp/x/main.go:10 +0x1a4\n", 4000)
 	c.CapturePanic("stack overflow", []byte(huge), "run", "")
-	files := sortedCrashFiles(filepath.Join(dir, crashDirName))
+	files := queuedFiles(filepath.Join(dir, crashDirName))
 	if len(files) != 1 {
 		t.Fatal("expected one queued crash")
 	}
@@ -148,14 +148,14 @@ func TestUploadPendingCrashes(t *testing.T) {
 	c.CapturePanic("boom", []byte(fakeStack), "run", "qemu")
 	c.CapturePanic("boom", []byte(fakeStack), "ps", "")
 
-	c.UploadPendingCrashes()
+	c.UploadPending()
 	if hits.Load() != 2 {
 		t.Fatalf("expected 2 uploads, got %d", hits.Load())
 	}
 	if !strings.Contains(string(lastBody), `"event":"crash"`) {
 		t.Fatalf("uploaded payload is not a crash event: %s", lastBody)
 	}
-	if files := sortedCrashFiles(filepath.Join(dir, crashDirName)); len(files) != 0 {
+	if files := queuedFiles(filepath.Join(dir, crashDirName)); len(files) != 0 {
 		t.Fatal("delivered crash files must be removed from the queue")
 	}
 }
@@ -168,8 +168,8 @@ func TestUploadKeepsQueueOnFailure(t *testing.T) {
 	dir := t.TempDir()
 	c := Init(Config{StoreDir: dir})
 	c.CapturePanic("boom", []byte(fakeStack), "run", "")
-	c.UploadPendingCrashes()
-	if files := sortedCrashFiles(filepath.Join(dir, crashDirName)); len(files) != 1 {
+	c.UploadPending()
+	if files := queuedFiles(filepath.Join(dir, crashDirName)); len(files) != 1 {
 		t.Fatal("undelivered crash files must stay queued")
 	}
 }
@@ -197,8 +197,8 @@ func TestUploadKeepsQueueOnRejectedResponse(t *testing.T) {
 	dir := t.TempDir()
 	c := Init(Config{StoreDir: dir})
 	c.CapturePanic("boom", []byte(fakeStack), "run", "")
-	c.UploadPendingCrashes()
-	if files := sortedCrashFiles(filepath.Join(dir, crashDirName)); len(files) != 1 {
+	c.UploadPending()
+	if files := queuedFiles(filepath.Join(dir, crashDirName)); len(files) != 1 {
 		t.Fatal("a rejected upload must keep the crash file queued")
 	}
 }
@@ -211,7 +211,7 @@ func TestQueueCapCountsClaimedFiles(t *testing.T) {
 	}
 	crashDir := filepath.Join(dir, crashDirName)
 	// Two concurrent invocations hold fresh claims.
-	files := sortedCrashFiles(crashDir)
+	files := queuedFiles(crashDir)
 	for _, f := range files[:2] {
 		if err := os.Rename(f, f+claimSuffix); err != nil {
 			t.Fatal(err)
@@ -220,7 +220,7 @@ func TestQueueCapCountsClaimedFiles(t *testing.T) {
 		_ = os.Chtimes(f+claimSuffix, now, now)
 	}
 	c.CapturePanic("boom", []byte(fakeStack), "run", "")
-	queued := len(sortedCrashFiles(crashDir))
+	queued := len(queuedFiles(crashDir))
 	claimed := countClaims(crashDir)
 	if queued+claimed > maxCrashFiles {
 		t.Fatalf("cap exceeded: %d queued + %d claimed > %d", queued, claimed, maxCrashFiles)
@@ -241,7 +241,7 @@ func TestClaimedCrashIsNotDoubleUploaded(t *testing.T) {
 	dir := t.TempDir()
 	c := Init(Config{StoreDir: dir})
 	c.CapturePanic("boom", []byte(fakeStack), "run", "")
-	files := sortedCrashFiles(filepath.Join(dir, crashDirName))
+	files := queuedFiles(filepath.Join(dir, crashDirName))
 	if len(files) != 1 {
 		t.Fatal("expected one queued crash")
 	}
@@ -250,7 +250,7 @@ func TestClaimedCrashIsNotDoubleUploaded(t *testing.T) {
 	if err := os.Rename(files[0], claimed); err != nil {
 		t.Fatal(err)
 	}
-	c.UploadPendingCrashes()
+	c.UploadPending()
 	if hits.Load() != 0 {
 		t.Fatal("a freshly claimed crash must not be uploaded by another invocation")
 	}
@@ -260,11 +260,11 @@ func TestClaimedCrashIsNotDoubleUploaded(t *testing.T) {
 	if err := os.Chtimes(claimed, old, old); err != nil {
 		t.Fatal(err)
 	}
-	c.UploadPendingCrashes()
+	c.UploadPending()
 	if hits.Load() != 1 {
 		t.Fatalf("stale claim must be recovered and uploaded once, got %d uploads", hits.Load())
 	}
-	if remaining := sortedCrashFiles(filepath.Join(dir, crashDirName)); len(remaining) != 0 {
+	if remaining := queuedFiles(filepath.Join(dir, crashDirName)); len(remaining) != 0 {
 		t.Fatal("recovered crash must leave the queue after delivery")
 	}
 }
@@ -273,8 +273,8 @@ func TestUploadWithoutEndpointKeepsQueue(t *testing.T) {
 	dir := t.TempDir()
 	c := Init(Config{StoreDir: dir})
 	c.CapturePanic("boom", []byte(fakeStack), "run", "")
-	c.UploadPendingCrashes()
-	if files := sortedCrashFiles(filepath.Join(dir, crashDirName)); len(files) != 1 {
+	c.UploadPending()
+	if files := queuedFiles(filepath.Join(dir, crashDirName)); len(files) != 1 {
 		t.Fatal("with no endpoint configured, crash files must stay queued")
 	}
 }

@@ -44,6 +44,9 @@ To see every payload instead of sending it:
 export HULL_TELEMETRY_DEBUG=1
 ```
 
+An event a wrapper would queue is printed and not written, so no later run
+sends it.
+
 ## The consent prompt
 
 Shown on the first interactive invocation. Nothing is sent before you
@@ -191,9 +194,23 @@ version 1 are not comparable with later ones and should not be mixed.
 | `stack` | Go stack trace, file paths trimmed to module-relative form |
 
 Crash reports are written to the `crashes/` directory next to
-`telemetry.json` when a panic happens
-and uploaded on the next invocation. You can inspect or delete the files at
-any time; the directory is the full queue.
+`telemetry.json` when a panic happens, and uploaded on the next invocation.
+You can inspect or delete the files at any time; the directory is the full
+queue.
+
+### Queued events
+
+A wrapper that hands its process to hull cannot wait for its own event to be
+sent. brig does this when it gives the terminal to an agent. It writes the
+event to the `outbox/` directory next to `telemetry.json` instead, and hull
+uploads it while the session runs. Whatever is left is uploaded by the next
+brig or hull command. The outbox holds at most 20 events.
+
+Both queues hold complete events. Whichever command runs next with telemetry
+on uploads them, whatever its own product or suppress list.
+
+A build with no endpoint, such as a dev build, writes nothing to either
+queue. Recording a no empties both.
 
 ## Where the state lives
 

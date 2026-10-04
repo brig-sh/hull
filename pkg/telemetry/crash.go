@@ -22,6 +22,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -33,8 +34,17 @@ const crashDirName = "crashes"
 // loop must not fill the disk.
 const maxCrashFiles = 5
 
-// maxUploadsPerRun bounds how much time a post-crash invocation can
-// spend flushing the queue (each upload is capped by sendTimeout).
+// outboxDirName is the queue of events an invocation wrote instead of
+// sending, because it could not wait for the network. Uploaded like the
+// crash queue.
+const outboxDirName = "outbox"
+
+// maxOutboxFiles caps the outbox the way maxCrashFiles caps the crash queue.
+const maxOutboxFiles = 20
+
+// maxUploadsPerRun bounds how many queued files one invocation uploads, over
+// both queues, and so the time it spends on them (each upload is capped by
+// sendTimeout).
 const maxUploadsPerRun = 3
 
 // maxStackBytes caps the scrubbed stack in a crash payload. A
@@ -50,6 +60,9 @@ const maxStackBytes = 16 * 1024
 const claimSuffix = ".uploading"
 
 const staleClaimAge = 10 * time.Minute
+
+// queueTempPrefix names a queue file still being written.
+const queueTempPrefix = ".queue-"
 
 // CapturePanic writes a ready-to-send crash payload to the queue. It is
 // called from the recover handler in main, so it swallows every error:
@@ -77,46 +90,117 @@ func (c *Client) CapturePanic(recovered any, stack []byte, command, backend stri
 	if err != nil {
 		return
 	}
-	dir := filepath.Join(c.cfg.StoreDir, crashDirName)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return
-	}
-	name := fmt.Sprintf("%d-%s.json", time.Now().UTC().Unix(), newUUID()[:8])
-	_ = os.WriteFile(filepath.Join(dir, name), body, 0o600)
-	pruneCrashDir(dir)
+	c.enqueue(crashDirName, maxCrashFiles, body)
 }
 
-// UploadPendingCrashesAsync flushes the queue from a background
-// goroutine, tracked like any delivery, so initialization never blocks
-// on it. Exit truncation is safe: a file leaves the queue only on a
-// 2xx response, so an interrupted upload retries on a later run.
-func (c *Client) UploadPendingCrashesAsync() {
+// Queue writes one event to the outbox instead of sending it, for the next
+// invocation with telemetry on to upload, and returns the file it wrote, or
+// "" when it wrote none. In debug mode it prints the event and writes nothing,
+// so a later run cannot send what debug mode showed. It is for an exit that cannot wait for the network:
+// brig queues its command event right before it hands its process to hull,
+// and hull uploads it while the session runs. Removing the file before an
+// upload claims it takes the event back.
+func (c *Client) Queue(event string, fields map[string]string) string {
+	if !c.Sends(event) {
+		return ""
+	}
+	body, err := json.Marshal(c.payload(event, fields))
+	if err != nil {
+		return ""
+	}
+	if c.debug {
+		c.deliver(body)
+		return ""
+	}
+	return c.enqueue(outboxDirName, maxOutboxFiles, body)
+}
+
+// enqueue adds one marshaled payload to a queue directory and enforces its
+// cap, and returns the file it wrote, or "" on a failure. The file appears
+// under its final name only once it is complete, so an uploader never claims
+// half of one. A build with no endpoint writes nothing, so that no other build
+// sends what it collected.
+func (c *Client) enqueue(dirName string, max int, body []byte) string {
+	if endpoint() == "" {
+		return ""
+	}
+	dir := filepath.Join(c.cfg.StoreDir, dirName)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return ""
+	}
+	tmp, err := os.CreateTemp(dir, queueTempPrefix+"*")
+	if err != nil {
+		return ""
+	}
+	_, werr := tmp.Write(body)
+	cerr := tmp.Close()
+	name := filepath.Join(dir, fmt.Sprintf("%d-%s.json", queueStamp(), newUUID()[:8]))
+	if werr != nil || cerr != nil || os.Rename(tmp.Name(), name) != nil {
+		_ = os.Remove(tmp.Name())
+		return ""
+	}
+	pruneQueue(dir, max)
+	return name
+}
+
+// lastStamp is the last stamp queueStamp returned.
+var lastStamp atomic.Int64
+
+// queueStamp returns the time in nanoseconds for a queue file's name, greater
+// than any it returned before. Names then sort in the order this process wrote
+// them, even within one tick of the clock, and the cap drops the oldest.
+func queueStamp() int64 {
+	now := time.Now().UnixNano()
+	for {
+		last := lastStamp.Load()
+		next := max(now, last+1)
+		if lastStamp.CompareAndSwap(last, next) {
+			return next
+		}
+	}
+}
+
+// UploadPendingAsync uploads the queues from a background goroutine,
+// tracked like any delivery, so initialization never blocks on it. Exit
+// truncation is safe: a file leaves a queue only on a 2xx response, so an
+// interrupted upload retries on a later run.
+func (c *Client) UploadPendingAsync() {
 	if !c.Enabled() {
 		return
 	}
 	c.inflight.Add(1)
 	go func() {
 		defer c.inflight.Done()
-		c.UploadPendingCrashes()
+		c.UploadPending()
 	}()
 }
 
-// UploadPendingCrashes flushes queued crash files, oldest first, at
-// most maxUploadsPerRun per invocation. Each file is claimed first by
-// an atomic rename, so two concurrent invocations never upload the
-// same report twice; a claim is removed on delivery and renamed back
-// on failure, and claims orphaned by a dead process are requeued once
-// they go stale.
-func (c *Client) UploadPendingCrashes() {
+// UploadPending uploads the crash queue, then the outbox. A queue holds
+// complete payloads, so whichever invocation runs next uploads them, whatever
+// its own product or suppress list. It stops at the first failed delivery.
+func (c *Client) UploadPending() {
 	if !c.Enabled() {
 		return
 	}
-	dir := filepath.Join(c.cfg.StoreDir, crashDirName)
-	recoverStaleClaims(dir)
-	uploaded := 0
-	for _, f := range sortedCrashFiles(dir) {
-		if uploaded >= maxUploadsPerRun {
+	budget := maxUploadsPerRun
+	for _, name := range []string{crashDirName, outboxDirName} {
+		if !c.uploadQueue(filepath.Join(c.cfg.StoreDir, name), &budget) {
 			return
+		}
+	}
+}
+
+// uploadQueue uploads one queue's files, oldest first, while budget lasts,
+// takes each upload off budget, and reports whether every attempt was
+// delivered. Each file is claimed first by an atomic rename, so two
+// concurrent invocations never upload the same file twice; a claim is
+// removed on delivery and renamed back on failure, and claims orphaned by a
+// dead process are requeued once they go stale.
+func (c *Client) uploadQueue(dir string, budget *int) bool {
+	recoverStaleClaims(dir)
+	for _, f := range queuedFiles(dir) {
+		if *budget <= 0 {
+			return true
 		}
 		claimed := f + claimSuffix
 		if err := os.Rename(f, claimed); err != nil {
@@ -128,15 +212,27 @@ func (c *Client) UploadPendingCrashes() {
 		body, err := os.ReadFile(claimed)
 		if err != nil || !c.deliver(body) {
 			_ = os.Rename(claimed, f)
-			return
+			return false
 		}
 		_ = os.Remove(claimed)
-		uploaded++
+		*budget--
+	}
+	return true
+}
+
+// clearQueues removes every queued file of dir that no upload has claimed. A
+// no covers what was queued under an earlier yes.
+func clearQueues(dir string) {
+	for _, name := range []string{crashDirName, outboxDirName} {
+		for _, f := range queuedFiles(filepath.Join(dir, name)) {
+			_ = os.Remove(f)
+		}
 	}
 }
 
-// recoverStaleClaims requeues claims whose owner died mid-upload. The
-// mtime was refreshed at claim time, so age here is real.
+// recoverStaleClaims requeues claims whose owner died mid-upload, and removes
+// the temporary file of a write that died before its rename. The mtime of a
+// claim was refreshed at claim time, so age here is real.
 func recoverStaleClaims(dir string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -144,7 +240,8 @@ func recoverStaleClaims(dir string) {
 	}
 	for _, e := range entries {
 		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, claimSuffix) {
+		claim, temp := strings.HasSuffix(name, claimSuffix), strings.HasPrefix(name, queueTempPrefix)
+		if e.IsDir() || !claim && !temp {
 			continue
 		}
 		info, err := e.Info()
@@ -152,6 +249,10 @@ func recoverStaleClaims(dir string) {
 			continue
 		}
 		full := filepath.Join(dir, name)
+		if temp {
+			_ = os.Remove(full)
+			continue
+		}
 		_ = os.Rename(full, strings.TrimSuffix(full, claimSuffix))
 	}
 }
@@ -190,14 +291,14 @@ func trimSourcePath(p string) string {
 	return p
 }
 
-// pruneCrashDir enforces the queue cap counting claimed files too --
+// pruneQueue enforces a queue's cap counting claimed files too --
 // concurrent claims must not let the queue grow past the documented
 // limit. Stale claims are recovered first; fresh claims are counted
-// but never deleted, so the oldest unclaimed reports go.
-func pruneCrashDir(dir string) {
+// but never deleted, so the oldest unclaimed files go.
+func pruneQueue(dir string, max int) {
 	recoverStaleClaims(dir)
-	queued := sortedCrashFiles(dir)
-	excess := len(queued) + countClaims(dir) - maxCrashFiles
+	queued := queuedFiles(dir)
+	excess := len(queued) + countClaims(dir) - max
 	for i := 0; i < excess && i < len(queued); i++ {
 		_ = os.Remove(queued[i])
 	}
@@ -218,9 +319,9 @@ func countClaims(dir string) int {
 	return n
 }
 
-// sortedCrashFiles lists the queue oldest first (names sort by their
+// queuedFiles lists a queue oldest first (names sort by their
 // unix-timestamp prefix).
-func sortedCrashFiles(dir string) []string {
+func queuedFiles(dir string) []string {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil

@@ -141,6 +141,8 @@ func TestCrashReportCarriesOnlyAKnownBackend(t *testing.T) {
 	t.Setenv(telemetry.EnvDisabled, "")
 	t.Setenv("DO_NOT_TRACK", "")
 	t.Setenv(telemetry.EnvSuppress, "")
+	// A build with no endpoint queues nothing. Nothing listens on this one.
+	t.Setenv(telemetry.EnvEndpoint, "http://127.0.0.1:1")
 	dir := t.TempDir()
 	prevClient, prevBackend := telemetryClient, telemetryBackend
 	t.Cleanup(func() { telemetryClient, telemetryBackend = prevClient, prevBackend })

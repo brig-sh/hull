@@ -112,6 +112,7 @@ func recordAnswer(dir string, st *state) error {
 	err := saveState(dir, st)
 	if st.Consent != nil && !*st.Consent {
 		optOutLegacy(dir)
+		clearQueues(dir)
 	}
 	return err
 }

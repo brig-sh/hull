@@ -328,14 +328,15 @@ func dirIsCaseSensitive(dir string) (bool, error) {
 // sitting in the directory -- and without this the emptiness check below would
 // refuse to mount over hull's own footprints on a genuinely fresh store.
 //
-// The crash queue is here for the same reason: under a --store-dir other than
-// the default one, the state lives in the store, and a crash before the first
-// mount queues its report there. The default store keeps no telemetry state;
-// see telemetry.DefaultStateDir.
+// The crash queue and the outbox are here for the same reason: under a
+// --store-dir other than the default one, the state lives in the store, and
+// a crash before the first mount queues its report there. The default store
+// keeps no telemetry state; see telemetry.DefaultStateDir.
 var storeOwnFiles = map[string]bool{
 	"telemetry.json": true,
 	"telemetry.lock": true,
 	"crashes":        true,
+	"outbox":         true,
 	storeMarkerName:  true,
 	".DS_Store":      true,
 }
