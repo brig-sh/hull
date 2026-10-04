@@ -21,10 +21,14 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/brig-sh/hull/pkg/store"
+	"github.com/brig-sh/hull/pkg/telemetry"
+	"github.com/urfave/cli/v3"
 )
 
 func TestSendEndOnceIsIdempotent(t *testing.T) {
@@ -85,5 +89,78 @@ func TestErrorClassIsCoarseAndStable(t *testing.T) {
 		if got := errorClass(tc.err); got != tc.want {
 			t.Errorf("%s: errorClass = %q, want %q", tc.name, got, tc.want)
 		}
+	}
+}
+
+func TestKnownCommandNeverSendsWhatTheUserTyped(t *testing.T) {
+	root := &cli.Command{Commands: []*cli.Command{
+		{Name: "run"},
+		{Name: "ps", Aliases: []string{"ls"}},
+	}}
+	cases := []struct{ token, want string }{
+		{"run", "run"},
+		{"ls", "ls"},
+		{"", ""},
+		{"ubuntu:latest", unknownCommand},
+		{"ghcr.io/example/private-thing:v1", unknownCommand},
+		{"rnu", unknownCommand},
+	}
+	for _, tc := range cases {
+		if got := knownCommand(root, tc.token); got != tc.want {
+			t.Errorf("knownCommand(%q) = %q, want %q", tc.token, got, tc.want)
+		}
+	}
+}
+
+// The check above is only worth something if initTelemetry uses it: the
+// command an event names is what initTelemetry records.
+func TestInitTelemetryNamesOnlyARealCommand(t *testing.T) {
+	t.Setenv("DO_NOT_TRACK", "1")
+	prevArgs, prevClient, prevName := os.Args, telemetryClient, telemetryCmdName
+	t.Cleanup(func() { os.Args, telemetryClient, telemetryCmdName = prevArgs, prevClient, prevName })
+	root := &cli.Command{
+		Flags: []cli.Flag{
+			&cli.StringFlag{Name: "store-dir", Value: t.TempDir()},
+			&cli.BoolFlag{Name: "unattended"},
+			&cli.BoolFlag{Name: "dnt"},
+		},
+		Commands: []*cli.Command{{Name: "run"}},
+	}
+	for token, want := range map[string]string{"run": "run", "ghcr.io/example/private-thing:v1": unknownCommand} {
+		os.Args = []string{"hull", token}
+		initTelemetry(root)
+		if telemetryCmdName != want {
+			t.Errorf("hull %s: command = %q, want %q", token, telemetryCmdName, want)
+		}
+	}
+}
+
+// A crash between reading --hypervisor and validating it would otherwise
+// queue whatever was written there.
+func TestCrashReportCarriesOnlyAKnownBackend(t *testing.T) {
+	t.Setenv(telemetry.EnvDisabled, "")
+	t.Setenv("DO_NOT_TRACK", "")
+	t.Setenv(telemetry.EnvSuppress, "")
+	dir := t.TempDir()
+	prevClient, prevBackend := telemetryClient, telemetryBackend
+	t.Cleanup(func() { telemetryClient, telemetryBackend = prevClient, prevBackend })
+	telemetryClient = telemetry.Init(telemetry.Config{StoreDir: dir, Version: "0.0.0-test"})
+	if !telemetryClient.Enabled() {
+		t.Fatal("test telemetry client is disabled; it would assert nothing")
+	}
+	telemetryBackend = "ghcr.io/example/private-thing:v1"
+
+	queueCrash("boom", []byte("goroutine 1 [running]:\n"))
+
+	files, _ := filepath.Glob(filepath.Join(dir, "crashes", "*.json"))
+	if len(files) != 1 {
+		t.Fatalf("want one queued report, got %v", files)
+	}
+	body, err := os.ReadFile(files[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "private-thing") || !strings.Contains(string(body), `"backend":"unknown"`) {
+		t.Fatalf("the report carries the raw backend:\n%s", body)
 	}
 }

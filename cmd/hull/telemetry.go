@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -42,6 +43,26 @@ var telemetryClient *telemetry.Client
 // telemetryCmdName is the top-level subcommand of this invocation, for
 // the command event.
 var telemetryCmdName string
+
+// unknownCommand stands in for a first token that is not one of hull's
+// commands. The token can be anything the user typed: `hull ubuntu:latest`
+// leaves the subcommand out, and only a real command name may leave the
+// machine.
+const unknownCommand = "unknown"
+
+// knownCommand returns name when it names one of root's subcommands, by name
+// or alias, and unknownCommand otherwise. An empty name stays empty.
+func knownCommand(root *cli.Command, name string) string {
+	if name == "" {
+		return ""
+	}
+	for _, c := range root.Commands {
+		if c.Name == name || slices.Contains(c.Aliases, name) {
+			return name
+		}
+	}
+	return unknownCommand
+}
 
 // topLevelCommand scans os.Args for the first non-flag token, skipping
 // the one global flag that takes a separate value.
@@ -73,6 +94,7 @@ func initTelemetry(cmd *cli.Command) {
 	if telemetryCmdName == "telemetry" || telemetryCmdName == "network-gateway" {
 		return
 	}
+	telemetryCmdName = knownCommand(cmd, telemetryCmdName)
 	// Without the leading v, as goreleaser's {{.Version}} spelled it when it was
 	// stamped: every release before this one reported 0.1.0-rcN, and a v on the
 	// next would split one series in two for anything that groups by version.
@@ -109,9 +131,26 @@ var telemetryBackend string
 // crash behavior -- stack on stderr, exit 2. Only main-goroutine panics
 // arrive here; a panic on another goroutine still crashes uncaught.
 func handlePanic(recovered any, stack []byte) {
-	telemetryClient.CapturePanic(recovered, stack, telemetryCmdName, telemetryBackend)
+	queueCrash(recovered, stack)
 	fmt.Fprintf(os.Stderr, "panic: %v\n\n%s", recovered, stack)
 	os.Exit(2)
+}
+
+// queueCrash writes the crash report for handlePanic.
+func queueCrash(recovered any, stack []byte) {
+	telemetryClient.CapturePanic(recovered, stack, telemetryCmdName, knownBackend(telemetryBackend))
+}
+
+// knownBackend returns backend when it is one of hull's VMM backends,
+// "unknown" when it is not, and "" when none was resolved. The name comes
+// from --hypervisor or an image annotation, and it is recorded before it is
+// validated: a crash on the way can carry whatever was written there.
+func knownBackend(backend string) string {
+	switch backend {
+	case "", "qemu", "vz", "hvi":
+		return backend
+	}
+	return unknownCommand
 }
 
 // sendCommandEvent reports how this invocation ended. Called from the
@@ -169,7 +208,7 @@ func sendStartEvent(backend string, started bool) {
 		boot = "fail"
 	}
 	telemetryClient.Send("start", map[string]string{
-		"backend":        backend,
+		"backend":        knownBackend(backend),
 		"backend_source": telemetryBackendSource,
 		"boot":           boot,
 	})
@@ -178,7 +217,7 @@ func sendStartEvent(backend string, started bool) {
 // sendEndEvent reports the instance lifetime.
 func sendEndEvent(backend string, lifetime time.Duration) {
 	telemetryClient.Send("end", map[string]string{
-		"backend":    backend,
+		"backend":    knownBackend(backend),
 		"duration_s": strconv.FormatInt(int64(lifetime.Seconds()), 10),
 	})
 }
@@ -437,7 +476,7 @@ func startVMMMetricsSampler(launcherPID int, backend string, vcpus int, startTim
 				return true // baseline taken, or the two are not comparable
 			}
 			telemetryClient.Send("metrics", map[string]string{
-				"backend":  backend,
+				"backend":  knownBackend(backend),
 				"rss_kb":   rssKB,
 				"cpu_pct":  strconv.FormatFloat(pct, 'f', 1, 64),
 				"uptime_s": strconv.FormatInt(int64(time.Since(startTime).Seconds()), 10),
