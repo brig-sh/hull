@@ -71,9 +71,13 @@ type Config struct {
 type Client struct {
 	cfg     Config
 	product string
-	st      *state
-	enabled bool
-	debug   bool
+	// version is what the events report. runtimeVersion is hull's own
+	// version when a wrapper's replaced it, and empty otherwise.
+	version        string
+	runtimeVersion string
+	st             *state
+	enabled        bool
+	debug          bool
 	// inflight tracks background deliveries so exit paths can grant a
 	// bounded grace via Flush without ever blocking indefinitely.
 	inflight sync.WaitGroup
@@ -91,8 +95,17 @@ func Init(cfg Config) *Client {
 	}
 	c := &Client{
 		cfg:     cfg,
-		product: product(),
+		product: DefaultProduct,
+		version: cfg.Version,
 		debug:   os.Getenv(EnvDebug) == "1",
+	}
+	// A wrapper driving hull names its product and its version. Both
+	// versions go out, so the events say which hull ran under it.
+	if p := os.Getenv(EnvProduct); p != "" {
+		c.product = p
+		if v := os.Getenv(EnvVersion); v != "" {
+			c.version, c.runtimeVersion = v, cfg.Version
+		}
 	}
 
 	// Child invocations of our own binary stay silent: the parent
@@ -245,12 +258,15 @@ func (c *Client) payload(event string, fields map[string]string) map[string]any 
 		"schema_version": SchemaVersion,
 		"event":          event,
 		"product":        c.product,
-		"version":        c.cfg.Version,
+		"version":        c.version,
 		"os":             c.cfg.OSVersion,
 		"arch":           runtime.GOARCH,
 		"install_id":     c.st.InstallID,
 		"captured_at":    capturedAt,
-		"checksum":       Checksum(event, c.product, c.cfg.Version, c.st.InstallID, capturedAt),
+		"checksum":       Checksum(event, c.product, c.version, c.st.InstallID, capturedAt),
+	}
+	if c.runtimeVersion != "" {
+		payload["runtime_version"] = c.runtimeVersion
 	}
 	if c.cfg.Uname != "" {
 		payload["uname"] = c.cfg.Uname
@@ -327,13 +343,6 @@ func Status(storeDir string) string {
 	default:
 		return "enabled"
 	}
-}
-
-func product() string {
-	if p := os.Getenv(EnvProduct); p != "" {
-		return p
-	}
-	return DefaultProduct
 }
 
 func envOptedOut() bool {

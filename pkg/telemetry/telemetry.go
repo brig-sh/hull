@@ -25,7 +25,7 @@ package telemetry
 
 // SchemaVersion is the version of the event schema. Any change to what
 // is collected bumps it, together with docs/telemetry.md.
-const SchemaVersion = 2
+const SchemaVersion = 3
 
 // ConsentVersion is the version of the consent ask. Expanding what we
 // collect bumps it, which re-triggers the prompt on the next interactive
@@ -51,6 +51,9 @@ const (
 	// EnvProduct lets a wrapper driving hull -- brig, today -- attribute
 	// events to the product the user actually installed.
 	EnvProduct = "HULL_TELEMETRY_PRODUCT"
+	// EnvVersion is the wrapper's version, read together with EnvProduct.
+	// hull's own version then goes out as runtime_version.
+	EnvVersion = "HULL_TELEMETRY_VERSION"
 	// EnvEndpoint overrides the build-time Endpoint (tests, staging).
 	EnvEndpoint = "HULL_TELEMETRY_ENDPOINT"
 	// EnvSuppress is internal: set on child invocations of our own

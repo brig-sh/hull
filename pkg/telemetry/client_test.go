@@ -445,3 +445,46 @@ func TestEmptyEndpointSendsNothing(t *testing.T) {
 	}
 	c.Send("command", nil) // nothing to assert beyond "does not hang or panic"
 }
+
+// payloadOf returns the envelope one event would carry, through the same path
+// Send marshals.
+func payloadOf(t *testing.T, c *Client, event string) map[string]any {
+	t.Helper()
+	if c.st == nil {
+		t.Fatal("client has no state")
+	}
+	return c.payload(event, nil)
+}
+
+func TestWrapperVersionMovesHullsToRuntimeVersion(t *testing.T) {
+	t.Setenv(EnvProduct, "brig")
+	t.Setenv(EnvVersion, "0.4.0")
+	c := Init(Config{StoreDir: t.TempDir(), Version: "0.1.0-rc30"})
+	p := payloadOf(t, c, "start")
+	if p["version"] != "0.4.0" || p["runtime_version"] != "0.1.0-rc30" {
+		t.Fatalf("version = %v, runtime_version = %v; want the wrapper's and hull's", p["version"], p["runtime_version"])
+	}
+	capturedAt, _ := p["captured_at"].(string)
+	if p["checksum"] != Checksum("start", "brig", "0.4.0", c.InstallID(), capturedAt) {
+		t.Fatal("the checksum must cover the version the event reports")
+	}
+}
+
+func TestHullEventsCarryNoRuntimeVersion(t *testing.T) {
+	c := Init(Config{StoreDir: t.TempDir(), Version: "0.1.0-rc30"})
+	p := payloadOf(t, c, "command")
+	if p["product"] != "hull" || p["version"] != "0.1.0-rc30" {
+		t.Fatalf("product = %v, version = %v; want hull's own", p["product"], p["version"])
+	}
+	if _, ok := p["runtime_version"]; ok {
+		t.Fatal("an event hull sends for itself must not carry runtime_version")
+	}
+}
+
+func TestVersionWithoutProductIsIgnored(t *testing.T) {
+	t.Setenv(EnvVersion, "9.9.9")
+	c := Init(Config{StoreDir: t.TempDir(), Version: "0.1.0-rc30"})
+	if p := payloadOf(t, c, "command"); p["version"] != "0.1.0-rc30" {
+		t.Fatalf("version = %v; a version with no product names no wrapper", p["version"])
+	}
+}
