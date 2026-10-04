@@ -328,9 +328,10 @@ func dirIsCaseSensitive(dir string) (bool, error) {
 // sitting in the directory -- and without this the emptiness check below would
 // refuse to mount over hull's own footprints on a genuinely fresh store.
 //
-// The crash queue is here for the same reason. brig shares this directory for
-// its own telemetry, so a brig crash can queue a report before hull has ever
-// mounted the store. Mounting hides the queue until the volume is detached.
+// The crash queue is here for the same reason: under a --store-dir other than
+// the default one, the state lives in the store, and a crash before the first
+// mount queues its report there. The default store keeps no telemetry state;
+// see telemetry.DefaultStateDir.
 var storeOwnFiles = map[string]bool{
 	"telemetry.json": true,
 	"telemetry.lock": true,
@@ -340,16 +341,20 @@ var storeOwnFiles = map[string]bool{
 }
 
 // dirIsEmpty reports whether mounting over dir would hide anything worth
-// keeping. Hull's own bookkeeping does not count; anything else does.
+// keeping. Hull's own bookkeeping does not count; anything else does. That
+// includes a temporary state file the telemetry client left behind when it
+// was killed between writing and renaming it.
 func dirIsEmpty(dir string) (bool, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return false, err
 	}
 	for _, e := range entries {
-		if !storeOwnFiles[e.Name()] {
-			return false, nil
+		name := e.Name()
+		if storeOwnFiles[name] || strings.HasPrefix(name, ".telemetry-") && strings.HasSuffix(name, ".json") {
+			continue
 		}
+		return false, nil
 	}
 	return true, nil
 }

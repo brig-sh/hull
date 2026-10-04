@@ -162,7 +162,7 @@ func Init(cfg Config) *Client {
 	if cfg.DNT {
 		c.st.Consent = boolPtr(false)
 		c.st.ConsentVersion = ConsentVersion
-		_ = saveState(cfg.StoreDir, c.st)
+		_ = recordAnswer(cfg.StoreDir, c.st)
 		return c
 	}
 
@@ -188,7 +188,7 @@ func Init(cfg Config) *Client {
 			c.enabled = answer
 			c.st.Consent = boolPtr(answer)
 			c.st.ConsentVersion = ConsentVersion
-			_ = saveState(cfg.StoreDir, c.st)
+			_ = recordAnswer(cfg.StoreDir, c.st)
 		}
 		return c
 	}
@@ -360,7 +360,7 @@ func SetConsent(storeDir string, enabled bool) error {
 	st, _ := loadOrCreateState(storeDir)
 	st.Consent = boolPtr(enabled)
 	st.ConsentVersion = ConsentVersion
-	return saveState(storeDir, st)
+	return recordAnswer(storeDir, st)
 }
 
 // Answer is the consent state on file, as `telemetry status` reports it.

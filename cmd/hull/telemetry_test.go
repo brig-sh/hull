@@ -164,3 +164,23 @@ func TestCrashReportCarriesOnlyAKnownBackend(t *testing.T) {
 		t.Fatalf("the report carries the raw backend:\n%s", body)
 	}
 }
+
+// The default store is a mountpoint, so its telemetry state lives next to it.
+// Any other --store-dir keeps its state inside, as it always has.
+func TestTelemetryStateLivesOutsideTheDefaultStore(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	custom := t.TempDir()
+	t.Chdir(home)
+	for store, want := range map[string]string{
+		filepath.Join(home, ".hull", "store"):       filepath.Join(home, ".hull"),
+		filepath.Join(home, ".hull", "store") + "/": filepath.Join(home, ".hull"),
+		".hull/./store": filepath.Join(home, ".hull"),
+		custom:          custom,
+	} {
+		root := &cli.Command{Flags: []cli.Flag{&cli.StringFlag{Name: "store-dir", Value: store}}}
+		if got := telemetryStateDir(root); got != want {
+			t.Errorf("--store-dir %s: state in %q, want %q", store, got, want)
+		}
+	}
+}

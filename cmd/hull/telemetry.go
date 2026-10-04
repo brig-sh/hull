@@ -100,7 +100,7 @@ func initTelemetry(cmd *cli.Command) {
 	// next would split one series in two for anything that groups by version.
 	version := strings.TrimPrefix(build.Version, "v")
 	telemetryClient = telemetry.Init(telemetry.Config{
-		StoreDir:  cmd.String("store-dir"),
+		StoreDir:  telemetryStateDir(cmd),
 		Version:   version,
 		OSVersion: telemetry.HostOS(),
 		Uname:     telemetry.HostUname(),
@@ -120,6 +120,28 @@ func initTelemetry(cmd *cli.Command) {
 	// they happen, so the report survives even when the crash killed
 	// networking or skipped every defer -- and init never waits on it.
 	telemetryClient.UploadPendingCrashesAsync()
+}
+
+// telemetryStateDir is where this invocation keeps its telemetry state: next
+// to the default store rather than inside it, and inside any other
+// --store-dir as before. See telemetry.DefaultStateDir for why.
+func telemetryStateDir(cmd *cli.Command) string {
+	store := cmd.String("store-dir")
+	if def := defaultStoreDir(); def != "" && absClean(store) == absClean(def) {
+		if dir := telemetry.DefaultStateDir(); dir != "" {
+			return dir
+		}
+	}
+	return store
+}
+
+// absClean returns dir as an absolute, cleaned path, so a trailing slash or a
+// relative spelling of the default store still names it.
+func absClean(dir string) string {
+	if abs, err := filepath.Abs(dir); err == nil {
+		return abs
+	}
+	return filepath.Clean(dir)
 }
 
 // telemetryBackend is set at backend resolution in run.go so a crash
@@ -540,7 +562,7 @@ func telemetryCommand() *cli.Command {
 				Name:  "on",
 				Usage: "enable telemetry",
 				Action: func(_ context.Context, cmd *cli.Command) error {
-					if err := telemetry.SetConsent(cmd.String("store-dir"), true); err != nil {
+					if err := telemetry.SetConsent(telemetryStateDir(cmd), true); err != nil {
 						return fmt.Errorf("failed to record telemetry consent: %w", err)
 					}
 					fmt.Println("telemetry enabled")
@@ -551,7 +573,7 @@ func telemetryCommand() *cli.Command {
 				Name:  "off",
 				Usage: "disable telemetry",
 				Action: func(_ context.Context, cmd *cli.Command) error {
-					if err := telemetry.SetConsent(cmd.String("store-dir"), false); err != nil {
+					if err := telemetry.SetConsent(telemetryStateDir(cmd), false); err != nil {
 						return fmt.Errorf("failed to record telemetry opt-out: %w", err)
 					}
 					fmt.Println("telemetry disabled")
@@ -562,7 +584,7 @@ func telemetryCommand() *cli.Command {
 				Name:  "status",
 				Usage: "show the effective telemetry state",
 				Action: func(_ context.Context, cmd *cli.Command) error {
-					fmt.Printf("telemetry: %s\n", telemetry.Status(cmd.String("store-dir")))
+					fmt.Printf("telemetry: %s\n", telemetry.Status(telemetryStateDir(cmd)))
 					return nil
 				},
 			},
