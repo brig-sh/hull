@@ -108,7 +108,7 @@ All events share a common envelope:
 
 | field | example | notes |
 |---|---|---|
-| `command` | `run` | the first non-flag token of the command line, skipping the value of `--store-dir`. See the caveat under [What is never sent](#what-is-never-sent) |
+| `command` | `run` | the subcommand: the first non-flag token of the command line, skipping the value of `--store-dir`, when it names one of hull's commands, and `unknown` when it does not |
 | `outcome` | `ok` / `error` | |
 | `error_class` | `network` | coarse class on failure, one of `canceled`, `not-found`, `permission`, `network`, `other`; never the error message |
 
@@ -176,8 +176,8 @@ version 1 are not comparable with later ones and should not be mixed.
 
 | field | notes |
 |---|---|
-| `command` | the first non-flag token, as above |
-| `backend` | if known at crash time |
+| `command` | the subcommand, or `unknown`, as above |
+| `backend` | if one was resolved at crash time: `qemu`, `vz`, `hvi`, or `unknown` for a name hull does not know |
 | `panic_type` | the Go type of the panic value (eg. `*errors.errorString`); never the panic message, which can embed paths |
 | `stack` | Go stack trace, file paths trimmed to module-relative form |
 
@@ -203,17 +203,12 @@ another `--store-dir` has its own consent state and its own install id.
 - your IP address is not stored: it is stripped at ingestion and never
   written down
 
-Two entries on that list need a caveat, because taken flatly they are wrong:
+One entry on that list needs a caveat, because taken flatly it is wrong:
 
 - **Process readings are sent.** A `metrics` event carries `rss_kb` and
   `cpu_pct`, and both are sampled from the VMM process, which is another
   process. The `metrics` section above says which process and when. What is
   not read is macOS DiagnosticReports.
-- **A malformed invocation can send an image name.** The `command` field is
-  simply the first non-flag token, and it is not checked against the real
-  subcommand list. So `hull run ubuntu:latest` sends `run`, but
-  `hull ubuntu:latest`, with the subcommand left out, sends `ubuntu:latest`.
-  The same applies to a mistyped subcommand. If that matters to you, opt out.
 
 ## Where it goes and how long it stays
 
