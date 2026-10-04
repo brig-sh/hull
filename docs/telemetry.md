@@ -2,8 +2,12 @@
 
 hull, and the wrappers that drive it, collect anonymous usage
 events and crash reports to help us understand what people run and fix what
-breaks. This page is the canonical reference for exactly what is sent. If a
-field is not listed here, it is not collected.
+breaks. This page is the canonical reference for exactly what hull sends. If a
+field is not listed here, hull does not collect it.
+
+brig sends events of its own through the same client, under the same answer.
+[brig's telemetry page](https://github.com/brig-sh/brig/blob/main/docs/telemetry.md)
+lists the fields those carry.
 
 The default is not the same in both directions, so both are stated here rather
 than in one sentence:
@@ -48,19 +52,23 @@ persisted either way.
 
 ```
 <product> collects anonymous usage events and crash reports to help us
-improve it: command names, backend choice, versions and stack traces --
-never file paths, arguments, image names or anything that identifies you.
+improve it: command names, which agent and backend you run, OS and tool
+versions, and stack traces. An agent of your own goes out as a salted
+hash of its name. File paths, arguments and image names are never sent.
 Docs: https://github.com/brig-sh/hull/blob/main/docs/telemetry.md
 Enable telemetry? [Y/n]
 ```
 
-(`<product>` is the tool the user installed: `hull` when it is driven
-directly, or the name of the wrapper driving it, such as `brig`. The docs URL
-the consent prompt prints is this page.)
+(`<product>` is the tool that asks. hull asks when it is run directly. A brig
+that sends its own events asks with its own name, links its own page, and
+leaves hull nothing to ask. One answer covers both tools, so the text names
+the agent, which only brig reports.)
 
 If a future version ever collects more than what this page lists, the
 prompt is asked again with the expanded list, and nothing at all is
-sent until you approve.
+sent until you approve. The current ask is consent version 2, which added
+brig's agent, the platform and `runtime_version`. A yes to version 1 is asked
+again.
 
 ## Unattended installs
 
@@ -97,10 +105,11 @@ All events share a common envelope:
 | `product` | `brig` | set by the wrapper driving hull; defaults to `hull` |
 | `version` | `0.1.0-rc14` | tool version, as `hull version` reports it without the leading `v`: the tag for a release, a pseudo-version such as `0.1.0-rc28.0.20260916191606-8a431dc1aaae` for a build after one, `+dirty` on a modified tree, `dev` for a build with no VCS data. Under a wrapper that sets `HULL_TELEMETRY_VERSION`, the wrapper's version |
 | `runtime_version` | `0.1.0-rc30` | hull's own version, when a wrapper set `HULL_TELEMETRY_PRODUCT` |
-| `os` | `26.0` | macOS major.minor only |
+| `platform` | `macos` | the OS family: `macos` or `linux` |
+| `os` | `26.3.1` | the OS version: the full macOS product version, or `ID VERSION_ID` from os-release on Linux (eg. `ubuntu 24.04`) |
 | `arch` | `arm64` | |
 | `install_id` | random UUID | generated locally on first run; not derived from the machine; delete `<store>/telemetry.json` to rotate it |
-| `uname` | `Darwin 25.3.0 <kernel build> arm64` | full uname, explicitly excluding the hostname |
+| `uname` | `Darwin 25.3.0 arm64` | the kernel's name, the version at the start of its release, and the machine (`Linux 6.8.0-45 aarch64` on Linux, for a release of `6.8.0-45-generic`). Not the hostname, not the kernel's build string, and not the rest of the release, which whoever built the kernel sets |
 | `captured_at` | RFC 3339 timestamp | when the event happened (for crash reports: the crash, not the upload) |
 | `checksum` | hex SHA-256 | integrity checksum over `event\|product\|version\|install_id\|captured_at` with a fixed salt; ingestion drops payloads whose checksum does not match -- a soft guard against naive forgery, not a security boundary |
 
@@ -193,9 +202,17 @@ the crash queue in `<store>/crashes/`, where `<store>` is the `--store-dir`
 everything else hull keeps, and telemetry follows it: a command run with
 another `--store-dir` has its own consent state and its own install id.
 
+brig keeps its answer in the default store too, and sends its own events
+through the same client (`pkg/telemetry`, a Go module of its own). One
+answer and one install id cover both tools, and `hull telemetry off`
+stops brig's events as well. brig does this on Linux too, where hull does
+not run yet: it creates `~/.hull/store` for that file alone.
+
 ## What is never sent
 
-- command arguments, flag values, environment variables
+- command arguments, flag values, environment variables (beyond the product
+  and version a wrapper names in `HULL_TELEMETRY_PRODUCT` and
+  `HULL_TELEMETRY_VERSION`)
 - file paths, directory names, hostnames, usernames
 - image digests or registry references
 - error message text (only coarse error classes)

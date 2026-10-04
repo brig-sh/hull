@@ -102,8 +102,8 @@ func initTelemetry(cmd *cli.Command) {
 	telemetryClient = telemetry.Init(telemetry.Config{
 		StoreDir:  cmd.String("store-dir"),
 		Version:   version,
-		OSVersion: osProductVersion(),
-		Uname:     unameString(),
+		OSVersion: telemetry.HostOS(),
+		Uname:     telemetry.HostUname(),
 		// CI counts as non-interactive (the conventional CI env var,
 		// set by GitHub runners and most others): never prompt there,
 		// even when the harness allocates a pty.
@@ -529,29 +529,6 @@ func resolveVzHelper(instanceDir string) int {
 // pidAlive reports whether pid is a live process (signal 0 probe).
 func pidAlive(pid int) bool {
 	return pid > 0 && unix.Kill(pid, 0) == nil
-}
-
-// osProductVersion returns the macOS version (major.minor) for the event
-// envelope; empty on failure, never an error.
-func osProductVersion() string {
-	v, err := unix.Sysctl("kern.osproductversion")
-	if err != nil {
-		return ""
-	}
-	return v
-}
-
-// unameString renders the full uname for the event envelope, explicitly
-// excluding the hostname (Nodename).
-func unameString() string {
-	var u unix.Utsname
-	if err := unix.Uname(&u); err != nil {
-		return ""
-	}
-	b := func(f []byte) string { return unix.ByteSliceToString(f) }
-	return strings.Join([]string{
-		b(u.Sysname[:]), b(u.Release[:]), b(u.Version[:]), b(u.Machine[:]),
-	}, " ")
 }
 
 func telemetryCommand() *cli.Command {

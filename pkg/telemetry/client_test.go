@@ -26,6 +26,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestFlushWaitsForSlowDelivery(t *testing.T) {
@@ -618,5 +620,100 @@ func TestEffectiveCreatesNothing(t *testing.T) {
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("Effective created %s: %v", dir, err)
+	}
+}
+
+func TestEnvelopeNamesThePlatform(t *testing.T) {
+	c := Init(Config{StoreDir: t.TempDir()})
+	if got := payloadOf(t, c, "command")["platform"]; got != Platform() || got == "" {
+		t.Fatalf("platform = %v, want %q", got, Platform())
+	}
+}
+
+func TestParseOSRelease(t *testing.T) {
+	cases := []struct{ name, content, want string }{
+		{"ubuntu", "NAME=\"Ubuntu\"\nID=ubuntu\nVERSION_ID=\"24.04\"\nPRETTY_NAME=\"Ubuntu 24.04.1 LTS\"\n", "ubuntu 24.04"},
+		{"rolling", "NAME=\"Arch Linux\"\nID=arch\nBUILD_ID=rolling\n", "arch"},
+		{"single quotes", "ID='fedora'\nVERSION_ID='41'\n", "fedora 41"},
+		{"no id", "NAME=whatever\nVERSION_ID=1\n", ""},
+		{"an odd ID is dropped whole", "ID=\"my laptop/Jane's\"\nVERSION_ID=1.0\n", ""},
+		{"an odd version is dropped whole", "ID=debian\nVERSION_ID=\"1.0 (secret)\"\n", "debian"},
+	}
+	for _, tc := range cases {
+		if got := parseOSRelease(tc.content); got != tc.want {
+			t.Errorf("%s: parseOSRelease = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+	if got := parseOSRelease("ID=" + strings.Repeat("a", osReleaseField) + "\n"); len(got) != osReleaseField {
+		t.Errorf("an ID of %d characters became %q", osReleaseField, got)
+	}
+	if got := parseOSRelease("ID=" + strings.Repeat("a", osReleaseField+1) + "\n"); got != "" {
+		t.Errorf("a long ID was sent as %q", got)
+	}
+}
+
+// A yes recorded under consent version 1 is an answer to a list without the
+// agent and the platform. It must not enable this version.
+func TestConsentVersionOneIsAskedAgain(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(statePath(dir), []byte(`{"install_id":"`+newUUID()+`","consent":true,"consent_version":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if c := Init(Config{StoreDir: dir}); c.Enabled() {
+		t.Fatal("a yes to consent version 1 enabled this version")
+	}
+	if got, _ := Effective(dir); got != Outdated {
+		t.Fatalf("Effective = %v, want Outdated", got)
+	}
+}
+
+// The prompt is what the answer is given to. brig sends a profile of the
+// user's own as a hash of its name, which anyone who guesses the name can
+// recompute, so the prompt says so and promises no more than that.
+func TestPromptNamesTheAgentHash(t *testing.T) {
+	var prompt bytes.Buffer
+	Init(Config{StoreDir: t.TempDir(), Interactive: true, Stdin: strings.NewReader("n\n"), Stderr: &prompt})
+	got := prompt.String()
+	if !strings.Contains(got, "salted\nhash of its name") {
+		t.Errorf("the prompt does not say an agent of your own goes out as a hash:\n%s", got)
+	}
+	if strings.Contains(got, "identifies you") {
+		t.Errorf("the prompt promises more than a guessable hash keeps:\n%s", got)
+	}
+}
+
+func TestKernelReleaseKeepsOnlyTheVersion(t *testing.T) {
+	for in, want := range map[string]string{
+		"25.3.0":                "25.3.0",
+		"6.8.0-45-generic":      "6.8.0-45",
+		"6.1.0-25-arm64":        "6.1.0-25",
+		"6.6.31+rpt-rpi-2712":   "6.6.31",
+		"6.8.0-jdoe-laptop":     "6.8.0",
+		"6.10.14-linuxkit":      "6.10.14",
+		"custom-kernel-of-jane": "",
+	} {
+		if got := kernelRelease(in); got != want {
+			t.Errorf("kernelRelease(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestHostUnameLeavesOutTheBuildString(t *testing.T) {
+	var u unix.Utsname
+	if err := unix.Uname(&u); err != nil {
+		t.Skip(err)
+	}
+	got := HostUname()
+	if build := unix.ByteSliceToString(u.Version[:]); build != "" && strings.Contains(got, build) {
+		t.Fatalf("uname carries the kernel's build string: %q", got)
+	}
+	if host := unix.ByteSliceToString(u.Nodename[:]); host != "" && strings.Contains(got, host) {
+		t.Fatalf("uname carries the hostname: %q", got)
+	}
+	if release := unix.ByteSliceToString(u.Release[:]); !strings.Contains(" "+got+" ", " "+kernelRelease(release)+" ") || (kernelRelease(release) != release && strings.Contains(got, release)) {
+		t.Fatalf("uname carries more of the release %q than its version: %q", release, got)
+	}
+	if len(strings.Fields(got)) != 3 {
+		t.Fatalf("uname = %q, want name, release and machine", got)
 	}
 }

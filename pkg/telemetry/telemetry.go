@@ -31,7 +31,7 @@ const SchemaVersion = 3
 // collect bumps it, which re-triggers the prompt on the next interactive
 // invocation; until the user re-consents, only previously consented
 // fields may be sent.
-const ConsentVersion = 1
+const ConsentVersion = 2
 
 // Endpoint is the ingestion endpoint URL, injected at build time via
 // -X github.com/brig-sh/hull/pkg/telemetry.Endpoint=...
