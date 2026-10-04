@@ -110,6 +110,11 @@ func healthProbeBudget(hc *types.HealthCheckConfig) (interval, timeout, total ti
 // after the VMM does.
 var errAgentTransport = errors.New("agent transport failure")
 
+// errGuestAgent marks an error reply from the guest agent itself (no such
+// binary, bad user). It is the opposite of errAgentTransport: the agent is
+// up and answering, it just refused the command.
+var errGuestAgent = errors.New("guest agent")
+
 // execCapture runs argv in a running instance through the guest agent,
 // non-interactively: no tty, no stdin, no signal forwarding. It returns the
 // process exit code and the combined output. A transport failure (agent
@@ -178,7 +183,7 @@ func execCapture(s *store.Store, instanceID string, argv, env []string, user str
 			// Guest-chosen bytes, and this error is printed by fatal(),
 			// which filters nothing. The identical line in exec.go was fixed
 			// in round 5 and these two twins were missed.
-			return 0, out.String(), fmt.Errorf("guest agent: %s", sanitizeGuestText(ae.Message))
+			return 0, out.String(), fmt.Errorf("%w: %s", errGuestAgent, sanitizeGuestText(ae.Message))
 		}
 	}
 }
