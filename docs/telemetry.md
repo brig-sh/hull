@@ -82,9 +82,9 @@ out:
 | variable | what it does |
 |---|---|
 | `HULL_TELEMETRY_PRODUCT` | the `product` field: a wrapper driving hull (brig) sets it so events count against the tool the user installed. Defaults to `hull` |
-| `HULL_TELEMETRY_VERSION` | the `version` field, read only together with `HULL_TELEMETRY_PRODUCT`: the wrapper's own version. hull's version then goes out as `runtime_version` |
+| `HULL_TELEMETRY_VERSION` | the `version` field, read only together with `HULL_TELEMETRY_PRODUCT`: the wrapper's own version, kept to the characters a version is spelled with and to 64 of them |
 | `HULL_TELEMETRY_ENDPOINT` | overrides the collector endpoint baked in at build time (tests, staging). A dev build has none, and sends nothing |
-| `HULL_TELEMETRY_SUPPRESS` | internal: hull sets it on its own child invocations (compose self-exec, the `network-gateway` daemon) so one user command counts once. Not an opt-out |
+| `HULL_TELEMETRY_SUPPRESS` | `1` on hull's own child invocations (compose self-exec, the `network-gateway` daemon), so one user command counts once. A comma-separated list of event names, such as `command`, suppresses only those: a wrapper that sends them itself sets it. That invocation never shows the consent prompt, and sends nothing until someone has answered. Any other value suppresses everything. Not an opt-out |
 
 ## What is sent
 
@@ -96,7 +96,7 @@ All events share a common envelope:
 | `event` | `command` | one of `command`, `start`, `end`, `metrics`, `crash` |
 | `product` | `brig` | set by the wrapper driving hull; defaults to `hull` |
 | `version` | `0.1.0-rc14` | tool version, as `hull version` reports it without the leading `v`: the tag for a release, a pseudo-version such as `0.1.0-rc28.0.20260916191606-8a431dc1aaae` for a build after one, `+dirty` on a modified tree, `dev` for a build with no VCS data. Under a wrapper that sets `HULL_TELEMETRY_VERSION`, the wrapper's version |
-| `runtime_version` | `0.1.0-rc30` | hull's own version, only when a wrapper's version is in `version` |
+| `runtime_version` | `0.1.0-rc30` | hull's own version, when a wrapper set `HULL_TELEMETRY_PRODUCT` |
 | `os` | `26.0` | macOS major.minor only |
 | `arch` | `arm64` | |
 | `install_id` | random UUID | generated locally on first run; not derived from the machine; delete `<store>/telemetry.json` to rotate it |

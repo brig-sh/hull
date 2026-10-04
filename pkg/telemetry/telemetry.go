@@ -52,13 +52,18 @@ const (
 	// events to the product the user actually installed.
 	EnvProduct = "HULL_TELEMETRY_PRODUCT"
 	// EnvVersion is the wrapper's version, read together with EnvProduct.
-	// hull's own version then goes out as runtime_version.
+	// Whenever EnvProduct is set, hull's own version goes out as
+	// runtime_version.
 	EnvVersion = "HULL_TELEMETRY_VERSION"
 	// EnvEndpoint overrides the build-time Endpoint (tests, staging).
 	EnvEndpoint = "HULL_TELEMETRY_ENDPOINT"
 	// EnvSuppress is internal: set on child invocations of our own
 	// binary (compose self-exec, the network-gateway daemon) so one
-	// user command counts once. Not a user-facing opt-out.
+	// user command counts once. Not a user-facing opt-out. "1"
+	// suppresses everything, and so does anything that is not a list of
+	// event names. A comma-separated list of event names is how a
+	// wrapper that sends those events itself keeps them from being
+	// counted twice.
 	EnvSuppress = "HULL_TELEMETRY_SUPPRESS"
 )
 

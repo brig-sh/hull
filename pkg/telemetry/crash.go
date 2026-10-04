@@ -58,7 +58,7 @@ const staleClaimAge = 10 * time.Minute
 // panic type and scrubbed stack only -- never the panic message, which
 // can embed paths or image references.
 func (c *Client) CapturePanic(recovered any, stack []byte, command, backend string) {
-	if !c.Enabled() {
+	if !c.Sends("crash") {
 		return
 	}
 	scrubbed := scrubStack(string(stack))

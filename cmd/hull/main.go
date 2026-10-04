@@ -327,9 +327,14 @@ func dirIsCaseSensitive(dir string) (bool, error) {
 // command, so by the time a command opens the store its two files are already
 // sitting in the directory -- and without this the emptiness check below would
 // refuse to mount over hull's own footprints on a genuinely fresh store.
+//
+// The crash queue is here for the same reason. brig shares this directory for
+// its own telemetry, so a brig crash can queue a report before hull has ever
+// mounted the store. Mounting hides the queue until the volume is detached.
 var storeOwnFiles = map[string]bool{
 	"telemetry.json": true,
 	"telemetry.lock": true,
+	"crashes":        true,
 	storeMarkerName:  true,
 	".DS_Store":      true,
 }
