@@ -441,6 +441,7 @@ func TestDeliverCountsOnly2xxAsSuccess(t *testing.T) {
 
 func TestEmptyEndpointSendsNothing(t *testing.T) {
 	// No EnvEndpoint, Endpoint var empty: Send must be a silent no-op.
+	t.Setenv(EnvEndpoint, "")
 	c := Init(Config{StoreDir: t.TempDir()})
 	if !c.Enabled() {
 		t.Fatal("expected enabled (unattended default)")
@@ -519,7 +520,7 @@ func TestSuppressListSkipsOnlyTheNamedEvents(t *testing.T) {
 		t.Fatalf("want the start event and no command event, got:\n%s", out.String())
 	}
 	c.CapturePanic("boom", []byte("goroutine 1"), "exec", "")
-	if files := sortedCrashFiles(dir + "/" + crashDirName); len(files) != 0 {
+	if files := queuedFiles(dir + "/" + crashDirName); len(files) != 0 {
 		t.Fatalf("a suppressed crash must not be queued, got %v", files)
 	}
 }

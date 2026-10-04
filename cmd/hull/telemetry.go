@@ -119,7 +119,7 @@ func initTelemetry(cmd *cli.Command) {
 	// Crashes are uploaded in the background on the invocation after
 	// they happen, so the report survives even when the crash killed
 	// networking or skipped every defer -- and init never waits on it.
-	telemetryClient.UploadPendingCrashesAsync()
+	telemetryClient.UploadPendingAsync()
 }
 
 // telemetryStateDir is where this invocation keeps its telemetry state: next
