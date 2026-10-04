@@ -7,6 +7,45 @@ release. History before v0.1.0-rc21 predates the import of this tree and
 is kept below as it was generated then; v0.1.0-rc19 and rc20 were re-cut
 imports of the same tree as rc21, and rc23 was a version bump only.
 
+## [0.1.0-rc30] - 2026-10-04
+
+### Bug Fixes
+
+- Listen on <socket>.qemu when --qemu-socket is not given
+- Refuse --net shared on hvi without the gateway
+- Match gateway by kernel argv, not command-line substrings
+- Stop failed-up teardown in reverse order and report errors
+- Name the renderer's repository path in the channel cask banner
+- Render the stable hull cask for the tap from the release
+- Name the version in the channel cask's url
+- Write a hull@main cask Homebrew 7 can tap
+- Publish each channel build as its own release
+
+### Build
+
+- Bump google.golang.org/grpc from 1.83.0 to 1.83.2
+- Bump github.com/containerd/containerd from 1.7.33 to 1.7.36
+
+### Documentation
+
+- Name the right socket in the gateway pre-flight entry
+- Keep the hvi networking rationale in networking.md
+- Describe hvi networking as refused, and say why
+- Add the rc29 changelog section
+
+### Miscellaneous
+
+- Bump hvi-vmm for FUSE_DAX guests
+
+### Refactor
+
+- Drop the hvi resolver branch the refusal made unreachable
+- Extract composeUp teardown into a function
+
+### Tests
+
+- Cover down order, health checks, and service hooks
+
 ## [0.1.0-rc29] - 2026-09-25
 
 ### Bug Fixes
