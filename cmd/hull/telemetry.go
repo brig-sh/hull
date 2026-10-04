@@ -365,7 +365,7 @@ func parseCPUCount(v string) (int, bool) {
 // second attach never double-counts. Sampling stops when done closes, when
 // the flock is dropped with the process, or when the VMM PID disappears.
 func startVMMMetricsSampler(launcherPID int, backend string, vcpus int, startTime time.Time, instanceDir string, done <-chan struct{}) {
-	if !telemetryClient.Enabled() {
+	if !telemetryClient.Sends("metrics") {
 		return
 	}
 	lock, err := os.OpenFile(filepath.Join(instanceDir, ".metrics.lock"), os.O_CREATE|os.O_RDWR, 0o600)

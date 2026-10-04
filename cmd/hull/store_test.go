@@ -146,6 +146,25 @@ func TestEnsureStoreIgnoresHullsOwnFiles(t *testing.T) {
 	}
 }
 
+// brig writes its telemetry here too, so its crash queue can exist before hull
+// has mounted anything.
+func TestEnsureStoreIgnoresAQueuedCrash(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "crashes"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "crashes", "1759600000-abcd1234.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	empty, err := dirIsEmpty(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !empty {
+		t.Fatal("a queued crash report counted as content worth protecting")
+	}
+}
+
 // Anything else in there is a user's, and mounting would hide it.
 func TestEnsureStoreStillProtectsRealContent(t *testing.T) {
 	dir := t.TempDir()

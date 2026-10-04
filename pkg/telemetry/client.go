@@ -61,6 +61,18 @@ type Config struct {
 	// DNT records an opt-out (the --dnt flag).
 	DNT bool
 
+	// Product is the product the events count against. Empty means the
+	// one a wrapper names in HULL_TELEMETRY_PRODUCT, or hull. A caller
+	// that sets it (brig, linking this package) ignores the variable.
+	Product string
+	// DocsURL is the schema page the consent prompt links to. Empty means
+	// hull's.
+	DocsURL string
+	// AskFirst keeps an install off until someone has answered the
+	// consent question. Without it, an unattended run on an install
+	// nobody has asked yet defaults to on.
+	AskFirst bool
+
 	// Stdin/Stderr default to os.Stdin/os.Stderr; injectable for tests.
 	Stdin  io.Reader
 	Stderr io.Writer
@@ -75,9 +87,12 @@ type Client struct {
 	// version when a wrapper's replaced it, and empty otherwise.
 	version        string
 	runtimeVersion string
-	st             *state
-	enabled        bool
-	debug          bool
+	// suppressed are the events a wrapper sends itself, and this
+	// invocation must not.
+	suppressed map[string]bool
+	st         *state
+	enabled    bool
+	debug      bool
 	// inflight tracks background deliveries so exit paths can grant a
 	// bounded grace via Flush without ever blocking indefinitely.
 	inflight sync.WaitGroup
@@ -93,24 +108,38 @@ func Init(cfg Config) *Client {
 	if cfg.Stderr == nil {
 		cfg.Stderr = io.Discard
 	}
-	c := &Client{
-		cfg:     cfg,
-		product: DefaultProduct,
-		version: cfg.Version,
-		debug:   os.Getenv(EnvDebug) == "1",
+	if cfg.DocsURL == "" {
+		cfg.DocsURL = DocsURL
 	}
-	// A wrapper driving hull names its product and its version. Both
-	// versions go out, so the events say which hull ran under it.
-	if p := os.Getenv(EnvProduct); p != "" {
-		c.product = p
-		if v := os.Getenv(EnvVersion); v != "" {
-			c.version, c.runtimeVersion = v, cfg.Version
-		}
-	}
-
 	// Child invocations of our own binary stay silent: the parent
 	// command already counts, and a daemon must never prompt.
-	if os.Getenv(EnvSuppress) == "1" {
+	suppressAll, suppressed := parseSuppress(os.Getenv(EnvSuppress))
+	if len(suppressed) > 0 {
+		// A wrapper names the events it sends itself. It also owns the
+		// consent question: this invocation never asks, and sends
+		// nothing until someone has answered.
+		cfg.Unattended, cfg.AskFirst = true, true
+	}
+	c := &Client{
+		cfg:        cfg,
+		product:    cfg.Product,
+		version:    cfg.Version,
+		suppressed: suppressed,
+		debug:      os.Getenv(EnvDebug) == "1",
+	}
+	// A wrapper driving hull names its product, and its version when it
+	// knows it. hull's own version then goes out as runtime_version, so
+	// the events say which hull ran under the wrapper.
+	if c.product == "" {
+		c.product = DefaultProduct
+		if p := os.Getenv(EnvProduct); p != "" {
+			c.product, c.runtimeVersion = p, cfg.Version
+			if v := cleanVersion(os.Getenv(EnvVersion)); v != "" {
+				c.version = v
+			}
+		}
+	}
+	if suppressAll {
 		return c
 	}
 
@@ -172,7 +201,7 @@ func Init(cfg Config) *Client {
 	// ID); a yes to an older ask does NOT cover the expanded schema --
 	// expanding collection silently is the one thing we never do, so
 	// stay off until an interactive run re-asks.
-	if c.st.Consent == nil {
+	if c.st.Consent == nil && !cfg.AskFirst {
 		c.enabled = true
 	}
 	return c
@@ -187,7 +216,7 @@ func (c *Client) ask() (answer, answered bool) {
 improve it: command names, backend choice, versions and stack traces --
 never file paths, arguments, image names or anything that identifies you.
 Docs: %s
-Enable telemetry? [Y/n] `, c.product, DocsURL)
+Enable telemetry? [Y/n] `, c.product, c.cfg.DocsURL)
 	line, err := bufio.NewReader(c.cfg.Stdin).ReadString('\n')
 	if err != nil && strings.TrimSpace(line) == "" {
 		return false, false
@@ -199,6 +228,12 @@ Enable telemetry? [Y/n] `, c.product, DocsURL)
 // Enabled reports whether events may be sent this invocation.
 func (c *Client) Enabled() bool {
 	return c != nil && c.enabled
+}
+
+// Sends reports whether an event of this kind goes out this invocation:
+// telemetry is enabled, and no wrapper sends the event itself.
+func (c *Client) Sends(event string) bool {
+	return c.Enabled() && !c.suppressed[event]
 }
 
 // InstallID exposes the anonymous install UUID (for `telemetry status`).
@@ -216,7 +251,7 @@ func (c *Client) InstallID() string {
 // reported. With HULL_TELEMETRY_DEBUG=1 the payload is printed to
 // stderr instead of being sent.
 func (c *Client) Send(event string, fields map[string]string) {
-	if !c.Enabled() {
+	if !c.Sends(event) {
 		return
 	}
 	body, err := json.Marshal(c.payload(event, fields))
@@ -327,22 +362,106 @@ func SetConsent(storeDir string, enabled bool) error {
 	return saveState(storeDir, st)
 }
 
-// Status describes the effective state for `telemetry status`.
-func Status(storeDir string) string {
+// Answer is the consent state on file, as `telemetry status` reports it.
+type Answer int
+
+const (
+	// Unanswered means nobody has answered yet. An interactive run asks,
+	// and an unattended one defaults to on unless the caller asks first.
+	Unanswered Answer = iota
+	// On means a yes to the current consent version.
+	On
+	// Off means a recorded no, or an opt-out variable in the environment.
+	Off
+	// Outdated means a yes to an older consent version. Nothing is sent
+	// until an interactive run asks again.
+	Outdated
+)
+
+// Effective returns the answer in force for storeDir. When a variable in the
+// environment decided it, the second value names it, as NAME=1. It only reads:
+// asking for the answer creates no state file and no install id.
+func Effective(storeDir string) (Answer, string) {
 	if envOptedOut() {
-		return fmt.Sprintf("disabled (%s)", optOutEnvName())
+		return Off, optOutEnvName()
 	}
-	st, _ := loadOrCreateState(storeDir)
+	st := peekState(storeDir)
 	switch {
 	case st.Consent == nil:
-		return "not configured (on by default; interactive runs will be asked)"
+		return Unanswered, ""
 	case !*st.Consent:
-		return "disabled"
+		return Off, ""
 	case st.ConsentVersion < ConsentVersion:
+		return Outdated, ""
+	default:
+		return On, ""
+	}
+}
+
+// Status describes the effective state for `telemetry status`.
+func Status(storeDir string) string {
+	answer, setting := Effective(storeDir)
+	switch answer {
+	case Unanswered:
+		return "not configured (on by default; interactive runs will be asked)"
+	case Off:
+		if setting != "" {
+			return fmt.Sprintf("disabled (%s)", setting)
+		}
+		return "disabled"
+	case Outdated:
 		return "enabled for an older schema (interactive runs will be re-asked)"
 	default:
 		return "enabled"
 	}
+}
+
+// events are the event names a suppress list may hold.
+var events = map[string]bool{"command": true, "start": true, "end": true, "metrics": true, "crash": true}
+
+// parseSuppress reads HULL_TELEMETRY_SUPPRESS. "1" suppresses everything, and
+// so does any value that is not a list of event names: someone who sets it to
+// "true" or "yes" means off, and must not get the prompt-free sending a list
+// asks for. A list of event names suppresses only those.
+func parseSuppress(v string) (all bool, list map[string]bool) {
+	if strings.TrimSpace(v) == "" {
+		return false, nil
+	}
+	list = map[string]bool{}
+	for _, e := range strings.Split(v, ",") {
+		e = strings.TrimSpace(e)
+		if !events[e] {
+			return true, nil
+		}
+		list[e] = true
+	}
+	return false, list
+}
+
+// maxVersion is the longest wrapper version kept.
+const maxVersion = 64
+
+// cleanVersion returns a wrapper's version when it is spelled only with the
+// characters of a version and is at most maxVersion long, and "" otherwise.
+// A value that fails is dropped whole: stripping characters out of it would
+// still send what was left, such as a branch name. The value goes into every
+// event, the checksum and a queued crash report.
+func cleanVersion(v string) string {
+	if len(v) > maxVersion {
+		return ""
+	}
+	for _, r := range v {
+		if !versionRune(r) {
+			return ""
+		}
+	}
+	return v
+}
+
+// versionRune reports whether r is one of the characters a version is
+// spelled with.
+func versionRune(r rune) bool {
+	return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("._+-", r)
 }
 
 func envOptedOut() bool {

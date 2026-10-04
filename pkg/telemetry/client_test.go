@@ -488,3 +488,135 @@ func TestVersionWithoutProductIsIgnored(t *testing.T) {
 		t.Fatalf("version = %v; a version with no product names no wrapper", p["version"])
 	}
 }
+
+// consentOn writes a yes to the current consent version into dir.
+func consentOn(t *testing.T, dir string) {
+	t.Helper()
+	yes := true
+	if err := saveState(dir, &state{InstallID: newUUID(), Consent: &yes, ConsentVersion: ConsentVersion}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSuppressListSkipsOnlyTheNamedEvents(t *testing.T) {
+	dir := t.TempDir()
+	consentOn(t, dir)
+	t.Setenv(EnvSuppress, "command, crash")
+	t.Setenv(EnvDebug, "1")
+	var out bytes.Buffer
+	c := Init(Config{StoreDir: dir, Stderr: &out})
+	for event, want := range map[string]bool{"command": false, "crash": false, "start": true, "end": true, "metrics": true} {
+		if got := c.Sends(event); got != want {
+			t.Errorf("Sends(%q) = %v, want %v", event, got, want)
+		}
+	}
+	c.Send("command", map[string]string{"command": "exec"})
+	c.Send("start", map[string]string{"backend": "hvi"})
+	c.Flush(time.Second)
+	if strings.Contains(out.String(), `"event":"command"`) || !strings.Contains(out.String(), `"event":"start"`) {
+		t.Fatalf("want the start event and no command event, got:\n%s", out.String())
+	}
+	c.CapturePanic("boom", []byte("goroutine 1"), "exec", "")
+	if files := sortedCrashFiles(dir + "/" + crashDirName); len(files) != 0 {
+		t.Fatalf("a suppressed crash must not be queued, got %v", files)
+	}
+}
+
+func TestSuppressListNeverPrompts(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(EnvSuppress, "command")
+	var prompt bytes.Buffer
+	Init(Config{StoreDir: dir, Interactive: true, Stdin: strings.NewReader("n\n"), Stderr: &prompt})
+	if prompt.Len() != 0 {
+		t.Fatalf("an invocation under a wrapper must not ask, got %q", prompt.String())
+	}
+	if st := loadState(dir); st.Consent != nil {
+		t.Fatal("an invocation under a wrapper must not record an answer")
+	}
+}
+
+func TestCallerProductIgnoresTheEnvironment(t *testing.T) {
+	t.Setenv(EnvProduct, "other")
+	t.Setenv(EnvVersion, "9.9.9")
+	c := Init(Config{StoreDir: t.TempDir(), Product: "brig", Version: "0.4.0"})
+	p := payloadOf(t, c, "command")
+	if p["product"] != "brig" || p["version"] != "0.4.0" {
+		t.Fatalf("product = %v, version = %v; want the caller's", p["product"], p["version"])
+	}
+	if _, ok := p["runtime_version"]; ok {
+		t.Fatal("a caller that names itself has no runtime version to report")
+	}
+}
+
+func TestAskFirstKeepsAnUnansweredInstallOff(t *testing.T) {
+	dir := t.TempDir()
+	if c := Init(Config{StoreDir: dir, AskFirst: true}); c.Enabled() {
+		t.Fatal("AskFirst must keep an unattended run off until someone answers")
+	}
+	if st := loadState(dir); st.Consent != nil {
+		t.Fatal("staying off must not record an answer")
+	}
+	var prompt bytes.Buffer
+	c := Init(Config{StoreDir: dir, AskFirst: true, Interactive: true, Stdin: strings.NewReader("\n"), Stderr: &prompt})
+	if !c.Enabled() || prompt.Len() == 0 {
+		t.Fatal("AskFirst must still ask an interactive run")
+	}
+	if c := Init(Config{StoreDir: dir, AskFirst: true}); !c.Enabled() {
+		t.Fatal("once answered yes, AskFirst must send from unattended runs")
+	}
+}
+
+func TestPromptLinksTheCallersDocs(t *testing.T) {
+	var prompt bytes.Buffer
+	Init(Config{StoreDir: t.TempDir(), Product: "brig", DocsURL: "https://example.com/brig-telemetry",
+		Interactive: true, Stdin: strings.NewReader("n\n"), Stderr: &prompt})
+	if !strings.HasPrefix(prompt.String(), "brig collects") || !strings.Contains(prompt.String(), "https://example.com/brig-telemetry") {
+		t.Fatalf("prompt must name the caller and link its docs, got:\n%s", prompt.String())
+	}
+}
+
+func TestEffectiveReportsEachAnswer(t *testing.T) {
+	yes, no := true, false
+	cases := []struct {
+		name    string
+		st      *state
+		env     string
+		want    Answer
+		setting string
+	}{
+		{name: "nothing on file", want: Unanswered},
+		{name: "yes", st: &state{Consent: &yes, ConsentVersion: ConsentVersion}, want: On},
+		{name: "no", st: &state{Consent: &no, ConsentVersion: ConsentVersion}, want: Off},
+		{name: "older yes", st: &state{Consent: &yes, ConsentVersion: ConsentVersion - 1}, want: Outdated},
+		{name: "variable", st: &state{Consent: &yes, ConsentVersion: ConsentVersion}, env: EnvDoNotTrack, want: Off, setting: EnvDoNotTrack + "=1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.st != nil {
+				tc.st.InstallID = newUUID()
+				if err := saveState(dir, tc.st); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.env != "" {
+				t.Setenv(tc.env, "1")
+			}
+			if got, setting := Effective(dir); got != tc.want || setting != tc.setting {
+				t.Fatalf("Effective = %v, %q; want %v, %q", got, setting, tc.want, tc.setting)
+			}
+		})
+	}
+}
+
+// brig reports the answer on a machine that may never have run hull. Asking
+// must not mint an install id there.
+func TestEffectiveCreatesNothing(t *testing.T) {
+	dir := t.TempDir() + "/hull"
+	if got, _ := Effective(dir); got != Unanswered {
+		t.Fatalf("Effective = %v, want Unanswered", got)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("Effective created %s: %v", dir, err)
+	}
+}

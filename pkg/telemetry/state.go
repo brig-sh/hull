@@ -80,6 +80,16 @@ func loadState(storeDir string) *state {
 	return st
 }
 
+// peekState reads the state file without the lock and without writing
+// anything. A missing or unreadable file reads as no answer.
+func peekState(storeDir string) *state {
+	st := &state{}
+	if data, err := os.ReadFile(statePath(storeDir)); err == nil {
+		_ = json.Unmarshal(data, st)
+	}
+	return st
+}
+
 // loadOrCreateState is loadState under the interprocess lock, and it
 // persists a freshly minted install ID immediately -- concurrent first
 // invocations then agree on one ID instead of each emitting their own.
