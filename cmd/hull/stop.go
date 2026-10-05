@@ -133,6 +133,15 @@ func stopInstanceIn(s *store.Store, instanceID string, timeoutSecs int) error {
 		return nil
 	}
 
+	// A creating record is a pull still inside runInstance. It has no pid
+	// because no VMM has been spawned, and marking it stopped would be a
+	// lie: launch builds a fresh record and overwrites this one, then boots.
+	// There is nothing here to signal. The hull process still pulling is
+	// what has to be interrupted.
+	if state.Status == store.StatusCreating {
+		return fmt.Errorf("instance %s is still being created; there is no VMM to stop", instanceID)
+	}
+
 	// Record the intent before the first signal, not after the VM is
 	// confirmed dead: the gap between them is one poll interval wide, and the
 	// supervisor restarts a service it sees dead without a marker. Status is

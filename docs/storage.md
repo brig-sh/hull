@@ -330,9 +330,16 @@ made `--force` a way to kill an arbitrary host process after a pid was recycled.
 
 `hull rm` also clears an instance directory whose `state.json` is missing or
 unparseable. `ps` lists that name as `unreadable` and prints `-` for its
-created time. That is how a name is freed when a run died before its first
-record was written, or when the record cannot be read. A name with no
-directory at all is still reported as not found.
+created time. That is how a name is freed when a run died in the few lines
+between creating the directory and writing its first record, or when the
+record cannot be read. A name with no directory at all is still reported as
+not found.
+
+A run that is still pulling an image has a pid-less record, and `ps` lists
+it as `creating`. No VMM exists yet, so `hull rm` removes that directory
+without `--force`. It does not cancel the `hull run` that is still pulling:
+that run creates the directory again and can still boot. `hull stop` refuses
+a `creating` instance, because there is no process to signal.
 
 ### Compose volumes
 
