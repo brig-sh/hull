@@ -327,7 +327,7 @@ func restoreCommand() *cli.Command {
 	}
 }
 
-func restoreInstance(_ context.Context, cmd *cli.Command) error {
+func restoreInstance(ctx context.Context, cmd *cli.Command) error {
 	args := cmd.Args()
 	if args.Len() == 0 {
 		return errors.New("instance ID required")
@@ -407,7 +407,7 @@ func restoreInstance(_ context.Context, cmd *cli.Command) error {
 	// The guest resumes with its previous network state in memory, so the
 	// recorded IP stays valid (same MAC, same lease/static address) — skip
 	// rediscovery by reporting no NAT networking to the launcher.
-	_, err = launchVMM(cmd, s, state, cmdArgs, gatewayFiles, hypervisors.VzVmm, detach, "none", "")
+	_, err = launchVMM(ctx, cmd, s, state, cmdArgs, gatewayFiles, hypervisors.VzVmm, detach, "none", "")
 	return err
 }
 

@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"os"
 	"os/exec"
@@ -304,7 +305,7 @@ func TestBlockRootfsBuildsABenignImage(t *testing.T) {
 		{guestPath: "/urunit.conf", content: []byte("URUNIT_ENV=PATH=/usr/bin\n"), mode: 0o600},
 		{guestPath: "/etc/hosts", content: []byte("127.0.0.1 localhost\n"), mode: 0o644},
 	}
-	if err := buildBlockRootfs(disk, rootfs, injects, 16); err != nil {
+	if err := buildBlockRootfs(context.Background(), disk, rootfs, injects, 16); err != nil {
 		t.Fatalf("buildBlockRootfs on a benign rootfs: %v", err)
 	}
 

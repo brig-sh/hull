@@ -6,6 +6,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -101,7 +102,7 @@ func TestCloneRootfsAPFSReplacesOnlyInstanceSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := cloneRootfsAPFS(source, instanceRootfs); err != nil {
+	if err := cloneRootfsAPFS(context.Background(), source, instanceRootfs); err != nil {
 		t.Fatal(err)
 	}
 	if info, err := os.Lstat(instanceRootfs); err != nil {

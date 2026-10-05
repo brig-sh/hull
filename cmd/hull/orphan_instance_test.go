@@ -32,6 +32,7 @@ package main
 // intermediate state.
 
 import (
+	"context"
 	"errors"
 	"go/ast"
 	"go/parser"
@@ -95,7 +96,7 @@ func TestNoVMMIsSpawnedWithoutARecordOfIt(t *testing.T) {
 
 	marker := filepath.Join(t.TempDir(), "vmm-started")
 	state := &store.InstanceState{ID: "vm1", LogFile: s.InstanceLogFile("vm1")}
-	started, err := launchVMM(&cli.Command{}, s, state, standInVMM(t, marker),
+	started, err := launchVMM(context.Background(), &cli.Command{}, s, state, standInVMM(t, marker),
 		nil, hypervisors.VzVmm, true, "none", "")
 
 	if err == nil {
@@ -225,7 +226,7 @@ func TestFailedSpawnLeavesNoStartingRecord(t *testing.T) {
 	}
 	state := &store.InstanceState{ID: "vm1", LogFile: s.InstanceLogFile("vm1")}
 
-	started, err := launchVMM(&cli.Command{}, s, state,
+	started, err := launchVMM(context.Background(), &cli.Command{}, s, state,
 		[]string{filepath.Join(t.TempDir(), "no-such-vmm")}, nil,
 		hypervisors.VzVmm, true, "none", "")
 	if err == nil {

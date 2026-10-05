@@ -125,7 +125,8 @@ const StatusUnreadable = "unreadable"
 // ErrInstanceStateUnreadable. ps then showed a healthy run as "unreadable",
 // the same word a corrupt state file earns, right next to the documented
 // advice that `hull rm` clears an unreadable directory. Running it against
-// a pull in progress deleted a VM that was not corrupt at all, only young.
+// a pull in progress removed its directory; run could then recreate it and
+// boot anyway. Preventing that removal race needs a separate creation lease.
 //
 // A missing state.json now means a crash between CreateInstance's Mkdir and
 // run's first SaveInstance -- a few lines of Go, not an image pull.

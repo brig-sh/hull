@@ -16,6 +16,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -33,9 +34,16 @@ const dhcpdLeasesPath = "/var/db/dhcpd_leases"
 // waitForLeaseIP polls the vmnet DHCP lease database until an entry matching
 // the given MAC address appears, and returns its IP.
 func waitForLeaseIP(mac string, timeout time.Duration) (string, error) {
+	return waitForLeaseIPContext(context.Background(), mac, timeout)
+}
+
+func waitForLeaseIPContext(ctx context.Context, mac string, timeout time.Duration) (string, error) {
 	want := normalizeMAC(mac)
 	deadline := time.Now().Add(timeout)
 	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		if data, err := os.ReadFile(dhcpdLeasesPath); err == nil {
 			if ip, ok := parseLeases(string(data))[want]; ok {
 				return ip, nil
@@ -44,7 +52,11 @@ func waitForLeaseIP(mac string, timeout time.Duration) (string, error) {
 		if time.Now().After(deadline) {
 			return "", fmt.Errorf("no DHCP lease for MAC %s after %s", mac, timeout)
 		}
-		time.Sleep(500 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
 	}
 }
 
