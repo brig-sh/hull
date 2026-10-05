@@ -329,9 +329,10 @@ writing into. Earlier versions signalled the recorded pid without checking, whic
 made `--force` a way to kill an arbitrary host process after a pid was recycled.
 
 `hull rm` also clears an instance directory whose `state.json` is missing or
-unparseable. That is the only way to free a name squatted by a run that died
-before its record was written. A name with no directory at all is still
-reported as not found.
+unparseable. `ps` lists that name as `unreadable` and prints `-` for its
+created time. That is how a name is freed when a run died before its first
+record was written, or when the record cannot be read. A name with no
+directory at all is still reported as not found.
 
 ### Compose volumes
 

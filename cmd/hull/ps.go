@@ -117,13 +117,20 @@ func renderInstances(s *store.Store, out io.Writer) error {
 		if ip == "" {
 			ip = "-"
 		}
+		// A zero StartTime is a row built because the record could not be
+		// read. Year 1 is not a creation time; "-" is the same empty cell
+		// the IP column already uses.
+		created := "-"
+		if !state.StartTime.IsZero() {
+			created = state.StartTime.Format("2006-01-02 15:04:05")
+		}
 		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
 			state.ID,
 			status,
 			exitStr,
 			pidStr,
 			ip,
-			state.StartTime.Format("2006-01-02 15:04:05"),
+			created,
 		)
 	}
 

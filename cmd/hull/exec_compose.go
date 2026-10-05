@@ -118,7 +118,7 @@ var errAgentTransport = errors.New("agent transport failure")
 func execCapture(s *store.Store, instanceID string, argv, env []string, user string, timeout time.Duration) (int, string, error) {
 	state, err := s.GetInstance(instanceID)
 	if err != nil {
-		return 0, "", fmt.Errorf("instance not found: %s", instanceID)
+		return 0, "", instanceReadError(instanceID, err)
 	}
 	if state.Status != "running" {
 		return 0, "", fmt.Errorf("instance %s is not running (status: %s)", instanceID, state.Status)
