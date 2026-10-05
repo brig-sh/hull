@@ -26,6 +26,8 @@ import (
 	"time"
 
 	"github.com/urfave/cli/v3"
+
+	"github.com/brig-sh/hull/pkg/store"
 )
 
 func logsCommand() *cli.Command {
@@ -66,23 +68,28 @@ func viewLogs(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	state, err := s.GetInstance(instanceID)
-	if err != nil {
-		return instanceReadError(instanceID, err)
-	}
-
-	logFile := state.LogFile
-
 	// The log is the guest's own console output, replayed verbatim onto the
 	// operator's terminal long after the guest wrote it -- an escape sequence
 	// that solicits a reply works just as well from here as it does live, and
 	// `hull logs` is often the first thing run on an instance that misbehaved.
 	// Filter it exactly like an exec session; see guestTerminalWriter.
-	if err := readLogs(guestTerminalWriter(os.Stdout), logFile, follow, tail); err != nil {
-		return err
-	}
+	return logsInstance(s, instanceID, guestTerminalWriter(os.Stdout), follow, tail)
+}
 
-	return nil
+// logsInstance is viewLogs without the CLI plumbing, so a record that has
+// no console yet can be refused without opening a path.
+func logsInstance(s *store.Store, instanceID string, out io.Writer, follow bool, tail int) error {
+	state, err := s.GetInstance(instanceID)
+	if err != nil {
+		return instanceReadError(instanceID, err)
+	}
+	// A creating record is written before the log path exists. Opening the
+	// empty string reports "log file not found:" with a blank path, which
+	// reads as a missing file rather than a pull still in progress.
+	if state.Status == store.StatusCreating {
+		return fmt.Errorf("instance %s is still being created; it has no console log yet", instanceID)
+	}
+	return readLogs(out, state.LogFile, follow, tail)
 }
 
 func readLogs(out io.Writer, logFile string, follow bool, tail int) error {

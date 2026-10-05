@@ -277,6 +277,21 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 		}
 	}()
 
+	// Publish a pid-less "creating" record before the pull and bundle prep
+	// below, which can run for seconds on a cold image. Without this, that
+	// whole window had a directory but no state.json, which GetInstance
+	// reports as unreadable rather than absent -- so `ps` showed every
+	// healthy run as "unreadable", the same word a corrupt state file earns,
+	// right next to the documented advice that `hull rm` clears one. See
+	// store.StatusCreating.
+	if err := s.SaveInstance(&store.InstanceState{
+		ID:        instanceName,
+		Status:    store.StatusCreating,
+		StartTime: time.Now(),
+	}); err != nil {
+		return fmt.Errorf("failed to record instance before the pull: %w", err)
+	}
+
 	bundleDir := s.InstanceBundleDir(instanceName)
 	logFile := s.InstanceLogFile(instanceName)
 	qmpSocket := s.InstanceQMPSocket(instanceName)

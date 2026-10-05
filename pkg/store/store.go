@@ -64,7 +64,7 @@ type InstanceState struct {
 	ImageDigest string    `json:"imageDigest"`
 	PID         int       `json:"pid"`
 	QMPSocket   string    `json:"qmpSocket"`
-	Status      string    `json:"status"` // StatusStarting, "running", "stopped", "error"
+	Status      string    `json:"status"` // StatusCreating, StatusStarting, "running", "stopped", "error"
 	StartTime   time.Time `json:"startTime"`
 	LogFile     string    `json:"logFile"`
 	CmdLine     []string  `json:"cmdLine"`
@@ -115,6 +115,26 @@ const StatusStarting = "starting"
 // name instead of dropping it. The row has no pid: a file that did not parse
 // must not be signalled, and ps must not write a stub back over it.
 const StatusUnreadable = "unreadable"
+
+// StatusCreating marks the window between CreateInstance and the first
+// StatusStarting record: the instance directory exists, a registry pull and
+// bundle preparation are under way, and no VMM exists yet to have a pid.
+//
+// Without a record here, that whole window -- several seconds on a cold
+// pull -- read as a missing state.json, which GetInstance reports as
+// ErrInstanceStateUnreadable. ps then showed a healthy run as "unreadable",
+// the same word a corrupt state file earns, right next to the documented
+// advice that `hull rm` clears an unreadable directory. Running it against
+// a pull in progress deleted a VM that was not corrupt at all, only young.
+//
+// A missing state.json now means a crash between CreateInstance's Mkdir and
+// run's first SaveInstance -- a few lines of Go, not an image pull.
+// StatusStarting with no pid still has to be read as possibly live, because
+// the VMM may already have been spawned when the pid write is lost; here
+// the spawn itself has not happened yet, so instanceMayHaveVMM, rm and
+// store compact can -- and do, by not matching this status at all -- treat
+// a "creating" record as idle, with no VMM to signal or protect.
+const StatusCreating = "creating"
 
 var ErrInstanceNotFound = errors.New("instance not found")
 
