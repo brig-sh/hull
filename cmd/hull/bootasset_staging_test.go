@@ -15,6 +15,7 @@
 package main
 
 import (
+	"context"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -153,7 +154,7 @@ func TestBlockImageIsNotWorldReadable(t *testing.T) {
 		content:   []byte("API_KEY=" + secret + "\n"),
 		mode:      0o600,
 	}}
-	if err := buildBlockRootfs(disk, rootfs, injects, 16); err != nil {
+	if err := buildBlockRootfs(context.Background(), disk, rootfs, injects, 16); err != nil {
 		t.Fatalf("buildBlockRootfs: %v", err)
 	}
 

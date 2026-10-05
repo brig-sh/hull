@@ -250,6 +250,12 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 		return fmt.Errorf("--name: %w", err)
 	}
 
+	// Interruption during preparation must return through the cleanup below.
+	// Keep this context through launch so a signal at the end of preparation
+	// cannot be lost before the VMM's shutdown handling takes over.
+	ctx, stopSignals := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	defer stopSignals()
+
 	// Load or create store
 	s, err := globalStore(cmd)
 	if err != nil {
@@ -315,8 +321,8 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 
 			// Copy entire bundle to instance directory using tar for robustness
 			srcPath := filepath.Clean(imageRef)
-			tarCmd := exec.Command("tar", "-C", srcPath, "-cf", "-", ".")
-			untarCmd := exec.Command("tar", "-C", bundleDir, "-xf", "-")
+			tarCmd := exec.CommandContext(ctx, "tar", "-C", srcPath, "-cf", "-", ".")
+			untarCmd := exec.CommandContext(ctx, "tar", "-C", bundleDir, "-xf", "-")
 
 			pipe, err := tarCmd.StdoutPipe()
 			if err != nil {
@@ -328,12 +334,21 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 				return fmt.Errorf("failed to start tar: %w", err)
 			}
 
-			if err := untarCmd.Run(); err != nil {
-				return fmt.Errorf("failed to untar bundle: %w", err)
+			untarErr := untarCmd.Run()
+			if untarErr != nil {
+				// The producer can be blocked writing to the failed consumer.
+				// Reap it before the instance directory is removed.
+				_ = tarCmd.Process.Kill()
 			}
-
-			if err := tarCmd.Wait(); err != nil {
-				return fmt.Errorf("tar failed: %w", err)
+			tarErr := tarCmd.Wait()
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if untarErr != nil {
+				return fmt.Errorf("failed to untar bundle: %w", untarErr)
+			}
+			if tarErr != nil {
+				return fmt.Errorf("tar failed: %w", tarErr)
 			}
 
 			log.Debugf("Bundle copied to: %s", bundleDir)
@@ -375,6 +390,10 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 		if err := client.GenerateBundle(bundleDir, imageDigest, imgConfig); err != nil {
 			return err
 		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	// Load OCI spec from bundle
@@ -797,7 +816,7 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 				if info, statErr := os.Lstat(rootfsLink); statErr != nil {
 					return fmt.Errorf("inspect unpacked OCI rootfs: %w", statErr)
 				} else if info.Mode()&os.ModeSymlink != 0 {
-					if err := cloneRootfsAPFS(resolved, rootfsLink); err != nil {
+					if err := cloneRootfsAPFS(ctx, resolved, rootfsLink); err != nil {
 						return err
 					}
 				}
@@ -878,7 +897,7 @@ exec %s "$@"
 				imageSizeMB = 15 * 1024
 			}
 
-			if err := buildBlockRootfs(diskPath, srcDir, injects, imageSizeMB); err != nil {
+			if err := buildBlockRootfs(ctx, diskPath, srcDir, injects, imageSizeMB); err != nil {
 				return err
 			}
 			rootfsDiskImage = diskPath
@@ -891,10 +910,13 @@ exec %s "$@"
 				if err := os.Remove(rootfsLink); err != nil {
 					return fmt.Errorf("failed to remove rootfs symlink: %w", err)
 				}
-				cpCmd := exec.Command("/bin/cp", "-c", "-a", target, rootfsLink)
+				cpCmd := exec.CommandContext(ctx, "/bin/cp", "-c", "-a", target, rootfsLink)
 				if _, err := cpCmd.CombinedOutput(); err != nil {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
 					log.Debugf("APFS clone failed (%v), falling back to regular copy", err)
-					cpCmd = exec.Command("/bin/cp", "-a", target, rootfsLink)
+					cpCmd = exec.CommandContext(ctx, "/bin/cp", "-a", target, rootfsLink)
 					if out, err := cpCmd.CombinedOutput(); err != nil {
 						return fmt.Errorf("failed to copy rootfs: %s: %w", string(out), err)
 					}
@@ -1450,7 +1472,7 @@ exec %s "$@"
 		MAC:         mac,
 		Backend:     string(vmmType),
 	}
-	started, err := launchVMM(cmd, s, state, cmdArgs, append(gatewayFiles, shareFiles...), vmmType, detach, netMode, gatewayIP)
+	started, err := launchVMM(ctx, cmd, s, state, cmdArgs, append(gatewayFiles, shareFiles...), vmmType, detach, netMode, gatewayIP)
 	instanceStarted = started
 	return err
 }
@@ -1703,7 +1725,7 @@ func warnSetuidUnsupported(rootfsDir string) {
 // a copy-on-write directory clone. A regular-copy fallback is intentionally not
 // used: silently copying a large image would make the cost and disk behavior of
 // HVI container boot depend on free space rather than APFS clone semantics.
-func cloneRootfsAPFS(source, rootfsLink string) error {
+func cloneRootfsAPFS(ctx context.Context, source, rootfsLink string) error {
 	staging := rootfsLink + ".apfs-clone"
 	if _, err := os.Lstat(staging); err == nil {
 		return fmt.Errorf("stage APFS rootfs clone: destination already exists: %s", staging)
@@ -1714,7 +1736,7 @@ func cloneRootfsAPFS(source, rootfsLink string) error {
 		return err
 	}
 
-	cpCmd := exec.Command("/bin/cp", "-c", "-a", source, staging)
+	cpCmd := exec.CommandContext(ctx, "/bin/cp", "-c", "-a", source, staging)
 	if out, err := cpCmd.CombinedOutput(); err != nil {
 		_ = os.RemoveAll(staging)
 		return fmt.Errorf("APFS clone rootfs %s: %s: %w", source, strings.TrimSpace(string(out)), err)
@@ -2397,7 +2419,16 @@ func containerHosts(rootfsDir string, entries []string) (string, error) {
 // until the VMM exits. Shared by run and restore. The returned bool reports
 // whether the VMM process was started — once it was, the caller must keep
 // the instance directory even on error.
-func launchVMM(cmd *cli.Command, s *store.Store, state *store.InstanceState, cmdArgs []string, gatewayFiles []*os.File, vmmType hypervisors.VmmType, detach bool, netMode, gatewayIP string) (bool, error) {
+func launchVMM(ctx context.Context, cmd *cli.Command, s *store.Store, state *store.InstanceState, cmdArgs []string, gatewayFiles []*os.File, vmmType hypervisors.VmmType, detach bool, netMode, gatewayIP string) (bool, error) {
+	// Register before spawning, including when called by restore. A canceled
+	// preparation cannot start a VMM; a signal racing the spawn must stop the
+	// child through the same graceful shutdown path as a foreground signal.
+	ctx, stopSignals := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	defer stopSignals()
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+
 	vmmCmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
 	vmmCmd.ExtraFiles = gatewayFiles
 
@@ -2497,7 +2528,11 @@ func launchVMM(cmd *cli.Command, s *store.Store, state *store.InstanceState, cmd
 
 	fmt.Fprintf(os.Stderr, "Starting VMM: %s\n", strings.Join(cmdArgs, " "))
 	log.Debugf("Starting VMM: %v", cmdArgs)
-	if err := vmmCmd.Start(); err != nil {
+	startErr := ctx.Err()
+	if startErr == nil {
+		startErr = vmmCmd.Start()
+	}
+	if startErr != nil {
 		// No process exists, so the record describes nothing and has to go --
 		// otherwise every failed run leaves an instance stuck at "starting".
 		// Restore comes before removal because restore is also a path: the
@@ -2511,7 +2546,7 @@ func launchVMM(cmd *cli.Command, s *store.Store, state *store.InstanceState, cmd
 			log.WithError(rbErr).Warnf("failed to remove the starting record for instance %s", state.ID)
 		}
 		sendStartEvent(string(vmmType), false)
-		return false, fmt.Errorf("failed to start VMM: %w", err)
+		return false, fmt.Errorf("failed to start VMM: %w", startErr)
 	}
 	fmt.Fprintf(os.Stderr, "VMM started (PID %d)\n", vmmCmd.Process.Pid)
 	sendStartEvent(string(vmmType), true)
@@ -2544,7 +2579,7 @@ func launchVMM(cmd *cli.Command, s *store.Store, state *store.InstanceState, cmd
 			if !detach {
 				go warnOnLeaseMismatch(apiSock, state.MAC, addr, 15*time.Second)
 			} else if cmd.Bool("wait-ip") {
-				warnOnLeaseMismatch(apiSock, state.MAC, addr, 5*time.Second)
+				warnOnLeaseMismatchContext(ctx, apiSock, state.MAC, addr, 5*time.Second)
 			}
 		}
 	}
@@ -2554,7 +2589,7 @@ func launchVMM(cmd *cli.Command, s *store.Store, state *store.InstanceState, cmd
 	// discovers in the background while the console is attached.
 	if gatewayIP == "" && netMode != "none" {
 		if detach && cmd.Bool("wait-ip") {
-			if ip, err := waitForLeaseIP(state.MAC, 30*time.Second); err == nil {
+			if ip, err := waitForLeaseIPContext(ctx, state.MAC, 30*time.Second); err == nil {
 				recordInstanceIP(s, state.ID, ip)
 			} else {
 				log.Debugf("guest IP not discovered: %v", err)
@@ -2568,13 +2603,13 @@ func launchVMM(cmd *cli.Command, s *store.Store, state *store.InstanceState, cmd
 		}
 	}
 
-	if detach {
+	if detach && ctx.Err() == nil {
 		// Print instance ID and return
 		fmt.Println(state.ID)
 		return true, nil
 	}
 
-	// Wait for the VMM (foreground mode).
+	// Wait for a foreground VMM, or a detached spawn canceled before success.
 	//
 	// Terminal signals do NOT reach this process: the VMM's process group
 	// is the foreground group, so Ctrl-C delivers SIGINT to the VMM
@@ -2582,10 +2617,6 @@ func launchVMM(cmd *cli.Command, s *store.Store, state *store.InstanceState, cmd
 	// forces after --stop-grace). This handler only fires for signals sent
 	// to this process explicitly (e.g. kill <pid>), where it forwards a
 	// graceful stop to the VMM.
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
-	defer signal.Stop(sigChan)
-
 	waitDone := make(chan error, 1)
 	go func() {
 		waitDone <- vmmCmd.Wait()
@@ -2596,7 +2627,7 @@ func launchVMM(cmd *cli.Command, s *store.Store, state *store.InstanceState, cmd
 	startVMMMetricsSampler(vmmCmd.Process.Pid, string(vmmType), vcpusFromCmdLine(state.CmdLine),
 		state.StartTime, s.InstanceDir(state.ID), metricsDone)
 
-	markStopped := func() {
+	finish := func(waitErr error) (bool, error) {
 		state.Status = "stopped"
 		state.PID = 0
 		if state.ExitedAt.IsZero() {
@@ -2604,10 +2635,16 @@ func launchVMM(cmd *cli.Command, s *store.Store, state *store.InstanceState, cmd
 		}
 		_ = s.SaveInstance(state)
 		sendEndOnce(s, state)
+		if detach {
+			// A detached start interrupted before success must report the
+			// cancellation even when the VMM stops with a clean exit code.
+			waitErr = errors.Join(ctx.Err(), waitErr)
+		}
+		return true, waitErr
 	}
 
 	select {
-	case <-sigChan:
+	case <-ctx.Done():
 		log.Debug("Received signal, attempting graceful shutdown")
 		// Try QMP powerdown (QEMU only)
 		if state.QMPSocket != "" && vmmType == hypervisors.QemuVmm {
@@ -2622,18 +2659,15 @@ func launchVMM(cmd *cli.Command, s *store.Store, state *store.InstanceState, cmd
 
 		select {
 		case waitErr := <-waitDone:
-			markStopped()
-			return true, waitErr
+			return finish(waitErr)
 		case <-time.After(time.Duration(cmd.Int("stop-grace")+5) * time.Second):
 			log.Debug("VMM did not exit in time, force killing")
 			_ = vmmCmd.Process.Kill()
 			<-waitDone
-			markStopped()
-			return true, nil
+			return finish(nil)
 		}
 	case err := <-waitDone:
-		markStopped()
-		return true, err
+		return finish(err)
 	}
 }
 

@@ -341,6 +341,10 @@ without `--force`. It does not cancel the `hull run` that is still pulling:
 that run creates the directory again and can still boot. `hull stop` refuses
 a `creating` instance, because there is no process to signal.
 
+During preparation, before a VMM starts, `SIGINT`, `SIGTERM`, and `SIGHUP`
+cancel the run and remove its instance directory; `SIGKILL` skips cleanup
+and can leave a `creating` record for `hull rm` to clear.
+
 ### Compose volumes
 
 CAUTION: `compose down --volumes` deletes a volume declared `external: true`

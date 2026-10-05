@@ -602,6 +602,13 @@ func gatewayAPISock(controlSock string) string {
 // given, keyed by address. Returns nothing when the gateway serves no API
 // socket, which is the common case for a gateway hull did not start.
 func gatewayLeases(apiSock string) (map[string]string, error) {
+	return gatewayLeasesContext(context.Background(), apiSock)
+}
+
+func gatewayLeasesContext(ctx context.Context, apiSock string) (map[string]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if apiSock == "" {
 		return nil, errors.New("no gateway API socket")
 	}
@@ -619,7 +626,12 @@ func gatewayLeases(apiSock string) (map[string]string, error) {
 		},
 		Timeout: 3 * time.Second,
 	}
-	resp, err := client.Get("http://gateway/leases")
+	defer client.CloseIdleConnections()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://gateway/leases", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -660,9 +672,16 @@ func leaseMismatchMessage(mac, leased, configured string) string {
 // Callers that cannot afford that pass a zero budget, which makes it a single
 // probe, or run it where the wait is already being paid.
 func warnOnLeaseMismatch(apiSock, mac, configured string, budget time.Duration) {
+	warnOnLeaseMismatchContext(context.Background(), apiSock, mac, configured, budget)
+}
+
+func warnOnLeaseMismatchContext(ctx context.Context, apiSock, mac, configured string, budget time.Duration) {
 	deadline := time.Now().Add(budget)
 	for {
-		if leases, err := gatewayLeases(apiSock); err == nil {
+		if ctx.Err() != nil {
+			return
+		}
+		if leases, err := gatewayLeasesContext(ctx, apiSock); err == nil {
 			if ip, ok := leaseFor(leases, mac); ok && ip != configured {
 				log.Warn(leaseMismatchMessage(mac, ip, configured))
 				return
@@ -673,7 +692,11 @@ func warnOnLeaseMismatch(apiSock, mac, configured string, budget time.Duration) 
 		if time.Now().After(deadline) {
 			return
 		}
-		time.Sleep(500 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(500 * time.Millisecond):
+		}
 	}
 }
 

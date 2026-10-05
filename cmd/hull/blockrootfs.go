@@ -19,6 +19,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -62,8 +63,8 @@ type blockInject struct {
 // ownership the image actually declares was recorded per file at unpack time
 // (see ociclient.GuestAttr) and is restored here, straight into the finished
 // filesystem, where ext4's inodes can hold what APFS could not.
-func buildBlockRootfs(diskPath, rootfsDir string, injects []blockInject, sizeMB int) error {
-	mkCmd := exec.Command(mke2fsBin, "-t", "ext4", "-d", rootfsDir,
+func buildBlockRootfs(ctx context.Context, diskPath, rootfsDir string, injects []blockInject, sizeMB int) error {
+	mkCmd := exec.CommandContext(ctx, mke2fsBin, "-t", "ext4", "-d", rootfsDir,
 		"-L", "rootfs", "-m", "0", "-q", diskPath, fmt.Sprintf("%dM", sizeMB))
 	if out, err := mkCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to create ext4 image: %s: %w", string(out), err)
@@ -133,7 +134,7 @@ func buildBlockRootfs(diskPath, rootfsDir string, injects []blockInject, sizeMB 
 	if err := os.WriteFile(scriptPath, script.Bytes(), 0600); err != nil {
 		return fmt.Errorf("failed to write block image fixups: %w", err)
 	}
-	dbCmd := exec.Command(debugfsBin, "-w", "-f", scriptPath, diskPath)
+	dbCmd := exec.CommandContext(ctx, debugfsBin, "-w", "-f", scriptPath, diskPath)
 	out, err := dbCmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to apply block image fixups: %s: %w", string(out), err)
@@ -146,7 +147,7 @@ func buildBlockRootfs(diskPath, rootfsDir string, injects []blockInject, sizeMB 
 	if bad := debugfsFailure(out); bad != "" {
 		return fmt.Errorf("failed to apply block image fixups: %s", bad)
 	}
-	return repairBlockImage(diskPath)
+	return repairBlockImage(ctx, diskPath)
 }
 
 // repairBlockImage settles the filesystem after debugfs has edited it.
@@ -162,12 +163,15 @@ func buildBlockRootfs(diskPath, rootfsDir string, injects []blockInject, sizeMB 
 //
 // e2fsck recomputes the summaries. It costs a few tens of milliseconds here,
 // against an image that has never been mounted.
-func repairBlockImage(diskPath string) error {
+func repairBlockImage(ctx context.Context, diskPath string) error {
 	// -f forces a full check even though the filesystem looks clean, which it
 	// does: nothing has mounted it. -y answers the questions, all of which are
 	// "recount this".
-	cmd := exec.Command("/opt/homebrew/opt/e2fsprogs/sbin/e2fsck", "-f", "-y", diskPath)
+	cmd := exec.CommandContext(ctx, "/opt/homebrew/opt/e2fsprogs/sbin/e2fsck", "-f", "-y", diskPath)
 	out, err := cmd.CombinedOutput()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err == nil {
 		return nil
 	}
@@ -176,7 +180,7 @@ func repairBlockImage(diskPath string) error {
 	// "reboot the system", meaningless for an image nothing has mounted.
 	// Anything from 4 up is a filesystem it could not correct.
 	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && exitErr.ExitCode() <= 2 {
+	if errors.As(err, &exitErr) && (exitErr.ExitCode() == 1 || exitErr.ExitCode() == 2) {
 		return nil
 	}
 	return fmt.Errorf("failed to check the block image: %s: %w", string(out), err)
