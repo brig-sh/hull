@@ -110,7 +110,19 @@ type InstanceState struct {
 // pid, so there is nothing to signal, attach to or sample.
 const StatusStarting = "starting"
 
+// StatusUnreadable is not written into state.json. ListInstances uses it when
+// the directory is there but the record cannot be read, so ps can show the
+// name instead of dropping it. The row has no pid: a file that did not parse
+// must not be signalled, and ps must not write a stub back over it.
+const StatusUnreadable = "unreadable"
+
 var ErrInstanceNotFound = errors.New("instance not found")
+
+// ErrInstanceStateUnreadable means the instance directory is present but
+// state.json is missing, unreadable, or not JSON. It is not
+// ErrInstanceNotFound. That error is only a name with no directory, because
+// callers treat the words "instance not found" as proof the VM is gone.
+var ErrInstanceStateUnreadable = errors.New("instance state is unreadable")
 var ErrInstanceExists = errors.New("instance already exists")
 var ErrImageNotFound = errors.New("image not found")
 var ErrInvalidInstanceID = errors.New("invalid instance name")
@@ -426,10 +438,10 @@ func (s *Store) SaveInstance(state *InstanceState) error {
 
 	// Temp file, then rename. os.WriteFile opens O_TRUNC and writes in place,
 	// so the record spent a moment empty on every save -- and a crash or a
-	// concurrent reader in that moment produced a truncated file that
-	// ListInstances silently skips. The instance then vanishes from ps, stop
-	// and inspect say "not found", and rm deletes the directory out from under
-	// a VM that is still running. Measured on the real binary: an instance
+	// concurrent reader in that moment produced a truncated file. ps, stop
+	// and inspect then had nothing they could trust, and the readers of the
+	// time treated that as absence, so rm deleted the directory out from under
+	// a VM that was still running. Measured on the real binary: an instance
 	// dropped from ps 86 times in 62,053 probes at an ordinary save rate, and
 	// brig polls hull ps.
 	//
@@ -515,18 +527,33 @@ func (s *Store) GetInstance(id string) (*InstanceState, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	return s.readInstance(id)
+}
+
+// readInstance loads one record. The caller holds s.mu.
+//
+// A missing file is "not found" only when the instance directory is gone
+// with it. A directory that exists without a usable state.json is a record
+// we failed to read, not a name that was never here: ps has to be able to
+// show it, and inspect must not answer with the absence sentence.
+func (s *Store) readInstance(id string) (*InstanceState, error) {
 	stateFile := filepath.Join(s.rootDir, "instances", id, "state.json")
 	data, err := os.ReadFile(stateFile)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, ErrInstanceNotFound
+			if _, statErr := os.Stat(filepath.Dir(stateFile)); os.IsNotExist(statErr) {
+				return nil, ErrInstanceNotFound
+			} else if statErr != nil {
+				return nil, fmt.Errorf("%w: %w", ErrInstanceStateUnreadable, statErr)
+			}
+			return nil, fmt.Errorf("%w: state file is missing", ErrInstanceStateUnreadable)
 		}
-		return nil, fmt.Errorf("failed to read instance state: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrInstanceStateUnreadable, err)
 	}
 
 	var state InstanceState
 	if err := json.Unmarshal(data, &state); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal instance state: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrInstanceStateUnreadable, err)
 	}
 
 	return &state, nil
@@ -549,18 +576,22 @@ func (s *Store) ListInstances() ([]*InstanceState, error) {
 			continue
 		}
 
-		stateFile := filepath.Join(instancesDir, entry.Name(), "state.json")
-		data, err := os.ReadFile(stateFile)
+		state, err := s.readInstance(entry.Name())
 		if err != nil {
+			// The directory disappeared between the listing and the read.
+			// Anything else still occupies the name, and hiding it is what
+			// made a broken record look the same as a removed VM.
+			if errors.Is(err, ErrInstanceNotFound) {
+				continue
+			}
+			instances = append(instances, &InstanceState{
+				ID:     entry.Name(),
+				Status: StatusUnreadable,
+			})
 			continue
 		}
 
-		var state InstanceState
-		if err := json.Unmarshal(data, &state); err != nil {
-			continue
-		}
-
-		instances = append(instances, &state)
+		instances = append(instances, state)
 	}
 
 	return instances, nil

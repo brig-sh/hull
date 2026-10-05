@@ -107,7 +107,7 @@ func execInstance(_ context.Context, cmd *cli.Command) error {
 	}
 	state, err := s.GetInstance(instanceID)
 	if err != nil {
-		return fmt.Errorf("instance not found: %s", instanceID)
+		return instanceReadError(instanceID, err)
 	}
 	if state.Status != "running" {
 		return fmt.Errorf("instance %s is not running (status: %s)", instanceID, state.Status)

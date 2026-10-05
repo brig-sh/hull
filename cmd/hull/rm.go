@@ -151,11 +151,11 @@ func forceKillVMM(instanceID string, pid int) error {
 //
 // A run that is killed between CreateInstance and the first SaveInstance --
 // or while the state file is being written -- leaves a directory with no
-// usable record. That instance is invisible to `ps`, unreachable by `stop`,
-// and its name stays squatted forever, because CreateInstance still fails with
-// ErrInstanceExists while `rm` used to answer "instance not found". Treat a
-// directory that exists as something to remove, and reserve "not found" for a
-// name that really has no directory.
+// usable record. ps lists that name as unreadable and inspect does not call
+// it missing, but the record has no pid for stop to signal, and the name
+// stays squatted, because CreateInstance still fails with ErrInstanceExists.
+// Treat a directory that exists as something to remove, and reserve "not
+// found" for a name that really has no directory.
 func removeWedgedInstance(s *store.Store, instanceID string, readErr error) error {
 	if _, statErr := os.Stat(s.InstanceDir(instanceID)); statErr != nil {
 		return fmt.Errorf("instance not found: %s", instanceID)
