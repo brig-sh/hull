@@ -507,7 +507,11 @@ jobs:
     # did. If the failures stop, a console session was the cause and the next
     # question is why VZ save needs one; if msuch still trips occasionally,
     # what is left is load on the shared Mac.
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","macOS","ARM64","gui"]') || fromJSON('["macos-15"]') }}
+    #
+    # Dependabot pull requests route like a fork too. GitHub gives a run that
+    # Dependabot triggered no Actions secrets, so the certificate import below
+    # fails on the self-hosted runner. boot-nosip still boots them.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && github.actor != 'dependabot[bot]' && fromJSON('["self-hosted","macOS","ARM64","gui"]') || fromJSON('["macos-15"]') }}
     # Under keychain-lock.sh's STALE, so a lock older than that cannot belong
     # to a job that is still running.
     timeout-minutes: 75
@@ -738,11 +742,14 @@ jobs:
     # needs a real Mac with a known SIP state, so there is nowhere to
     # reroute to: a fork skips the job instead. These are persistent
     # machines, so untrusted code that ran on them would outlive its own job.
+    # The third clause skips Dependabot pull requests: their runs get no
+    # Actions secrets, so the certificate import below cannot succeed.
     if: >-
       (needs.changes.outputs.code == 'true'
        || github.event_name == 'workflow_dispatch')
       && (github.event_name != 'pull_request'
           || github.event.pull_request.head.repo.full_name == github.repository)
+      && github.actor != 'dependabot[bot]'
     runs-on: ["self-hosted", "macOS", "ARM64", "sip-enabled"]
     # Under keychain-lock.sh's STALE, so a lock older than that cannot belong
     # to a job that is still running.
