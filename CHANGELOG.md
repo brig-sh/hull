@@ -7,6 +7,49 @@ release. History before v0.1.0-rc21 predates the import of this tree and
 is kept below as it was generated then; v0.1.0-rc19 and rc20 were re-cut
 imports of the same tree as rc21, and rc23 was a version bump only.
 
+## [0.1.0-rc31] - 2026-10-06
+
+### Bug Fixes
+
+- Preserve cancellation and ignored hangups
+- Clean up interrupted instance creation
+- Publish creating state before image preparation
+- Distinguish unreadable instance state from absence
+- Keep the queues in debug mode
+- Keep the state outside the store
+- Send unknown for a stray token
+
+### Build
+
+- Bump golang.org/x/crypto to v0.56.0 and go to 1.26.6
+- Bump github.com/cilium/ebpf from 0.17.3 to 0.22.0
+
+### Documentation
+
+- Add the rc30 changelog section
+
+### Features
+
+- Let a wrapper queue an event
+- Report the platform and Linux OS
+- Let a wrapper send events itself
+- Report a wrapper's version
+
+### Miscellaneous
+
+- Pin urunc to the agent output fix
+- Bump hvi-vmm for the vsock close and credit fixes
+- Route Dependabot pull requests like forks in the signing lanes
+
+### Refactor
+
+- Make the client a module
+
+### Tests
+
+- Ignore SIGHUP with a shell trap instead of nohup
+- Cover detached launch and creating record rollback
+
 ## [0.1.0-rc30] - 2026-10-04
 
 ### Bug Fixes
