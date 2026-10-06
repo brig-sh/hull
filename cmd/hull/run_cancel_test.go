@@ -117,14 +117,26 @@ type cancellationRun struct {
 
 func startCancellationRun(t *testing.T, storeDir, dockerConfig, image string, files []*os.File, extraEnv ...string) *cancellationRun {
 	t.Helper()
+	return startCancellationRunWithHUPDisposition(t, storeDir, dockerConfig, image, files, false, extraEnv...)
+}
+
+func startCancellationRunWithHUPDisposition(t *testing.T, storeDir, dockerConfig, image string, files []*os.File, ignoreHUP bool, extraEnv ...string) *cancellationRun {
+	t.Helper()
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
 	run := &cancellationRun{done: make(chan struct{})}
-	run.cmd = exec.Command(executable, "-test.run=^TestRunCancellationHelperProcess$", "--",
+	args := []string{"-test.run=^TestRunCancellationHelperProcess$", "--",
 		"hull-run-cancellation-helper", "--store-dir", storeDir, "run", "--name", "canceling",
-		"--pull", "always", image)
+		"--pull", "always", image}
+	if ignoreHUP {
+		// nohup sets SIG_IGN before exec. The Go helper must inherit that OS
+		// disposition; installing Ignore in it would hide NotifyContext's bug.
+		run.cmd = exec.Command("/usr/bin/nohup", append([]string{executable}, args...)...)
+	} else {
+		run.cmd = exec.Command(executable, args...)
+	}
 	// Isolate any preparation children so assertion failures cannot leave them
 	// behind. The test signals only the run PID for the actual regression.
 	run.cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -200,6 +212,11 @@ func assertRunCanceledAndRemoved(t *testing.T, run *cancellationRun, s *store.St
 		t.Errorf("signal did not become an ordinary run error: state=%v, err=%v, output=%q",
 			run.cmd.ProcessState, run.err, run.output.String())
 	}
+	assertFailedRunRemoved(t, s)
+}
+
+func assertFailedRunRemoved(t *testing.T, s *store.Store) {
+	t.Helper()
 	if _, err := os.Stat(s.InstanceDir("canceling")); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("cancellation left the instance directory: %v", err)
 	}
@@ -212,6 +229,65 @@ func assertRunCanceledAndRemoved(t *testing.T, run *cancellationRun, s *store.St
 	if _, err := s.CreateInstance("canceling"); err != nil {
 		t.Errorf("cancellation did not free the instance name: %v", err)
 	}
+}
+
+func TestRunPreservesInheritedIgnoredSIGHUP(t *testing.T) {
+	s, dir, dockerConfig := runCancellationStore(t)
+	entered, canceled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var enteredOnce, canceledOnce, releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		enteredOnce.Do(func() { close(entered) })
+		select {
+		case <-r.Context().Done():
+			canceledOnce.Do(func() { close(canceled) })
+		case <-release:
+			http.Error(w, "intentional pull failure", http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(unblock)
+	run := startCancellationRunWithHUPDisposition(t, dir, dockerConfig,
+		strings.TrimPrefix(srv.URL, "http://")+"/test/image:latest", nil, true)
+	select {
+	case <-entered:
+	case <-run.done:
+		t.Fatalf("run ended before the registry request: %v, %q", run.err, run.output.String())
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not reach the registry")
+	}
+	assertCreatingBeforeSignal(t, s)
+	if err := run.cmd.Process.Signal(syscall.SIGHUP); err != nil {
+		t.Fatalf("hang up run: %v", err)
+	}
+	// Let a wrongly installed handler deliver cancellation, while keeping the
+	// registry barrier closed. Ignored HUP has no acknowledgement to wait for.
+	select {
+	case <-run.done:
+		t.Fatalf("inherited ignored HUP ended run: %v, %q", run.err, run.output.String())
+	case <-canceled:
+		t.Fatal("inherited ignored HUP canceled the blocked registry request")
+	case <-time.After(500 * time.Millisecond):
+	}
+	if err := run.cmd.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Fatalf("run did not survive ignored HUP: %v", err)
+	}
+	assertCreatingBeforeSignal(t, s)
+	unblock()
+	select {
+	case <-run.done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not return after the intentional pull failure")
+	}
+	status, ok := run.cmd.ProcessState.Sys().(syscall.WaitStatus)
+	if !ok || status.Signaled() || status.ExitStatus() != 2 || run.err == nil ||
+		!strings.Contains(run.output.String(), "hull-run-error:") ||
+		!strings.Contains(run.output.String(), "unexpected status code 400") ||
+		!strings.Contains(run.output.String(), "hull-run-canceled: false\n") {
+		t.Errorf("run did not finish with the intended registry error: state=%v, err=%v, output=%q",
+			run.cmd.ProcessState, run.err, run.output.String())
+	}
+	assertFailedRunRemoved(t, s)
 }
 
 func TestRunSignalsCancelBlockedPullAndRemoveCreating(t *testing.T) {

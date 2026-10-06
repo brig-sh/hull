@@ -342,8 +342,9 @@ that run creates the directory again and can still boot. `hull stop` refuses
 a `creating` instance, because there is no process to signal.
 
 During preparation, before a VMM starts, `SIGINT`, `SIGTERM`, and `SIGHUP`
-cancel the run and remove its instance directory; `SIGKILL` skips cleanup
-and can leave a `creating` record for `hull rm` to clear.
+(unless inherited as ignored, such as under `nohup`) cancel the run and
+remove its instance directory; `SIGKILL` skips cleanup and can leave a
+`creating` record for `hull rm` to clear.
 
 ### Compose volumes
 

@@ -169,6 +169,16 @@ func runCommand() *cli.Command {
 	}
 }
 
+// notifyRunSignals preserves an inherited ignored SIGHUP, such as under
+// nohup: registering it with NotifyContext would enable it again.
+func notifyRunSignals(ctx context.Context) (context.Context, context.CancelFunc) {
+	signals := []os.Signal{syscall.SIGINT, syscall.SIGTERM}
+	if !signal.Ignored(syscall.SIGHUP) {
+		signals = append(signals, syscall.SIGHUP)
+	}
+	return signal.NotifyContext(ctx, signals...)
+}
+
 func runInstance(ctx context.Context, cmd *cli.Command) error {
 	args := cmd.Args()
 	if args.Len() == 0 {
@@ -253,7 +263,7 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	// Interruption during preparation must return through the cleanup below.
 	// Keep this context through launch so a signal at the end of preparation
 	// cannot be lost before the VMM's shutdown handling takes over.
-	ctx, stopSignals := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	ctx, stopSignals := notifyRunSignals(ctx)
 	defer stopSignals()
 
 	// Load or create store
@@ -2423,7 +2433,7 @@ func launchVMM(ctx context.Context, cmd *cli.Command, s *store.Store, state *sto
 	// Register before spawning, including when called by restore. A canceled
 	// preparation cannot start a VMM; a signal racing the spawn must stop the
 	// child through the same graceful shutdown path as a foreground signal.
-	ctx, stopSignals := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	ctx, stopSignals := notifyRunSignals(ctx)
 	defer stopSignals()
 	if err := ctx.Err(); err != nil {
 		return false, err
@@ -2761,6 +2771,12 @@ func resolveImageDigest(ctx context.Context, client *ociclient.Client, s *store.
 	// Pull the image
 	result, err := client.PullPlatform(ctx, ref, platform)
 	if err != nil {
+		// Go 1.26.4's signal cancellation cause, returned by net/http, does
+		// not match context.Canceled. Preserve both the context error and
+		// the underlying pull error for callers on every supported version.
+		if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
+			err = fmt.Errorf("%w: %w", ctxErr, err)
+		}
 		return "", fmt.Errorf("failed to pull image %s: %w", ref, err)
 	}
 
