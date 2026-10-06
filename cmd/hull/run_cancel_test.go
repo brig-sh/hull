@@ -131,9 +131,11 @@ func startCancellationRunWithHUPDisposition(t *testing.T, storeDir, dockerConfig
 		"hull-run-cancellation-helper", "--store-dir", storeDir, "run", "--name", "canceling",
 		"--pull", "always", image}
 	if ignoreHUP {
-		// nohup sets SIG_IGN before exec. The Go helper must inherit that OS
+		// The shell sets SIG_IGN before exec. The Go helper must inherit that OS
 		// disposition; installing Ignore in it would hide NotifyContext's bug.
-		run.cmd = exec.Command("/usr/bin/nohup", append([]string{executable}, args...)...)
+		// nohup(1) is not used: on a runner without a console session it exits
+		// 127 with "can't detach from console".
+		run.cmd = exec.Command("/bin/sh", append([]string{"-c", `trap '' HUP; exec "$0" "$@"`, executable}, args...)...)
 	} else {
 		run.cmd = exec.Command(executable, args...)
 	}
