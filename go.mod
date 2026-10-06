@@ -14,7 +14,7 @@ require (
 	github.com/opencontainers/runtime-spec v1.2.1
 	github.com/sirupsen/logrus v1.9.4
 	github.com/urfave/cli/v3 v3.10.1
-	github.com/urunc-dev/urunc v0.8.1-0.20260912220515-ddc98b772f21
+	github.com/urunc-dev/urunc v0.8.1-0.20261006162953-6c062f39c5bb
 	golang.org/x/sys v0.47.0
 	golang.org/x/term v0.45.0
 	gopkg.in/yaml.v3 v3.0.1
