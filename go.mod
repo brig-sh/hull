@@ -1,6 +1,6 @@
 module github.com/brig-sh/hull
 
-go 1.26.4
+go 1.26.6
 
 require (
 	github.com/brig-sh/hull/pkg/telemetry v0.0.0-00010101000000-000000000000
@@ -83,7 +83,7 @@ require (
 	github.com/xhit/go-str2duration/v2 v2.1.0 // indirect
 	go.opencensus.io v0.24.0 // indirect
 	go.yaml.in/yaml/v4 v4.0.0-rc.4 // indirect
-	golang.org/x/crypto v0.55.0 // indirect
+	golang.org/x/crypto v0.56.0 // indirect
 	golang.org/x/mod v0.38.0 // indirect
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
