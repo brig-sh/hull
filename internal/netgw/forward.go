@@ -15,9 +15,12 @@
 package netgw
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,6 +29,9 @@ import (
 
 	"github.com/containers/gvisor-tap-vsock/pkg/services/forwarder"
 	gvntypes "github.com/containers/gvisor-tap-vsock/pkg/types"
+	"github.com/inetaf/tcpproxy"
+	log "github.com/sirupsen/logrus"
+	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
 // A forward is a listener on the host that carries connections to one guest
@@ -48,6 +54,12 @@ var ErrForwardNotFound = errors.New("no forward listens there")
 // ErrForwardInvalid is returned for a forward the gateway cannot install at
 // all: an unknown protocol, or an address it cannot read.
 var ErrForwardInvalid = errors.New("invalid forward")
+
+// ErrForwardUnroutable is returned for a forward whose remote the gateway
+// reads but cannot reach: an address neither on the guest subnet nor in the
+// service range. The netstack routes only the subnet, so such a forward would
+// listen and then fail every connection.
+var ErrForwardUnroutable = errors.New("forward remote is unreachable")
 
 // Forward is one host listener and the guest address behind it.
 type Forward struct {
@@ -225,15 +237,61 @@ func ParseForward(s string) (Forward, error) {
 // not read its own back: upstream keeps the map unexported and serves it only
 // through an HTTP handler of its own. Listing is what a caller asks for first,
 // so the record lives beside the thing it describes.
+//
+// A forward whose remote is a service address does not go to upstream at
+// all. Upstream dials the remote from the netstack, which has no route to the
+// service range and never consults the service table. Those forwards get a
+// listener of their own here, which resolves the service on every connection.
 type forwards struct {
 	fw *forwarder.PortsForwarder
 
+	stack    *stack.Stack
+	services *ServiceTable
+	dial     dialFunc
+	rejects  *rejectLog
+
 	mu  sync.Mutex
 	set map[string]Forward
+	// toService holds what stops each forward to a service address, by key.
+	toService map[string]io.Closer
 }
 
-func newForwards(fw *forwarder.PortsForwarder) *forwards {
-	return &forwards{fw: fw, set: map[string]Forward{}}
+func newForwards(fw *forwarder.PortsForwarder, s *stack.Stack, services *ServiceTable, dial dialFunc, rejects *rejectLog) *forwards {
+	return &forwards{
+		fw:        fw,
+		stack:     s,
+		services:  services,
+		dial:      dial,
+		rejects:   rejects,
+		set:       map[string]Forward{},
+		toService: map[string]io.Closer{},
+	}
+}
+
+// serviceRemote reports whether f's remote is a service address, and refuses
+// one that is neither that nor on the guest subnet.
+//
+// Without a service range, no address off the subnet can be reached, a
+// virtual address among them, so the forward is refused rather than left
+// listening on a port whose every connection fails.
+func (s *forwards) serviceRemote(f Forward) (netip.AddrPort, bool, error) {
+	remote, err := netip.ParseAddrPort(f.Remote)
+	if err != nil {
+		return netip.AddrPort{}, false, fmt.Errorf("%w: remote address %q: %w", ErrForwardInvalid, f.Remote, err)
+	}
+	remote = netip.AddrPortFrom(remote.Addr().Unmap(), remote.Port())
+	if s.services.contains(remote.Addr()) {
+		return remote, true, nil
+	}
+	if s.services.subnet.IsValid() && !s.services.subnet.Contains(remote.Addr()) {
+		if !s.services.cidr.IsValid() {
+			return netip.AddrPort{}, false, fmt.Errorf("%w: %s is not on the guest subnet %s, and this gateway was started without a service range",
+				ErrForwardUnroutable, remote.Addr(), s.services.subnet)
+		}
+		return netip.AddrPort{}, false, fmt.Errorf("%w: %s is neither on the guest subnet %s nor in the service range %s",
+			ErrForwardUnroutable, remote.Addr(), s.services.subnet, s.services.cidr)
+	}
+	return remote, false, nil
 }
 
 // expose installs one forward.
@@ -251,12 +309,21 @@ func (s *forwards) expose(f Forward) (Forward, error) {
 		return Forward{}, fmt.Errorf("%w: %s/%s carries %s",
 			ErrForwardExists, have.Protocol, have.Local, have.Remote)
 	}
+	remote, toService, err := s.serviceRemote(f)
+	if err != nil {
+		return Forward{}, err
+	}
 	// Whether two addresses can share a port is the host kernel's answer, not
 	// one to reimplement: darwin binds 0.0.0.0:80 beside 127.0.0.1:80 for TCP
 	// and refuses the pair for UDP, and Linux refuses both. So the bind
 	// decides, and the refusal it gives for a port already held is the same
 	// answer the set gives for one this gateway holds.
-	if err := s.fw.Expose(protocolOf(f.Protocol), f.Local, f.Remote); err != nil {
+	if toService {
+		err = s.exposeService(f, remote)
+	} else {
+		err = s.fw.Expose(protocolOf(f.Protocol), f.Local, f.Remote)
+	}
+	if err != nil {
 		if errors.Is(err, syscall.EADDRINUSE) {
 			// Which holder, read from the set rather than assumed. The keys
 			// differ here by definition -- an identical address was refused
@@ -319,7 +386,12 @@ func (s *forwards) unexpose(protocol, local string) (Forward, error) {
 	// Dropped whatever upstream returned. It removes its own record before it
 	// closes the listener, so keeping ours on an error would leave a forward
 	// listed that nothing serves, refused as published, and undeletable.
-	err = s.fw.Unexpose(protocolOf(have.Protocol), have.Local)
+	if closer, ok := s.toService[have.key()]; ok {
+		delete(s.toService, have.key())
+		err = closer.Close()
+	} else {
+		err = s.fw.Unexpose(protocolOf(have.Protocol), have.Local)
+	}
 	delete(s.set, have.key())
 	if err != nil {
 		return Forward{}, fmt.Errorf("cannot stop listening on %s: %w", have.Local, err)
@@ -343,6 +415,81 @@ func (s *forwards) list() []Forward {
 		return out[i].Local < out[j].Local
 	})
 	return out
+}
+
+// exposeService listens on f's local address and carries each connection, or
+// each UDP flow, to an endpoint of the service at vip. The service is looked
+// up when the connection arrives, not here: a caller may publish the port
+// before the service has endpoints, and the table changes under a running
+// forward. Until there is an endpoint a TCP connection is reset and a
+// datagram is dropped.
+//
+// The caller holds the lock.
+func (s *forwards) exposeService(f Forward, vip netip.AddrPort) error {
+	if f.Protocol == "udp" {
+		addr, err := net.ResolveUDPAddr("udp", f.Local)
+		if err != nil {
+			return err
+		}
+		ln, err := net.ListenUDP("udp", addr)
+		if err != nil {
+			return err
+		}
+		p, err := forwarder.NewUDPProxy(ln, func() (net.Conn, error) {
+			conn, ok := dialService(s.stack, s.services, s.dial, "udp", vip.Addr(), vip.Port())
+			if !ok {
+				return nil, fmt.Errorf("service udp/%s has no reachable endpoint", vip)
+			}
+			return conn, nil
+		})
+		if err != nil {
+			_ = ln.Close()
+			return err
+		}
+		go p.Run()
+		s.toService[f.key()] = p
+		return nil
+	}
+
+	ln, err := net.Listen("tcp", f.Local)
+	if err != nil {
+		return err
+	}
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				if !errors.Is(err, net.ErrClosed) {
+					log.Errorf("forward %s: %v", f, err)
+				}
+				return
+			}
+			go s.serveService(conn, vip)
+		}
+	}()
+	s.toService[f.key()] = ln
+	return nil
+}
+
+// serveService carries one host connection to an endpoint of the service at
+// vip, or resets it when the service has none that answers.
+func (s *forwards) serveService(conn net.Conn, vip netip.AddrPort) {
+	outbound, ok := dialService(s.stack, s.services, s.dial, "tcp", vip.Addr(), vip.Port())
+	if !ok {
+		client, _ := netip.ParseAddrPort(conn.RemoteAddr().String())
+		s.rejects.reportService("tcp", client.Addr(), vip.Addr(), vip.Port())
+		// A linger of zero makes the close a reset, which is what a guest
+		// connecting to the same address is answered with.
+		if tcp, isTCP := conn.(*net.TCPConn); isTCP {
+			_ = tcp.SetLinger(0)
+		}
+		_ = conn.Close()
+		return
+	}
+	remote := tcpproxy.DialProxy{
+		DialContext: func(_ context.Context, _, _ string) (net.Conn, error) { return outbound, nil },
+	}
+	remote.HandleConn(conn)
 }
 
 func protocolOf(p string) gvntypes.TransportProtocol {

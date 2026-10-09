@@ -101,7 +101,9 @@ and local as query parameters.
 
 With --service-cidr the gateway also routes service addresses, the way a
 Kubernetes ClusterIP does: a connection to an address in that range is
-carried to one of the endpoints the service table lists for it, in turn. The
+carried to one of the endpoints the service table lists for it, in turn. A
+forward may name a service address as its remote, and each connection to it
+is resolved through the table the same way. The
 table is served on the API socket as /services. GET returns it, and PUT
 replaces all of it with the JSON array sent. An endpoint marked host is
 dialed from the host; any other is a guest on the subnet. Service traffic is
@@ -778,8 +780,13 @@ func joinGateway(sockPath string) (*os.File, *net.UnixConn, error) {
 // Publishing a port is widening the boundary of the sandbox behind it, so the
 // endpoint reports what it did rather than only that it worked: the forward
 // comes back on the response, and the conflict cases are told apart. A local
-// address already taken is 409, one nothing holds is 404, and a request the
-// gateway cannot parse is 400.
+// address already taken is 409, one nothing holds is 404, a request the
+// gateway cannot parse is 400, and a remote it cannot reach, off the guest
+// subnet and outside the service range, is 422.
+//
+// A remote in the service range is resolved through the service table on
+// every connection, so it is accepted whether or not the service has
+// endpoints yet.
 func forwardsHandler(vn forwarder) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -842,6 +849,8 @@ func forwardStatus(err error) int {
 		return http.StatusNotFound
 	case errors.Is(err, netgw.ErrForwardInvalid):
 		return http.StatusBadRequest
+	case errors.Is(err, netgw.ErrForwardUnroutable):
+		return http.StatusUnprocessableEntity
 	default:
 		return http.StatusInternalServerError
 	}
