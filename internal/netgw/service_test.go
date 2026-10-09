@@ -46,8 +46,17 @@ const testServiceWait = 30 * time.Second
 // peer is a second netstack on the gateway's switch. It stands in for a guest
 // with a real TCP/IP stack, where a test needs a connection through a service
 // to complete rather than only start.
+//
+// Skipped under the race detector. Three gvisor netstacks in one binary spend
+// their time in the stacks' wakers, and with every atomic instrumented one of
+// these tests takes about a minute instead of half a second, measured. The
+// plain test run covers them; under -race the forwarders are still exercised
+// by the tests that need only one netstack.
 func peer(t *testing.T, gw *Network, ip, mac string, zones []gvntypes.Zone) *Network {
 	t.Helper()
+	if raceEnabled {
+		t.Skip("three netstacks under the race detector take about a minute per test")
+	}
 	p, err := New(Config{
 		MTU:               1500,
 		Subnet:            testSubnet,
@@ -74,11 +83,12 @@ func peer(t *testing.T, gw *Network, ip, mac string, zones []gvntypes.Zone) *Net
 	_, svc, _ := net.ParseCIDR(testServiceCIDR)
 	dst, _ := tcpip.NewSubnet(tcpip.AddrFromSlice(svc.IP.To4()), tcpip.MaskFromBytes(svc.Mask))
 	p.stack.AddRoute(tcpip.Route{Destination: dst, Gateway: tcpip.AddrFrom4Slice(net.ParseIP(testGatewayIP).To4()), NIC: nicID})
-	t.Cleanup(func() {
-		cancel()
-		_ = ours.Close()
-		_ = theirs.Close()
-	})
+	// The sockets are left open, as the netstacks are. Closing one while
+	// frames are in flight races in the upstream switch: a write that fails
+	// drops the port, the port's reader can learn a MAC for it again, and the
+	// next frame to that MAC dereferences the dropped port.
+	t.Cleanup(cancel)
+	patientNeighbors(t, p)
 	// The switch takes a port when its Accept goroutine runs, and drops what
 	// is sent to a port it does not have yet. Wait until the peer reaches the
 	// gateway's own resolver, so a test starts on a joined network.
@@ -122,6 +132,23 @@ func socketpair(t *testing.T) (net.Conn, net.Conn) {
 	return conns[0], conns[1]
 }
 
+// patientNeighbors lets n keep asking for a neighbor's address for 30
+// seconds rather than three. Under the race detector on a loaded host an ARP
+// round trip between two netstacks can take longer than three seconds, and
+// once resolution fails the stack backs off before it asks again.
+func patientNeighbors(t *testing.T, n *Network) {
+	t.Helper()
+	c, err := n.stack.NUDConfigurations(nicID, ipv4.ProtocolNumber)
+	if err != nil {
+		t.Fatalf("NUDConfigurations: %v", err)
+	}
+	c.MaxMulticastProbes = 30
+	c.MaxUnicastProbes = 30
+	if err := n.stack.SetNUDConfigurations(nicID, ipv4.ProtocolNumber, c); err != nil {
+		t.Fatalf("SetNUDConfigurations: %v", err)
+	}
+}
+
 func serviceNetwork(t *testing.T, policy *Policy) (*Network, chan dialed) {
 	t.Helper()
 	dials := make(chan dialed, 16)
@@ -144,6 +171,7 @@ func serviceNetwork(t *testing.T, policy *Policy) (*Network, chan dialed) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	patientNeighbors(t, n)
 	return n, dials
 }
 
@@ -527,4 +555,226 @@ func TestServiceUDPToAGuestEndpoint(t *testing.T) {
 		t.Fatalf("answer %v", r.Answer)
 	}
 	expectNoDial(t, dials)
+}
+
+// hostRead connects to a forward's local address from the host and returns
+// what the far end sent, or the error the connection ended with.
+func hostRead(t *testing.T, local string) (string, error) {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", local, testServiceWait)
+	if err != nil {
+		// A reset can beat connect back, and is then the dial's error.
+		return "", err
+	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetReadDeadline(time.Now().Add(testServiceWait))
+	got, err := io.ReadAll(conn)
+	return string(got), err
+}
+
+// A forward may name a service address. Each host connection is resolved
+// through the table when it arrives, so the forward can be published before
+// the service has endpoints: until then a connection is reset, and once the
+// table names one it is carried there, from the gateway's address.
+func TestForwardToAServiceReachesAGuestEndpoint(t *testing.T) {
+	n, dials := serviceNetwork(t, nil)
+	server := peer(t, n, "10.87.0.3", "5a:94:ef:e4:0c:03", nil)
+	from := serve(t, server, "10.87.0.3", 8080)
+	local := "127.0.0.1:" + freePort(t)
+
+	if _, err := n.Expose(Forward{Local: local, Remote: "10.96.0.20:80"}); err != nil {
+		t.Fatalf("a forward to a service with no endpoints yet was refused: %v", err)
+	}
+	t.Cleanup(func() { _, _ = n.Unexpose("tcp", local) })
+	if got, _ := hostRead(t, local); got != "" {
+		t.Fatalf("a service with no endpoints answered %q", got)
+	}
+
+	if err := n.SetServices([]Service{{
+		VIP: netip.MustParseAddr("10.96.0.20"), Port: 80,
+		Endpoints: []ServiceEndpoint{{IP: netip.MustParseAddr("10.87.0.3"), Port: 8080}},
+	}}); err != nil {
+		t.Fatalf("SetServices: %v", err)
+	}
+	if got, err := hostRead(t, local); got != "hello" {
+		t.Fatalf("read %q, %v", got, err)
+	}
+	if src := <-from; hostOf(src) != testGatewayIP {
+		t.Fatalf("the endpoint saw %s, want the gateway %s", src, testGatewayIP)
+	}
+	expectNoDial(t, dials)
+}
+
+func TestForwardToAServiceFailsOverToTheNextEndpoint(t *testing.T) {
+	n, _ := serviceNetwork(t, nil)
+	server := peer(t, n, "10.87.0.3", "5a:94:ef:e4:0c:03", nil)
+	serve(t, server, "10.87.0.3", 8080)
+	if err := n.SetServices([]Service{{
+		VIP: netip.MustParseAddr("10.96.0.20"), Port: 80,
+		Endpoints: []ServiceEndpoint{
+			{IP: netip.MustParseAddr("10.87.0.3"), Port: 9},
+			{IP: netip.MustParseAddr("10.87.0.3"), Port: 8080},
+		},
+	}}); err != nil {
+		t.Fatalf("SetServices: %v", err)
+	}
+	local := "127.0.0.1:" + freePort(t)
+	if _, err := n.Expose(Forward{Local: local, Remote: "10.96.0.20:80"}); err != nil {
+		t.Fatalf("Expose: %v", err)
+	}
+	t.Cleanup(func() { _, _ = n.Unexpose("tcp", local) })
+	if got, err := hostRead(t, local); got != "hello" {
+		t.Fatalf("read %q, %v", got, err)
+	}
+}
+
+// A host endpoint behind a forwarded service address: the NodePort to the
+// apiserver case, end to end on the host.
+func TestForwardToAServiceWithAHostEndpoint(t *testing.T) {
+	backend, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = backend.Close() })
+	go func() {
+		c, err := backend.Accept()
+		if err != nil {
+			return
+		}
+		_, _ = c.Write([]byte("hello"))
+		_ = c.Close()
+	}()
+	n, err := New(Config{
+		MTU: 1500, Subnet: testSubnet, GatewayIP: testGatewayIP, GatewayMacAddress: testGatewayMA,
+		ServiceCIDR: netip.MustParsePrefix(testServiceCIDR),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := n.SetServices([]Service{{
+		VIP: netip.MustParseAddr("10.96.0.1"), Port: 443,
+		Endpoints: []ServiceEndpoint{{
+			IP: netip.MustParseAddr("127.0.0.1"), Port: uint16(backend.Addr().(*net.TCPAddr).Port), Host: true,
+		}},
+	}}); err != nil {
+		t.Fatalf("SetServices: %v", err)
+	}
+	local := "127.0.0.1:" + freePort(t)
+	if _, err := n.Expose(Forward{Local: local, Remote: "10.96.0.1:443"}); err != nil {
+		t.Fatalf("Expose: %v", err)
+	}
+	t.Cleanup(func() { _, _ = n.Unexpose("tcp", local) })
+	if got, err := hostRead(t, local); got != "hello" {
+		t.Fatalf("read %q, %v", got, err)
+	}
+}
+
+func TestForwardToAServiceOverUDP(t *testing.T) {
+	n, _ := serviceNetwork(t, nil)
+	_ = peer(t, n, "10.87.0.3", "5a:94:ef:e4:0c:03", []gvntypes.Zone{{
+		Name:    "cluster.local.",
+		Records: []gvntypes.Record{{Name: "web", IP: net.ParseIP("10.96.0.20")}},
+	}})
+	if err := n.SetServices([]Service{{
+		VIP: netip.MustParseAddr("10.96.0.10"), Port: 53, Protocol: "udp",
+		Endpoints: []ServiceEndpoint{{IP: netip.MustParseAddr("10.87.0.3"), Port: 53}},
+	}}); err != nil {
+		t.Fatalf("SetServices: %v", err)
+	}
+	local := "127.0.0.1:" + freePort(t)
+	if _, err := n.Expose(Forward{Protocol: "udp", Local: local, Remote: "10.96.0.10:53"}); err != nil {
+		t.Fatalf("Expose: %v", err)
+	}
+	t.Cleanup(func() { _, _ = n.Unexpose("udp", local) })
+
+	conn, err := net.Dial("udp", local)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	q := new(dns.Msg)
+	q.SetQuestion("web.cluster.local.", dns.TypeA)
+	c := &dns.Conn{Conn: conn}
+	var r *dns.Msg
+	deadline := time.Now().Add(testServiceWait)
+	for r == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("no answer through the forwarded service")
+		}
+		_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+		if err := c.WriteMsg(q); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		r, _ = c.ReadMsg()
+	}
+	if len(r.Answer) != 1 || r.Answer[0].(*dns.A).A.String() != "10.96.0.20" {
+		t.Fatalf("answer %v", r.Answer)
+	}
+}
+
+// A forward's remote must be one the gateway can reach: a guest on the
+// subnet, or a service address when there is a service range. Anything else
+// would listen and then fail every connection, so it is refused.
+func TestForwardRemoteMustBeRoutable(t *testing.T) {
+	withRange, _ := serviceNetwork(t, nil)
+	without, _ := filteredNetwork(t, nil)
+	for _, tc := range []struct {
+		what   string
+		n      *Network
+		remote string
+		ok     bool
+	}{
+		{"a guest, with a service range", withRange, "10.87.0.2:80", true},
+		{"a guest, without one", without, "10.87.0.2:80", true},
+		{"a service address with no service yet", withRange, "10.96.0.20:80", true},
+		{"a service address without a service range", without, "10.96.0.20:80", false},
+		{"an address outside both", withRange, "192.0.2.1:80", false},
+		{"an address off the subnet without a service range", without, "192.0.2.1:80", false},
+	} {
+		local := "127.0.0.1:" + freePort(t)
+		_, err := tc.n.Expose(Forward{Local: local, Remote: tc.remote})
+		if tc.ok && err != nil {
+			t.Errorf("%s: refused: %v", tc.what, err)
+		}
+		if !tc.ok && !errors.Is(err, ErrForwardUnroutable) {
+			t.Errorf("%s: got %v, want ErrForwardUnroutable", tc.what, err)
+		}
+		if err == nil {
+			if _, err := tc.n.Unexpose("tcp", local); err != nil {
+				t.Errorf("%s: Unexpose: %v", tc.what, err)
+			}
+		}
+	}
+}
+
+// A forward to a service address is listed, withdrawn and its port freed
+// like any other.
+func TestForwardToAServiceIsWithdrawnLikeAnyOther(t *testing.T) {
+	n, _ := serviceNetwork(t, nil)
+	for _, protocol := range []string{"tcp", "udp"} {
+		local := "127.0.0.1:" + freePort(t)
+		f := Forward{Protocol: protocol, Local: local, Remote: "10.96.0.20:80"}
+		if _, err := n.Expose(f); err != nil {
+			t.Fatalf("%s Expose: %v", protocol, err)
+		}
+		if got := n.Forwards(); len(got) != 1 || got[0] != f {
+			t.Fatalf("%s Forwards: %+v", protocol, got)
+		}
+		if _, err := n.Expose(f); !errors.Is(err, ErrForwardExists) {
+			t.Fatalf("%s: a second forward on the address: %v", protocol, err)
+		}
+		if gone, err := n.Unexpose(protocol, local); err != nil || gone != f {
+			t.Fatalf("%s Unexpose: %+v %v", protocol, gone, err)
+		}
+		if got := n.Forwards(); len(got) != 0 {
+			t.Fatalf("%s after Unexpose: %+v", protocol, got)
+		}
+		// The port is free again.
+		if _, err := n.Expose(f); err != nil {
+			t.Fatalf("%s Expose after Unexpose: %v", protocol, err)
+		}
+		if _, err := n.Unexpose(protocol, local); err != nil {
+			t.Fatalf("%s Unexpose: %v", protocol, err)
+		}
+	}
 }
