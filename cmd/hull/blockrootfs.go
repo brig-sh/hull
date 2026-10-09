@@ -64,10 +64,8 @@ type blockInject struct {
 // (see ociclient.GuestAttr) and is restored here, straight into the finished
 // filesystem, where ext4's inodes can hold what APFS could not.
 func buildBlockRootfs(ctx context.Context, diskPath, rootfsDir string, injects []blockInject, sizeMB int) error {
-	mkCmd := exec.CommandContext(ctx, mke2fsBin, "-t", "ext4", "-d", rootfsDir,
-		"-L", "rootfs", "-m", "0", "-q", diskPath, fmt.Sprintf("%dM", sizeMB))
-	if out, err := mkCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to create ext4 image: %s: %w", string(out), err)
+	if err := mkfsFromDir(ctx, diskPath, rootfsDir, sizeMB); err != nil {
+		return err
 	}
 
 	// mke2fs creates the image file itself, under the process umask, and it
@@ -87,10 +85,29 @@ func buildBlockRootfs(ctx context.Context, diskPath, rootfsDir string, injects [
 	if err := os.Chmod(diskPath, 0o600); err != nil {
 		return fmt.Errorf("failed to restrict the block image: %w", err)
 	}
+	return applyBlockFixups(ctx, diskPath, rootfsDir, injects, filepath.Dir(diskPath))
+}
 
+// mkfsFromDir runs mke2fs to write an ext4 image of rootfsDir at diskPath.
+// extra goes before the device argument, for options only some callers want.
+func mkfsFromDir(ctx context.Context, diskPath, rootfsDir string, sizeMB int, extra ...string) error {
+	args := []string{"-t", "ext4", "-d", rootfsDir, "-L", "rootfs", "-m", "0", "-q"}
+	args = append(args, extra...)
+	args = append(args, diskPath, fmt.Sprintf("%dM", sizeMB))
+	if out, err := exec.CommandContext(ctx, mke2fsBin, args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to create ext4 image: %s: %w", string(out), err)
+	}
+	return nil
+}
+
+// applyBlockFixups writes injects into a finished image, gives every path the
+// ownership the unpack recorded for it, and repairs the filesystem summaries
+// debugfs leaves stale. Its scratch files go in a new directory under
+// stageParent, or under os.TempDir() when stageParent is empty.
+func applyBlockFixups(ctx context.Context, diskPath, rootfsDir string, injects []blockInject, stageParent string) error {
 	// The injected files need to exist on the host for debugfs to copy them in.
 	// Three small files beside the image, not a second copy of the rootfs.
-	stage, err := os.MkdirTemp(filepath.Dir(diskPath), "block-inject-")
+	stage, err := os.MkdirTemp(stageParent, "block-inject-")
 	if err != nil {
 		return fmt.Errorf("failed to stage block image files: %w", err)
 	}
