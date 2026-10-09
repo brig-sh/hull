@@ -46,6 +46,7 @@ Artifacts live in `<store>/instances/<name>/checkpoint/`:
 | `machine-id` | persisted `VZGenericMachineIdentifier`. Restore requires the identical machine identity, so every Vz instance persists one from first boot |
 | `vm.vzstate` | machine + memory state (encrypted by the framework, bound to this Mac) |
 | `rootfs.img` | APFS copy-on-write clone of the block rootfs at the checkpoint moment |
+| `disk<N>.img` | clone of each writable `vz-runner --disk`. Read-only `--disk-ro` images are not cloned; `latest.json` lists every disk under `disks` with its serial, path and clone name |
 | `latest.json`| manifest, written last; its mtime marks checkpoint completion |
 
 - **Block-mode rootfs** (`run --rootfs-type block`) is required: the disk is
