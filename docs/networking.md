@@ -207,7 +207,8 @@ forward **as installed** -- the defaults filled in, so a request that omitted
 the protocol is answered `tcp` and a later `GET` agrees with it. It answers 409
 when something is already published on that local address -- including a
 a port the host already holds, whether this gateway published it or
-something else did -- and 400 for a forward the gateway cannot read. A
+something else did -- 400 for a forward the gateway cannot read, and 422 for
+a remote it cannot reach. A
 `DELETE` answers 200 with the forward that went, 404 when nothing holds that
 address, and 400 for a protocol or an address it cannot read, which is what
 `POST` answers for the same input.
@@ -219,6 +220,13 @@ and reads back as `0.0.0.0:3000`, and a host named rather than addressed is a
 The guest side must be an IPv4 address. The gateway forwards no IPv6 and the
 guest network is IPv4-only, so an IPv6 remote is refused with a 400 rather than
 reaching the forwarder and failing there.
+
+The remote must also be one the gateway can reach: a guest on the subnet, or a
+service address when the gateway has `--service-cidr` (see
+[Services](#services)). Any other address is refused with a 422. The netstack
+routes only the subnet, so such a forward would listen and then fail every
+connection. The same rule applies to `--forward`, and a gateway given an
+unreachable one refuses to start.
 
 The `--api` socket binds host ports and, with `--service-cidr`, names the host
 addresses service traffic is carried to, so treat it as a control socket
@@ -272,6 +280,23 @@ How it works:
 - An address in the range with no service, or a service with no endpoints, is
   refused: TCP gets a reset and UDP is dropped. Neither is dialed from the
   host.
+
+A forward may name a service address as its remote. That is how a service is
+published on the host, the way a Kubernetes NodePort is:
+
+```bash
+curl --unix-socket /tmp/gw.sock.api -X POST http://gw/forwards \
+  -d '{"protocol":"tcp","local":"0.0.0.0:30080","remote":"10.96.0.20:80"}'
+```
+
+Such a forward is not handed to the netstack, which has no route to the
+service range. Each host connection, or each UDP flow, is resolved through the
+service table when it arrives, with the same turns, the same failover and the
+same guest or host dialing as a guest's own connection. So the forward can be
+published before the service has endpoints, or before the service exists at
+all: until the table names an endpoint, a TCP connection is reset and a
+datagram is dropped. A forward to a service address on a gateway without
+`--service-cidr` is refused with a 422.
 
 The API:
 
