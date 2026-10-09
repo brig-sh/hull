@@ -20,6 +20,7 @@ connected at all.
 | the same behavior on every backend | `--gateway-sock` |
 | a guest on `hvi` that can reach anything | `--gateway-sock`. `--net shared` alone is refused |
 | host ports forwarded into a guest | the gateway, with `--forward` or the `/forwards` API |
+| a virtual address that spreads connections over several guests | the gateway, with `--service-cidr` and the `/services` API |
 | several services that talk to each other by name | `hull compose`, which sets up a gateway for you |
 | an egress policy | the gateway. A policy is a gateway flag |
 | no network at all | `--net none`, the default |
@@ -219,17 +220,94 @@ The guest side must be an IPv4 address. The gateway forwards no IPv6 and the
 guest network is IPv4-only, so an IPv6 remote is refused with a 400 rather than
 reaching the forwarder and failing there.
 
-The `--api` socket binds host ports, so treat it as a control socket rather
-than a probe. Anything that can open it can publish a port, `0.0.0.0`
+The `--api` socket binds host ports and, with `--service-cidr`, names the host
+addresses service traffic is carried to, so treat it as a control socket
+rather than a probe. Anything that can open it can publish a port, `0.0.0.0`
 included. The gateway gives it mode `0600` before it answers under that name,
 so the gate is the owner rather than whatever the umask happened to leave.
 Keep it that way, and do not hand it to a guest. The control and QEMU sockets
 are not narrowed: a member connects to those, and what may reach them is a
 separate question from who may publish a port.
 
-This is the one thing about a running gateway that can change. The subnet and
-the egress rules are read once at startup, so changing either means restarting
-the gateway, which drops every member of its network.
+The forwards and the service table below are the parts of a running gateway
+that can change. The subnet and the egress rules are read once at startup, so
+changing either means restarting the gateway, which drops every member of its
+network.
+
+### Services
+
+With `--service-cidr` the gateway routes a range of virtual addresses the way
+a Kubernetes ClusterIP Service does. A guest connects to a virtual address and
+port, and the gateway carries the connection to one of the endpoints its
+service table lists for that address, port and protocol.
+
+```bash
+hull network-gateway --socket /tmp/gw.sock --api /tmp/gw.sock.api \
+  --service-cidr 10.96.0.0/12 &
+
+# replace the whole table
+curl --unix-socket /tmp/gw.sock.api -X PUT http://gw/services -d '[
+  {"vip":"10.96.0.10","port":53,"protocol":"udp",
+   "endpoints":[{"ip":"10.87.0.12","port":53}]},
+  {"vip":"10.96.0.1","port":443,"protocol":"tcp",
+   "endpoints":[{"ip":"127.0.0.1","port":6443,"host":true}]}
+]'
+
+# read it back
+curl --unix-socket /tmp/gw.sock.api http://gw/services
+```
+
+How it works:
+
+- A guest's default route is the gateway, so a packet for a virtual address
+  leaves the switch and reaches the netstack, as egress does. The forwarder
+  checks the service range before anything else.
+- A guest endpoint must be on the subnet. The gateway dials it from inside the
+  virtual network, the way `/probe/tcp` does. An endpoint with `"host":true` is
+  dialed from the host instead, so `127.0.0.1` there is the host itself. That
+  is how a guest reaches a server on the host under a virtual address.
+- Endpoints take turns. Each TCP connection starts at the next one, and a TCP
+  endpoint that refuses or does not answer within 3 seconds is skipped for the
+  one after it. A UDP endpoint is chosen once per flow.
+- An address in the range with no service, or a service with no endpoints, is
+  refused: TCP gets a reset and UDP is dropped. Neither is dialed from the
+  host.
+
+The API:
+
+- `GET /services` answers 200 with the table as a JSON array, ordered by
+  address, port and protocol.
+- `PUT /services` takes a JSON array and replaces the whole table. The caller
+  keeps the source of truth and sends all of it every time, so the gateway
+  keeps no history and a restarted caller only has to send it again. The
+  response is 200 with the table as installed.
+- `protocol` is `tcp` or `udp` in either case, and may be left out to mean
+  `tcp`. `host` may be left out to mean a guest endpoint.
+- A body that is not a JSON array of services, or that carries a field the
+  gateway does not know, is 400. A table the gateway cannot route is 422: a
+  virtual address outside `--service-cidr`, an unknown protocol, a port of 0,
+  a guest endpoint off the subnet, or one address, port and protocol listed
+  twice. A gateway started without `--service-cidr` answers 422 to every
+  `PUT` with a service in it.
+- A refused table changes nothing. The table already installed stays.
+
+`--service-cidr` must be IPv4 and must not overlap `--subnet`. A guest reaches
+an address on the subnet over the switch, so a virtual address there would
+never reach the forwarder.
+
+Two things to know before relying on it:
+
+- **The endpoint sees the gateway as the source.** There is no NAT. The
+  gateway accepts the guest's connection and opens a second one to the
+  endpoint, so a guest endpoint sees the gateway's address (`10.87.0.1` by
+  default) and a host endpoint sees a loopback or host address. Nothing that
+  identifies the client guest by source address works through a service.
+- **Service traffic is not egress.** No egress rule applies to it, under any
+  `--egress-default`. The destination is the table's choice and not the
+  guest's: a guest endpoint is on this network, and a host endpoint is one the
+  holder of the API socket named. That makes a host endpoint a hole in an
+  egress policy that only the API socket's owner can open, which is one more
+  reason to keep that socket out of a guest's reach.
 
 ### IPv6 is not forwarded
 
@@ -259,8 +337,8 @@ identity and it is not TLS authorization: a shared front end serving many names
 on one address admits all of them once the guest holds it.
 
 [network-egress.md](network-egress.md) has the whole picture, including
-precedence, address rotation, direct-IP behavior, and the four things the filter
-does not cover.
+precedence, address rotation, direct-IP behavior, and what the filter does not
+cover.
 
 ## What hull does not do
 

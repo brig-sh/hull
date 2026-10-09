@@ -205,12 +205,13 @@ Hidden from `hull --help`. `hull compose` starts one per project; a standalone
 | Flag | Default | What it does |
 |---|---|---|
 | `--socket <path>` | required | control socket path |
-| `--api <path>` | | HTTP API socket path: the health probe, and `/forwards`, which publishes and withdraws host ports. Chmodded `0600` |
+| `--api <path>` | | HTTP API socket path: the health probe, `/forwards`, which publishes and withdraws host ports, and `/services`, the service table. Chmodded `0600` |
 | `--qemu-socket <path>` | derived from `--socket` plus `.qemu` | stream netdev socket. Carries **both QEMU and hvi** members |
 | `--subnet <cidr>` | `10.87.0.0/24` | virtual subnet |
 | `--gateway-ip <ip>` | `10.87.0.1` | gateway address on that subnet |
 | `--forward <spec>` | | host port forward, `hostaddr:port=guestip:port`. Repeatable |
 | `--host <name=ip>` | | static DNS A record served by the gateway. Repeatable |
+| `--service-cidr <cidr>` | unset, meaning no services | virtual address range the `/services` table routes, e.g. `10.96.0.0/12`. IPv4, and must not overlap `--subnet` |
 | `--egress-default <verdict>` | unset, meaning unfiltered | `allow` or `deny` for a connection no rule matches |
 | `--egress-allow <rule>` | | `host=<glob>` or `cidr=<cidr>`. Repeatable |
 | `--egress-deny <rule>` | | same forms. Repeatable |

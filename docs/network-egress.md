@@ -180,6 +180,11 @@ from another. Separation is a network per sandbox, as above.
 **Ingress.** `--forward` exposes a guest's port on the host. It is a host
 exposure, it is not egress, and no egress rule applies to it.
 
+**Services.** A connection to an address in `--service-cidr` is carried to an
+endpoint the service table names, and no egress rule applies to it. A host
+endpoint is dialed from the host whatever the policy says. See
+[networking.md](networking.md#services).
+
 **ICMP.** A guest's ping is answered by the gateway itself: the netstack
 treats the destination as one of its own addresses and replies, so an echo
 request never leaves the host. A ping to a blocked address still succeeds and
@@ -209,13 +214,14 @@ type it. It can be run by hand, and the flags beyond the egress policy are:
 
 ```
 --socket PATH               control socket (required); guests and `run --gateway-sock` connect here
---api PATH                  HTTP API socket: healthcheck probe, and /forwards
+--api PATH                  HTTP API socket: healthcheck probe, /forwards and /services
 --qemu-socket PATH          unix socket for QEMU (and hvi) stream-netdev members
 --subnet CIDR               virtual subnet, default 10.87.0.0/24
 --gateway-ip ADDR           the gateway's own address on it, default 10.87.0.1
 --forward HOSTADDR:PORT=GUESTIP:PORT
                             host port forward, repeatable
 --host NAME=IP              static DNS A record served by the gateway, repeatable
+--service-cidr CIDR         virtual address range routed by the /services table
 --project NAME              compose project to supervise; turns on restart policies
 --supervise-interval DUR    liveness poll interval of that loop, default 2s
 --egress-refresh DUR        how often the named hosts in the egress rules are re-resolved, default 30s; 0 disables
