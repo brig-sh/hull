@@ -24,6 +24,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
+	"syscall"
 	"testing"
 
 	"github.com/brig-sh/hull/pkg/store"
@@ -285,5 +287,87 @@ func TestPullHonorsContextCancellation(t *testing.T) {
 
 	if _, err := c.PullPlatform(ctx, ref, DefaultPlatform); err == nil {
 		t.Fatal("a cancelled context must stop the pull")
+	}
+}
+
+// Two pulls into one store at the same time (#114). The sweep a pull runs
+// before unpacking must leave the other pull's staging directories alone: the
+// `.tmp-<pid>` it is unpacking into, and the `.old-<pid>` it is holding the
+// previous image in until its commit is through. Removing the first truncates
+// the other pull's image; removing the second leaves its rollback nothing to
+// restore. The other pull holds a lock on each, which is what the sweep
+// reads; the leftovers of a pull that is gone, whose locks died with it, are
+// still swept.
+func TestPullLeavesAConcurrentPullsStagingAlone(t *testing.T) {
+	ref := testRegistry(t, "hello from the test layer")
+	c, s := newClient(t)
+
+	const other = "sha256:c408baae42f5c74c0661fbc20a289fd23d4322988e52c88cd54108e5c4c74893"
+	plant := func(name string, held bool) string {
+		dir := filepath.Join(s.RootDir(), "images", name)
+		if err := os.MkdirAll(filepath.Join(dir, "rootfs", "usr"), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if held {
+			f, err := os.Open(dir)
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+				t.Fatalf("Flock: %v", err)
+			}
+			t.Cleanup(func() { _ = f.Close() })
+		}
+		return dir
+	}
+	inFlight := plant(other+".tmp-1", true)
+	rollback := plant(other+".old-1", true)
+	gone := plant(other+".tmp-2", false)
+
+	if _, err := c.Pull(context.Background(), ref); err != nil {
+		t.Fatalf("Pull: %v", err)
+	}
+	for _, dir := range []string{inFlight, rollback} {
+		if _, err := os.Stat(filepath.Join(dir, "rootfs", "usr")); err != nil {
+			t.Errorf("the pull swept a concurrent pull's %s: %v", filepath.Base(dir), err)
+		}
+	}
+	if _, err := os.Stat(gone); !os.IsNotExist(err) {
+		t.Errorf("the leftover of a dead pull survived: %v", err)
+	}
+}
+
+// A legacy `.old-<pid>` whose best-effort delete did not finish is still
+// swept before a new pull unpacks, even when its pid is this process's own.
+// Its directory lock, not the pid in its name, decides whether it is busy.
+func TestPullCommitsOverItsOwnOldLeftover(t *testing.T) {
+	ref := testRegistry(t, "hello from the test layer")
+	c, s := newClient(t)
+
+	first, err := c.Pull(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("first Pull: %v", err)
+	}
+	// What a commit whose RemoveAll did not finish leaves behind, with the
+	// image incomplete so the second pull has to commit again.
+	leftover := filepath.Join(s.RootDir(), "images", first.Digest+".old-"+strconv.Itoa(os.Getpid()))
+	if err := os.MkdirAll(filepath.Join(leftover, "rootfs"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(leftover, "rootfs", "stale"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := os.Remove(filepath.Join(s.RootDir(), "images", first.Digest, "unpack-schema")); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	if _, err := c.Pull(context.Background(), ref); err != nil {
+		t.Fatalf("second Pull over an own .old- leftover: %v", err)
+	}
+	if !s.ImageComplete(first.Digest) {
+		t.Error("the second pull did not publish a complete image")
+	}
+	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
+		t.Errorf("the own .old- leftover survived the commit: %v", err)
 	}
 }

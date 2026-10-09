@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -54,7 +55,7 @@ func TestPruneKeepsTheUsableImage(t *testing.T) {
 	s := newCacheTestStore(t)
 	seedImage(t, s, true)
 
-	targets, err := pruneTargets(s, false, time.Now())
+	targets, err := pruneTargets(s, false)
 	if err != nil {
 		t.Fatalf("pruneTargets: %v", err)
 	}
@@ -100,7 +101,7 @@ func TestPruneKeepsBothPlatformsOfATag(t *testing.T) {
 		Ref: cacheTestRef, Digest: otherTestDigest, Platform: "linux/amd64",
 	}, true)
 
-	targets, err := pruneTargets(s, false, time.Now())
+	targets, err := pruneTargets(s, false)
 	if err != nil {
 		t.Fatalf("pruneTargets: %v", err)
 	}
@@ -115,7 +116,7 @@ func TestPruneRemovesAnUnusableImage(t *testing.T) {
 	s := newCacheTestStore(t)
 	seedImage(t, s, false)
 
-	targets, err := pruneTargets(s, false, time.Now())
+	targets, err := pruneTargets(s, false)
 	if err != nil {
 		t.Fatalf("pruneTargets: %v", err)
 	}
@@ -157,7 +158,7 @@ func TestPruneLeavesAnEntryThatIsNotADigest(t *testing.T) {
 		t.Fatalf("MkdirAll: %v", err)
 	}
 
-	targets, err := pruneTargets(s, false, time.Now())
+	targets, err := pruneTargets(s, false)
 	if err != nil {
 		t.Fatalf("pruneTargets: %v", err)
 	}
@@ -175,7 +176,7 @@ func TestPruneAllRemovesAnUnusedImage(t *testing.T) {
 	s := newCacheTestStore(t)
 	seedImage(t, s, true)
 
-	targets, err := pruneTargets(s, true, time.Now())
+	targets, err := pruneTargets(s, true)
 	if err != nil {
 		t.Fatalf("pruneTargets: %v", err)
 	}
@@ -191,7 +192,7 @@ func TestPruneNeverRemovesAHeldImage(t *testing.T) {
 	seedImage(t, s, false) // unusable, so it would go on every other ground
 	seedInstance(t, s, "held", cacheTestDigest, "stopped", 0)
 
-	targets, err := pruneTargets(s, true, time.Now())
+	targets, err := pruneTargets(s, true)
 	if err != nil {
 		t.Fatalf("pruneTargets: %v", err)
 	}
@@ -204,15 +205,7 @@ func TestPruneSweepsStagingLeftovers(t *testing.T) {
 	s := newCacheTestStore(t)
 	seedImage(t, s, true)
 	for _, suffix := range []string{".tmp-", ".old-"} {
-		dir := stagingDir(t, s, cacheTestDigest+suffix+"999999")
-		// Age the whole tree, not just the directory: a `.tmp-` is dated by
-		// the newest mtime under it, so ageing the top alone changes nothing.
-		old := time.Now().Add(-2 * pullStagingGrace)
-		for _, p := range []string{filepath.Join(dir, "rootfs"), dir} {
-			if err := os.Chtimes(p, old, old); err != nil {
-				t.Fatalf("Chtimes: %v", err)
-			}
-		}
+		stagingDir(t, s, cacheTestDigest+suffix+"999999")
 	}
 
 	var out bytes.Buffer
@@ -232,12 +225,22 @@ func TestPruneSweepsStagingLeftovers(t *testing.T) {
 }
 
 // A staging directory belonging to a pull in flight must survive: prune has to
-// be safe to run at any moment, and deleting it fails that pull.
+// be safe to run at any moment, and deleting it fails that pull. The pull
+// holds a lock on it, and that lock is the whole of the evidence: no pid, no
+// age, however old the tree looks.
 func TestPruneLeavesAPullInFlightAlone(t *testing.T) {
 	s := newCacheTestStore(t)
-	dir := stagingDir(t, s, cacheTestDigest+".tmp-"+strconv.Itoa(os.Getpid()))
+	name := cacheTestDigest + ".tmp-" + strconv.Itoa(os.Getpid())
+	dir := stagingDir(t, s, name)
+	old := time.Now().Add(-48 * time.Hour)
+	for _, p := range []string{filepath.Join(dir, "rootfs"), dir} {
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatalf("Chtimes: %v", err)
+		}
+	}
+	held := holdStagingDir(t, dir)
 
-	targets, err := pruneTargets(s, false, time.Now())
+	targets, err := pruneTargets(s, false)
 	if err != nil {
 		t.Fatalf("pruneTargets: %v", err)
 	}
@@ -245,33 +248,60 @@ func TestPruneLeavesAPullInFlightAlone(t *testing.T) {
 		t.Fatalf("prune would remove a pull in flight: %v", targetNames(targets))
 	}
 
-	// The freshness that protects it is the newest mtime in the tree, not the
-	// staging directory's own. A pull writes into rootfs/, and an image big
-	// enough can spend an hour there without touching the directory above.
-	old := time.Now().Add(-2 * pullStagingGrace)
-	if err := os.Chtimes(dir, old, old); err != nil {
-		t.Fatalf("Chtimes: %v", err)
+	// And a removal decided before the pull started is refused, not
+	// carried out: the lock is taken again at the delete.
+	var out bytes.Buffer
+	if err := pruneStoreIn(&out, s, false, false, ""); err != nil {
+		t.Fatalf("pruneStoreIn: %v", err)
 	}
-	targets, err = pruneTargets(s, false, time.Now())
-	if err != nil {
-		t.Fatalf("pruneTargets: %v", err)
-	}
-	if len(targets) != 0 {
-		t.Fatalf("a pull still writing into rootfs/ was pruned: %v", targetNames(targets))
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("prune removed a locked staging directory: %v", err)
 	}
 
-	// Age the whole tree, and the pid alone must not protect it: pid numbers
-	// are recycled, and no pull takes an hour.
-	if err := os.Chtimes(filepath.Join(dir, "rootfs"), old, old); err != nil {
-		t.Fatalf("Chtimes: %v", err)
-	}
-	targets, err = pruneTargets(s, false, time.Now())
+	_ = held.Close()
+	targets, err = pruneTargets(s, false)
 	if err != nil {
 		t.Fatalf("pruneTargets: %v", err)
 	}
 	if len(targets) != 1 {
-		t.Fatalf("an hour-old staging directory was still protected: %v", targetNames(targets))
+		t.Fatalf("a released staging directory was still protected: %v", targetNames(targets))
 	}
+}
+
+// A removal the listing approved is refused when a pull has taken the
+// directory since, and the run says so instead of failing.
+func TestPruneReportsAStagingDirectoryTakenSinceTheListing(t *testing.T) {
+	s := newCacheTestStore(t)
+	name := cacheTestDigest + ".tmp-" + strconv.Itoa(os.Getpid())
+	dir := stagingDir(t, s, name)
+	holdStagingDir(t, dir)
+
+	var out bytes.Buffer
+	targets := []pruneTarget{{name: name, staging: true, reason: "leftover from an interrupted pull"}}
+	if _, err := removePruneTargets(&out, s, targets, false); err != nil {
+		t.Fatalf("removing a target a pull took since: %v", err)
+	}
+	if !strings.Contains(out.String(), "Left "+name+" alone") {
+		t.Errorf("the run does not say the directory was left alone: %q", out.String())
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Errorf("the locked directory was removed: %v", err)
+	}
+}
+
+// holdStagingDir takes the lock a pull holds on its staging directory, and
+// releases it when the test ends.
+func holdStagingDir(t *testing.T, dir string) *os.File {
+	t.Helper()
+	f, err := os.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatalf("Flock: %v", err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	return f
 }
 
 func TestPruneDryRunRemovesNothing(t *testing.T) {
@@ -307,44 +337,6 @@ func TestPruneEmptyStore(t *testing.T) {
 	}
 }
 
-// The figure printed is the space the host gets back, so it counts blocks and
-// counts a hard-linked file once. Unpack creates those for repeated entries.
-func TestDirDiskUsageCountsAHardLinkOnce(t *testing.T) {
-	dir := t.TempDir()
-	body := bytes.Repeat([]byte("x"), 64*1024)
-	first := filepath.Join(dir, "a")
-	if err := os.WriteFile(first, body, 0o600); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-	single := dirDiskUsage(dir)
-	if single < int64(len(body)) {
-		t.Fatalf("dirDiskUsage = %d for a %d-byte file", single, len(body))
-	}
-	if err := os.Link(first, filepath.Join(dir, "b")); err != nil {
-		t.Fatalf("Link: %v", err)
-	}
-	if got := dirDiskUsage(dir); got != single {
-		t.Errorf("a hard link changed the total from %d to %d", single, got)
-	}
-}
-
-func TestStagingPID(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		want int
-	}{
-		{cacheTestDigest + ".tmp-4242", 4242},
-		{cacheTestDigest + ".old-1", 1},
-		{cacheTestDigest + ".tmp-", 0},
-		{cacheTestDigest + ".tmp-abc", 0},
-		{cacheTestDigest, 0},
-	} {
-		if got := stagingPID(filepath.Join("/store/images", tc.name)); got != tc.want {
-			t.Errorf("stagingPID(%q) = %d, want %d", tc.name, got, tc.want)
-		}
-	}
-}
-
 // The blocking case from review. `run` picks the newest COMPLETE entry, so an
 // incomplete newer one must not supersede the complete older one: prune used
 // to remove the incomplete entry as unusable and the complete one as
@@ -371,8 +363,9 @@ func TestPruneKeepsTheLastCompleteEntryOfATag(t *testing.T) {
 }
 
 // A `.old-<pid>` carries the displaced image's mtimes, which say when that
-// image was unpacked. Reading them as the entry's age let prune delete the
-// rollback copy of a pull that is still running.
+// image was unpacked and nothing about the pull holding it; prune once read
+// them as the entry's age and deleted the rollback copy of a running pull.
+// The pull's lock on it is the evidence now, whatever the tree's dates say.
 func TestPruneKeepsAFreshlyDisplacedImage(t *testing.T) {
 	s := newCacheTestStore(t)
 	dir := stagingDir(t, s, cacheTestDigest+".old-"+strconv.Itoa(os.Getpid()))
@@ -382,8 +375,9 @@ func TestPruneKeepsAFreshlyDisplacedImage(t *testing.T) {
 			t.Fatalf("Chtimes: %v", err)
 		}
 	}
+	holdStagingDir(t, dir)
 
-	targets, err := pruneTargets(s, false, time.Now())
+	targets, err := pruneTargets(s, false)
 	if err != nil {
 		t.Fatalf("pruneTargets: %v", err)
 	}
@@ -398,7 +392,7 @@ func TestPruneNamesWhatEachStagingKindIs(t *testing.T) {
 	stagingDir(t, s, cacheTestDigest+".tmp-"+strconv.Itoa(stalePID))
 	stagingDir(t, s, cacheTestDigest+".old-"+strconv.Itoa(stalePID))
 
-	targets, err := pruneTargets(s, false, time.Now())
+	targets, err := pruneTargets(s, false)
 	if err != nil {
 		t.Fatalf("pruneTargets: %v", err)
 	}
@@ -415,5 +409,24 @@ func TestPruneNamesWhatEachStagingKindIs(t *testing.T) {
 	}
 	if r := reasons[cacheTestDigest+".old-"+strconv.Itoa(stalePID)]; !strings.Contains(r, "previous image") {
 		t.Errorf(".old- reason = %q", r)
+	}
+}
+
+// A leftover prune listed and a pull's sweep took first is reported as
+// already gone, and its bytes are not claimed as reclaimed by this run.
+func TestPruneDoesNotClaimWhatAnotherSweeperFreed(t *testing.T) {
+	s := newCacheTestStore(t)
+	name := cacheTestDigest + ".tmp-" + strconv.Itoa(stalePID)
+	var out bytes.Buffer
+	targets := []pruneTarget{{name: name, staging: true, reason: "leftover from an interrupted pull", bytes: 4096}}
+	reclaimed, err := removePruneTargets(&out, s, targets, false)
+	if err != nil {
+		t.Fatalf("removing a target that is already gone: %v", err)
+	}
+	if reclaimed != 0 {
+		t.Errorf("reclaimed %d bytes nothing in this run freed", reclaimed)
+	}
+	if !strings.Contains(out.String(), "Already gone: "+name) {
+		t.Errorf("the run does not say the directory was already gone: %q", out.String())
 	}
 }

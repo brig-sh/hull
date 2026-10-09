@@ -204,15 +204,37 @@ func (c *Client) PullPlatform(ctx context.Context, ref, platformStr string) (*Pu
 	if err := os.MkdirAll(imagesRoot, 0700); err != nil {
 		return nil, fmt.Errorf("failed to create images dir: %w", err)
 	}
-	for _, pattern := range []string{"*.tmp-*", "*.old-*"} {
-		if stale, err := filepath.Glob(filepath.Join(imagesRoot, pattern)); err == nil {
-			for _, d := range stale {
-				_ = os.RemoveAll(d)
-			}
-		}
+	// Sweep what interrupted pulls left behind, and only that: another pull
+	// may be unpacking into its own staging directory right now, or holding
+	// the previous image aside while it commits, and holds a lock on it
+	// either way. The sweep is best effort; a leftover it could not remove
+	// is prune's to report.
+	removed, sweepErr := c.store.SweepStaging()
+	if len(removed) > 0 {
+		log.Debugf("swept %d leftover(s) of interrupted pulls: %v", len(removed), removed)
 	}
+	if sweepErr != nil {
+		log.Debugf("could not sweep every pull leftover: %v", sweepErr)
+	}
+	// The staging directory is locked for as long as this pull uses it, so
+	// a sweep in another process leaves it alone; see store.CreateStaging.
+	// The deferred delete runs before the deferred release, so an abandoned
+	// pull takes its directory with it while still holding the lock. Once
+	// the commit has published the directory the name is no longer this
+	// pull's: a second pull of the same digest in this process can have
+	// made a fresh one under it, and the delete must not take that.
 	tmpDir := filepath.Join(imagesRoot, fmt.Sprintf("%s.tmp-%d", digestStr, os.Getpid()))
-	defer func() { _ = os.RemoveAll(tmpDir) }()
+	staging, err := store.CreateStaging(tmpDir)
+	if err != nil {
+		return nil, err
+	}
+	published := false
+	defer func() { _ = staging.Close() }()
+	defer func() {
+		if !published {
+			_ = os.RemoveAll(tmpDir)
+		}
+	}()
 
 	prog := newProgress(c.Quiet, len(layers), totalSize)
 	if err := UnpackLayers(layers, filepath.Join(tmpDir, "rootfs"), prog); err != nil {
@@ -235,31 +257,13 @@ func (c *Client) PullPlatform(ctx context.Context, ref, platformStr string) (*Pu
 		return nil, fmt.Errorf("failed to stamp the unpack schema: %w", err)
 	}
 
-	// Commit by swapping directories, never by deleting in place. RemoveAll
-	// on a populated rootfs takes seconds and deletes in readdir order, so an
-	// interrupt during it could strip the rootfs while leaving image.json --
-	// exactly the half-state that made every later run fail. Renaming the old
-	// directory aside is atomic; the slow delete then happens once the new
-	// image is already published, where an interrupt is harmless (the leftover
-	// is swept by the *.old-* glob above).
-	finalDir := filepath.Join(imagesRoot, digestStr)
-	oldDir := filepath.Join(imagesRoot, fmt.Sprintf("%s.old-%d", digestStr, os.Getpid()))
-	swapped := false
-	if _, err := os.Stat(finalDir); err == nil {
-		if err := os.Rename(finalDir, oldDir); err != nil {
-			return nil, fmt.Errorf("failed to displace the previous image: %w", err)
-		}
-		swapped = true
+	// Publish by swapping directories, under the store lock; see CommitImage
+	// for why neither half is optional, and why it takes the staging lock to
+	// release it itself.
+	if err := c.store.CommitImage(digestStr, tmpDir, staging); err != nil {
+		return nil, err
 	}
-	if err := os.Rename(tmpDir, finalDir); err != nil {
-		if swapped {
-			_ = os.Rename(oldDir, finalDir) // put the usable image back
-		}
-		return nil, fmt.Errorf("failed to commit image: %w", err)
-	}
-	if swapped {
-		_ = os.RemoveAll(oldDir)
-	}
+	published = true
 
 	// Get available platforms
 	platforms := []string{fmt.Sprintf("%s/%s", config.OS, config.Architecture)}

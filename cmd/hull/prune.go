@@ -21,34 +21,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
-	"strings"
-	"syscall"
-	"time"
 
 	"github.com/urfave/cli/v3"
 
 	"github.com/brig-sh/hull/pkg/ociclient"
 	"github.com/brig-sh/hull/pkg/store"
 )
-
-// pullStagingGrace is how long a staging directory whose pid is still alive is
-// left alone.
-//
-// A `<digest>.tmp-<pid>` belonging to a pull in flight must not be deleted:
-// doing so fails that pull, and this command is expected to be safe to run at
-// any time. But a pid is weak evidence -- the kernel recycles pid numbers, so
-// an unrelated process can inherit the number of the hull that left the
-// directory behind, and the entry would then be immortal.
-//
-// So the pid only protects a directory that was also touched recently. No pull
-// takes an hour, and a directory older than that belongs to a hull that is
-// long gone whatever is answering to its pid now.
-const pullStagingGrace = time.Hour
 
 func pruneCommand() *cli.Command {
 	return &cli.Command{
@@ -58,8 +39,8 @@ func pruneCommand() *cli.Command {
 			"left by an interrupted pull, image directories whose metadata or rootfs is " +
 			"missing, and digests superseded by a later pull of the same reference and " +
 			"platform. With --all it also removes every image no instance refers to.\n\n" +
-			"An image any instance refers to is never removed, running or stopped. Use " +
-			"`hull rmi --force` for that case.\n\n" +
+			"An image any instance refers to is never removed, running or stopped. Stop " +
+			"running instances first, then use `hull rmi --force` for that case.\n\n" +
 			"Nothing removed here is unrecoverable: every image can be pulled again.\n\n" +
 			"Deleting inside the store does not shrink its backing sparse image. Run " +
 			"`hull store compact` afterwards to return the space to the host.",
@@ -107,7 +88,7 @@ type pruneTarget struct {
 }
 
 func pruneStoreIn(w io.Writer, s *store.Store, all, dryRun bool, compactHint string) error {
-	targets, err := pruneTargets(s, all, time.Now())
+	targets, err := pruneTargets(s, all)
 	if err != nil {
 		return err
 	}
@@ -116,27 +97,7 @@ func pruneStoreIn(w io.Writer, s *store.Store, all, dryRun bool, compactHint str
 		return nil
 	}
 
-	var reclaimed int64
-	var failures []error
-	for _, t := range targets {
-		if dryRun {
-			_, _ = fmt.Fprintf(w, "Would remove %s (%s, %s)\n", t.describe(), t.reason, formatSize(t.bytes))
-			reclaimed += t.bytes
-			continue
-		}
-		var rmErr error
-		if t.staging {
-			rmErr = s.RemoveStagingDir(t.name)
-		} else {
-			rmErr = s.DeleteImage(t.name)
-		}
-		if rmErr != nil {
-			failures = append(failures, rmErr)
-			continue
-		}
-		_, _ = fmt.Fprintf(w, "Removed %s (%s, %s)\n", t.describe(), t.reason, formatSize(t.bytes))
-		reclaimed += t.bytes
-	}
+	reclaimed, err := removePruneTargets(w, s, targets, dryRun)
 
 	verb := "Reclaimed"
 	if dryRun {
@@ -149,7 +110,47 @@ func pruneStoreIn(w io.Writer, s *store.Store, all, dryRun bool, compactHint str
 	if compactHint != "" && reclaimed > 0 && !dryRun {
 		_, _ = fmt.Fprintln(w, compactHint)
 	}
-	return errors.Join(failures...)
+	return err
+}
+
+// removePruneTargets removes (or, on a dry run, reports) each target, and
+// returns the bytes reclaimed along with every removal that failed.
+func removePruneTargets(w io.Writer, s *store.Store, targets []pruneTarget, dryRun bool) (int64, error) {
+	var reclaimed int64
+	var failures []error
+	for _, t := range targets {
+		if dryRun {
+			_, _ = fmt.Fprintf(w, "Would remove %s (%s, %s)\n", t.describe(), t.reason, formatSize(t.bytes))
+			reclaimed += t.bytes
+			continue
+		}
+		var rmErr error
+		if t.staging {
+			var got bool
+			got, rmErr = s.RemoveStagingDir(t.name)
+			if rmErr == nil && !got {
+				// A pull's sweep took it between the listing and now. The
+				// space is free, but not by this run, so it is not counted.
+				_, _ = fmt.Fprintf(w, "Already gone: %s (%s)\n", t.describe(), t.reason)
+				continue
+			}
+		} else {
+			rmErr = s.DeleteImage(t.name)
+		}
+		if errors.Is(rmErr, store.ErrStagingInUse) {
+			// A pull started using it between the listing and now. Not a
+			// failure: it is exactly what the listing would have skipped.
+			_, _ = fmt.Fprintf(w, "Left %s alone (a pull is using it)\n", t.describe())
+			continue
+		}
+		if rmErr != nil {
+			failures = append(failures, rmErr)
+			continue
+		}
+		_, _ = fmt.Fprintf(w, "Removed %s (%s, %s)\n", t.describe(), t.reason, formatSize(t.bytes))
+		reclaimed += t.bytes
+	}
+	return reclaimed, errors.Join(failures...)
 }
 
 func (t pruneTarget) describe() string {
@@ -175,21 +176,19 @@ func (t pruneTarget) describe() string {
 // whole prune would block the instance creation the check is looking for.
 // Saving the record before GenerateBundle would close it, and that is a change
 // to the run path.
-func pruneTargets(s *store.Store, all bool, now time.Time) ([]pruneTarget, error) {
+func pruneTargets(s *store.Store, all bool) ([]pruneTarget, error) {
 	staging, err := s.StagingDirs()
 	if err != nil {
 		return nil, err
 	}
 	var targets []pruneTarget
 	for _, name := range staging {
-		dir := filepath.Join(s.RootDir(), "images", name)
-		bytes, touched := dirUsage(dir)
-		if pullInFlight(dir, now, touched) {
-			log.Debugf("leaving %s alone: a pull may still be using it", name)
+		if s.StagingInFlight(name) {
+			log.Debugf("leaving %s alone: a pull is using it", name)
 			continue
 		}
 		reason := "leftover from an interrupted pull"
-		if displaced(dir) {
+		if store.Displaced(name) {
 			// Not the same thing as a half-written `.tmp-`: this is the
 			// previous image, renamed aside by a pull that then died before
 			// deleting it. It is a whole image, and the line should say so
@@ -200,7 +199,7 @@ func pruneTargets(s *store.Store, all bool, now time.Time) ([]pruneTarget, error
 			name:    name,
 			staging: true,
 			reason:  reason,
-			bytes:   bytes,
+			bytes:   store.DirDiskUsage(filepath.Join(s.RootDir(), "images", name)),
 		})
 	}
 
@@ -255,7 +254,7 @@ func pruneTargets(s *store.Store, all bool, now time.Time) ([]pruneTarget, error
 		t := pruneTarget{
 			name:   name,
 			reason: reason,
-			bytes:  dirDiskUsage(s.ImageDir(name)),
+			bytes:  store.DirDiskUsage(s.ImageDir(name)),
 		}
 		if recorded {
 			t.ref = img.Ref
@@ -322,128 +321,4 @@ func newer(a, b *store.ImageMetadata) bool {
 		return a.Digest > b.Digest
 	}
 	return a.PulledAt.After(b.PulledAt)
-}
-
-// pullInFlight reports whether a staging directory may still belong to a
-// running pull. See pullStagingGrace for why both halves are needed.
-//
-// The two staging kinds date differently. A `.tmp-<pid>` is written into for
-// as long as the pull runs, so its age is the newest mtime anywhere in the
-// tree: the directory's own mtime only moves when an entry is created directly
-// in it, four times over a whole pull, and an image big enough to spend an
-// hour unpacking would look untouched.
-//
-// A `.old-<pid>` is never written into. It arrives by rename at commit time
-// and carries the displaced image's mtimes, which say when that image was
-// unpacked and nothing about the pull holding it. Reading them let prune
-// delete the rollback copy of a live pull whose previous image happened to be
-// a month old. Its age is the directory's own ctime, which the rename sets.
-func pullInFlight(dir string, now, touched time.Time) bool {
-	fi, err := os.Stat(dir)
-	if err != nil {
-		return false
-	}
-	if displaced(dir) {
-		touched = statusChangeTime(fi)
-	}
-	if now.Sub(touched) > pullStagingGrace {
-		return false
-	}
-	return processAlive(stagingPID(dir))
-}
-
-// displaced reports whether a staging name is the `.old-<pid>` kind.
-func displaced(dir string) bool {
-	return strings.Contains(filepath.Base(dir), ".old-")
-}
-
-// statusChangeTime is the inode's ctime, which a rename updates and a copy of
-// the file times does not. Zero when the platform does not report one, which
-// reads as ancient and prunes.
-func statusChangeTime(fi os.FileInfo) time.Time {
-	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok {
-		return time.Time{}
-	}
-	return time.Unix(st.Ctimespec.Sec, st.Ctimespec.Nsec)
-}
-
-// stagingPID reads the pid out of a `<digest>.tmp-<pid>` name, or 0 when the
-// name does not carry one.
-func stagingPID(dir string) int {
-	name := filepath.Base(dir)
-	i := strings.LastIndex(name, "-")
-	if i < 0 {
-		return 0
-	}
-	pid, err := strconv.Atoi(name[i+1:])
-	if err != nil || pid <= 0 {
-		return 0
-	}
-	return pid
-}
-
-// processAlive reports whether a pid names a live process. EPERM counts: the
-// process exists, it just belongs to somebody else.
-func processAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	err := syscall.Kill(pid, 0)
-	return err == nil || errors.Is(err, syscall.EPERM)
-}
-
-// dirDiskUsage sums what a directory tree actually occupies, so the figure
-// printed is the space the host gets back rather than the size of the layers
-// the image was pulled from.
-//
-// Blocks, not sizes: an unpacked rootfs is mostly small files, each rounded up
-// to a block, and a sparse file occupies less than it claims. Hard links are
-// counted once -- unpack creates them for repeated layer entries, and counting
-// each name would overstate the total.
-//
-// APFS clones are counted in full, since each clone reports the blocks it
-// shares. Nothing hull writes under images/ is a clone of another entry there,
-// so the figure is exact for a store hull built and an upper bound for one
-// somebody has copied inside with `cp -c`.
-//
-// Returns what it managed to measure. A walk that fails part-way gives a low
-// figure in a report; refusing to delete over it would be worse.
-func dirDiskUsage(dir string) int64 {
-	total, _ := dirUsage(dir)
-	return total
-}
-
-// dirUsage is dirDiskUsage plus the newest mtime it saw, which is how the
-// staging sweep tells a pull in flight from one that died. One walk answers
-// both questions, and the staging path needs both.
-func dirUsage(dir string) (int64, time.Time) {
-	var total int64
-	var newest time.Time
-	seen := make(map[uint64]bool)
-	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return nil
-		}
-		st, ok := info.Sys().(*syscall.Stat_t)
-		if !ok {
-			return nil
-		}
-		if mod := info.ModTime(); mod.After(newest) {
-			newest = mod
-		}
-		if st.Nlink > 1 {
-			if seen[st.Ino] {
-				return nil
-			}
-			seen[st.Ino] = true
-		}
-		total += st.Blocks * 512
-		return nil
-	})
-	return total, newest
 }

@@ -142,8 +142,8 @@ Without `--all`, prune removes only what no run could ever choose:
 
 | Removed | Why it is dead |
 |---|---|
-| `<digest>.tmp-<pid>` | a half-unpacked image from an interrupted pull. Otherwise swept only at the start of the next pull |
-| `<digest>.old-<pid>` | the previous image, renamed aside by a pull that died before deleting it |
+| `<digest>.tmp-<pid>` | a half-unpacked image from an interrupted pull. Otherwise swept only at the start of the next pull, which applies the same lock check |
+| `<digest>.old-<pid>-<unique>` | the previous image, renamed aside by an interrupted pull or image removal |
 | an image with no `rootfs/`, or one stamped with an older unpack schema | it satisfies no cache lookup; the next run re-pulls it |
 | an image directory whose `image.json` cannot be read | invisible to `hull images`, and to everything else |
 | a digest superseded by a later **complete** pull of the same reference and platform | `hull run` already resolves that group to the newest complete entry. A run that pins the older digest re-pulls it |
@@ -152,25 +152,22 @@ With `--all` it also removes every image no instance refers to, which is the
 whole cache on a machine with nothing running. Nothing prune removes is
 unrecoverable: every image can be pulled again.
 
-An image any instance refers to is never pruned, running or stopped. Use
-`hull rmi --force` for that case. Prune does not touch instances, boot assets
-or named volumes.
+An image any instance refers to is never pruned, running or stopped. Stop
+running instances first, then use `hull rmi --force` for that case. Prune does
+not touch instances, boot assets or named volumes.
 
 Only a complete image supersedes another. An incomplete newer entry is removed
 on its own account and never takes the last usable entry of a tag with it.
 
-A staging directory is left alone while it may still belong to a pull in
-flight: its pid names a live process **and** it is younger than an hour. The
-pid alone is not enough, because pid numbers are recycled and the entry would
-then be immortal.
-
-The two staging kinds are dated differently. A `.tmp-<pid>` is written into for
-as long as the pull runs, so its age is the newest mtime anywhere in the tree;
-the directory's own mtime moves about four times over a whole pull and would
-make a long one look abandoned. A `.old-<pid>` is never written into: it
-arrives by rename and carries the displaced image's mtimes, which say when that
-image was unpacked, so its age is the directory's own ctime, which the rename
-sets.
+A staging directory is left alone while a pull is using it. The pull holds a
+lock on the directory itself (a `flock` on its descriptor) for as long as it
+unpacks into it, and on the previous image from the moment it is renamed aside
+until it is deleted or put back. The kernel drops the lock when the process
+exits, however it exits. A sweeper tries the lock without waiting: busy means
+in flight, and it deletes while holding it, so two sweepers cannot race. The
+sweep a pull runs before unpacking applies the same rule, so two pulls into one
+store at the same time leave each other's staging directories alone. The pid
+in the name only keeps two pulls' directories apart.
 
 ## Layout
 
@@ -452,14 +449,18 @@ itself on the next run instead of poisoning every later one. The current layout
 version is 3; bumping it makes every older rootfs a miss that gets re-unpacked.
 
 A pull commits by directory rename, not by deleting in place. Layers unpack into
-`<digest>.tmp-<pid>`, any existing image is displaced to `<digest>.old-<pid>`,
+`<digest>.tmp-<pid>`, any existing image is displaced to `<digest>.old-<pid>-<unique>`,
 and the slow recursive delete happens only after the new image is published.
 Leftover staging directories are swept at the start of the next pull and by
-`hull prune`, never satisfy a cache lookup, and never appear in `hull images`.
+`hull prune`, once the pull that made them no longer holds its lock on them;
+they never satisfy a cache lookup, and never appear in `hull images`.
 
 `hull rmi` and `hull prune` remove an image the same way, renaming the
 directory aside before deleting it, so an interrupted removal leaves a staging
-name rather than an image with half a rootfs.
+name rather than an image with half a rootfs. Each displacement has a unique
+suffix so concurrent commits or removals in one process do not reuse a name.
+The displaced directory stays locked through deletion, so prune skips an
+active removal. The store lock is released before the recursive delete.
 
 Pulling a republished tag adds a new digest without retiring the old one, so
 several image directories can answer one tag. The most recently pulled complete
