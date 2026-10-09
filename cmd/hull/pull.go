@@ -56,6 +56,7 @@ func pullImage(ctx context.Context, cmd *cli.Command) error {
 	}
 
 	client := ociclient.New(s)
+	client.InstanceLive = instanceMayHaveVMM
 
 	fmt.Printf("Pulling %s...\n", imageRef)
 	result, err := client.PullPlatform(ctx, imageRef, cmd.String("platform"))
