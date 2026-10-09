@@ -5,11 +5,10 @@
 # that carries a "(#NN)" gets a PR link, the rest stand on their own.
 #
 # Local use:   scripts/changelog.sh            # rewrite CHANGELOG.md
-#              scripts/changelog.sh --notes vX  # print notes for one tag
 #              git-cliff --config cliff.toml -o CHANGELOG.md   # no docker
-# Nothing in CI runs it: the release workflow takes its notes from GitHub
-# (goreleaser `changelog.use: github`), so regenerate and commit this file
-# by hand when cutting a release.
+# Nothing in CI runs it, so regenerate and commit this file by hand when
+# cutting a release. The release notes are a separate render, from
+# cliff-notes.toml; see release.yml.
 
 [changelog]
 header = """

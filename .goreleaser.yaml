@@ -1,7 +1,8 @@
 # hull's single release path, the same shape brig uses.
 #
-# GoReleaser builds and notarizes the Go binary, assembles the archive and
-# writes the changelog. vz-runner is Swift, which GoReleaser cannot build and
+# GoReleaser builds and notarizes the Go binary and assembles the archive; the
+# release notes come from git-cliff, see the changelog block at the bottom.
+# vz-runner is Swift, which GoReleaser cannot build and
 # cannot import in the open-source edition (the prebuilt builder is a Pro
 # feature), so the release workflow builds, signs and notarizes it just before
 # this runs, and it travels in the archive as an extra file.
@@ -121,6 +122,9 @@ signs:
 sboms:
   - artifacts: archive
 
+# Not what a release publishes. release.yml hands goreleaser the notes git-cliff
+# renders from cliff-notes.toml, with --release-notes, and goreleaser then
+# writes no changelog of its own.
 changelog:
   use: github
   sort: asc
