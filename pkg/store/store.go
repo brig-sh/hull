@@ -269,8 +269,8 @@ func WriteImageMetadata(dir string, metadata *ImageMetadata) error {
 
 // isStagingDir reports whether an images/ entry is pull scaffolding rather than
 // a published image. The pull path stages under <digest>.tmp-<pid> and displaces
-// the previous image to <digest>.old-<pid>; both now carry an image.json, so
-// name is the only thing that distinguishes them from the real entry.
+// the previous image to <digest>.old-<pid>-<unique>. Both carry image.json,
+// so the name is what distinguishes them from a published image.
 func isStagingDir(name string) bool {
 	return strings.Contains(name, ".tmp-") || strings.Contains(name, ".old-")
 }

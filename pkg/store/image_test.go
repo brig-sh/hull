@@ -16,9 +16,13 @@ package store
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -114,7 +118,7 @@ func TestRemoveStagingDirRejectsAnythingElse(t *testing.T) {
 	seedImage(t, s, testDigest, &ImageMetadata{Ref: "ghcr.io/x/y:v1"})
 
 	for _, bad := range []string{testDigest, "../instances", "images"} {
-		if err := s.RemoveStagingDir(bad); err == nil {
+		if _, err := s.RemoveStagingDir(bad); err == nil {
 			t.Errorf("RemoveStagingDir(%q) was accepted", bad)
 		}
 	}
@@ -140,7 +144,7 @@ func TestStagingDirsAndRemoval(t *testing.T) {
 		t.Fatalf("StagingDirs = %v, want the two staging entries", staging)
 	}
 	for _, name := range staging {
-		if err := s.RemoveStagingDir(name); err != nil {
+		if _, err := s.RemoveStagingDir(name); err != nil {
 			t.Fatalf("RemoveStagingDir(%q): %v", name, err)
 		}
 	}
@@ -331,5 +335,171 @@ func TestFindImagesStillTreatsAShortIndexDigestAsAPrefix(t *testing.T) {
 	}
 	if len(matches) != 2 || !byPrefix {
 		t.Fatalf("short index digest: %d match(es), byPrefix %v", len(matches), byPrefix)
+	}
+}
+
+// A commit publishes by rename: the previous image is displaced, the staging
+// directory takes its place, and the displaced copy is gone afterwards. When
+// the staging directory cannot be renamed in, the previous image is put back
+// and nothing is lost.
+func TestCommitImageSwapsAndRollsBack(t *testing.T) {
+	s := newTestStore(t)
+	imageDir := saveTestImage(t, s, "example.com/img:tag")
+	if err := os.WriteFile(filepath.Join(imageDir, "previous"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	staging := filepath.Join(s.RootDir(), "images", testDigest+".tmp-"+strconv.Itoa(os.Getpid()))
+	held, err := CreateStaging(staging)
+	if err != nil {
+		t.Fatalf("CreateStaging: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(staging, "rootfs"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	// A legacy leftover from this pid must not collide with the new
+	// displacement name. The ordinary staging sweep will collect it.
+	leftover := filepath.Join(s.RootDir(), "images", testDigest+".old-"+strconv.Itoa(os.Getpid()))
+	if err := os.MkdirAll(filepath.Join(leftover, "rootfs"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	if err := s.CommitImage(testDigest, staging, held); err != nil {
+		t.Fatalf("CommitImage: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(imageDir, "rootfs")); err != nil {
+		t.Errorf("the staging directory was not published: %v", err)
+	}
+	// The pull's lock followed the inode into the published image, and the
+	// commit let go of it there: another commit of the same digest must find
+	// the image free to displace, not busy.
+	if l, err := lockDir(imageDir, false); err != nil {
+		t.Errorf("the published image is still locked after the commit: %v", err)
+	} else {
+		_ = l.Close()
+	}
+	if _, err := os.Stat(filepath.Join(imageDir, "previous")); !os.IsNotExist(err) {
+		t.Errorf("the previous image is still in place: %v", err)
+	}
+	if _, err := os.Stat(leftover); err != nil {
+		t.Errorf("the commit touched an unrelated leftover: %v", err)
+	}
+	if _, err := s.SweepStaging(); err != nil {
+		t.Fatalf("SweepStaging: %v", err)
+	}
+
+	// Rollback: nothing to rename in, so the image that was there comes back.
+	if err := s.CommitImage(testDigest, staging, nil); err == nil {
+		t.Fatal("CommitImage with no staging directory succeeded")
+	}
+	if _, err := os.Stat(filepath.Join(imageDir, "rootfs")); err != nil {
+		t.Errorf("the previous image was not put back after a failed commit: %v", err)
+	}
+	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
+		t.Errorf("a failed commit left the previous image displaced: %v", err)
+	}
+	if err := s.CommitImage("not a digest", staging, nil); err == nil {
+		t.Error("CommitImage accepted a name that is not a digest")
+	}
+}
+
+// A live operation with the same pid must not prevent another publication
+// or removal. Legacy names can still exist during an upgrade.
+func TestImageOperationsLeaveLockedLegacyLeftoverAlone(t *testing.T) {
+	for _, operation := range []string{"commit", "delete"} {
+		t.Run(operation, func(t *testing.T) {
+			s := newTestStore(t)
+			saveTestImage(t, s, "example.com/img:tag")
+			name := testDigest + ".old-" + strconv.Itoa(os.Getpid())
+			leftover := plantStaging(t, s, name)
+			holdStaging(t, leftover)
+			var err error
+			if operation == "commit" {
+				staging := plantStaging(t, s, testDigest+".tmp-1")
+				err = s.CommitImage(testDigest, staging, holdStaging(t, staging))
+			} else {
+				err = s.DeleteImage(testDigest)
+			}
+			if err != nil {
+				t.Fatalf("%s: %v", operation, err)
+			}
+			if _, err := os.Stat(filepath.Join(leftover, "rootfs", "layer")); err != nil {
+				t.Fatalf("%s touched the live leftover: %v", operation, err)
+			}
+		})
+	}
+}
+
+// Pause after the rmi rename, before its recursive delete. Prune must see
+// the directory as busy, while other store users and commits can proceed.
+func TestDisplacedImageRemovalHoldsOnlyDirectoryLock(t *testing.T) {
+	s := newTestStore(t)
+	saveTestImage(t, s, "example.com/img:tag")
+	aside := s.displacedImageDir(testDigest)
+	held, err := s.displaceImage(testDigest, aside)
+	if err != nil {
+		t.Fatalf("displaceImage: %v", err)
+	}
+	defer func() { _ = held.Close() }()
+	name := filepath.Base(aside)
+	if !s.StagingInFlight(name) {
+		t.Fatal("an active image removal is listed as abandoned")
+	}
+	if !s.mu.TryLock() {
+		t.Fatal("image removal still holds the store mutex")
+	}
+	s.mu.Unlock()
+	f, err := os.OpenFile(filepath.Join(s.RootDir(), ".lock"), os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatalf("image removal still holds the store flock: %v", err)
+	}
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	if removed, err := s.RemoveStagingDir(name); removed || !errors.Is(err, ErrStagingInUse) {
+		t.Fatalf("RemoveStagingDir = %v, %v; want false, ErrStagingInUse", removed, err)
+	}
+	staging := plantStaging(t, s, testDigest+".tmp-1")
+	if err := s.CommitImage(testDigest, staging, holdStaging(t, staging)); err != nil {
+		t.Fatalf("commit during image removal: %v", err)
+	}
+	if err := s.DeleteImage(testDigest); err != nil {
+		t.Fatalf("second removal: %v", err)
+	}
+	if _, err := os.Stat(aside); err != nil {
+		t.Fatalf("another operation touched the first removal: %v", err)
+	}
+	_ = held.Close()
+	if removed, err := s.RemoveStagingDir(name); err != nil || !removed {
+		t.Fatalf("cleanup after release = %v, %v", removed, err)
+	}
+}
+
+func TestConcurrentCommitsInOneProcess(t *testing.T) {
+	s := newTestStore(t)
+	saveTestImage(t, s, "example.com/img:tag")
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for worker := range 2 {
+		wg.Go(func() {
+			<-start
+			for iteration := range 25 {
+				name := fmt.Sprintf("%s.tmp-%d-%d", testDigest, worker, iteration)
+				staging := plantStaging(t, s, name)
+				if err := s.CommitImage(testDigest, staging, holdStaging(t, staging)); err != nil {
+					t.Errorf("CommitImage: %v", err)
+					return
+				}
+			}
+		})
+	}
+	close(start)
+	wg.Wait()
+	if _, err := os.Stat(filepath.Join(s.ImageDir(testDigest), "rootfs", "layer")); err != nil {
+		t.Fatalf("published image missing: %v", err)
+	}
+	if names, err := s.StagingDirs(); err != nil || len(names) != 0 {
+		t.Fatalf("commits left staging directories: %v, %v", names, err)
 	}
 }
