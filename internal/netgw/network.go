@@ -308,7 +308,7 @@ func addServices(cfg Config, s *stack.Stack, ipPool *tap.IPPool, divs *diverts, 
 	if err := dhcpServer(cfg, s, ipPool); err != nil {
 		return nil, err
 	}
-	return forwardHostVM(cfg, s)
+	return forwardHostVM(cfg, s, services, dial, rejects)
 }
 
 func dnsServer(cfg Config, s *stack.Stack, divs *diverts) error {
@@ -365,8 +365,8 @@ func dhcpServer(cfg Config, s *stack.Stack, ipPool *tap.IPPool) error {
 
 // forwardHostVM installs the forwards the gateway was started with, and hands
 // back the set so more can be installed while it runs.
-func forwardHostVM(cfg Config, s *stack.Stack) (*forwards, error) {
-	set := newForwards(forwarder.NewPortsForwarder(s))
+func forwardHostVM(cfg Config, s *stack.Stack, services *ServiceTable, dial dialFunc, rejects *rejectLog) (*forwards, error) {
+	set := newForwards(forwarder.NewPortsForwarder(s), s, services, dial, rejects)
 	for _, f := range cfg.Forwards {
 		if _, err := set.expose(f); err != nil {
 			return nil, err
