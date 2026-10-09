@@ -294,6 +294,8 @@ See [telemetry.md](telemetry.md).
 | Variable | What it does |
 |---|---|
 | `HULL_TERMINAL_FILTER` | `off`, `0`, `none` or `false` turns off the filter hull puts between guest output and your terminal, which blocks OSC 52 clipboard reads, DCS passthrough and cursor-position queries. Anything else leaves it on |
+| `HULL_ROOTFS_MODE` | `overlay-block` boots a container (hvi and vz) from two disks: a read-only ext4 of the image, built once per image at `<store>/images/<digest>/rootfs.ext4`, as the overlay lower (serial `disk0`), and a per-instance sparse 16 GiB ext4 as the upper (`disk1`). Unset keeps the default root. Any other value is refused, and outside a container boot it is ignored with a warning. On hvi it needs an hvi with `--disk-ro` (hvi-vmm `feat/multi-disk`, not the c53a857 pin). It cannot be checkpointed. See [storage.md](storage.md#where-the-guests-root-filesystem-actually-is) |
+| `HULL_HVI_ROOTFS_UPPER` | hvi container boot only. `virtiofs` or `block` keeps the image's virtio-fs share as a read-only overlay lower and gives the instance an upper: a directory exported as `rootfs-upper`, or a sparse 16 GiB ext4 disk. Unset keeps the APFS clone. Cannot be combined with `HULL_ROOTFS_MODE` |
 | `CI` | counts the session as non-interactive, so the consent prompt never shows |
 | `TERM` | forwarded into the guest for a pty `exec` |
 | `COMPOSE_FILE`, `COMPOSE_PROJECT_NAME`, `COMPOSE_PROFILES`, `COMPOSE_DISABLE_ENV_FILE` | compose equivalents of the flags above |
