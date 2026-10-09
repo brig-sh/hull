@@ -753,6 +753,33 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	rootfsDiskImage := "" // path to ext4 disk image (block mode)
 	containerRootfsDirect := false
 	containerMetadataRootfs := ""
+	// The overlay upper layer an hvi container boot keeps per instance: its
+	// kind ("virtiofs" or "block") and the directory or disk that holds it.
+	containerRootfsUpper := ""
+	containerRootfsUpperPath := ""
+	// HULL_ROOTFS_MODE=overlay-block: the container root is an overlay of a
+	// read-only ext4 image of the store rootfs (disk0) and the instance's
+	// own ext4 upper (disk1). Both reach the VMM as block devices, and
+	// vz-init finds them by serial from the /urunc-rootfs-lower and
+	// /urunc-rootfs-upper markers.
+	containerRootfsLower := ""
+	var containerBlockDevs []types.BlockDevSpec
+	rootfsMode := os.Getenv("HULL_ROOTFS_MODE")
+	switch rootfsMode {
+	case "", rootfsModeOverlayBlock:
+	default:
+		return fmt.Errorf("HULL_ROOTFS_MODE must be %s or unset (got %q)", rootfsModeOverlayBlock, rootfsMode)
+	}
+	overlayBlock := containerBoot && rootfsMode == rootfsModeOverlayBlock
+	if rootfsMode != "" && !containerBoot {
+		log.Warnf("HULL_ROOTFS_MODE=%s applies to container boots only; ignored for this image", rootfsMode)
+	}
+	if overlayBlock && os.Getenv("HULL_HVI_ROOTFS_UPPER") != "" {
+		return errors.New("HULL_ROOTFS_MODE=overlay-block and HULL_HVI_ROOTFS_UPPER both choose the root layout; set one")
+	}
+	if overlayBlock && rootfsTypeOverride == "block" {
+		return errors.New("HULL_ROOTFS_MODE=overlay-block does not combine with --rootfs-type block")
+	}
 	mountRootfs := ociSpec.Annotations["com.urunc.unikernel.mountRootfs"] == "true"
 
 	if containerBoot {
@@ -817,7 +844,30 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 			if resolveErr != nil {
 				return fmt.Errorf("resolve unpacked OCI rootfs: %w", resolveErr)
 			}
-			if vmmType == hypervisors.HviVmm {
+			if overlayBlock {
+				layout, err := prepareOverlayBlockRootfs(ctx, resolved, s.InstanceDir(instanceName))
+				if err != nil {
+					return err
+				}
+				rootfsDir = resolved
+				containerMetadataRootfs = resolved
+				containerBlockDevs = layout.disks
+				containerRootfsLower = layout.lowerMarker
+				containerRootfsUpper = layout.upperMarker
+				containerRootfsUpperPath = layout.disks[1].Path
+			} else if upper := os.Getenv("HULL_HVI_ROOTFS_UPPER"); vmmType == hypervisors.HviVmm && upper != "" {
+				// Overlay: the cached image is the read-only lower and every
+				// guest write lands in the instance's own upper layer, so
+				// nothing is copied before the VMM starts.
+				upperPath, err := prepareRootfsUpper(s.InstanceDir(instanceName), upper)
+				if err != nil {
+					return err
+				}
+				rootfsDir = resolved
+				containerMetadataRootfs = resolved
+				containerRootfsUpper = upper
+				containerRootfsUpperPath = upperPath
+			} else if vmmType == hypervisors.HviVmm {
 				// HVI's writable virtio-fs backend can use an unpacked directory as
 				// the real root. Replace only the instance bundle's cache symlink
 				// with an APFS copy-on-write clone: guest changes then persist with
@@ -1012,6 +1062,16 @@ exec %s "$@"
 		if containerRootfsDirect {
 			if err := initrd.AddFileToInitrd(initrdPath, "true\n", "/urunc-rootfs-direct"); err != nil {
 				return fmt.Errorf("select direct writable rootfs in boot initrd: %w", err)
+			}
+		}
+		if containerRootfsLower != "" {
+			if err := initrd.AddFileToInitrd(initrdPath, containerRootfsLower+"\n", "/urunc-rootfs-lower"); err != nil {
+				return fmt.Errorf("select overlay lower layer in boot initrd: %w", err)
+			}
+		}
+		if containerRootfsUpper != "" {
+			if err := initrd.AddFileToInitrd(initrdPath, containerRootfsUpper+"\n", "/urunc-rootfs-upper"); err != nil {
+				return fmt.Errorf("select overlay upper layer in boot initrd: %w", err)
 			}
 		}
 		resolver, err := containerBootResolver(gatewayIP)
@@ -1361,6 +1421,8 @@ exec %s "$@"
 	// export (virtiofs on Vz, 9p on QEMU) mounted by the init wrapper.
 	sharedfsParams := types.SharedfsParams{}
 	switch {
+	case overlayBlock:
+		// The root comes from disks; there is no rootfs share to export.
 	case containerBoot && rootfsDir != "":
 		sharedfsParams = types.SharedfsParams{
 			Type: "virtiofs", Path: rootfsDir, Tag: "rootfs", ReadOnly: !containerRootfsDirect,
@@ -1381,6 +1443,19 @@ exec %s "$@"
 		})
 		log.Debugf("Shared directory: host=%s guest=%s tag=%s readOnly=%t",
 			sh.host, sh.guest, sh.tag, sh.readOnly)
+	}
+	// HULL_HVI_ROOTFS_UPPER: vz-init mounts the upper layer by kind, a
+	// writable tag named rootfs-upper or the guest's only disk. The
+	// overlay-block kinds name serials instead and their disks are already in
+	// containerBlockDevs.
+	blockDevPath := rootfsDiskImage
+	switch containerRootfsUpper {
+	case "virtiofs":
+		sharedDirParams = append(sharedDirParams, types.SharedDirParams{
+			Path: containerRootfsUpperPath, Tag: "rootfs-upper",
+		})
+	case "block":
+		blockDevPath = containerRootfsUpperPath
 	}
 
 	// "unikernel" is hull's own default name, but the file it names would come
@@ -1405,7 +1480,8 @@ exec %s "$@"
 		KernelPath:    kernelPath,
 		InitrdPath:    initrdPath,
 		RootfsPath:    rootfsDir,
-		BlockDevPath:  rootfsDiskImage,
+		BlockDevPath:  blockDevPath,
+		BlockDevs:     containerBlockDevs,
 		LogFile:       logFile,
 		AgentSockPath: s.InstanceAgentSocket(instanceName),
 		GUI:           gui,
