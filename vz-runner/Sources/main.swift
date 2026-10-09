@@ -11,6 +11,14 @@ struct SharedDir {
     var readOnly: Bool
 }
 
+// DiskSpec is one --disk or --disk-ro image. The guest finds it by its
+// virtio-blk serial, disk<N>, where N is its position among the --disk*
+// flags; /dev/vdX order is not part of the contract.
+struct DiskSpec {
+    var path: String
+    var readOnly: Bool
+}
+
 // Ceilings for the numeric flags. They are deliberately far above anything a
 // real host can satisfy -- Virtualization.framework clamps to the machine's
 // actual limits later -- and exist only to keep a hostile or fat-fingered
@@ -67,6 +75,7 @@ struct VMConfig {
     var noNet = false
     var stopGraceSeconds: Int = 10
     var sharedDirs: [SharedDir] = []
+    var disks: [DiskSpec] = []      // --disk / --disk-ro, in argv order
     var useDirectBoot: Bool = true  // Try VZLinuxBootLoader first
     var stateDir: String = ""       // checkpoint artifacts live here; empty disables checkpointing
     var restore: Bool = false       // boot by restoring the saved state instead of a cold start
@@ -89,6 +98,13 @@ struct VMConfig {
             case "--rootfs":
                 i += 1
                 if i < args.count { config.rootfsPath = args[i] }
+            case "--disk", "--disk-ro":
+                // Repeatable, in any interleaving. Each one becomes its own
+                // virtio-blk device after the --rootfs/EFI disk, with serial
+                // disk<N> counted over these flags only.
+                let readOnly = (args[i] == "--disk-ro")
+                i += 1
+                if i < args.count { config.disks.append(DiskSpec(path: args[i], readOnly: readOnly)) }
             case "--cmdline":
                 i += 1
                 if i < args.count { config.cmdline = args[i] }
@@ -191,6 +207,10 @@ struct VMConfig {
     var machineIDPath: String { stateDir + "/machine-id" }
     var vmStatePath: String { stateDir + "/vm.vzstate" }
     var diskStatePath: String { stateDir + "/rootfs.img" }
+    // The checkpoint clone of the writable --disk with serial disk<n>.
+    // Read-only disks are never cloned: nothing can have changed them.
+    func diskCloneName(_ n: Int) -> String { "disk\(n).img" }
+    func diskClonePath(_ n: Int) -> String { stateDir + "/" + diskCloneName(n) }
     var manifestPath: String { stateDir + "/latest.json" }
     var errorPath: String { stateDir + "/error" }
 }
@@ -805,6 +825,19 @@ class VZManager: NSObject, VZVirtualMachineDelegate {
             vmConfig.storageDevices.append(VZVirtioBlockDeviceConfiguration(attachment: rootfsAttachment))
         }
 
+        // --disk / --disk-ro, after the legacy disks, each with a stable
+        // serial so the guest does not depend on enumeration order. A
+        // read-only disk is enforced by the device, not by a mount option.
+        for (n, disk) in config.disks.enumerated() {
+            let attachment = try VZDiskImageStorageDeviceAttachment(
+                url: URL(fileURLWithPath: disk.path), readOnly: disk.readOnly)
+            let device = VZVirtioBlockDeviceConfiguration(attachment: attachment)
+            let serial = "disk\(n)"
+            try VZVirtioBlockDeviceConfiguration.validateBlockDeviceIdentifier(serial)
+            device.blockDeviceIdentifier = serial
+            vmConfig.storageDevices.append(device)
+        }
+
         // Memory balloon — only without a state dir: Virtualization.framework
         // refuses to save/restore configurations that contain balloon devices,
         // and the runner never drives the balloon anyway.
@@ -1054,14 +1087,46 @@ class VZManager: NSObject, VZVirtualMachineDelegate {
                         print("VZRunner: checkpoint: disk clone failed (cp -c exit \(status))", to: &standardError)
                     }
                 }
+                // The --disk* devices: writable ones are cloned beside the
+                // machine state like the rootfs; read-only ones are recorded
+                // by path only, since the guest cannot have changed them. An
+                // entry whose clone failed names no image, the same signal
+                // diskImage gives for the rootfs.
+                var diskEntries: [[String: Any]] = []
+                if saveError == nil {
+                    for (n, disk) in self.config.disks.enumerated() {
+                        var entry: [String: Any] = [
+                            "serial": "disk\(n)",
+                            "path": disk.path,
+                            "readOnly": disk.readOnly,
+                            "image": "",
+                        ]
+                        if !disk.readOnly {
+                            let clonePath = self.config.diskClonePath(n)
+                            try? FileManager.default.removeItem(atPath: clonePath)
+                            let status = (try? runShellQuietly("/bin/cp", ["-c", disk.path, clonePath])) ?? 1
+                            if status == 0 {
+                                entry["image"] = self.config.diskCloneName(n)
+                            } else {
+                                print("VZRunner: checkpoint: disk\(n) clone failed (cp -c exit \(status))", to: &standardError)
+                            }
+                        }
+                        diskEntries.append(entry)
+                    }
+                }
                 if saveError == nil {
                     let elapsedMs = Int(Date().timeIntervalSince(started) * 1000)
-                    let manifest: [String: Any] = [
+                    var manifest: [String: Any] = [
                         "stateFile": "vm.vzstate",
                         "diskImage": diskCloned ? "rootfs.img" : "",
                         "savedAt": ISO8601DateFormatter().string(from: started),
                         "durationMs": elapsedMs,
                     ]
+                    // Absent without --disk*, so a single-rootfs manifest is
+                    // unchanged.
+                    if !self.config.disks.isEmpty {
+                        manifest["disks"] = diskEntries
+                    }
                     if let data = try? JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys]) {
                         try? data.write(to: URL(fileURLWithPath: self.config.manifestPath))
                     }
@@ -1084,21 +1149,65 @@ class VZManager: NSObject, VZVirtualMachineDelegate {
         }
     }
 
-    // restoreDisk puts the checkpointed rootfs clone back in place of the
-    // live disk image. Must run before createVM attaches the file.
+    // restoreDisk puts the checkpoint's disk clones back in place of the live
+    // images. Must run before createVM attaches the files.
+    //
+    // It stages first and replaces after: every clone is copied beside its
+    // disk, and only once all of them are there is each copy renamed over its
+    // disk. A missing clone or a copy that fails leaves every live disk as it
+    // was, instead of a rootfs from the checkpoint next to disks that are not.
+    //
+    // A read-only disk was never cloned and is attached as given. A writable
+    // disk with no clone fails the restore: the machine state would rewind
+    // and that disk would not. A rootfs with no clone keeps the current one,
+    // as before the --disk devices existed.
     func restoreDisk() throws {
-        guard !config.rootfsPath.isEmpty else { return }
-        guard FileManager.default.fileExists(atPath: config.diskStatePath) else {
-            print("VZRunner: restore: no disk image in checkpoint, keeping current rootfs", to: &standardError)
-            return
+        var restores: [(clone: String, live: String, label: String)] = []
+        if !config.rootfsPath.isEmpty {
+            if FileManager.default.fileExists(atPath: config.diskStatePath) {
+                restores.append((config.diskStatePath, config.rootfsPath, "rootfs"))
+            } else {
+                print("VZRunner: restore: no disk image in checkpoint, keeping current rootfs", to: &standardError)
+            }
         }
-        try? FileManager.default.removeItem(atPath: config.rootfsPath)
-        let status = try runShellQuietly("/bin/cp", ["-c", config.diskStatePath, config.rootfsPath])
-        guard status == 0 else {
-            throw NSError(domain: "VZRunner", code: 3,
-                userInfo: [NSLocalizedDescriptionKey: "failed to restore rootfs from checkpoint (cp -c exit \(status))"])
+        for (n, disk) in config.disks.enumerated() where !disk.readOnly {
+            let clonePath = config.diskClonePath(n)
+            guard FileManager.default.fileExists(atPath: clonePath) else {
+                throw NSError(domain: "VZRunner", code: 3,
+                    userInfo: [NSLocalizedDescriptionKey: "no disk\(n) image in checkpoint for \(disk.path); the disk cannot rewind with the machine state"])
+            }
+            restores.append((clonePath, disk.path, "disk\(n)"))
         }
-        print("VZRunner: restore: rootfs restored from checkpoint", to: &standardError)
+
+        var staged: [String] = []
+        func discardStaged() {
+            for path in staged {
+                try? FileManager.default.removeItem(atPath: path)
+            }
+        }
+        for r in restores {
+            let stage = r.live + ".restore"
+            try? FileManager.default.removeItem(atPath: stage)
+            let status = (try? runShellQuietly("/bin/cp", ["-c", r.clone, stage])) ?? 1
+            guard status == 0 else {
+                try? FileManager.default.removeItem(atPath: stage)
+                discardStaged()
+                throw NSError(domain: "VZRunner", code: 3,
+                    userInfo: [NSLocalizedDescriptionKey: "failed to restore \(r.label) from checkpoint (cp -c exit \(status)); the disks are unchanged"])
+            }
+            staged.append(stage)
+        }
+
+        // rename(2) within a directory replaces the disk in one step.
+        for (i, r) in restores.enumerated() {
+            guard rename(staged[i], r.live) == 0 else {
+                let reason = String(cString: strerror(errno))
+                discardStaged()
+                throw NSError(domain: "VZRunner", code: 3,
+                    userInfo: [NSLocalizedDescriptionKey: "failed to put \(r.label) back from checkpoint: \(reason)"])
+            }
+            print("VZRunner: restore: \(r.label) restored from checkpoint", to: &standardError)
+        }
     }
 
     func run() {
@@ -1119,6 +1228,9 @@ class VZManager: NSObject, VZVirtualMachineDelegate {
             print("  Kernel: \(config.kernelPath)", to: &standardError)
             if !config.initrdPath.isEmpty { print("  Initrd: \(config.initrdPath)", to: &standardError) }
             if !config.rootfsPath.isEmpty { print("  Rootfs: \(config.rootfsPath)", to: &standardError) }
+            for (n, disk) in config.disks.enumerated() {
+                print("  Disk disk\(n): \(disk.path)\(disk.readOnly ? " (ro)" : "")", to: &standardError)
+            }
             print("  Cmdline: \(config.cmdline)", to: &standardError)
             print("  Memory: \(config.memoryMB)MB, CPUs: \(config.cpuCount)", to: &standardError)
             fflush(stderr)
@@ -1405,7 +1517,7 @@ struct VzRunner {
         }
 
         guard let config = VMConfig.parse(args) else {
-            print("Usage: vz-runner --kernel <path> [--initrd <path>] [--rootfs <path>] [--cmdline <string>] [--mem MB] [--cpus N] [--efi] [--share <path> <tag>] [--mac <address>] [--net-fd <n>] [--stop-grace <s>] [--qmp socket] [--state-dir <dir>] [--restore] [--gui] [--gui-title <str>] [--rosetta]", to: &standardError)
+            print("Usage: vz-runner --kernel <path> [--initrd <path>] [--rootfs <path>] [--disk <path>]... [--disk-ro <path>]... [--cmdline <string>] [--mem MB] [--cpus N] [--efi] [--share <path> <tag>] [--mac <address>] [--net-fd <n>] [--stop-grace <s>] [--qmp socket] [--state-dir <dir>] [--restore] [--gui] [--gui-title <str>] [--rosetta]", to: &standardError)
             exit(1)
         }
 
