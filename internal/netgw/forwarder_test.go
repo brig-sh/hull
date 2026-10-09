@@ -69,7 +69,7 @@ func awaitDial(t *testing.T, dials chan dialed) dialed {
 	select {
 	case d := <-dials:
 		return d
-	case <-time.After(3 * time.Second):
+	case <-time.After(replyWait):
 		t.Fatal("the forwarder never dialed out")
 		return dialed{}
 	}
@@ -245,7 +245,7 @@ func TestIPv6NeverEgresses(t *testing.T) {
 
 func awaitUnknownL3(t *testing.T, n *Network, protocol tcpip.NetworkProtocolNumber) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(replyWait)
 	for {
 		counter, ok := n.stack.Stats().NICs.UnknownL3ProtocolRcvdPacketCounts.Get(uint64(protocol))
 		if ok && counter.Value() > 0 {

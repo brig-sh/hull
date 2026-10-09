@@ -129,16 +129,30 @@ func (m *member) arpReplyTo(frame []byte) []byte {
 
 func (m *member) send(t *testing.T, frame []byte) {
 	t.Helper()
-	_ = m.conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+	// A pipe write completes when the gateway reads the frame, which is the
+	// same in-process answer await waits for, under the same load.
+	_ = m.conn.SetWriteDeadline(time.Now().Add(replyWait))
 	if _, err := m.conn.Write(frame); err != nil {
 		t.Fatalf("send frame: %v", err)
 	}
 }
 
-// await returns the first frame matching pred, or fails after the deadline.
+// replyWait bounds how long a test waits for the gateway to answer.
+//
+// Every answer is computed in-process -- the netstack's ICMP reply, an ARP
+// exchange with the member, a dial the forwarder makes, a counter it bumps,
+// the read that completes a pipe write, a resolver tick -- so this is a
+// liveness bound, not a budget the gateway is held to. It only has to be
+// wide enough that a slow machine cannot cross it: the CI Mac runs these
+// under the race detector beside the e2e job's VMs and the other runners'
+// work, and three seconds was crossed there once, by an echo reply that
+// arrived late rather than not at all.
+const replyWait = 10 * time.Second
+
+// await returns the first frame matching pred, or fails after replyWait.
 func (m *member) await(t *testing.T, what string, pred func([]byte) bool) []byte {
 	t.Helper()
-	deadline := time.After(3 * time.Second)
+	deadline := time.After(replyWait)
 	for {
 		select {
 		case frame := <-m.frames:
