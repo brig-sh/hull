@@ -16,6 +16,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/netip"
 	"strings"
@@ -191,5 +192,24 @@ func TestParseServiceCIDR(t *testing.T) {
 		if tc.ok && got.String() != tc.want {
 			t.Fatalf("%q: got %s, want %s", tc.in, got, tc.want)
 		}
+	}
+}
+
+// unroutableForwards refuses every forward the way a gateway refuses a remote
+// it cannot reach.
+type unroutableForwards struct{ *fakeForwards }
+
+func (unroutableForwards) Expose(f netgw.Forward) (netgw.Forward, error) {
+	return netgw.Forward{}, fmt.Errorf("%w: %s", netgw.ErrForwardUnroutable, f.Remote)
+}
+
+// A forward whose remote the gateway cannot reach, a service address on a
+// gateway with no service range among them, is a 422: the request was read,
+// and it names something this gateway cannot carry.
+func TestForwardsAPIRefusesAnUnroutableRemote(t *testing.T) {
+	h := forwardsHandler(unroutableForwards{&fakeForwards{}})
+	w := call(t, h, http.MethodPost, "/forwards", `{"local":"127.0.0.1:1","remote":"10.96.0.20:80"}`)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("got %d, want 422 (%s)", w.Code, w.Body)
 	}
 }
