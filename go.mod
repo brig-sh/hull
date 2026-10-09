@@ -14,7 +14,7 @@ require (
 	github.com/opencontainers/runtime-spec v1.2.1
 	github.com/sirupsen/logrus v1.9.4
 	github.com/urfave/cli/v3 v3.10.1
-	github.com/urunc-dev/urunc v0.8.1-0.20261006162953-6c062f39c5bb
+	github.com/urunc-dev/urunc v0.8.1-0.20261009113523-a58f31afce08
 	golang.org/x/sys v0.47.0
 	golang.org/x/term v0.45.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -98,8 +98,10 @@ require (
 // The darwin work hull depends on -- the Vz backend, exec, console, the GUI
 // window flags, the HVI backend and the generic container initrd -- is the
 // urunc-dev/urunc branch feat/initrd-hvi-backend-v0.8.0: the darwin commits
-// rebased onto the v0.8.0 release. The require below is that branch's tip.
-// No replace: the module is the upstream repository itself.
+// rebased onto the v0.8.0 release. The require below is
+// feat/multi-disk-darwin, that branch's tip plus the multi-disk builders,
+// until they merge into it. No replace: the module is the upstream
+// repository itself.
 //
 // hull tracks that branch rather than urunc main. main has no hvi backend at
 // all and renders netdev.* with no guard for an empty address, so it cannot
