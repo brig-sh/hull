@@ -20,6 +20,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -89,7 +90,8 @@ func forwardNetwork(t *testing.T, start ...Forward) *Network {
 }
 
 // freePort takes a port from the host and gives it straight back, so the
-// number is one nothing else on this machine is listening on.
+// number is one nothing on this machine was listening on at 127.0.0.1 just
+// now. That is all it promises: see exposeFresh for what it does not.
 func freePort(t *testing.T) string {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -100,17 +102,103 @@ func freePort(t *testing.T) string {
 	return strconv.Itoa(l.Addr().(*net.TCPAddr).Port)
 }
 
+// exposeFresh publishes the forwards on one port the binds accepted, and
+// returns what was installed along with the port. Each Local is a host with
+// no port -- "127.0.0.1", "0.0.0.0", or "" for the empty host -- and the
+// forwards must differ in protocol: whether two addresses can share a port
+// within one protocol is the kernel's answer, refused as ErrForwardExists
+// without the errno this helper redraws on, and a test asking that question
+// has to ask it itself.
+//
+// A port freePort hands back can be in use by the time Expose binds it. The
+// kernel's search for a free port is exact-address for a SO_REUSEADDR socket,
+// which every Go listener is, so a port another process holds on 0.0.0.0 is
+// still handed out on 127.0.0.1; the probe is TCP, so a UDP holder is never
+// seen at all; and the other packages' tests run beside this one and take
+// ports as they go. Either way the bind fails with the port held outside this
+// gateway, which says nothing about the gateway and failed a CI run over a
+// number. The test draws again instead, withdrawing whatever of the set it
+// had already installed, so the forwards end up on one port together.
+func exposeFresh(t *testing.T, n *Network, forwards ...Forward) ([]Forward, string) {
+	t.Helper()
+	// As Expose reads them: the empty protocol is tcp, and case is ignored.
+	protocols := map[string]bool{}
+	for _, f := range forwards {
+		protocol, err := parseProtocol(f.Protocol)
+		if err != nil {
+			t.Fatalf("exposeFresh: %v", err)
+		}
+		if protocols[protocol] {
+			t.Fatalf("exposeFresh: two %s forwards cannot share a port through this helper", protocol)
+		}
+		protocols[protocol] = true
+	}
+	var err error
+	for range 10 {
+		port := freePort(t)
+		var installed []Forward
+		for _, f := range forwards {
+			f.Local += ":" + port
+			var got Forward
+			got, err = n.Expose(f)
+			if err != nil {
+				break
+			}
+			installed = append(installed, got)
+		}
+		if err == nil {
+			return installed, port
+		}
+		for _, got := range installed {
+			if _, uerr := n.Unexpose(got.Protocol, got.Local); uerr != nil {
+				t.Fatalf("Unexpose after a redraw: %v", uerr)
+			}
+		}
+		if !errors.Is(err, syscall.EADDRINUSE) {
+			break
+		}
+	}
+	t.Fatalf("Expose on a fresh port: %v", err)
+	return nil, ""
+}
+
+// startupNetworkFresh is forwardNetwork for a startup forward on a fresh
+// port, drawing again the way exposeFresh does: New installs the forward
+// through the same bind and refuses the same way.
+func startupNetworkFresh(t *testing.T, f Forward) (*Network, string) {
+	t.Helper()
+	var err error
+	for range 10 {
+		port := freePort(t)
+		f := f
+		f.Local += ":" + port
+		var n *Network
+		n, err = New(Config{
+			MTU:               1500,
+			Subnet:            testSubnet,
+			GatewayIP:         testGatewayIP,
+			GatewayMacAddress: testGatewayMA,
+			Forwards:          []Forward{f},
+		})
+		if err == nil {
+			return n, port
+		}
+		if !errors.Is(err, syscall.EADDRINUSE) {
+			break
+		}
+	}
+	t.Fatalf("New with a startup forward on a fresh port: %v", err)
+	return nil, ""
+}
+
 func TestExposeAndUnexposeChangeARunningGateway(t *testing.T) {
 	n := forwardNetwork(t)
 	if got := n.Forwards(); len(got) != 0 {
 		t.Fatalf("a new gateway has %d forwards", len(got))
 	}
 
-	local := "127.0.0.1:" + freePort(t)
-	installed, err := n.Expose(Forward{Local: local, Remote: "10.87.0.2:80"})
-	if err != nil {
-		t.Fatalf("Expose: %v", err)
-	}
+	got, port := exposeFresh(t, n, Forward{Local: "127.0.0.1", Remote: "10.87.0.2:80"})
+	installed, local := got[0], "127.0.0.1:"+port
 	// What was installed, with the defaults filled in -- this is what the API
 	// answers a POST with, and a caller that omitted the protocol must not be
 	// told it is empty when a later read says tcp.
@@ -142,10 +230,8 @@ func TestExposeAndUnexposeChangeARunningGateway(t *testing.T) {
 
 func TestExposeRefusesALocalAddressAlreadyPublished(t *testing.T) {
 	n := forwardNetwork(t)
-	local := "127.0.0.1:" + freePort(t)
-	if _, err := n.Expose(Forward{Local: local, Remote: "10.87.0.2:80"}); err != nil {
-		t.Fatalf("Expose: %v", err)
-	}
+	_, port := exposeFresh(t, n, Forward{Local: "127.0.0.1", Remote: "10.87.0.2:80"})
+	local := "127.0.0.1:" + port
 	_, err := n.Expose(Forward{Local: local, Remote: "10.87.0.3:80"})
 	if !errors.Is(err, ErrForwardExists) {
 		t.Fatalf("second Expose: %v is not ErrForwardExists", err)
@@ -161,12 +247,8 @@ func TestExposeRefusesALocalAddressAlreadyPublished(t *testing.T) {
 // same collision as publishing either twice.
 func TestExposeReadsAnEmptyHostAsAllInterfaces(t *testing.T) {
 	n := forwardNetwork(t)
-	port := freePort(t)
-	got, err := n.Expose(Forward{Local: ":" + port, Remote: "10.87.0.2:80"})
-	if err != nil {
-		t.Fatalf("Expose: %v", err)
-	}
-	if got.Local != "0.0.0.0:"+port {
+	installed, port := exposeFresh(t, n, Forward{Local: "", Remote: "10.87.0.2:80"})
+	if got := installed[0]; got.Local != "0.0.0.0:"+port {
 		t.Fatalf("Expose installed %q, want 0.0.0.0:%s", got.Local, port)
 	}
 	if _, err := n.Expose(Forward{Local: "0.0.0.0:" + port, Remote: "10.87.0.3:80"}); !errors.Is(err, ErrForwardExists) {
@@ -188,10 +270,7 @@ func TestExposeLeavesAnOverlappingAddressToTheKernel(t *testing.T) {
 		{"127.0.0.1", "0.0.0.0"},
 	} {
 		n := forwardNetwork(t)
-		port := freePort(t)
-		if _, err := n.Expose(Forward{Local: order[0] + ":" + port, Remote: "10.87.0.2:80"}); err != nil {
-			t.Fatalf("Expose(%s): %v", order[0], err)
-		}
+		_, port := exposeFresh(t, n, Forward{Local: order[0], Remote: "10.87.0.2:80"})
 		_, err := n.Expose(Forward{Local: order[1] + ":" + port, Remote: "10.87.0.3:80"})
 		if err != nil && !errors.Is(err, ErrForwardExists) {
 			t.Fatalf("Expose(%s) after %s: %v is neither installed nor ErrForwardExists",
@@ -223,10 +302,7 @@ func TestExposeReportsAPortHeldOutsideTheGatewayAsPublished(t *testing.T) {
 // hosts: the set's keys differ, so only the bind refuses.
 func TestExposeNamesTheForwardHoldingAPortItCannotBind(t *testing.T) {
 	n := forwardNetwork(t)
-	port := freePort(t)
-	if _, err := n.Expose(Forward{Protocol: "udp", Local: "0.0.0.0:" + port, Remote: "10.87.0.2:53"}); err != nil {
-		t.Fatalf("Expose: %v", err)
-	}
+	_, port := exposeFresh(t, n, Forward{Protocol: "udp", Local: "0.0.0.0", Remote: "10.87.0.2:53"})
 	_, err := n.Expose(Forward{Protocol: "udp", Local: "127.0.0.1:" + port, Remote: "10.87.0.3:53"})
 	if !errors.Is(err, ErrForwardExists) {
 		t.Fatalf("udp beside a published wildcard: %v is not ErrForwardExists", err)
@@ -272,13 +348,12 @@ func TestUnexposeTellsAnUnreadableTargetFromAnAbsentOne(t *testing.T) {
 // addresses on one port are two forwards.
 func TestExposeAllowsOnePortOnTwoSpecificAddresses(t *testing.T) {
 	n := forwardNetwork(t)
-	port := freePort(t)
-	if _, err := n.Expose(Forward{Local: "127.0.0.1:" + port, Remote: "10.87.0.2:80"}); err != nil {
-		t.Fatalf("Expose: %v", err)
-	}
-	if _, err := n.Expose(Forward{Protocol: "udp", Local: "127.0.0.1:" + port, Remote: "10.87.0.3:80"}); err != nil {
-		t.Fatalf("udp beside tcp on one address: %v", err)
-	}
+	// Both through the helper: the probe is TCP, so the port it hands out is
+	// unverified for UDP, and a UDP holder elsewhere would fail the second
+	// bind with no way to draw again from here.
+	exposeFresh(t, n,
+		Forward{Local: "127.0.0.1", Remote: "10.87.0.2:80"},
+		Forward{Protocol: "udp", Local: "127.0.0.1", Remote: "10.87.0.3:80"})
 	if got := n.Forwards(); len(got) != 2 {
 		t.Fatalf("want two forwards, got %+v", got)
 	}
@@ -292,8 +367,8 @@ func TestUnexposeRefusesAPortNothingPublished(t *testing.T) {
 }
 
 func TestStartupForwardsAreListedLikeAnyOther(t *testing.T) {
-	local := "127.0.0.1:" + freePort(t)
-	n := forwardNetwork(t, Forward{Protocol: "tcp", Local: local, Remote: "10.87.0.2:8080"})
+	n, port := startupNetworkFresh(t, Forward{Protocol: "tcp", Local: "127.0.0.1", Remote: "10.87.0.2:8080"})
+	local := "127.0.0.1:" + port
 	want := []Forward{{"tcp", local, "10.87.0.2:8080"}}
 	if got := n.Forwards(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("Forwards = %+v, want %+v", got, want)
