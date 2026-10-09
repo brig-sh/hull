@@ -396,7 +396,7 @@ func TestWatchHostsResolvesBeforeTheFirstTick(t *testing.T) {
 	go policy.WatchHosts(ctx, res, time.Hour)
 
 	guest, dst := addr(t, testGuestIP), addr(t, "93.184.216.34")
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(replyWait)
 	for !policy.AllowsConnection(guest, dst) {
 		if time.Now().After(deadline) {
 			t.Fatal("WatchHosts did not resolve before its first tick")
@@ -415,7 +415,7 @@ func TestWatchHostsStopsWithTheContext(t *testing.T) {
 	cancel()
 	select {
 	case <-done:
-	case <-time.After(3 * time.Second):
+	case <-time.After(replyWait):
 		t.Fatal("WatchHosts outlived its context")
 	}
 }

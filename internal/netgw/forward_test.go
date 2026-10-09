@@ -164,7 +164,9 @@ func exposeFresh(t *testing.T, n *Network, forwards ...Forward) ([]Forward, stri
 
 // startupNetworkFresh is forwardNetwork for a startup forward on a fresh
 // port, drawing again the way exposeFresh does: New installs the forward
-// through the same bind and refuses the same way.
+// through the same bind and refuses the same way. A refused New leaves its
+// stack and goroutines running, as every test's network does -- the package
+// has no Close -- so a redraw here costs one more of those.
 func startupNetworkFresh(t *testing.T, f Forward) (*Network, string) {
 	t.Helper()
 	var err error
