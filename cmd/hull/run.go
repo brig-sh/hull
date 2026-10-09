@@ -274,6 +274,7 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 
 	// Create OCI client
 	client := ociclient.New(s)
+	client.InstanceLive = instanceMayHaveVMM
 
 	log.Debugf("Running instance %s from image %s", instanceName, imageRef)
 

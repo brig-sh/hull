@@ -38,6 +38,13 @@ type Client struct {
 	store *store.Store
 	// Quiet suppresses pull progress output on stderr.
 	Quiet bool
+	// InstanceLive says whether an instance record can still have a VMM
+	// behind it, which is what keeps a pull from displacing the image that
+	// VMM is running on. hull wires in the check rmi uses, which looks at
+	// the process; nil falls back to the record's status alone, which reads
+	// a record left at "running" by a death as live and so keeps the image
+	// for it until something reconciles the record.
+	InstanceLive func(*store.InstanceState) bool
 }
 
 // PullResult contains the result of a successful image pull
@@ -182,17 +189,45 @@ func (c *Client) PullPlatform(ctx context.Context, ref, platformStr string) (*Pu
 	// This is what makes --pull=always affordable: it costs a manifest lookup
 	// rather than a full re-download and re-unpack of an unchanged image.
 	// The metadata is rewritten so PulledAt and Ref track this resolution.
+	//
+	// Complete is not the same as whole. An image can lose part of its tree
+	// after it was published and look no different from here. The entry
+	// count the pull recorded is checked, and fewer entries than recorded
+	// falls through to a fresh unpack, which displaces the damaged image the
+	// way any re-pull would.
+	//
+	// Unless an instance refers to it. A running one has the rootfs shared
+	// into its guest, and displacing the directory would pull the root
+	// filesystem out from under it; rmi and prune refuse the same way. The
+	// damaged image is served as is, with the way out in the warning.
 	if c.store.ImageComplete(digestStr) {
-		log.Debugf("image %s already present, skipping unpack", digestStr)
-		if _, err := c.store.SaveImage(digestStr, metadata); err != nil {
-			return nil, fmt.Errorf("failed to refresh image metadata: %w", err)
+		damaged := c.store.VerifyImage(digestStr)
+		if damaged != nil {
+			holders, err := c.imageHeld(digestStr)
+			if err != nil {
+				return nil, err
+			}
+			if len(holders) > 0 {
+				log.Warnf("image %s is damaged (%v) but instances %s refer to it, so it is kept as is; "+
+					"stop them and use `hull rmi --force`, or remove them with `hull rm --force`, then pull again",
+					digestStr, damaged, strings.Join(holders, ", "))
+				damaged = nil
+			} else {
+				log.Warnf("image %s will be unpacked again: %v", digestStr, damaged)
+			}
 		}
-		return &PullResult{
-			Digest:    digestStr,
-			Size:      totalSize,
-			Labels:    labels,
-			Platforms: []string{fmt.Sprintf("%s/%s", config.OS, config.Architecture)},
-		}, nil
+		if damaged == nil {
+			log.Debugf("image %s already present, skipping unpack", digestStr)
+			if _, err := c.store.SaveImage(digestStr, metadata); err != nil {
+				return nil, fmt.Errorf("failed to refresh image metadata: %w", err)
+			}
+			return &PullResult{
+				Digest:    digestStr,
+				Size:      totalSize,
+				Labels:    labels,
+				Platforms: []string{fmt.Sprintf("%s/%s", config.OS, config.Architecture)},
+			}, nil
+		}
 	}
 
 	// Build the image atomically: unpack into a temp sibling and rename it
@@ -256,14 +291,40 @@ func (c *Client) PullPlatform(ctx context.Context, ref, platformStr string) (*Pu
 	if err := store.WriteUnpackSchema(tmpDir); err != nil {
 		return nil, fmt.Errorf("failed to stamp the unpack schema: %w", err)
 	}
+	// And the size of the tree it was published with, so a later pull can tell
+	// whether it is still all there.
+	if err := store.WriteRootfsEntries(tmpDir); err != nil {
+		return nil, fmt.Errorf("failed to record the rootfs entry count: %w", err)
+	}
 
-	// Publish by swapping directories, under the store lock; see CommitImage
-	// for why neither half is optional, and why it takes the staging lock to
-	// release it itself.
-	if err := c.store.CommitImage(digestStr, tmpDir, staging); err != nil {
+	// An instance may have started on the image while the layers were
+	// downloading, so check the holder records again before committing. A run
+	// is only visible here once launchVMM records its image digest; earlier
+	// bundle preparation and rootfs cloning are not covered, nor is a holder
+	// recorded between this check and the swap. Keep the image a recorded
+	// holder has and discard this pull's copy with the staging directory.
+	holders, err := c.imageHeld(digestStr)
+	if err != nil {
 		return nil, err
 	}
-	published = true
+	if len(holders) > 0 {
+		log.Warnf("image %s is in use by instances %s, so the image they have is kept as is; "+
+			"stop them and use `hull rmi --force`, or remove them with `hull rm --force`, then pull again",
+			digestStr, strings.Join(holders, ", "))
+		// The image on disk is theirs; the metadata only records what this
+		// pull resolved, as the early skip above records it.
+		if _, err := c.store.SaveImage(digestStr, metadata); err != nil {
+			return nil, fmt.Errorf("failed to refresh image metadata: %w", err)
+		}
+	} else {
+		// Publish by swapping directories, under the store lock; see
+		// CommitImage for why neither half is optional, and why it takes
+		// the staging lock to release it itself.
+		if err := c.store.CommitImage(digestStr, tmpDir, staging); err != nil {
+			return nil, err
+		}
+		published = true
+	}
 
 	// Get available platforms
 	platforms := []string{fmt.Sprintf("%s/%s", config.OS, config.Architecture)}
@@ -274,6 +335,41 @@ func (c *Client) PullPlatform(ctx context.Context, ref, platformStr string) (*Pu
 		Labels:    labels,
 		Platforms: platforms,
 	}, nil
+}
+
+// imageHeld returns the ids of the instances the image on disk must be kept
+// for, which is every live holder, and the stopped ones too when the image
+// is complete.
+//
+// A live instance has the image's rootfs shared into its guest, whatever
+// the cache thinks of that image: a rootfs stamped with an older unpack
+// schema is a miss here and a perfectly good root filesystem to a guest
+// already booted on it, and replacing the directory under that guest is
+// not a repair. rmi refuses over the same records, with the same test of
+// liveness when the caller wired one in. A stopped instance only expects
+// the image back on its next start, so a complete one is kept for it and
+// an incomplete one is what this pull replaces for it.
+func (c *Client) imageHeld(digest string) ([]string, error) {
+	holders, err := c.store.ImageHolders(digest)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list the instances using image %s: %w", digest, err)
+	}
+	complete := c.store.ImageComplete(digest)
+	var ids []string
+	for _, h := range holders {
+		if c.instanceLive(h) || complete {
+			ids = append(ids, h.ID)
+		}
+	}
+	return ids, nil
+}
+
+// instanceLive applies InstanceLive, or the status-only fallback.
+func (c *Client) instanceLive(inst *store.InstanceState) bool {
+	if c.InstanceLive != nil {
+		return c.InstanceLive(inst)
+	}
+	return inst.Status == "running" || inst.Status == store.StatusStarting
 }
 
 // keepIndexDigest carries an index digest already recorded for this image over

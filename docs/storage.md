@@ -181,7 +181,8 @@ in the name only keeps two pulls' directories apart.
 │   ├── image.json
 │   ├── oci-config.json
 │   ├── rootfs/                  the unpacked image
-│   └── (unpack-schema stamp)
+│   ├── unpack-schema            the layout version rootfs/ was written with
+│   └── rootfs-entries           how many entries rootfs/ held when published
 ├── assets/                      generic boot assets, shared across instances
 │   ├── Image                    the kernel; bzImage on amd64
 │   ├── container-initrd
@@ -447,6 +448,26 @@ only when its `image.json`, its unpacked `rootfs/` and a matching unpack-schema
 stamp are all present. Metadata alone is a miss, so an interrupted pull heals
 itself on the next run instead of poisoning every later one. The current layout
 version is 3; bumping it makes every older rootfs a miss that gets re-unpacked.
+
+A pull also records how many entries `rootfs/` held when it was published, in
+`rootfs-entries`. A pull that resolves to a digest the store already holds
+counts them again before deciding there is nothing to unpack, and re-unpacks
+the image when entries have gone missing since: an image that lost part of
+its tree after publication is repaired by pulling it again, rather than only
+by `hull rmi`. The count is taken after the last layer is unpacked, so it
+cannot tell a tree that was already short when it was published; that case
+still needs `hull rmi`. An image an instance refers to is never displaced
+this way, running or stopped: a running guest has the rootfs shared in, and a
+stopped instance expects it back on start. The pull warns, names the
+instances, and serves the image as is. Stop the instances and use
+`hull rmi --force`, or remove them with `hull rm --force`, then pull again.
+The pull checks holders again before publishing, but a run only becomes
+visible to this check once `launchVMM` records its image digest, after bundle
+preparation and rootfs cloning. A holder recorded between the check and the
+swap is also outside this protection. An image pulled by a hull from before the
+count existed carries none and is trusted. The count is only read on the pull
+path, so `hull run` pays for it only under `--pull=always`; with the default
+policy an image it already holds is served as is.
 
 A pull commits by directory rename, not by deleting in place. Layers unpack into
 `<digest>.tmp-<pid>`, any existing image is displaced to `<digest>.old-<pid>-<unique>`,
