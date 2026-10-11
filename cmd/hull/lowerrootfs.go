@@ -23,6 +23,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -153,13 +154,17 @@ func lowerRootfsFresh(disk, imageDir string) bool {
 }
 
 // lowerRootfsGeometry sizes the read-only image from the rootfs it holds:
-// every file's size rounded up to a block, one block per directory, symlink
-// and other entry, plus 20% and 64 MiB of slack for the filesystem's own
+// every file's size rounded up to a block, counted once however many hard
+// links name it (busybox links its applets to one binary, and counting each
+// link made a 1 MiB image 657 MiB), one block per directory, symlink and
+// other entry, plus 20% and 64 MiB of slack for the filesystem's own
 // metadata. The file is sparse, so the slack costs no host space. The inode
 // count is the entry count plus 20% and 4096, since an image of many small
 // files runs out of inodes before blocks at mke2fs's default ratio.
 func lowerRootfsGeometry(rootfsDir string) (sizeMB int, inodes int64, err error) {
 	var bytes, entries int64
+	type fileID struct{ dev, ino uint64 }
+	seen := map[fileID]bool{}
 	walkErr := filepath.WalkDir(rootfsDir, func(_ string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -169,6 +174,13 @@ func lowerRootfsGeometry(rootfsDir string) (sizeMB int, inodes int64, err error)
 			info, infoErr := d.Info()
 			if infoErr != nil {
 				return infoErr
+			}
+			if st, ok := info.Sys().(*syscall.Stat_t); ok && st.Nlink > 1 {
+				id := fileID{uint64(st.Dev), st.Ino}
+				if seen[id] {
+					return nil
+				}
+				seen[id] = true
 			}
 			bytes += (info.Size() + ext4BlockSize - 1) / ext4BlockSize * ext4BlockSize
 		} else {
