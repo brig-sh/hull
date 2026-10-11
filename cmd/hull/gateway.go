@@ -22,6 +22,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -96,19 +97,31 @@ and no egress rule applies to it.
 With --api the gateway serves /forwards on that socket, which publishes a
 guest port and withdraws it again while the guest is running. GET lists what
 is published, POST takes {protocol, local, remote}, and DELETE takes protocol
-and local as query parameters. This is the only part of a running gateway
-that can change; the network and the rules are read once at startup.
+and local as query parameters.
+
+With --service-cidr the gateway also routes service addresses, the way a
+Kubernetes ClusterIP does: a connection to an address in that range is
+carried to one of the endpoints the service table lists for it, in turn. The
+table is served on the API socket as /services. GET returns it, and PUT
+replaces all of it with the JSON array sent. An endpoint marked host is
+dialed from the host; any other is a guest on the subnet. Service traffic is
+not egress and no egress rule applies to it. An endpoint sees the gateway's
+address as the source of a connection, not the client guest's.
+
+The forwards and the service table are the parts of a running gateway that
+can change; the network and the rules are read once at startup.
 
 IPv6 is dropped outright. The netstack does not forward IPv6 yet, so no
 guest reaches the outside world over it, with or without a policy.`),
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "socket", Required: true, Usage: "control socket path (required)"},
-			&cli.StringFlag{Name: "api", Usage: "HTTP API socket path (probe, leases and the /forwards endpoint)"},
+			&cli.StringFlag{Name: "api", Usage: "HTTP API socket path (probe, leases, and the /forwards and /services endpoints)"},
 			&cli.StringFlag{Name: "qemu-socket", Usage: "unix socket for the QEMU stream netdev, used by both the QEMU and HVI backends (default: --socket plus .qemu)"},
 			&cli.StringFlag{Name: "subnet", Value: "10.87.0.0/24", Usage: "virtual subnet CIDR"},
 			&cli.StringFlag{Name: "gateway-ip", Value: "10.87.0.1", Usage: "gateway IP on the subnet"},
 			&cli.StringSliceFlag{Name: "forward", Usage: "host port forward, hostaddr:port=guestip:port (repeatable)"},
 			&cli.StringSliceFlag{Name: "host", Usage: "static DNS A record served by the gateway, name=ip (repeatable)"},
+			&cli.StringFlag{Name: "service-cidr", Usage: "service address range routed by the /services table, e.g. 10.96.0.0/12; without it the table stays empty"},
 			&cli.StringFlag{Name: "egress-default", Usage: "verdict for a connection no egress rule matches, allow or deny; without it egress is unfiltered"},
 			&cli.StringSliceFlag{Name: "egress-allow", Usage: "egress allow rule, host=<glob> or cidr=<cidr> (repeatable)"},
 			&cli.StringSliceFlag{Name: "egress-deny", Usage: "egress deny rule, host=<glob> or cidr=<cidr> (repeatable)"},
@@ -120,6 +133,10 @@ guest reaches the outside world over it, with or without a policy.`),
 			// Parse the policy before anything else starts: a rule the
 			// gateway cannot make sense of has to stop it, not degrade it.
 			policy, err := netgw.ParseEgressPolicy(cmd.String("egress-default"), cmd.StringSlice("egress-allow"), cmd.StringSlice("egress-deny"))
+			if err != nil {
+				return err
+			}
+			serviceCIDR, err := parseServiceCIDR(cmd.String("service-cidr"))
 			if err != nil {
 				return err
 			}
@@ -148,7 +165,7 @@ guest reaches the outside world over it, with or without a policy.`),
 			if qemuSock == "" {
 				qemuSock = qemuGatewaySock(cmd.String("socket"))
 			}
-			return runGateway(ctx, cmd.String("socket"), cmd.String("api"), qemuSock, cmd.String("subnet"), cmd.String("gateway-ip"), forwards, cmd.StringSlice("host"), policy, cmd.Duration("egress-refresh"), sup)
+			return runGateway(ctx, cmd.String("socket"), cmd.String("api"), qemuSock, cmd.String("subnet"), cmd.String("gateway-ip"), forwards, cmd.StringSlice("host"), policy, cmd.Duration("egress-refresh"), serviceCIDR, sup)
 		},
 	}
 }
@@ -165,7 +182,7 @@ const gatewayShutdownGrace = 20 * time.Second
 // handful of rules is not a source of DNS traffic worth noticing.
 const egressRefreshDefault = 30 * time.Second
 
-func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, gatewayIP string, forwards []netgw.Forward, hosts []string, policy *netgw.Policy, egressRefresh time.Duration, sup *supervisor) error {
+func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, gatewayIP string, forwards []netgw.Forward, hosts []string, policy *netgw.Policy, egressRefresh time.Duration, serviceCIDR netip.Prefix, sup *supervisor) error {
 	// Serve service names from the gateway's DNS in addition to the
 	// /etc/hosts injection, so images that bypass /etc/hosts keep working.
 	// Non-matching queries fall through to the host resolver.
@@ -202,6 +219,7 @@ func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, ga
 		DNSZones:          dns,
 		Egress:            policy,
 		EgressRefresh:     egressRefresh,
+		ServiceCIDR:       serviceCIDR,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create virtual network: %w", err)
@@ -219,6 +237,9 @@ func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, ga
 	}
 	defer func() { _ = l.Close(); _ = os.Remove(sockPath) }()
 	log.Infof("network-gateway on %s (subnet %s, gw %s, %d forwards, %s)", sockPath, subnet, gatewayIP, len(forwards), policy.Summary())
+	if serviceCIDR.IsValid() {
+		log.Infof("network-gateway: routing services in %s", serviceCIDR)
+	}
 
 	// Probe API: the gateway is the only process that can dial into the
 	// virtual network, so TCP healthchecks run here.
@@ -253,6 +274,7 @@ func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, ga
 			_ = json.NewEncoder(w).Encode(vn.Leases())
 		})
 		mux.Handle("/forwards", forwardsHandler(vn))
+		mux.Handle("/services", servicesHandler(vn))
 		srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 		go func() { _ = srv.Serve(apiL) }()
 	}
@@ -747,7 +769,7 @@ func joinGateway(sockPath string) (*os.File, *net.UnixConn, error) {
 //	POST   /forwards  {protocol, local, remote}   publish one
 //	DELETE /forwards?protocol=tcp&local=addr:port withdraw one
 //
-// A forward is the one thing about a running gateway that can change. The
+// A forward, like the service table, can change on a running gateway. The
 // network and the egress rules are read once at startup, so a caller that
 // wants either of those restarts the gateway; a caller that wants a port
 // published does not, because restarting drops every member of the network
@@ -823,4 +845,74 @@ func forwardStatus(err error) int {
 	default:
 		return http.StatusInternalServerError
 	}
+}
+
+// parseServiceCIDR reads --service-cidr. An empty value is the zero prefix,
+// which leaves the service table inert.
+func parseServiceCIDR(s string) (netip.Prefix, error) {
+	if s == "" {
+		return netip.Prefix{}, nil
+	}
+	p, err := netip.ParsePrefix(s)
+	if err != nil {
+		return netip.Prefix{}, fmt.Errorf("invalid --service-cidr %q: %w", s, err)
+	}
+	if !p.Addr().Is4() {
+		return netip.Prefix{}, fmt.Errorf("invalid --service-cidr %q: the guest network is IPv4 only", s)
+	}
+	return p.Masked(), nil
+}
+
+// servicesHandler serves the gateway's service table.
+//
+//	GET /services            the table, as a JSON array
+//	PUT /services  [...]     replace the whole table
+//
+// The table is replaced whole rather than edited entry by entry, so the
+// caller keeps the source of truth and the gateway keeps no history: a caller
+// that restarts sends the table again and nothing is left over from before.
+//
+// A body that is not a JSON array of services is 400. A table the gateway
+// cannot route, a virtual address outside --service-cidr, an unknown
+// protocol or a guest endpoint off the subnet among them, is 422. Either way
+// the table already installed stays as it was.
+func servicesHandler(vn serviceTable) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodGet:
+			_ = json.NewEncoder(w).Encode(vn.Services())
+		case http.MethodPut:
+			var in []netgw.Service
+			dec := json.NewDecoder(r.Body)
+			// A misspelled field would otherwise be dropped in silence, and a
+			// service installed without the endpoints its caller meant.
+			dec.DisallowUnknownFields()
+			if err := dec.Decode(&in); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if err := vn.SetServices(in); err != nil {
+				status := http.StatusInternalServerError
+				if errors.Is(err, netgw.ErrServiceInvalid) {
+					status = http.StatusUnprocessableEntity
+				}
+				http.Error(w, err.Error(), status)
+				return
+			}
+			installed := vn.Services()
+			log.Infof("network-gateway: installed %d services", len(installed))
+			_ = json.NewEncoder(w).Encode(installed)
+		default:
+			http.Error(w, "use GET or PUT", http.StatusMethodNotAllowed)
+		}
+	})
+}
+
+// serviceTable is what the /services endpoint needs of a gateway's network.
+// An interface for the reason forwarder is one: a netgw.ServiceTable stands
+// in for it in a test, without a netstack.
+type serviceTable interface {
+	SetServices([]netgw.Service) error
+	Services() []netgw.Service
 }

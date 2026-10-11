@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"net/netip"
 	"strconv"
 	"time"
 
@@ -77,6 +78,10 @@ type Config struct {
 	// EgressRefresh is how often the literal host rules are re-resolved so
 	// the policy follows a name whose addresses rotate. Zero turns it off.
 	EgressRefresh time.Duration
+	// ServiceCIDR is the range service virtual addresses are drawn from.
+	// Traffic to it is routed by the service table rather than dialed from
+	// the host. Zero leaves the table empty and nothing routed by it.
+	ServiceCIDR netip.Prefix
 
 	// dial opens the host-side connection. Tests replace it; nil means
 	// net.Dial.
@@ -84,6 +89,9 @@ type Config struct {
 	// resolve is the host-side resolver the gateway forwards to. Tests
 	// replace it; nil means the host's own.
 	resolve resolver
+	// serviceDialTimeout bounds one attempt to reach a guest service
+	// endpoint. Tests raise it; zero means defaultServiceDialTimeout.
+	serviceDialTimeout time.Duration
 }
 
 // Network is a running user-mode network. Members join it by handing over a
@@ -93,6 +101,7 @@ type Network struct {
 	networkSwitch *tap.Switch
 	ipPool        *tap.IPPool
 	forwards      *forwards
+	services      *ServiceTable
 	egress        *Policy
 	resolver      resolver
 	egressRefresh time.Duration
@@ -105,6 +114,10 @@ func New(cfg Config) (*Network, error) {
 	}
 	if cfg.MTU < 0 || cfg.MTU > math.MaxInt32 {
 		return nil, errors.New("mtu is out of range")
+	}
+	services, err := newServices(cfg)
+	if err != nil {
+		return nil, err
 	}
 
 	ipPool := tap.NewIPPool(subnet)
@@ -122,7 +135,7 @@ func New(cfg Config) (*Network, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot create network stack: %w", err)
 	}
-	fwd, err := addServices(cfg, s, ipPool)
+	fwd, err := addServices(cfg, s, ipPool, services)
 	if err != nil {
 		return nil, fmt.Errorf("cannot add network services: %w", err)
 	}
@@ -132,6 +145,7 @@ func New(cfg Config) (*Network, error) {
 		networkSwitch: networkSwitch,
 		ipPool:        ipPool,
 		forwards:      fwd,
+		services:      services,
 		egress:        cfg.Egress,
 		resolver:      upstreamResolver(cfg),
 		egressRefresh: cfg.EgressRefresh,
@@ -233,14 +247,40 @@ func createStack(cfg Config, endpoint stack.LinkEndpoint) (*stack.Stack, error) 
 	return s, nil
 }
 
-func addServices(cfg Config, s *stack.Stack, ipPool *tap.IPPool) (*forwards, error) {
+// newServices builds the service table for cfg. A service range that
+// overlaps the subnet is refused: a guest reaches a subnet address over the
+// switch, so a virtual address there would never reach the forwarder.
+func newServices(cfg Config) (*ServiceTable, error) {
+	subnet, err := netip.ParsePrefix(cfg.Subnet)
+	if err != nil {
+		return nil, fmt.Errorf("cannot parse subnet cidr: %w", err)
+	}
+	subnet = subnet.Masked()
+	cidr := cfg.ServiceCIDR
+	if cidr.IsValid() {
+		cidr = cidr.Masked()
+		if !cidr.Addr().Is4() {
+			return nil, fmt.Errorf("service cidr %s is not IPv4", cidr)
+		}
+		if cidr.Overlaps(subnet) {
+			return nil, fmt.Errorf("service cidr %s overlaps the subnet %s", cidr, subnet)
+		}
+	}
+	table := NewServiceTable(cidr, subnet)
+	if cfg.serviceDialTimeout > 0 {
+		table.dialTimeout = cfg.serviceDialTimeout
+	}
+	return table, nil
+}
+
+func addServices(cfg Config, s *stack.Stack, ipPool *tap.IPPool, services *ServiceTable) (*forwards, error) {
 	dial := cfg.dial
 	if dial == nil {
 		dial = net.Dial
 	}
 	rejects := newRejectLog()
-	s.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpForwarder(s, cfg.Egress, dial, rejects).HandlePacket)
-	s.SetTransportProtocolHandler(udp.ProtocolNumber, udpForwarder(s, cfg.Egress, dial, rejects).HandlePacket)
+	s.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpForwarder(s, cfg.Egress, services, dial, rejects).HandlePacket)
+	s.SetTransportProtocolHandler(udp.ProtocolNumber, udpForwarder(s, cfg.Egress, services, dial, rejects).HandlePacket)
 
 	if err := dnsServer(cfg, s); err != nil {
 		return nil, err
