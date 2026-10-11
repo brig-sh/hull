@@ -182,7 +182,9 @@ in the name only keeps two pulls' directories apart.
 │   ├── oci-config.json
 │   ├── rootfs/                  the unpacked image
 │   ├── unpack-schema            the layout version rootfs/ was written with
-│   └── rootfs-entries           how many entries rootfs/ held when published
+│   ├── rootfs-entries           how many entries rootfs/ held when published
+│   ├── rootfs.ext4              read-only ext4 of rootfs/, HULL_ROOTFS_MODE=overlay-block only, 0400
+│   └── rootfs.ext4.lock         flock serializing that build
 ├── assets/                      generic boot assets, shared across instances
 │   ├── Image                    the kernel; bzImage on amd64
 │   ├── container-initrd
@@ -194,6 +196,8 @@ in the name only keeps two pulls' directories apart.
     ├── bundle/                  config.json plus the rootfs symlink or image
     ├── log                      0600, detached runs only
     ├── checkpoint/              machine-id, vm.vzstate, rootfs.img, latest.json
+    ├── rootfs-upper.ext4        overlay upper disk (overlay-block, or HULL_HVI_ROOTFS_UPPER=block)
+    ├── rootfs-upper/            overlay upper directory (HULL_HVI_ROOTFS_UPPER=virtiofs)
     └── (QMP socket, agent socket, staged boot files)
 ```
 
@@ -223,6 +227,8 @@ survive.
 | `hvi`, generic container boot | a same-volume APFS copy-on-write clone of the cached image rootfs, exported read-write | **Yes**, in that instance's directory, until `hull rm` |
 | `virtiofs` or `9pfs`, not generic container boot | a full `cp -c -a` APFS clone of the image rootfs inside the instance directory | **Yes**, until `hull rm` |
 | `block` | a per-instance ext4 image at `<instance>/bundle/rootfs.ext4`, mode 0600 | **Yes**, until `hull rm` |
+| `HULL_ROOTFS_MODE=overlay-block` (`hvi` and `vz`, generic container boot) | overlayfs: the image's read-only ext4 `<image>/rootfs.ext4` as the lower (disk serial `disk0`) and `<instance>/rootfs-upper.ext4` as the upper (`disk1`) | **Yes**, in the upper disk, until `hull rm` |
+| `HULL_HVI_ROOTFS_UPPER=virtiofs` or `block` (`hvi`, generic container boot) | overlayfs: the shared image cache directory over read-only virtiofs as the lower, `<instance>/rootfs-upper/` or `<instance>/rootfs-upper.ext4` as the upper | **Yes**, in the upper, until `hull rm` |
 
 A freshly created instance holds no copy of the image at all: the bundle starts
 as a `config.json` plus a `rootfs` symlink into the image cache. What replaces
@@ -243,6 +249,46 @@ floor of 15 GiB, so every block-mode instance asks for at least 15 GiB of
 nominal filesystem capacity. Building it reads the cached rootfs and never
 duplicates it: the per-instance files are injected into the finished image with
 `debugfs`.
+
+The overlay-block lower is built the same way, once per image: `mke2fs -d`
+from the cached rootfs, the recorded ownership applied with `debugfs`, no
+journal, sized at the block-rounded contents plus 20%. The first run of an
+image pays for the build; later runs reuse the file until a re-unpack makes
+the image's unpack-schema stamp newer than it. The upper is created sparse on
+first boot and costs only what the guest writes. `hull rmi` and `hull prune`
+remove the lower with the image. `hull prune` counts the cached lower at its
+allocated size; `hull images` does not include it.
+
+### Extra image disks: `--image-disk`
+
+`hull run --image-disk IMAGE` (repeatable) attaches another image's cached
+read-only lower as a disk, for a guest supervisor that runs several images in
+one VM. hull pulls the image as `--pull` says and builds or reuses
+`<image>/rootfs.ext4` exactly as for the root. It applies to container boots on
+`hvi` and `vz`, and does not combine with `--rootfs-type block` or
+`HULL_HVI_ROOTFS_UPPER`.
+
+The VMM attaches four disks at most, `--disk` and `--disk-ro` together, so an
+overlay-block root (two disks) leaves room for two images, and a root that is
+not on disks leaves four. hull refuses a larger request before it pulls.
+Writable space is not attached per image: the guest uses the root's upper disk,
+which is the only writable disk, and keeps each image's upper and work
+directories in directories of their own on it.
+
+Serials follow argv order: the root pair first (`disk0` lower, `disk1` upper,
+when overlay-block), then the `--image-disk` images in the order given. hull
+writes `<instance>/disks.json` before it starts the VMM:
+
+```json
+{"disks": [
+  {"serial": "disk0", "role": "rootfs-lower", "path": "...", "readOnly": true, "image": "busybox", "digest": "sha256:..."},
+  {"serial": "disk1", "role": "rootfs-upper", "path": "...", "readOnly": false},
+  {"serial": "disk2", "role": "image-lower", "path": "...", "readOnly": true, "image": "nginx:alpine", "digest": "sha256:..."}
+]}
+```
+
+The lower's size counts a file once however many hard links name it, so a
+busybox image is a few tens of MiB apparent, not hundreds.
 
 ## Credentials on disk: read this before forwarding a secret
 
