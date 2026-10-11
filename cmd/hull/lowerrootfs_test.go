@@ -312,3 +312,43 @@ func TestLowerRootfsGeometry(t *testing.T) {
 		t.Errorf("%d inodes for 11 entries", inodes)
 	}
 }
+
+// Hard links name one file: an image that links many applet names to one
+// binary, as busybox does, is sized for that binary once, and the image
+// still builds into the size computed for it.
+func TestLowerRootfsGeometryCountsHardLinksOnce(t *testing.T) {
+	requireE2fsprogs(t)
+	imageDir := newImageDir(t)
+	bin := filepath.Join(imageDir, "rootfs", "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// 4 MiB of content, linked 100 times.
+	if err := os.WriteFile(filepath.Join(bin, "busybox"), make([]byte, 4<<20), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 100; i++ {
+		name := "applet" + string(rune('a'+i%26)) + string(rune('a'+i/26))
+		if err := os.Link(filepath.Join(bin, "busybox"), filepath.Join(bin, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sizeMB, _, err := lowerRootfsGeometry(filepath.Join(imageDir, "rootfs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sizeMB > 4+1+64+4 {
+		t.Errorf("size %d MiB: the linked binary was counted more than once", sizeMB)
+	}
+	disk, err := ensureLowerRootfs(context.Background(), imageDir)
+	if err != nil {
+		t.Fatalf("ensureLowerRootfs: %v", err)
+	}
+	info, err := os.Stat(disk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() > int64(sizeMB)<<20 {
+		t.Errorf("image is %d bytes, more than the %d MiB computed", info.Size(), sizeMB)
+	}
+}
