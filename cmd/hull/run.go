@@ -96,6 +96,13 @@ func runCommand() *cli.Command {
 				Usage: "share a directory the caller already holds open: FD:/guest/path[:ro|rw] (repeatable). " +
 					"The descriptor must be inherited across the exec, so clear FD_CLOEXEC on it first",
 			},
+			&cli.StringSliceFlag{
+				Name: "image-disk",
+				Usage: "attach another image's read-only ext4 as a disk (repeatable): the image is pulled as --pull says " +
+					"and its cached lower is built or reused as for the root. Serials follow argv order after the root's " +
+					"disks, and <instance>/disks.json lists them. Container boots on hvi or vz; an overlay-block root " +
+					"leaves room for two, any other root for four",
+			},
 			&cli.StringFlag{
 				Name:  "hypervisor",
 				Value: "",
@@ -781,6 +788,20 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	if overlayBlock && rootfsTypeOverride == "block" {
 		return errors.New("HULL_ROOTFS_MODE=overlay-block does not combine with --rootfs-type block")
 	}
+	imageDiskRefs := cmd.StringSlice("image-disk")
+	var imageDisks []imageDisk
+	if len(imageDiskRefs) > 0 {
+		switch {
+		case !containerBoot:
+			return errors.New("--image-disk applies to container boots only")
+		case rootfsTypeOverride == "block" || os.Getenv("HULL_HVI_ROOTFS_UPPER") != "":
+			return errors.New("--image-disk does not combine with --rootfs-type block or HULL_HVI_ROOTFS_UPPER, which claim a disk of their own")
+		}
+		imageDisks, err = resolveImageDisks(ctx, client, s, imageDiskRefs, imageDiskBudget(overlayBlock), pullPolicy, platform)
+		if err != nil {
+			return err
+		}
+	}
 	mountRootfs := ociSpec.Annotations["com.urunc.unikernel.mountRootfs"] == "true"
 
 	if containerBoot {
@@ -1417,6 +1438,17 @@ exec %s "$@"
 	}
 
 	_ = mountRootfs
+
+	if len(imageDisks) > 0 || len(containerBlockDevs) > 0 {
+		var recs []diskRecord
+		containerBlockDevs, recs, err = assembleDisks(containerBlockDevs, imageRef, imageDigest, imageDisks)
+		if err != nil {
+			return err
+		}
+		if err := writeDisksManifest(instanceDir, recs); err != nil {
+			return err
+		}
+	}
 
 	// Wire the parsed shares into the VMM arguments: each share is a tagged
 	// export (virtiofs on Vz, 9p on QEMU) mounted by the init wrapper.
