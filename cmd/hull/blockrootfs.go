@@ -237,6 +237,13 @@ func appendOwnershipScript(w *bytes.Buffer, rootfsDir string) (skipped int, err 
 		if line := modeFixup(q, d, mode); line != "" {
 			_, _ = buf.WriteString(line)
 		}
+		// The record has done its job once the lines above exist. Where mke2fs
+		// copied it into the image, take it out: it is host bookkeeping, and
+		// the guest has no use for it. Removing an attribute the inode does
+		// not have is silent in debugfs, so this needs no check of its own.
+		if ociclient.CopiedRecordXattr != "" && !symlink {
+			_, _ = fmt.Fprintf(buf, "ea_rm %s %s\n", q, ociclient.CopiedRecordXattr)
+		}
 		return nil
 	})
 	if flushErr := buf.Flush(); flushErr != nil {

@@ -38,6 +38,11 @@ import (
 // change with it.
 const guestAttrXattr = "com.nofire.hvi.linux-attr"
 
+// CopiedRecordXattr is empty on macOS: the record's name is in no namespace
+// e2fsprogs maps to ext4, so mke2fs -d leaves it out of the block image and
+// there is nothing for the builder to remove.
+const CopiedRecordXattr = ""
+
 // recordsOwnership says the manual extractor has to run on every layer, not
 // only on the ones archive.Apply could not finish.
 //

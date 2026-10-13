@@ -47,6 +47,15 @@ import (
 // practice.
 const guestAttrXattr = "user.com.nofire.hvi.linux-attr"
 
+// CopiedRecordXattr names the record as it arrives in a block image built
+// from the unpacked tree, so the builder can take it out again.
+//
+// mke2fs -d copies every user.* attribute it finds, so without that every
+// file in a Linux-built guest image carries hull's host-side bookkeeping,
+// visible to the guest through getfattr, `tar --xattrs` and `rsync -X`, and
+// the image differs from the one a Mac builds from the same layers.
+const CopiedRecordXattr = guestAttrXattr
+
 // recordsOwnership is true when the unpack cannot chown, i.e. when hull is not
 // root. A root unpack keeps the image's ownership in the filesystem itself,
 // mke2fs then copies the real one, and there is nothing to record.
