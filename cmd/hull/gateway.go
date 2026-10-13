@@ -569,7 +569,15 @@ func clearStaleUnixSocket(what, path, remedy string) error {
 		return fmt.Errorf("socket %s is in use by a running gateway", path)
 	case errors.Is(err, syscall.ECONNREFUSED):
 		// Nobody is listening: the file the last gateway left behind is
-		// ours to clear.
+		// ours to clear -- if it is a socket. macOS answers a connect to a
+		// regular file with ENOTSOCK, which lands in the refusal below, but
+		// Linux answers it with ECONNREFUSED, the same errno as a dead
+		// socket, and this removed whatever file the operator had at the
+		// path. Look at what is there before unlinking it.
+		if info, stErr := os.Lstat(path); stErr == nil && info.Mode()&fs.ModeSocket == 0 {
+			return fmt.Errorf("%s exists and is not a socket; refusing to remove it to "+
+				"bind the %s socket there", path, what)
+		}
 		if rmErr := os.Remove(path); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
 			return fmt.Errorf("failed to remove stale socket %s: %w", path, rmErr)
 		}
