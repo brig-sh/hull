@@ -1,5 +1,3 @@
-//go:build darwin
-
 // Copyright (c) 2026, NOFire AI
 // SPDX-License-Identifier: Apache-2.0
 

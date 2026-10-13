@@ -29,7 +29,7 @@ require (
 	github.com/apparentlymart/go-cidr v1.1.1 // indirect
 	github.com/cavaliergopher/cpio v1.0.1 // indirect
 	github.com/checkpoint-restore/go-criu/v6 v6.3.0 // indirect
-	github.com/cilium/ebpf v0.22.0 // indirect
+	github.com/cilium/ebpf v0.18.0 // indirect
 	github.com/containerd/cgroups/v3 v3.1.0 // indirect
 	github.com/containerd/console v1.0.5 // indirect
 	github.com/containerd/continuity v0.5.0 // indirect
@@ -111,3 +111,10 @@ require (
 // hull builds it from this tree: a change to the client and its use here land
 // in one commit, and the version above is a placeholder the replace resolves.
 replace github.com/brig-sh/hull/pkg/telemetry => ./pkg/telemetry
+
+// github.com/cilium/ebpf is held at v0.18.0. It reaches hull only in the
+// native Linux build, through urunc's cgo libcontainer code and
+// github.com/opencontainers/cgroups v0.0.4, which reads ProgramInfo.RunCount
+// and ProgramInfo.Runtime. ebpf v0.19.0 removed both, so a newer ebpf breaks
+// that build. cgroups v0.1.0 no longer reads them but does not build with
+// runc v1.3.6, so ebpf moves when cgroups and runc move.

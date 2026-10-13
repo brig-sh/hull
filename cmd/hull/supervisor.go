@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build darwin
-
 // Restart policies and the project supervisor.
 //
 // The per-project gateway daemon is already the one host process with the
