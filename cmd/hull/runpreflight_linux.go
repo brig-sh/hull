@@ -16,3 +16,9 @@ package main
 
 // platformRunPreflight applies checkLinuxRun.
 func platformRunPreflight(r runRequest) (runRequest, error) { return checkLinuxRun(r) }
+
+// defaultHypervisor is hvi: it is the only backend hull on Linux has.
+const defaultHypervisor = "hvi"
+
+// platformCheckHypervisor applies checkLinuxHypervisor.
+func platformCheckHypervisor(name, source string) error { return checkLinuxHypervisor(name, source) }

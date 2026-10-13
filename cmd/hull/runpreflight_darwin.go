@@ -17,3 +17,11 @@ package main
 // platformRunPreflight has nothing to narrow on macOS: every backend and
 // rootfs mode run.go knows is available here.
 func platformRunPreflight(r runRequest) (runRequest, error) { return r, nil }
+
+// defaultHypervisor is qemu, for backward compatibility: it was the only
+// backend when the flag and the annotation were both optional.
+const defaultHypervisor = "qemu"
+
+// platformCheckHypervisor has nothing to refuse on macOS; an unknown name
+// fails in newVMM.
+func platformCheckHypervisor(string, string) error { return nil }
