@@ -22,6 +22,8 @@ package ociclient
 
 const recordsOwnership = false
 
+const CopiedRecordXattr = ""
+
 func hostFileMode(mode int64) int64 { return mode }
 
 func hostDirMode(mode int64) int64 { return mode }
