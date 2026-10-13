@@ -10,7 +10,7 @@ import (
 func getTermios(fd int) (*syscall.Termios, error) {
 	var t syscall.Termios
 	_, _, errno := syscall.Syscall6(syscall.SYS_IOCTL, uintptr(fd),
-		uintptr(syscall.TIOCGETA), uintptr(unsafe.Pointer(&t)), 0, 0, 0)
+		uintptr(ioctlGetTermios), uintptr(unsafe.Pointer(&t)), 0, 0, 0)
 	if errno != 0 {
 		return nil, errno
 	}
@@ -22,7 +22,7 @@ func restoreTerminal(t *syscall.Termios) {
 		return
 	}
 	_, _, _ = syscall.Syscall6(syscall.SYS_IOCTL, uintptr(syscall.Stdin),
-		uintptr(syscall.TIOCSETA), uintptr(unsafe.Pointer(t)), 0, 0, 0)
+		uintptr(ioctlSetTermios), uintptr(unsafe.Pointer(t)), 0, 0, 0)
 }
 
 // setTermios applies t to stdin.
@@ -31,7 +31,7 @@ func setTermios(t *syscall.Termios) {
 		return
 	}
 	_, _, _ = syscall.Syscall6(syscall.SYS_IOCTL, uintptr(syscall.Stdin),
-		uintptr(syscall.TIOCSETA), uintptr(unsafe.Pointer(t)), 0, 0, 0)
+		uintptr(ioctlSetTermios), uintptr(unsafe.Pointer(t)), 0, 0, 0)
 }
 
 // makeRawTerminal puts fd into raw mode (cfmakeraw semantics) and returns
@@ -51,7 +51,7 @@ func makeRawTerminal(fd int) (*syscall.Termios, error) {
 	raw.Cc[syscall.VMIN] = 1
 	raw.Cc[syscall.VTIME] = 0
 	_, _, errno := syscall.Syscall6(syscall.SYS_IOCTL, uintptr(fd),
-		uintptr(syscall.TIOCSETA), uintptr(unsafe.Pointer(&raw)), 0, 0, 0)
+		uintptr(ioctlSetTermios), uintptr(unsafe.Pointer(&raw)), 0, 0, 0)
 	if errno != 0 {
 		return nil, errno
 	}

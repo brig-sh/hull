@@ -65,11 +65,7 @@ func pruneStore(cmd *cli.Command) error {
 	if err != nil {
 		return err
 	}
-	storeDir := cmd.String("store-dir")
-	hint := ""
-	if _, statErr := os.Stat(storeImagePath(storeDir, defaultStoreDir())); statErr == nil {
-		hint = "Run `hull store compact` to return the reclaimed space to the host."
-	}
+	hint := storeCompactHint(cmd.String("store-dir"))
 	return pruneStoreIn(os.Stdout, s, cmd.Bool("all"), cmd.Bool("dry-run"), hint)
 }
 

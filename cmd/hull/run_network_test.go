@@ -111,7 +111,7 @@ func TestCheckHviNetworking(t *testing.T) {
 		// treated as "networking on" everywhere else in the run path. It has
 		// to be refused here too, or the check is bypassed by a typo.
 		{name: "hvi unrecognised net mode is refused", vmm: hypervisors.HviVmm, netMode: "shred", wantErr: true},
-		{name: "vz shared is untouched", vmm: hypervisors.VzVmm, netMode: "shared"},
+		{name: "vz shared is untouched", vmm: vzVmm, netMode: "shared"},
 		{name: "qemu shared is untouched", vmm: hypervisors.QemuVmm, netMode: "shared"},
 	}
 	for _, tc := range tests {
