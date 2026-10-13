@@ -47,6 +47,16 @@ const guestAttrXattr = "com.nofire.hvi.linux-attr"
 // which is not yet pinned down, so this adds a pass rather than replacing one.
 const recordsOwnership = true
 
+// hostFileMode and hostDirMode return the image's mode unchanged on macOS.
+//
+// The Linux build widens what the owner may do with an unpacked file, because
+// there the host file only feeds mke2fs. Here it is also what vz and qemu
+// serve to the guest over virtiofs and 9pfs, which report the host mode
+// straight through, so a widened /etc/shadow would reach those guests readable.
+func hostFileMode(mode int64) int64 { return mode }
+
+func hostDirMode(mode int64) int64 { return mode }
+
 // recordGuestAttr stores the ownership and mode an entry has inside the image.
 //
 // symlink is set for entries whose own attributes matter rather than their

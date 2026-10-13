@@ -858,9 +858,15 @@ func TestExtractTarAppliesDirectoryModes(t *testing.T) {
 			t.Errorf("Stat(%s): %v", name, err)
 			continue
 		}
+		// The host mode is the image's on macOS, where vz and qemu serve it to
+		// the guest. An unprivileged Linux unpack adds owner rwx on the host,
+		// and the guest gets the image's mode from the record instead.
 		got := fi.Mode() & (fs.ModePerm | fs.ModeSetuid | fs.ModeSetgid | fs.ModeSticky)
-		if got != posixFileMode(want) {
-			t.Errorf("%s mode = %v, want %v (image asked for %#o)", name, got, posixFileMode(want), want)
+		if got != posixFileMode(hostDirMode(want)) {
+			t.Errorf("%s mode = %v, want %v (image asked for %#o)", name, got, posixFileMode(hostDirMode(want)), want)
+		}
+		if mode, _, _, ok := GuestAttr(filepath.Join(rootfs, name), false); ok && int64(mode&0o7777) != want {
+			t.Errorf("%s recorded as %#o, want %#o", name, mode&0o7777, want)
 		}
 	}
 
