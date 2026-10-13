@@ -22,6 +22,11 @@ import (
 	"github.com/urunc-dev/urunc/pkg/unikontainers/types"
 )
 
+// vzVmmName is urunc's name for the Virtualization.framework backend, spelled
+// out for the Linux build, where urunc does not declare it.
+// hviargv_darwin_test.go pins it to urunc's own value.
+const vzVmmName = "vz"
+
 // hviLinuxArgv builds the hvi command line hull runs on Linux.
 //
 // It is hull's own copy of urunc's HviDarwin.BuildExecCmd with the virtio-fs

@@ -28,12 +28,12 @@ import (
 
 // vzVmm is the value urunc gives Virtualization.framework on macOS. urunc does
 // not declare it on Linux, but run.go compares against it on both, so the
-// Linux build carries the same string. vmm_darwin_test.go pins the two equal.
-const vzVmm hypervisors.VmmType = "vz"
+// Linux build carries the same string, from vzVmmName.
+const vzVmm hypervisors.VmmType = vzVmmName
 
 // newVMM builds the monitor for a Linux run. Only hvi is offered: it is the
-// one backend whose state can move between a Mac and a Linux host, which is
-// what hull on Linux exists for (see checkLinuxRun).
+// backend hull's Linux support is built around, and the one a sandbox moved
+// from another KVM host was running (see checkLinuxRun).
 //
 // urunc's Linux factory is not used for it. It finds hvi only on PATH, so the
 // hvi installed beside hull -- the layout make and the release archive

@@ -22,10 +22,11 @@ import (
 	"github.com/urunc-dev/urunc/pkg/unikontainers/types"
 )
 
-// hviLinuxArgv is a copy of urunc's darwin builder minus shares, and it is
-// only worth anything while it stays one: a sandbox moved from a Mac to Linux
-// must come up with the same devices. This fails the day urunc's darwin argv
-// grows, drops or reorders a flag the Linux copy has not.
+// hviLinuxArgv is a copy of urunc's darwin builder minus shares, kept so hvi
+// has one command-line contract on every host hull runs it on. This compares
+// the two on the argument sets below, so it catches a flag urunc's darwin argv
+// adds, drops or reorders for them; a flag added under some other condition
+// needs a case here before it is caught.
 func TestHviLinuxArgvMatchesTheDarwinBuilder(t *testing.T) {
 	for _, args := range []types.ExecArgs{
 		{KernelPath: "/k"},
@@ -56,10 +57,50 @@ func TestHviLinuxArgvMatchesTheDarwinBuilder(t *testing.T) {
 	}
 }
 
-// vmm_linux.go spells the vz backend as a literal, because urunc declares it
-// only here. Pin the literal to urunc's value.
-func TestLinuxVzLiteralMatchesUrunc(t *testing.T) {
-	if hypervisors.VzVmm != "vz" {
-		t.Fatalf("urunc's VzVmm is %q; update vzVmm in vmm_linux.go to match", hypervisors.VzVmm)
+// vmm_linux.go spells the vz backend through vzVmmName, because urunc
+// declares it only here. Pin that constant to urunc's value.
+func TestLinuxVzNameMatchesUrunc(t *testing.T) {
+	if hypervisors.VzVmm != vzVmmName {
+		t.Fatalf("urunc's VzVmm is %q but vzVmmName is %q; update vzVmmName in hviargv.go",
+			hypervisors.VzVmm, vzVmmName)
+	}
+}
+
+// --fs-uid and --fs-gid describe virtio-fs shares to hvi's file server, so the
+// Linux argv, which has no shares, drops them where urunc's darwin builder
+// would add them. Everything else must still match, in order.
+func TestHviLinuxArgvDropsOnlyTheShareOwnerFlags(t *testing.T) {
+	args := types.ExecArgs{
+		ContainerID:  "t1",
+		KernelPath:   "/k",
+		BlockDevPath: "/s/rootfs.ext4",
+		GuestUID:     1000,
+		GuestGID:     1000,
+		Net:          types.NetDevParams{UnixSocket: "/g/gw.sock", MAC: "52:54:00:aa:bb:cc"},
+	}
+	darwin, err := hypervisors.NewHviDarwin("/opt/hull/hvi").BuildExecCmd(args, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want []string
+	dropped := 0
+	for i := 0; i < len(darwin); i++ {
+		if darwin[i] == "--fs-uid" || darwin[i] == "--fs-gid" {
+			i++ // and its value
+			dropped++
+			continue
+		}
+		want = append(want, darwin[i])
+	}
+	if dropped != 2 {
+		t.Fatalf("urunc's darwin argv no longer carries --fs-uid and --fs-gid for a "+
+			"non-root guest; re-check what hviLinuxArgv should drop: %q", darwin)
+	}
+	linux, err := hviLinuxArgv("/opt/hull/hvi", args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(linux, want) {
+		t.Errorf("argv drifted from urunc's darwin builder:\n linux  %q\n darwin %q (minus the share owner)", linux, want)
 	}
 }
