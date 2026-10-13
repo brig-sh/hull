@@ -31,7 +31,8 @@ BUILD_DIR      ?= ${CURDIR}/dist
 #? PREFIX Directory to install binaries (default: /usr/local/bin)
 PREFIX         ?= /usr/local/bin
 
-# Architecture (Apple Silicon only for now)
+# Architecture. arm64 is the only one built or tested: Apple Silicon for the
+# macOS targets, and arm64 Linux/KVM for `make linux`.
 ARCH           ?= arm64
 
 # Binary variables
@@ -100,6 +101,13 @@ urunc_macos:
 	mkdir -p $(BUILD_DIR)
 	GOARCH=$(ARCH) $(GO) build -ldflags "$(LDFLAGS)" \
 		-o $(HULL_BIN)_$(ARCH) $(CURDIR)/cmd/hull
+
+## linux Build the hull CLI for Linux (GOOS=linux, GOARCH=$(ARCH)); build hvi on the Linux host itself.
+.PHONY: linux
+linux:
+	mkdir -p $(BUILD_DIR)
+	GOOS=linux GOARCH=$(ARCH) $(GO) build -ldflags "$(LDFLAGS)" \
+		-o $(HULL_BIN)_linux_$(ARCH) $(CURDIR)/cmd/hull
 
 ## vz_runner Build the Swift Virtualization.framework runner.
 .PHONY: vz_runner
