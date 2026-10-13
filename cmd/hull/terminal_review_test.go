@@ -86,9 +86,9 @@ func TestSizingPolicyDoesNotOpenDevTTY(t *testing.T) {
 	fset := token.NewFileSet()
 	// Parsed rather than grepped: the doc comment explains why /dev/tty is not
 	// consulted, and mentioning it there is the point.
-	file, err := parser.ParseFile(fset, "terminal_darwin.go", nil, 0)
+	file, err := parser.ParseFile(fset, "terminal.go", nil, 0)
 	if err != nil {
-		t.Fatalf("parse terminal_darwin.go: %v", err)
+		t.Fatalf("parse terminal.go: %v", err)
 	}
 	ast.Inspect(file, func(n ast.Node) bool {
 		lit, ok := n.(*ast.BasicLit)
