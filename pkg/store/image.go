@@ -86,7 +86,7 @@ func (s *Store) DeleteImage(digest string) error {
 	if err := os.Rename(imageDir, aside); err != nil {
 		return fmt.Errorf("failed to displace image %s: %w", digest, err)
 	}
-	if err := os.RemoveAll(aside); err != nil {
+	if err := RemoveTree(aside); err != nil {
 		return fmt.Errorf("failed to remove image %s: %w", digest, err)
 	}
 	return nil
@@ -135,7 +135,7 @@ func (s *Store) RemoveStagingDir(name string) error {
 	}
 	defer unlock()
 
-	if err := os.RemoveAll(filepath.Join(s.rootDir, "images", name)); err != nil {
+	if err := RemoveTree(filepath.Join(s.rootDir, "images", name)); err != nil {
 		return fmt.Errorf("failed to remove staging directory %s: %w", name, err)
 	}
 	return nil

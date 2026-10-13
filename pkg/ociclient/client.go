@@ -207,12 +207,12 @@ func (c *Client) PullPlatform(ctx context.Context, ref, platformStr string) (*Pu
 	for _, pattern := range []string{"*.tmp-*", "*.old-*"} {
 		if stale, err := filepath.Glob(filepath.Join(imagesRoot, pattern)); err == nil {
 			for _, d := range stale {
-				_ = os.RemoveAll(d)
+				_ = store.RemoveTree(d)
 			}
 		}
 	}
 	tmpDir := filepath.Join(imagesRoot, fmt.Sprintf("%s.tmp-%d", digestStr, os.Getpid()))
-	defer func() { _ = os.RemoveAll(tmpDir) }()
+	defer func() { _ = store.RemoveTree(tmpDir) }()
 
 	prog := newProgress(c.Quiet, len(layers), totalSize)
 	if err := UnpackLayers(layers, filepath.Join(tmpDir, "rootfs"), prog); err != nil {
@@ -258,7 +258,7 @@ func (c *Client) PullPlatform(ctx context.Context, ref, platformStr string) (*Pu
 		return nil, fmt.Errorf("failed to commit image: %w", err)
 	}
 	if swapped {
-		_ = os.RemoveAll(oldDir)
+		_ = store.RemoveTree(oldDir)
 	}
 
 	// Get available platforms

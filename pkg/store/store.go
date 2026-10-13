@@ -621,8 +621,10 @@ func (s *Store) DeleteInstance(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// RemoveTree, because a virtiofs instance holds a clone of the image's
+	// rootfs, 0555 directories and all.
 	instanceDir := filepath.Join(s.rootDir, "instances", id)
-	return os.RemoveAll(instanceDir)
+	return RemoveTree(instanceDir)
 }
 
 // RootDir returns the root directory of the store
