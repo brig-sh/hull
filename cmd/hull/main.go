@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build darwin
-
 package main
 
 import (
@@ -53,7 +51,8 @@ func main() {
 	// Keep the image/instance store on the case-sensitive APFS volume mounted
 	// at ~/.hull/store. Linux package trees contain names that differ only by
 	// case (for example xt_CONNMARK.h and xt_connmark.h), which cannot coexist
-	// on the default case-insensitive home volume.
+	// on the default case-insensitive home volume. On Linux the same path is a
+	// plain directory; see ensureStore in storemount_linux.go.
 	storeDirDefault := filepath.Join(homeDir, ".hull", "store")
 
 	app := &cli.Command{
