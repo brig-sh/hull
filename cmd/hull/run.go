@@ -225,6 +225,22 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	if guiTitle != "" && !gui {
 		return errors.New("--gui-title requires --gui")
 	}
+	// Before the store is opened and the image pulled: a host that cannot run
+	// this combination should say so before it has downloaded anything.
+	preflight, err := platformRunPreflight(runRequest{
+		hypervisor:   hypervisorOverride,
+		rootfsType:   rootfsTypeOverride,
+		netMode:      netMode,
+		gatewaySock:  gatewaySock,
+		sharedDirs:   len(sharedDirs),
+		sharedDirFds: len(sharedDirFds),
+		gui:          gui,
+		rosetta:      cmd.Bool("rosetta"),
+	})
+	if err != nil {
+		return err
+	}
+	hypervisorOverride, rootfsTypeOverride = preflight.hypervisor, preflight.rootfsType
 
 	// Generate instance ID if not provided
 	if instanceName == "" {
