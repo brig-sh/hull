@@ -267,7 +267,7 @@ func (c *Client) PullPlatform(ctx context.Context, ref, platformStr string) (*Pu
 	defer func() { _ = staging.Close() }()
 	defer func() {
 		if !published {
-			_ = os.RemoveAll(tmpDir)
+			_ = store.RemoveTree(tmpDir)
 		}
 	}()
 
