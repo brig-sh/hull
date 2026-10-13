@@ -52,6 +52,10 @@ const CopiedRecordXattr = ""
 // which is not yet pinned down, so this adds a pass rather than replacing one.
 const recordsOwnership = true
 
+// recordsLinksAside is false on macOS: XATTR_NOFOLLOW puts a symlink's
+// record on the link itself.
+const recordsLinksAside = false
+
 // hostFileMode and hostDirMode return the image's mode unchanged on macOS.
 //
 // The Linux build widens what the owner may do with an unpacked file, because
