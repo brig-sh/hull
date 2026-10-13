@@ -56,6 +56,39 @@ const guestAttrXattr = "user.com.nofire.hvi.linux-attr"
 // reports success, and the files still belong to the mapped user.
 var recordsOwnership = os.Geteuid() != 0
 
+// hostFileMode is the mode an unpacked regular file is given on the host:
+// the image's own, with owner read added when the unpack records ownership.
+//
+// Fedora, RHEL, Rocky, Alma, UBI and Amazon Linux ship /etc/shadow and
+// /etc/gshadow at 0000, and Fedora's sudo is 04111. Put on the host as is, a
+// file like that is unreadable to the user who unpacked it -- root is the only
+// one DAC lets past 0000 -- and `mke2fs -d` stops on the first one with
+// "Permission denied while populating file system". Block is the only rootfs
+// on Linux, so that refused the whole image family. The image's mode is not
+// lost by widening: the record beside the file holds it, and
+// buildBlockRootfs writes it into the finished image.
+//
+// A root unpack keeps the mode untouched: root reads a 0000 file regardless,
+// and there is no record to put the real mode back from.
+func hostFileMode(mode int64) int64 {
+	if recordsOwnership {
+		return mode | 0o400
+	}
+	return mode
+}
+
+// hostDirMode is hostFileMode for directories, which need the owner's write
+// and search bits as well as read: without them mke2fs cannot list a 0111
+// directory, and nobody but root can delete a tree that has 0555 directories
+// in it (Fedora has dozens under /usr/lib), so `hull rmi` and the pull's own
+// sweeps would fail on it.
+func hostDirMode(mode int64) int64 {
+	if recordsOwnership {
+		return mode | 0o700
+	}
+	return mode
+}
+
 // recordGuestAttr stores the ownership and mode an entry has inside the image.
 // Errors are the caller's to ignore, as on darwin: a filesystem with no user
 // xattr support (tmpfs before 6.6, some network filesystems) costs the guest

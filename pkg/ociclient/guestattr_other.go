@@ -22,6 +22,10 @@ package ociclient
 
 const recordsOwnership = false
 
+func hostFileMode(mode int64) int64 { return mode }
+
+func hostDirMode(mode int64) int64 { return mode }
+
 func recordGuestAttr(_ string, _ uint32, _, _ uint32, _ bool) error { return nil }
 
 func GuestAttr(_ string, _ bool) (mode, uid, gid uint32, ok bool) { return 0, 0, 0, false }

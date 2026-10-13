@@ -672,8 +672,10 @@ func extractTarIgnoreChown(r io.Reader, rootfsDir string) error {
 			// stops being writable.
 			keepAttr(false)
 
-			// Set file permissions
-			if err := chmodPOSIX(target, header.Mode); err != nil {
+			// Set file permissions. hostFileMode keeps the file readable by
+			// its owner where the image's own mode would lock even the owner
+			// out; see it for why that cannot be left to the image.
+			if err := chmodPOSIX(target, hostFileMode(header.Mode)); err != nil {
 				log.Warnf("failed to chmod %s: %v", target, err)
 			}
 
@@ -749,7 +751,7 @@ func extractTarIgnoreChown(r io.Reader, rootfsDir string) error {
 					return fmt.Errorf("failed to copy hard link target %s: %w", name, werr)
 				}
 				keepAttr(false)
-				if cerr := chmodPOSIX(target, header.Mode); cerr != nil {
+				if cerr := chmodPOSIX(target, hostFileMode(header.Mode)); cerr != nil {
 					log.Warnf("failed to chmod %s: %v", target, cerr)
 				}
 				continue
@@ -790,6 +792,10 @@ func extractTarIgnoreChown(r io.Reader, rootfsDir string) error {
 // setuid, setgid and sticky as high bits, so the conversion has to go through
 // posixFileMode -- handing it a raw 01777 would set neither the sticky bit nor
 // anything else recognisable.
+//
+// hostDirMode can add the owner's rwx on top of the image's mode. Where it
+// does, the record beside the directory keeps the image's own, and that is
+// the mode the guest gets.
 func applyDirModes(root *os.Root, modes map[string]int64) {
 	names := make([]string, 0, len(modes))
 	for name := range modes {
@@ -804,7 +810,7 @@ func applyDirModes(root *os.Root, modes map[string]int64) {
 		return names[i] < names[j]
 	})
 	for _, name := range names {
-		if err := root.Chmod(name, posixFileMode(modes[name])); err != nil {
+		if err := root.Chmod(name, posixFileMode(hostDirMode(modes[name]))); err != nil {
 			// Not fatal: the directory is there with the content in it, and a
 			// filesystem that will not take the mode (or an entry a later one
 			// replaced) costs the guest a permission bit, not the pull.
