@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build darwin
+
 package main
 
 import (
-	"bytes"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -23,25 +24,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/sirupsen/logrus"
 )
-
-// captureWarnings collects everything logged while fn runs.
-func captureWarnings(t *testing.T, fn func()) string {
-	t.Helper()
-	var buf bytes.Buffer
-	prev := logrus.StandardLogger().Out
-	prevLevel := logrus.GetLevel()
-	logrus.SetOutput(&buf)
-	logrus.SetLevel(logrus.DebugLevel)
-	t.Cleanup(func() {
-		logrus.SetOutput(prev)
-		logrus.SetLevel(prevLevel)
-	})
-	fn()
-	return buf.String()
-}
 
 // writeRootfs lays out a rootfs containing rel at the given mode.
 func writeRootfs(t *testing.T, rel string, mode os.FileMode) string {
