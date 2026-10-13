@@ -40,11 +40,9 @@ import (
 // Linux backend has no virtio-fs server, so nothing outside hull reads it here
 // and the name only has to agree with GuestAttr below.
 //
-// Symlinks get no record: Linux refuses user.* attributes on a symlink
-// (EPERM), so a link keeps the unpacking user's ownership in the image. A
-// symlink's owner is consulted only by the sticky-directory and
-// protected_symlinks checks, which an image's own links do not meet in
-// practice.
+// Symlinks get no record here: Linux refuses user.* attributes on a symlink
+// (EPERM). Their ownership is set aside in a file beside the rootfs instead;
+// see recordsLinksAside and LinkOwners.
 const guestAttrXattr = "user.com.nofire.hvi.linux-attr"
 
 // CopiedRecordXattr names the record as it arrives in a block image built
@@ -64,6 +62,12 @@ const CopiedRecordXattr = guestAttrXattr
 // fail: inside a user namespace containerd swallows the chown EPERM and
 // reports success, and the files still belong to the mapped user.
 var recordsOwnership = os.Geteuid() != 0
+
+// recordsLinksAside says symlink ownership goes in the file LinkOwners reads,
+// because a symlink cannot hold the record. Without it every link in a
+// Linux-built image is owned by the user who ran the pull, /bin/sh -> busybox
+// included, where the same image built on a Mac has 0:0 links.
+var recordsLinksAside = recordsOwnership
 
 // hostFileMode is the mode an unpacked regular file is given on the host:
 // the image's own, with owner read added when the unpack records ownership.

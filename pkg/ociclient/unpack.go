@@ -513,6 +513,9 @@ func extractTarIgnoreChown(r io.Reader, rootfsDir string) error {
 		// The mode each directory entry asked for, applied once the layer is
 		// through rather than as the entry is read: see applyDirModes.
 		dirModes = map[string]int64{}
+		// The ownership of each symlink, where the link itself cannot hold a
+		// record: see recordsLinksAside.
+		links = map[string]LinkOwner{}
 	)
 
 	for {
@@ -696,6 +699,9 @@ func extractTarIgnoreChown(r io.Reader, rootfsDir string) error {
 				return fmt.Errorf("failed to create symlink %s -> %s: %w", name, header.Linkname, err)
 			}
 			keepAttr(true)
+			if recordsLinksAside {
+				links[filepath.ToSlash(name)] = LinkOwner{UID: uint32(header.Uid), GID: uint32(header.Gid)}
+			}
 
 		case tar.TypeLink:
 			// Hard link to a file extracted earlier in this rootfs.
@@ -768,6 +774,13 @@ func extractTarIgnoreChown(r io.Reader, rootfsDir string) error {
 	}
 
 	applyDirModes(root, dirModes)
+	if len(links) > 0 {
+		// Not fatal, for the same reason a failed xattr record is not: the
+		// links are all there, and what is lost is their owner in the guest.
+		if err := mergeLinkOwners(rootfsDir, links); err != nil {
+			log.Warnf("could not record image ownership for %d symlink(s): %v", len(links), err)
+		}
+	}
 	return nil
 }
 

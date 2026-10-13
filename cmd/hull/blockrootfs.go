@@ -200,6 +200,14 @@ func appendOwnershipScript(w *bytes.Buffer, rootfsDir string) (skipped int, err 
 	}
 	defer func() { _ = root.Close() }()
 
+	// Symlink ownership from an unprivileged Linux unpack, which could not
+	// put it on the links themselves. A tree without it keeps the host's
+	// ownership on its links, as before.
+	links, linkErr := ociclient.LinkOwners(rootfsDir)
+	if linkErr != nil {
+		log.Warnf("symlinks keep the host's ownership in the block image: %v", linkErr)
+	}
+
 	buf := bufio.NewWriter(w)
 	// The walk runs over root.FS() rather than over rootfsDir with
 	// filepath.WalkDir, for the reason spelled out on errImagePlantedPath in
@@ -220,6 +228,11 @@ func appendOwnershipScript(w *bytes.Buffer, rootfsDir string) (skipped int, err 
 		}
 		symlink := d.Type()&fs.ModeSymlink != 0
 		mode, uid, gid, ok := ociclient.GuestAttr(rootfsEntry(rootfsDir, name), symlink)
+		if !ok && symlink {
+			if o, found := links[name]; found {
+				uid, gid, ok = o.UID, o.GID, true
+			}
+		}
 		if !ok {
 			return nil
 		}
