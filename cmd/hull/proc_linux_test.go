@@ -15,6 +15,7 @@
 package main
 
 import (
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -69,10 +70,26 @@ func TestInspectProcessReadsArgvAndStartTimeFromProc(t *testing.T) {
 
 // e2fsprogs lives in /sbin on Debian and Raspberry Pi OS, which an ordinary
 // login's PATH does not include. The lookup must still find it there.
+//
+// findE2fsTool falls back to /usr/sbin/<name> when it finds nothing, so a
+// prefix check alone would pass on a host with no e2fsprogs at all. The
+// result has to exist.
 func TestE2fsToolsAreFoundOutsidePath(t *testing.T) {
+	installed := false
+	for _, p := range []string{"/usr/sbin/mke2fs", "/sbin/mke2fs"} {
+		if _, err := os.Stat(p); err == nil {
+			installed = true
+		}
+	}
+	if !installed {
+		t.Skip("e2fsprogs is not installed in /usr/sbin or /sbin")
+	}
 	t.Setenv("PATH", "/nonexistent")
 	got := findE2fsTool("mke2fs")
 	if !strings.HasPrefix(got, "/usr/sbin/") && !strings.HasPrefix(got, "/sbin/") {
 		t.Fatalf("findE2fsTool(mke2fs) = %q, want a path under /usr/sbin or /sbin", got)
+	}
+	if _, err := os.Stat(got); err != nil {
+		t.Fatalf("findE2fsTool(mke2fs) = %q, which does not exist: %v", got, err)
 	}
 }
