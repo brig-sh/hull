@@ -30,11 +30,6 @@ import (
 	"github.com/brig-sh/hull/pkg/ociclient"
 )
 
-const (
-	mke2fsBin  = "/opt/homebrew/opt/e2fsprogs/sbin/mke2fs"
-	debugfsBin = "/opt/homebrew/opt/e2fsprogs/sbin/debugfs"
-)
-
 // blockInject is a per-instance file placed into the image after it is built.
 //
 // These used to be written into a staged copy of the rootfs before imaging,
@@ -63,6 +58,14 @@ type blockInject struct {
 // (see ociclient.GuestAttr) and is restored here, straight into the finished
 // filesystem, where ext4's inodes can hold what APFS could not.
 func buildBlockRootfs(diskPath, rootfsDir string, injects []blockInject, sizeMB int) error {
+	// All three are needed, and the last two run only after mke2fs has written
+	// a full-size image; finding out that debugfs is missing at that point
+	// leaves a 15 GiB sparse file and an error that names the wrong step.
+	for _, bin := range []string{mke2fsBin, debugfsBin, e2fsckBin} {
+		if _, err := os.Stat(bin); err != nil {
+			return fmt.Errorf("the block rootfs needs e2fsprogs (mke2fs, debugfs, e2fsck): %w", err)
+		}
+	}
 	mkCmd := exec.Command(mke2fsBin, "-t", "ext4", "-d", rootfsDir,
 		"-L", "rootfs", "-m", "0", "-q", diskPath, fmt.Sprintf("%dM", sizeMB))
 	if out, err := mkCmd.CombinedOutput(); err != nil {
@@ -166,7 +169,7 @@ func repairBlockImage(diskPath string) error {
 	// -f forces a full check even though the filesystem looks clean, which it
 	// does: nothing has mounted it. -y answers the questions, all of which are
 	// "recount this".
-	cmd := exec.Command("/opt/homebrew/opt/e2fsprogs/sbin/e2fsck", "-f", "-y", diskPath)
+	cmd := exec.Command(e2fsckBin, "-f", "-y", diskPath)
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		return nil

@@ -17,7 +17,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,7 +40,6 @@ import (
 
 	"github.com/brig-sh/hull/internal/netgw"
 	"github.com/urfave/cli/v3"
-	"golang.org/x/sys/unix"
 	"gopkg.in/yaml.v3"
 
 	"github.com/brig-sh/hull/internal/compose"
@@ -1903,44 +1901,6 @@ func gatewayProcessMatches(pid int, sockPath string) bool {
 		}
 	}
 	return subcommand && socket
-}
-
-// processArgv returns the argv of pid as the kernel holds it, via the
-// kern.procargs2 sysctl. The buffer is argc (a native int32), then the exec
-// path, NUL padding, and argc NUL-terminated argv strings, then the
-// environment, which is not read.
-func processArgv(pid int) ([]string, error) {
-	buf, err := unix.SysctlRaw("kern.procargs2", pid)
-	if err != nil {
-		return nil, err
-	}
-	if len(buf) < 4 {
-		return nil, fmt.Errorf("procargs2 for pid %d: short buffer", pid)
-	}
-	argc := int(int32(binary.NativeEndian.Uint32(buf)))
-	if argc < 0 {
-		return nil, fmt.Errorf("procargs2 for pid %d: argc %d", pid, argc)
-	}
-	rest := buf[4:]
-	// Skip the exec path, then the NUL padding after it.
-	i := bytes.IndexByte(rest, 0)
-	if i < 0 {
-		return nil, fmt.Errorf("procargs2 for pid %d: no exec path", pid)
-	}
-	rest = rest[i:]
-	for len(rest) > 0 && rest[0] == 0 {
-		rest = rest[1:]
-	}
-	argv := make([]string, 0, argc)
-	for range argc {
-		j := bytes.IndexByte(rest, 0)
-		if j < 0 {
-			return nil, fmt.Errorf("procargs2 for pid %d: truncated argv", pid)
-		}
-		argv = append(argv, string(rest[:j]))
-		rest = rest[j+1:]
-	}
-	return argv, nil
 }
 
 // waitHealthy polls the gateway probe API until the TCP address answers.

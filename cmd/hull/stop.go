@@ -21,9 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -276,26 +274,16 @@ func reapOrphanVMM(s *store.Store, state *store.InstanceState) bool {
 		return false
 	}
 	want := strings.Join(state.CmdLine, " ")
-	// -ww so long argv is not truncated to the terminal width; the paths that
-	// make this unique are at the end of the line.
-	out, err := exec.Command("/bin/ps", "-axww", "-o", "pid=,command=").Output()
+	procs, err := listProcesses()
 	if err != nil {
 		return false
 	}
 	killed := false
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		pidStr, cmd, ok := strings.Cut(line, " ")
-		if !ok {
+	for _, p := range procs {
+		if p.command != want {
 			continue
 		}
-		if strings.TrimSpace(cmd) != want {
-			continue
-		}
-		pid, perr := strconv.Atoi(pidStr)
-		if perr != nil || pid <= 0 {
-			continue
-		}
+		pid := p.pid
 		// Re-check immediately before signalling.
 		//
 		// The decision to reap comes from a record read before the `ps` above,
@@ -363,26 +351,11 @@ func processIsAVMM(pid int, state *store.InstanceState) bool {
 	if pid <= 0 {
 		return false
 	}
-	out, err := exec.Command("/bin/ps", "-p", strconv.Itoa(pid), "-o", "lstart=,command=").Output()
-	if err != nil {
+	info, ok := inspectProcess(pid)
+	if !ok {
 		return false
 	}
-	line := strings.TrimSpace(string(out))
-	if line == "" {
-		return false
-	}
-	// ps prints lstart as a fixed 24-character date, then the command.
-	const lstartLen = 24
-	if len(line) <= lstartLen {
-		return false
-	}
-	started, cmdline := strings.TrimSpace(line[:lstartLen]), strings.TrimSpace(line[lstartLen:])
-
-	fields := strings.Fields(cmdline)
-	if len(fields) == 0 {
-		return false
-	}
-	base := filepath.Base(fields[0])
+	base := filepath.Base(info.argv0)
 	isVMM := vmmExecutables[base]
 	if !isVMM {
 		for _, prefix := range vmmExecutablePrefixes {
@@ -400,23 +373,27 @@ func processIsAVMM(pid int, state *store.InstanceState) bool {
 	}
 	// If the record carries the argv we spawned, that is the strongest signal
 	// available and it costs nothing to use.
-	if len(state.CmdLine) > 0 && strings.Join(state.CmdLine, " ") == cmdline {
+	if len(state.CmdLine) > 0 && strings.Join(state.CmdLine, " ") == info.command {
 		return true
 	}
-	if state.StartTime.IsZero() {
+	if state.StartTime.IsZero() || !info.startKnown {
 		return true
 	}
-	// ParseInLocation, not Parse: `ps -o lstart=` prints LOCAL wall-clock time
-	// with no zone, and parsing it as UTC makes every process look
-	// (UTC-offset) hours out. On a UTC+3 machine that made every live VMM
-	// appear to have started three hours in the future, so the reuse check
-	// rejected it and stop refused to signal a VM it should have stopped.
-	when, perr := time.ParseInLocation("Mon Jan  2 15:04:05 2006", started, time.Local)
-	if perr != nil {
-		// Unparseable: fall back to the name match rather than refusing to act
-		// at all, and say so in the log rather than silently.
-		log.Debugf("could not parse the start time %q for pid %d: %v", started, pid, perr)
-		return true
-	}
-	return !when.After(state.StartTime.Add(5 * time.Second))
+	return !info.started.After(state.StartTime.Add(5 * time.Second))
+}
+
+// procInfo is what processIsAVMM reads about a live process: the program it
+// runs, its argv joined with spaces the way a record's CmdLine is compared,
+// and when it started, if the platform could say.
+type procInfo struct {
+	argv0      string
+	command    string
+	started    time.Time
+	startKnown bool
+}
+
+// procEntry is one line of a process listing: a pid and its joined argv.
+type procEntry struct {
+	pid     int
+	command string
 }

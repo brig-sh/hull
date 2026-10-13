@@ -492,16 +492,6 @@ func pidAlive(pid int) bool {
 	return pid > 0 && unix.Kill(pid, 0) == nil
 }
 
-// osProductVersion returns the macOS version (major.minor) for the event
-// envelope; empty on failure, never an error.
-func osProductVersion() string {
-	v, err := unix.Sysctl("kern.osproductversion")
-	if err != nil {
-		return ""
-	}
-	return v
-}
-
 // unameString renders the full uname for the event envelope, explicitly
 // excluding the hostname (Nodename).
 func unameString() string {

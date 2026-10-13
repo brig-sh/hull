@@ -476,7 +476,7 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	telemetryBackend = vmmName
 	// Graphics is only supported on the Vz backend; the QEMU darwin builder
 	// never emits window flags.
-	if gui && vmmType != hypervisors.VzVmm {
+	if gui && vmmType != vzVmm {
 		return fmt.Errorf("--gui is only supported with the Vz hypervisor (got %q)", vmmName)
 	}
 
@@ -484,7 +484,7 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	// from Virtualization.framework, which the QEMU backend cannot provide.
 	// The annotation lets an image opt in; the flag covers everything else.
 	rosetta := cmd.Bool("rosetta") || ociSpec.Annotations["com.urunc.darwin.rosetta"] == "true"
-	if rosetta && vmmType != hypervisors.VzVmm {
+	if rosetta && vmmType != vzVmm {
 		return fmt.Errorf("--rosetta is only supported with the Vz hypervisor (got %q)", vmmName)
 	}
 
@@ -499,7 +499,7 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	if !cmd.Bool("no-boot-assets") &&
 		annotationOverrides["com.urunc.unikernel.bootKernel"] == "" &&
 		annotationOverrides["com.urunc.unikernel.bootInitrd"] == "" &&
-		(vmmType == hypervisors.VzVmm || vmmType == hypervisors.HviVmm) &&
+		(vmmType == vzVmm || vmmType == hypervisors.HviVmm) &&
 		!imageCarriesKernel(ociSpec.Annotations) {
 		kernel, initrdFile, assetErr := bootassets.Ensure(ctx, cmd.String("store-dir"))
 		if assetErr != nil {
@@ -524,7 +524,7 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	unikernelType, unikernelTypeDeclared := unikernelFamily(ociSpec.Annotations, containerBoot)
 
 	// Create VMM instance
-	vmm, err := hypervisors.NewVMM(vmmType, uruncCfg.Monitors)
+	vmm, err := newVMM(vmmType, uruncCfg.Monitors)
 	if err != nil {
 		return fmt.Errorf("failed to create VMM: %w", err)
 	}
@@ -540,9 +540,7 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	if qemuD, ok := vmm.(*hypervisors.Qemu); ok {
 		qemuD.SetQMPSocket(qmpSocket)
 	}
-	if vzD, ok := vmm.(*hypervisors.VzDarwin); ok {
-		vzD.SetQMPSocket(qmpSocket)
-	}
+	setVzQMPSocket(vmm, qmpSocket)
 
 	// Create unikernel instance
 	unikernel, err := unikernels.New(unikernelType)
@@ -627,7 +625,7 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	if err := verifyContainerBootAssets(bootKernel, bootInitrd); err != nil {
 		return err
 	}
-	if containerBoot && vmmType != hypervisors.VzVmm && vmmType != hypervisors.HviVmm {
+	if containerBoot && vmmType != vzVmm && vmmType != hypervisors.HviVmm {
 		return fmt.Errorf("generic virtiofs container boot requires the vz or hvi backend (got %q)", vmmName)
 	}
 	if bootKernel != "" {
@@ -659,7 +657,7 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 		if err != nil {
 			return fmt.Errorf("boot kernel from image annotation: %w", err)
 		}
-	} else if vmmType == hypervisors.VzVmm || vmmType == hypervisors.HviVmm {
+	} else if vmmType == vzVmm || vmmType == hypervisors.HviVmm {
 		// For native arm64 backends, look for common kernel locations in rootfs.
 		//
 		// The names are hull's, but the files are the image's, and an image
@@ -747,7 +745,7 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 		// Determine rootfs sharing mode
 		rootfsType := rootfsTypeOverride
 		if rootfsType == "" {
-			if vmmType == hypervisors.VzVmm || vmmType == hypervisors.HviVmm {
+			if vmmType == vzVmm || vmmType == hypervisors.HviVmm {
 				rootfsType = "virtiofs"
 			} else {
 				rootfsType = "9pfs"
@@ -926,7 +924,7 @@ exec %s "$@"
 	shareMounts := ""
 	var containerMounts strings.Builder
 	for _, sh := range shares {
-		if vmmType == hypervisors.VzVmm || vmmType == hypervisors.HviVmm {
+		if vmmType == vzVmm || vmmType == hypervisors.HviVmm {
 			mountOpts := ""
 			if sh.readOnly {
 				mountOpts = "-o ro "
@@ -1001,7 +999,7 @@ exec %s "$@"
 	// Console device depends on VMM backend
 	consoleDev := "ttyS0"
 	if runtime.GOARCH == "arm64" {
-		if vmmType == hypervisors.VzVmm {
+		if vmmType == vzVmm {
 			consoleDev = "hvc0"
 		} else {
 			consoleDev = "ttyAMA0"
@@ -1034,7 +1032,7 @@ exec %s "$@"
 			initrdEntry = "/init"
 		}
 		kernelCmdline = fmt.Sprintf("rdinit=%s console=%s", initrdEntry, consoleDev) + ipArg
-	} else if rootfsDir != "" && vmmType == hypervisors.VzVmm {
+	} else if rootfsDir != "" && vmmType == vzVmm {
 		// Vz: virtiofs rootfs boot (no initramfs)
 		kernelCmdline = fmt.Sprintf("root=rootfs rootfstype=virtiofs rw console=%s", consoleDev) + ipArg
 
@@ -1387,7 +1385,7 @@ exec %s "$@"
 	// Join the user-mode gateway: the datagram end backs the guest's single
 	// NIC (fd 3 in the child); the control connection (fd 4) stays open for
 	// the VMM's lifetime and its closure removes the gateway member.
-	if gatewaySock != "" && vmmType == hypervisors.VzVmm {
+	if gatewaySock != "" && vmmType == vzVmm {
 		dataF, ctlConn, err := joinGateway(gatewaySock)
 		if err != nil {
 			return err
@@ -1402,7 +1400,7 @@ exec %s "$@"
 		gatewayFiles = []*os.File{dataF, ctlF}
 		cmdArgs = append(cmdArgs, "--net-fd", "3")
 	}
-	if vmmType == hypervisors.VzVmm {
+	if vmmType == vzVmm {
 		cmdArgs = append(cmdArgs, vzNetArgs(netMode)...)
 		cmdArgs = append(cmdArgs, "--stop-grace", strconv.Itoa(int(cmd.Int("stop-grace"))))
 		// Every Vz instance is checkpoint-ready: the state dir persists the
@@ -1719,31 +1717,6 @@ func cloneRootfsAPFS(source, rootfsLink string) error {
 	if err := os.Rename(staging, rootfsLink); err != nil {
 		_ = os.RemoveAll(staging)
 		return fmt.Errorf("install instance APFS rootfs clone: %w", err)
-	}
-	return nil
-}
-
-func requireSameAPFSVolume(source, destinationParent string) error {
-	var sourceFS, destinationFS unix.Statfs_t
-	if err := unix.Statfs(source, &sourceFS); err != nil {
-		return fmt.Errorf("inspect source filesystem for APFS clone: %w", err)
-	}
-	if err := unix.Statfs(destinationParent, &destinationFS); err != nil {
-		return fmt.Errorf("inspect destination filesystem for APFS clone: %w", err)
-	}
-	fsName := func(raw [16]byte) string {
-		for i, value := range raw {
-			if value == 0 {
-				return string(raw[:i])
-			}
-		}
-		return string(raw[:])
-	}
-	if fsName(sourceFS.Fstypename) != "apfs" || fsName(destinationFS.Fstypename) != "apfs" {
-		return fmt.Errorf("HVI writable rootfs requires an APFS image store and instance directory")
-	}
-	if sourceFS.Fsid.Val != destinationFS.Fsid.Val {
-		return fmt.Errorf("HVI writable rootfs requires the image store and instance directory on the same APFS volume")
 	}
 	return nil
 }
@@ -2358,7 +2331,7 @@ func launchVMM(cmd *cli.Command, s *store.Store, state *store.InstanceState, cmd
 		origTermios, _ = getTermios(int(os.Stdin.Fd()))
 		defer restoreTerminal(origTermios)
 		defer claimForeground()
-		if vmmType == hypervisors.VzVmm && origTermios != nil {
+		if vmmType == vzVmm && origTermios != nil {
 			raw := *origTermios
 			raw.Lflag &^= syscall.ECHO | syscall.ICANON | syscall.IEXTEN
 			raw.Iflag &^= syscall.ICRNL

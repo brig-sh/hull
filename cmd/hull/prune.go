@@ -84,11 +84,7 @@ func pruneStore(cmd *cli.Command) error {
 	if err != nil {
 		return err
 	}
-	storeDir := cmd.String("store-dir")
-	hint := ""
-	if _, statErr := os.Stat(storeImagePath(storeDir, defaultStoreDir())); statErr == nil {
-		hint = "Run `hull store compact` to return the reclaimed space to the host."
-	}
+	hint := storeCompactHint(cmd.String("store-dir"))
 	return pruneStoreIn(os.Stdout, s, cmd.Bool("all"), cmd.Bool("dry-run"), hint)
 }
 
@@ -355,17 +351,6 @@ func pullInFlight(dir string, now, touched time.Time) bool {
 // displaced reports whether a staging name is the `.old-<pid>` kind.
 func displaced(dir string) bool {
 	return strings.Contains(filepath.Base(dir), ".old-")
-}
-
-// statusChangeTime is the inode's ctime, which a rename updates and a copy of
-// the file times does not. Zero when the platform does not report one, which
-// reads as ancient and prunes.
-func statusChangeTime(fi os.FileInfo) time.Time {
-	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok {
-		return time.Time{}
-	}
-	return time.Unix(st.Ctimespec.Sec, st.Ctimespec.Nsec)
 }
 
 // stagingPID reads the pid out of a `<digest>.tmp-<pid>` name, or 0 when the

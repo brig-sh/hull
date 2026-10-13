@@ -36,7 +36,7 @@ func TestContainerBootResolver(t *testing.T) {
 		{name: "gateway", vmm: hypervisors.HviVmm, netMode: "shared", gatewayCIDR: "10.87.0.9/24", want: "10.87.0.1"},
 		{name: "hvi built in", vmm: hypervisors.HviVmm, netMode: "shared", want: "10.0.2.3"},
 		{name: "hvi disabled", vmm: hypervisors.HviVmm, netMode: "none"},
-		{name: "vz dhcp", vmm: hypervisors.VzVmm, netMode: "shared"},
+		{name: "vz dhcp", vmm: vzVmm, netMode: "shared"},
 		{name: "invalid gateway", vmm: hypervisors.HviVmm, netMode: "shared", gatewayCIDR: "bad", wantErr: true},
 	}
 	for _, tt := range tests {

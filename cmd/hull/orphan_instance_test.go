@@ -46,7 +46,6 @@ import (
 	"time"
 
 	"github.com/urfave/cli/v3"
-	"github.com/urunc-dev/urunc/pkg/unikontainers/hypervisors"
 
 	"github.com/brig-sh/hull/pkg/store"
 )
@@ -96,7 +95,7 @@ func TestNoVMMIsSpawnedWithoutARecordOfIt(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "vmm-started")
 	state := &store.InstanceState{ID: "vm1", LogFile: s.InstanceLogFile("vm1")}
 	started, err := launchVMM(&cli.Command{}, s, state, standInVMM(t, marker),
-		nil, hypervisors.VzVmm, true, "none", "")
+		nil, vzVmm, true, "none", "")
 
 	if err == nil {
 		t.Errorf("launchVMM reported success with a store it could not write to; "+
@@ -227,7 +226,7 @@ func TestFailedSpawnLeavesNoStartingRecord(t *testing.T) {
 
 	started, err := launchVMM(&cli.Command{}, s, state,
 		[]string{filepath.Join(t.TempDir(), "no-such-vmm")}, nil,
-		hypervisors.VzVmm, true, "none", "")
+		vzVmm, true, "none", "")
 	if err == nil {
 		t.Fatal("launchVMM succeeded with a VMM binary that does not exist")
 	}
