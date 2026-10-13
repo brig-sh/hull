@@ -12,15 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !darwin
+//go:build !darwin && !linux
 
 package ociclient
 
-// Everywhere else an unpack can hold the image's ownership in the filesystem
-// itself, so there is nothing to record beside it and no reason to avoid
-// containerd's extractor. See the darwin file for why macOS cannot.
+// Everywhere else hull is not run, so nothing is recorded. See the darwin
+// file for why macOS records ownership beside each file, and the linux file
+// for why an unprivileged Linux unpack has to as well.
 
 const recordsOwnership = false
+
+const recordsLinksAside = false
+
+const CopiedRecordXattr = ""
+
+func hostFileMode(mode int64) int64 { return mode }
+
+func hostDirMode(mode int64) int64 { return mode }
 
 func recordGuestAttr(_ string, _ uint32, _, _ uint32, _ bool) error { return nil }
 

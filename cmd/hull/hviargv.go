@@ -35,12 +35,12 @@ const vzVmmName = "vz"
 // --agent-sock, so hull exec has nothing to dial; no --net-gateway, so the
 // guest gets hvi's stub NIC instead of the gateway's network and policy; and
 // no --net-mac, so every guest presents the same default MAC and the gateway,
-// which keys its leases by it, hands two sandboxes the same address. A Linux
-// destination for a sandbox started on a Mac has to boot it with the same
-// devices it had there, so the argv here must match the darwin one flag for
-// flag. Patching urunc would fork a dependency hull pins at a branch tip for
-// a contract that belongs to hull; mirroring the dozen lines keeps the
-// contract here, and hviargv_darwin_test.go fails if the two drift.
+// which keys its leases by it, hands two sandboxes the same address. hull's
+// guests should get one hvi command line on every host, so the argv here
+// matches the darwin one flag for flag, shares aside. Patching urunc would
+// fork a dependency hull pins at a branch tip for a contract that belongs to
+// hull; mirroring the dozen lines keeps the contract here, and
+// hviargv_darwin_test.go compares the two.
 //
 // Shares are refused rather than dropped: hvi's KVM backend has no virtio-fs
 // server (it parses --share-* and configures nothing), so a guest that asked
