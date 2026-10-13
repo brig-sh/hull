@@ -41,6 +41,10 @@ Kubernetes integration, and it implements a subset of Compose. See
   `vz-runner` declares a macOS 14 floor in `vz-runner/Package.swift`, so
   earlier versions can work. Nothing blocks them, and nothing tests them.
 - About 2 GB of free disk space for the store, plus each image you pull.
+- On Linux, hull builds from source for arm64 with KVM and runs only the
+  `hvi` backend with a block rootfs, as the destination for a sandbox that
+  started on a Mac. See [docs/backends.md](docs/backends.md#hvi-on-linux)
+  and [docs/build.md](docs/build.md#linux).
 
 ## Install
 
