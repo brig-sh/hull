@@ -514,27 +514,17 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	}
 
 	// Determine VMM and unikernel types from annotations or CLI override
-	// Default to QEMU for backward compatibility
-	var vmmType hypervisors.VmmType
-	vmmName := ""
-
-	// CLI override takes precedence
-	vmmSource := "default"
-	if hypervisorOverride != "" {
-		vmmName = hypervisorOverride
-		vmmSource = "flag"
-		log.Debugf("Using hypervisor from --hypervisor flag: %s", vmmName)
-	} else if annotation, ok := ociSpec.Annotations["com.urunc.unikernel.hypervisor"]; ok {
-		vmmName = annotation
-		vmmSource = "annotation"
-		log.Debugf("Using hypervisor from annotation: %s", vmmName)
-	} else {
-		vmmName = "qemu"
-		log.Debugf("No hypervisor override or annotation, using default: qemu")
-	}
+	vmmName, vmmSource := selectHypervisor(hypervisorOverride, ociSpec.Annotations, defaultHypervisor)
+	log.Debugf("Using hypervisor %s (from %s)", vmmName, vmmSource)
 
 	vmmName = normalizeVmmName(vmmName)
-	vmmType = hypervisors.VmmType(vmmName)
+	// The flag was checked before the pull; an annotation can only be checked
+	// now that the image is here.
+	if err := platformCheckHypervisor(vmmName, vmmSource); err != nil {
+		return err
+	}
+
+	vmmType := hypervisors.VmmType(vmmName)
 	telemetryBackendSource = vmmSource
 	telemetryBackend = vmmName
 	// Graphics is only supported on the Vz backend; the QEMU darwin builder

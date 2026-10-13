@@ -15,6 +15,7 @@
 package ociclient
 
 import (
+	"runtime"
 	"testing"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -66,5 +67,22 @@ func TestNoUnikernelTypeIsInjectedBesideOtherUruncLabels(t *testing.T) {
 				t.Errorf("%s = %q, want %q", UnikernelTypeAnnotation, got, tc.wantType)
 			}
 		})
+	}
+}
+
+// hull on Linux treats the hypervisor annotation as the image's own choice and
+// refuses anything but hvi, so the defaults written for a plain image must not
+// name one there. macOS keeps qemu-hvf, its historical default.
+func TestPlainImageDefaultsNameAHypervisorOnlyOnMacOS(t *testing.T) {
+	cfg := &v1.ConfigFile{}
+	cfg.Config.Labels = map[string]string{"org.opencontainers.image.title": "x"}
+	spec := createOCISpec(cfg, "rootfs")
+	got, ok := spec.Annotations[HypervisorAnnotation]
+	if runtime.GOOS == "darwin" {
+		if got != "qemu-hvf" {
+			t.Errorf("macOS default hypervisor annotation = %q, want qemu-hvf", got)
+		}
+	} else if ok {
+		t.Errorf("a plain image was given hypervisor annotation %q on %s", got, runtime.GOOS)
 	}
 }
