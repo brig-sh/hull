@@ -348,7 +348,11 @@ func receivedKernelDir(s *store.Store) string {
 }
 
 // destTakeKernel is migrate-take-kernel: it installs the kernel on in as the
-// kernel of profile, if it has sha256 sum and size bytes.
+// kernel of profile, if it has sha256 sum and size bytes, and only when the
+// store has none. A store that holds another kernel of the profile keeps
+// it: a profile run boots only the kernel installed, and whoever installed
+// that one, brig's BRIG_PORTABLE_KERNEL among them, expects those bytes. A
+// move does not need the kernel at all.
 func destTakeKernel(s *store.Store, profile, sum string, size int64, in io.Reader) *migrateReply {
 	if _, err := bootassets.NormalizeProfile(profile); err != nil || profile == "" {
 		return refuse(codeFailed, fmt.Errorf("profile %q: %v", profile, err))
@@ -364,8 +368,15 @@ func destTakeKernel(s *store.Store, profile, sum string, size int64, in io.Reade
 		destHolds(s, p)
 		return &migrateReply{OK: true, Probe: p}
 	}
-	if installedProfileKernel(s.RootDir(), profile) == sum {
+	if installed := installedProfileKernel(s.RootDir(), profile); installed == sum {
 		return reply()
+	} else if bootassets.ProfileKernelPresent(s.RootDir(), profile) {
+		held := "one that does not match its install record"
+		if installed != "" {
+			held = "sha256 " + installed
+		}
+		return refuse(codeFailed, fmt.Errorf("this store holds another %s kernel (%s); it was not replaced. "+
+			"`hull assets pull --profile %s --force` there installs another", profile, held, profile))
 	}
 	dir := receivedKernelDir(s)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -544,11 +555,14 @@ func prepareDestination(ctx context.Context, s *store.Store, state *store.Instan
 	if state.Profile != "" {
 		want := installedProfileKernel(s.RootDir(), state.Profile)
 		what := state.Profile + " kernel"
-		switch {
+		switch held := probe.ProfileKernels[state.Profile]; {
 		case want == "":
 			step(prepareStep{What: what, Result: "skipped", Detail: "none is installed here to send"})
-		case probe.ProfileKernels[state.Profile] == want:
+		case held == want:
 			step(prepareStep{What: what, Result: "held", Detail: digestHead(want)})
+		case held != "":
+			step(prepareStep{What: what, Result: "skipped", Detail: fmt.Sprintf("it holds another one (%s), "+
+				"which is not replaced; this host's is %s", digestHead(held), digestHead(want))})
 		default:
 			st, err := sendProfileKernel(ctx, s, p, state.Profile, want)
 			if err != nil {
