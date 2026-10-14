@@ -379,6 +379,33 @@ every second. This Mac has no sshd, so the Mac runs used the
 | Plain `hull restore` of either side | refused by the move | refused by the move |
 | `--abort` | destination removed the instance, kept the tombstone; source stopped its fenced VMM and tried `hull restore`, refused for the same reason | the same |
 
-Not run live: a lost commit acknowledgement, an abort answered `running`, a
-transfer cut midway and a disk changed after the fence (the unit tests cover
-each), any gateway case, and a move on KVM past the restore.
+**A lost commit acknowledgement, Mac (HVF), hvi 4ea836f.** A stand-in for
+ssh ran `migrate-commit` on the destination and then failed as a cut link
+would, so the source never read the reply:
+
+- The source stopped in `committing`, fenced (its VM `fenced`, its
+  checkpoint `migrating`); the destination recorded `running` and the guest
+  counted on there (TICK 12, 14).
+- The destination then moved the guest on to a third store, which committed
+  at epoch 2 and replaced the destination's `migration.json`. Its ledger
+  still held the first move as `running`, and `migrate-status` answered
+  from it. In a second run the destination's operator ran
+  `hull rm --force` instead, with the same ledger answer.
+- In both runs the source's `hull migrate --abort` was refused, saying the
+  move committed there, and the source stayed fenced. `hull migrate NAME
+  --txid T` then recorded `committed` and stopped the fenced VMM. After the
+  move on, the third store went on counting (TICK 18, 21) with no boot line.
+
+**An abort after the transfer, Mac (HVF), hvi 4ea836f.** The stand-in
+refused `migrate-prepare` once, so the move stopped in `transferred`. On
+the destination a plain `hull restore` was refused by the move. The abort
+removed the destination's instance, left its ledger entry `aborted` and
+recorded `destReleased` on the source. The source then restored the guest
+from its fenced checkpoint, and it counted on (TICK 9 at the fence, then 13,
+15) with no boot line. A late `migrate-commit` on the destination was
+refused with `aborted`, and a second abort said "already aborted".
+
+Not run live: an abort answered `unknown_txid`, a destination whose cleanup
+fails, a transfer cut midway, a stream whose reply is lost and a disk
+changed after the fence (the unit tests cover each), any gateway case, and
+a move on KVM past the restore.
