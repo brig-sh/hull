@@ -25,6 +25,7 @@ import (
 // compose tests that only build there; both let the move tests run this
 // binary as ssh and as hull.
 func TestMain(m *testing.M) {
+	testBinaryAsHull()
 	code := m.Run()
 	removeFakeHvi()
 	os.Exit(code)

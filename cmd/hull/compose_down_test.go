@@ -69,6 +69,7 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
+	testBinaryAsHull()
 	code := m.Run()
 	removeFakeHvi()
 	os.Exit(code)
