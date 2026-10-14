@@ -105,18 +105,35 @@ type InstanceState struct {
 	// leaves it alone: a fenced instance that was stopped is exactly the one
 	// a restore needs to find.
 	Migration *MigrationState `json:"migration,omitempty"`
+	// OwnerEpoch counts the moves (`hull migrate`) that brought this
+	// instance to this host: 0 for one that was started here, and one more
+	// than the source's at every committed move. A move hands over the
+	// next epoch, and the destination accepts its commit only for that
+	// epoch, so a commit meant for an earlier move is refused.
+	OwnerEpoch uint64 `json:"ownerEpoch,omitempty"`
 }
 
 // Migration states. A checkpointed instance kept running after the capture,
 // so its disk has moved on since; a fenced one never ran again, so its disk
 // still matches the bundle. Restoring records restoring, then restored-paused
 // once hvi has rebuilt the VM, then restored once it runs.
+//
+// A move (`hull migrate`) adds three. On the source, migrating is a fenced
+// checkpoint that a move has taken over: only the move, or its abort, may
+// decide what becomes of it, so a plain restore refuses it. migrated is a
+// source whose move committed: the VM runs on another host now, and this
+// checkpoint is stale for good. On the destination, incoming is a received
+// checkpoint that only the move's own restore may bring up, and only its
+// commit may resume.
 const (
 	MigrationCheckpointed   = "checkpointed"
 	MigrationFenced         = "fenced"
 	MigrationRestoring      = "restoring"
 	MigrationRestoredPaused = "restored-paused"
 	MigrationRestored       = "restored"
+	MigrationMigrating      = "migrating"
+	MigrationMigrated       = "migrated"
+	MigrationIncoming       = "incoming"
 )
 
 // MigrationState is the record of the last checkpoint taken of an instance
@@ -134,6 +151,12 @@ type MigrationState struct {
 	// hvi may write to, so a restore can check the bundle is the one hull
 	// recorded.
 	ManifestSHA256 string `json:"manifestSha256,omitempty"`
+	// MoveTxID names the move (`hull migrate`) this checkpoint belongs to,
+	// when it belongs to one; its record is <instance>/migration.json.
+	MoveTxID string `json:"moveTxid,omitempty"`
+	// Peer is the other host of that move: where a migrated instance went,
+	// or where an incoming one came from.
+	Peer string `json:"peer,omitempty"`
 }
 
 // StatusStarting marks the one moment an instance has no pid to record: the
@@ -664,6 +687,20 @@ func (s *Store) InstanceControlSocket(id string) string {
 // profile.
 func (s *Store) InstanceProfilePath(id string) string {
 	return s.instancePath(id, "profile.json")
+}
+
+// InstanceMigrationRecord returns the path of the record of the instance's
+// move between hosts (`hull migrate`), on either side of it.
+func (s *Store) InstanceMigrationRecord(id string) string {
+	return s.instancePath(id, "migration.json")
+}
+
+// MigrationTombstoneDir is where a destination keeps the records of moves it
+// aborted. Aborting removes the instance directory, so the name is free for
+// another run, and the record moves here so a late commit or a status query
+// for its txid still gets an answer.
+func (s *Store) MigrationTombstoneDir() string {
+	return filepath.Join(s.rootDir, "migrations")
 }
 
 // DeleteInstance removes an instance directory
