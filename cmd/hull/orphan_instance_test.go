@@ -95,7 +95,7 @@ func TestNoVMMIsSpawnedWithoutARecordOfIt(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "vmm-started")
 	state := &store.InstanceState{ID: "vm1", LogFile: s.InstanceLogFile("vm1")}
 	started, err := launchVMM(&cli.Command{}, s, state, standInVMM(t, marker),
-		nil, vzVmm, true, "none", "")
+		nil, vzVmm, true, "none", "", nil)
 
 	if err == nil {
 		t.Errorf("launchVMM reported success with a store it could not write to; "+
@@ -226,7 +226,7 @@ func TestFailedSpawnLeavesNoStartingRecord(t *testing.T) {
 
 	started, err := launchVMM(&cli.Command{}, s, state,
 		[]string{filepath.Join(t.TempDir(), "no-such-vmm")}, nil,
-		vzVmm, true, "none", "")
+		vzVmm, true, "none", "", nil)
 	if err == nil {
 		t.Fatal("launchVMM succeeded with a VMM binary that does not exist")
 	}

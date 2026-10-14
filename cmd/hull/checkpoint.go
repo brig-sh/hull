@@ -360,7 +360,7 @@ func vzRestoreInstance(_ context.Context, cmd *cli.Command) error {
 	// The guest resumes with its previous network state in memory, so the
 	// recorded IP stays valid (same MAC, same lease/static address) — skip
 	// rediscovery by reporting no NAT networking to the launcher.
-	_, err = launchVMM(cmd, s, state, cmdArgs, gatewayFiles, hypervisors.VzVmm, detach, "none", "")
+	_, err = launchVMM(cmd, s, state, cmdArgs, gatewayFiles, hypervisors.VzVmm, detach, "none", "", nil)
 	return err
 }
 
