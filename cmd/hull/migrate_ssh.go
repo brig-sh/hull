@@ -118,6 +118,16 @@ func refusalCode(err error) string {
 	return ""
 }
 
+// refusalDetail returns what the destination said in a migrateRefusal in
+// err's chain, or err itself.
+func refusalDetail(err error) string {
+	var r *migrateRefusal
+	if errors.As(err, &r) {
+		return r.Reply.Error
+	}
+	return err.Error()
+}
+
 // movePeer runs one remote verb on the destination. stdin, when not nil, is
 // copied to the verb's standard input. The source drives every step through
 // this, so the tests can put the destination in the same process, drop a

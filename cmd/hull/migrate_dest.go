@@ -698,6 +698,10 @@ func destAbort(s *store.Store, txid string) *migrateReply {
 	}
 	switch rec.State {
 	case dstRunning:
+		if path != s.InstanceMigrationRecord(rec.Name) {
+			return refuseWith(codeRunning, fmt.Errorf("move %s committed here at epoch %d; %s has since been "+
+				"removed here or moved on", txid, rec.Epoch, rec.Name), rec)
+		}
 		return refuseWith(codeRunning, fmt.Errorf("move %s committed here and %s runs here, at epoch %d",
 			txid, rec.Name, rec.Epoch), rec)
 	case migAborted:

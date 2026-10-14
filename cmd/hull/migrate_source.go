@@ -943,8 +943,9 @@ func sourceAbort(ctx context.Context, s *store.Store, name string, w io.Writer, 
 	released := err == nil && abortedThere(reply, rec)
 	switch {
 	case err != nil && refusalCode(err) == codeRunning:
-		return fmt.Errorf("the destination %s says move %s committed there and runs %s: it cannot be "+
-			"aborted. `hull migrate %s --txid %s` records the commit here", rec.Peer, rec.TxID, name, name, rec.TxID)
+		return fmt.Errorf("the destination %s says move %s committed there (%v): it cannot be aborted. "+
+			"`hull migrate %s --txid %s` records the commit here", rec.Peer, rec.TxID, refusalDetail(err), name,
+			rec.TxID)
 	case err != nil && refusalCode(err) == codeUnknownTxID && committing:
 		return rec.fail(path, fmt.Errorf("cannot abort move %s: %s has no record of it, but this host has "+
 			"sent it the commit, which it may have run before its record was lost. The source stays fenced: "+
