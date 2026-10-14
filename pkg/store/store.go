@@ -747,10 +747,12 @@ func (s *Store) InstanceMigrationRecord(id string) string {
 	return s.instancePath(id, "migration.json")
 }
 
-// MigrationTombstoneDir is where a destination keeps the records of moves it
-// aborted. Aborting removes the instance directory, so the name is free for
-// another run, and the record moves here so a late commit or a status query
-// for its txid still gets an answer.
+// MigrationTombstoneDir is the ledger where a destination keeps the records
+// of moves that ended on it, committed or aborted, as <txid>.json. Aborting
+// removes the instance directory, so the name is free for another run, and
+// `hull rm` or a later move can remove or replace a committed one; the
+// record here outlives both, so a late commit, an abort or a status query
+// for its txid still gets the true answer.
 func (s *Store) MigrationTombstoneDir() string {
 	return filepath.Join(s.rootDir, "migrations")
 }

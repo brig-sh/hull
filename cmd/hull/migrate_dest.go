@@ -28,6 +28,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -234,7 +235,9 @@ func destRecord(s *store.Store, txid string) (*migrationRecord, string, func(), 
 	if rec.Role != roleDestination {
 		return nil, "", nil, refuseWith(codeFailed, fmt.Errorf("move %s is recorded here as its %s", txid, rec.Role), rec)
 	}
-	if rec.State == migAborted {
+	if path != s.InstanceMigrationRecord(rec.Name) {
+		// From the ledger: the move ended here, and its record there is
+		// never written again but by an abort of the instance it names.
 		return rec, path, nil, nil
 	}
 	unlock, err := lockMove(filepath.Dir(path), moveLockWait)
@@ -651,6 +654,11 @@ func destCommit(s *store.Store, txid string, epoch uint64) *migrateReply {
 	if err := s.SaveInstance(state); err != nil {
 		return refuseWith(codeFailed, rec.fail(path, err), rec)
 	}
+	// The ledger first: once the instance record says running, the store
+	// must answer for this txid whatever later happens to the instance.
+	if err := writeMoveLedger(s, rec, dstRunning); err != nil {
+		return refuseWith(codeFailed, rec.fail(path, fmt.Errorf("record the commit in the ledger: %w", err)), rec)
+	}
 	// The destination's commit point: from here the guest may run, and
 	// nothing may abort the move.
 	if err := rec.advance(path, dstRunning); err != nil {
@@ -672,50 +680,91 @@ func destCommit(s *store.Store, txid string, epoch uint64) *migrateReply {
 
 // destAbort is migrate-abort: refused once the move has committed here;
 // otherwise it records aborted first (so a commit that arrives later is
-// refused), then stops any paused VM the move restored, keeps the record as
-// a tombstone and frees the name. A move this store never heard of
-// answers ok with code unknown_txid: nothing here can run it.
+// refused), keeps the record in the ledger, then stops any paused VM the
+// move restored and frees the name. It answers ok only once all of that is
+// done: a source that hears ok runs the guest again, so a copy left here
+// that something could still resume is a refusal, and running the abort
+// again finishes the job. A move this store has no record of is refused
+// with code unknown_txid: whether that is enough for the source to run the
+// guest again depends on whether it ever sent the commit, which only the
+// source knows.
 func destAbort(s *store.Store, txid string) *migrateReply {
 	rec, path, unlock, no := destRecord(s, txid)
 	if no != nil {
-		if no.Code == codeUnknownTxID {
-			no.OK = true
-		}
 		return no
 	}
 	if unlock != nil {
 		defer unlock()
 	}
 	switch rec.State {
-	case migAborted:
-		return &migrateReply{OK: true, Record: rec}
 	case dstRunning:
+		if path != s.InstanceMigrationRecord(rec.Name) {
+			return refuseWith(codeRunning, fmt.Errorf("move %s committed here at epoch %d; %s has since been "+
+				"removed here or moved on", txid, rec.Epoch, rec.Name), rec)
+		}
 		return refuseWith(codeRunning, fmt.Errorf("move %s committed here and %s runs here, at epoch %d",
 			txid, rec.Name, rec.Epoch), rec)
+	case migAborted:
+		if path != s.InstanceMigrationRecord(rec.Name) {
+			// From the ledger: the instance is gone already.
+			return &migrateReply{OK: true, Record: rec}
+		}
+	default:
+		if err := rec.advance(path, migAborted); err != nil {
+			return refuseWith(codeFailed, err, rec)
+		}
 	}
-	if err := rec.advance(path, migAborted); err != nil {
-		return refuseWith(codeFailed, err, rec)
+	// The ledger before the name is freed: once the instance directory is
+	// gone, it is what refuses a late commit.
+	if err := writeMoveLedger(s, rec, migAborted); err != nil {
+		return refuseWith(codeFailed, fmt.Errorf("move %s is aborted here, but recording it in the ledger "+
+			"failed: %w; run the abort again", txid, err), rec)
 	}
-	if err := os.MkdirAll(s.MigrationTombstoneDir(), 0o700); err == nil {
-		_ = writeMigrationRecord(filepath.Join(s.MigrationTombstoneDir(), txid+".json"), rec)
+	err := destCleanup(s, rec.Name)
+	if err == nil {
+		if _, serr := os.Stat(s.InstanceDir(rec.Name)); serr == nil {
+			err = errors.New("its directory is still there")
+		}
 	}
-	var cleanup error
-	if _, err := s.GetInstance(rec.Name); err == nil {
-		cleanup = removeInstanceIn(s, rec.Name, true)
-	} else {
-		cleanup = s.DeleteInstance(rec.Name)
+	if err != nil {
+		return refuseWith(codeFailed, fmt.Errorf("move %s is aborted here, but removing %s failed: %w; "+
+			"run the abort again", txid, rec.Name, err), rec)
 	}
-	reply := &migrateReply{OK: true, Record: rec}
-	if cleanup != nil {
-		reply.Error = fmt.Sprintf("aborted, but removing %s failed: %v", rec.Name, cleanup)
+	return &migrateReply{OK: true, Record: rec}
+}
+
+// destCleanup removes what an aborted move left of instance name: the VM
+// its restore started, if any, and the directory. A variable so the tests
+// can make it fail.
+var destCleanup = func(s *store.Store, name string) error {
+	if _, err := s.GetInstance(name); err == nil {
+		return removeInstanceIn(s, name, true)
 	}
-	return reply
+	return s.DeleteInstance(name)
+}
+
+// writeMoveLedger writes rec, in state, to <store>/migrations/<txid>.json:
+// the ledger of the moves that ended on this store. A commit writes it
+// before the instance record says running, an abort before it frees the
+// name. Neither `hull rm` nor a later move of the instance removes it, so a
+// source that asks about the move later, after its commit acknowledgement
+// was lost, still gets the answer: the move committed here, or it did not.
+func writeMoveLedger(s *store.Store, rec *migrationRecord, state string) error {
+	if err := os.MkdirAll(s.MigrationTombstoneDir(), 0o700); err != nil {
+		return err
+	}
+	entry := *rec
+	if entry.State != state {
+		entry.State = state
+		entry.History = append(slices.Clone(rec.History), migrateHistory{State: state, At: time.Now().UTC()})
+	}
+	return writeMigrationRecord(filepath.Join(s.MigrationTombstoneDir(), rec.TxID+".json"), &entry)
 }
 
 // destStatus is migrate-status: the record, and what hvi says the VM is
 // doing.
 func destStatus(s *store.Store, txid string) *migrateReply {
-	rec, _, err := findMigrationByTxID(s, txid)
+	rec, path, err := findMigrationByTxID(s, txid)
 	if errors.Is(err, os.ErrNotExist) {
 		return refuse(codeUnknownTxID, fmt.Errorf("no move %s is recorded here", txid))
 	}
@@ -723,6 +772,11 @@ func destStatus(s *store.Store, txid string) *migrateReply {
 		return refuse(codeFailed, err)
 	}
 	reply := &migrateReply{OK: true, Record: rec}
+	// Only for the instance this move holds: a ledger entry's name may by
+	// now be another instance, or one that moved on.
+	if path != s.InstanceMigrationRecord(rec.Name) {
+		return reply
+	}
 	if state, err := s.GetInstance(rec.Name); err == nil && rec.State != migAborted {
 		reply.VM = hviVMState(state)
 	}

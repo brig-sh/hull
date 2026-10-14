@@ -135,7 +135,8 @@ func TestDestinationVerbs(t *testing.T) {
 	if r := destStatus(s, strings.Repeat("ef", 16)); r.OK || r.Code != codeUnknownTxID {
 		t.Errorf("status of an unknown move: %+v", r)
 	}
-	if r := destAbort(s, strings.Repeat("ef", 16)); !r.OK || r.Code != codeUnknownTxID {
+	// Refused, not ok: only the source knows whether that is enough.
+	if r := destAbort(s, strings.Repeat("ef", 16)); r.OK || r.Code != codeUnknownTxID {
 		t.Errorf("abort of an unknown move: %+v", r)
 	}
 	// A stream that is not one is refused, and the record says why.

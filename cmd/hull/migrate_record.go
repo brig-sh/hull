@@ -123,6 +123,11 @@ type migrationRecord struct {
 
 	// Source only: how to reach the destination's hull again on a retry.
 	Remote *migrateRemote `json:"remote,omitempty"`
+	// DestReleased is set on the source of an aborted move once the
+	// destination has confirmed it keeps nothing of it. An abort that ran
+	// without that word (before the fence, with no answer) leaves it unset,
+	// and running the abort again asks again.
+	DestReleased bool `json:"destReleased,omitempty"`
 
 	// BundleDir and ManifestSHA256 name the fenced checkpoint the move
 	// carries, on either side once it is there.
@@ -217,7 +222,7 @@ var txidPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
 // newMoveTxID draws a move's txid. 128 bits, not the 64 of a checkpoint's:
 // a move's txid is matched across two hosts' stores and lives on in their
-// tombstones, and a collision there would let one move's commit act on
+// ledgers, and a collision there would let one move's commit act on
 // another's record.
 func newMoveTxID() (string, error) {
 	var b [16]byte
@@ -344,8 +349,11 @@ func readMigrationRecord(path string) (*migrationRecord, error) {
 }
 
 // findMigrationByTxID finds the record of move txid in s: in an instance
-// directory, or among the tombstones of aborted moves. It returns the
-// record's path too. os.ErrNotExist when this store never saw the move.
+// directory, or in the ledger of moves that ended here (committed or
+// aborted). The instance directory wins: it is the record a move's steps
+// write, and the ledger keeps the move's outcome once the instance has gone
+// or moved on. It returns the record's path too. os.ErrNotExist when this
+// store never saw the move.
 func findMigrationByTxID(s *store.Store, txid string) (*migrationRecord, string, error) {
 	if err := checkTxID(txid); err != nil {
 		return nil, "", err
@@ -427,6 +435,12 @@ func moveRefusal(s *store.Store, id, verb string) error {
 	case rec.Role == roleSource && rec.State != migAborted:
 		return fmt.Errorf("instance %s is being moved to %s (move %s, %s): no %s until the move "+
 			"commits, or `hull migrate --abort %s` ends it", id, rec.Peer, rec.TxID, rec.State, verb, rec.TxID)
+	case rec.Role == roleDestination && rec.State == migAborted && verb != "rm":
+		// The abort's cleanup did not finish: whatever is left may be the
+		// restored, paused guest, which the source now runs again.
+		return fmt.Errorf("instance %s is what is left here of move %s from %s, which was aborted: no %s. "+
+			"`hull migrate-abort --txid %s` here, or `hull rm --force %s`, removes it", id, rec.TxID, rec.Peer,
+			verb, rec.TxID, id)
 	case rec.Role == roleDestination && rec.State != dstRunning && rec.State != migAborted:
 		return fmt.Errorf("instance %s is arriving from %s (move %s, %s): only the move's commit "+
 			"runs it, and `hull migrate --abort %s` on the source ends it", id, rec.Peer, rec.TxID,

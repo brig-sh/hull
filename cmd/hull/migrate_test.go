@@ -17,6 +17,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -569,5 +570,454 @@ func TestMoveThereAndBack(t *testing.T) {
 	away, err := readMigrationRecord(f.dst.InstanceMigrationRecord(f.name))
 	if err != nil || away.Role != roleSource || away.State != srcCommitted || away.Epoch != 2 {
 		t.Errorf("the second move's source record: %+v %v", away, err)
+	}
+}
+
+// loseCommitAck runs a move whose commit reply is lost: the destination
+// runs the guest, the source stays fenced in committing.
+func loseCommitAck(t *testing.T, f *moveFixture) *localPeer {
+	t.Helper()
+	peer := newLocalPeer(f.dst)
+	peer.drop["migrate-commit"] = 1
+	_ = sourceMigrate(context.Background(), f.src, f.name, f.options(false), peer)
+	if got := f.srcRecord(t).State; got != srcCommitting {
+		t.Fatalf("source is %s, want committing", got)
+	}
+	return peer
+}
+
+// abortRefusedThenCommitted checks that the source's abort is refused
+// because the destination committed, and that a re-run records the commit.
+func abortRefusedThenCommitted(t *testing.T, f *moveFixture, peer movePeer) {
+	t.Helper()
+	restored := 0
+	localRestore = func(*store.Store, string) error { restored++; return nil }
+	err := sourceAbort(context.Background(), f.src, f.name, &bytes.Buffer{}, peer)
+	if err == nil || !strings.Contains(err.Error(), "cannot be aborted") {
+		t.Errorf("abort of a move the destination committed: %v", err)
+	}
+	if restored != 0 || f.srcRecord(t).State != srcCommitting {
+		t.Fatalf("the source was brought back (restored %d, record %s)", restored, f.srcRecord(t).State)
+	}
+	opt := f.options(false)
+	opt.txid = f.srcRecord(t).TxID
+	if err := sourceMigrate(context.Background(), f.src, f.name, opt, peer); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.srcRecord(t).State; got != srcCommitted {
+		t.Errorf("after the re-run the source is %s", got)
+	}
+}
+
+// The commit's acknowledgement is lost and the destination then moves the
+// instance on to a third host, which replaces its migration.json. Its
+// ledger still says the first move committed there, so the source's abort
+// is refused and a re-run records the commit: the guest never runs on two
+// hosts.
+func TestMoveLedgerAnswersAfterTheInstanceMovedOn(t *testing.T) {
+	f := newMoveFixture(t, true)
+	peerB := loseCommitAck(t, f)
+	txid := f.srcRecord(t).TxID
+	c := shortStore(t)
+	on := f.options(false)
+	on.to, on.remote.Target = "pm@c", "pm@c"
+	if err := sourceMigrate(context.Background(), f.dst, f.name, on, newLocalPeer(c)); err != nil {
+		t.Fatalf("moving on to c: %v", err)
+	}
+	if mustInstance(t, c, f.name).Status != "running" {
+		t.Fatal("c does not run the guest")
+	}
+	r := destStatus(f.dst, txid)
+	if !r.OK || r.Record.State != dstRunning || r.VM != "" {
+		t.Errorf("status of the first move after the move on: %+v", r)
+	}
+	abortRefusedThenCommitted(t, f, peerB)
+}
+
+// The same with the destination's operator removing the instance after the
+// commit: `hull rm` leaves the ledger, so the source cannot abort a move
+// that ran on the destination and resume the guest from before it.
+func TestMoveLedgerAnswersAfterRm(t *testing.T) {
+	f := newMoveFixture(t, true)
+	peer := loseCommitAck(t, f)
+	if err := removeInstanceIn(f.dst, f.name, true); err != nil {
+		t.Fatalf("rm on the destination: %v", err)
+	}
+	abortRefusedThenCommitted(t, f, peer)
+}
+
+// Once the source has sent the commit, a destination with no record of the
+// move, or a reply that is not its record of this move aborted, leaves the
+// source fenced: the commit may have run there.
+func TestMoveAbortWhileCommittingNeedsTheAbortedRecord(t *testing.T) {
+	f := newMoveFixture(t, true)
+	peer := loseCommitAck(t, f)
+	rec := f.srcRecord(t)
+	restored := 0
+	localRestore = func(*store.Store, string) error { restored++; return nil }
+	for _, answer := range []*migrateReply{
+		{OK: false, Code: codeUnknownTxID, Error: "no move is recorded here"},
+		{OK: true},
+		{OK: true, Record: &migrationRecord{TxID: rec.TxID, Epoch: rec.Epoch + 1, State: migAborted}},
+		{OK: true, Record: &migrationRecord{TxID: rec.TxID, Epoch: rec.Epoch, State: dstRestoredPaused}},
+	} {
+		peer.answer["migrate-abort"] = answer
+		err := sourceAbort(context.Background(), f.src, f.name, &bytes.Buffer{}, peer)
+		if err == nil || !strings.Contains(err.Error(), "stays fenced") {
+			t.Errorf("abort answered %+v: %v", answer, err)
+		}
+		if restored != 0 || f.vm.stopped || f.srcRecord(t).State != srcCommitting {
+			t.Fatalf("abort answered %+v brought the source back", answer)
+		}
+	}
+	// The destination's own answer, from its ledger, is "running".
+	delete(peer.answer, "migrate-abort")
+	if err := sourceAbort(context.Background(), f.src, f.name, &bytes.Buffer{}, peer); err == nil ||
+		!strings.Contains(err.Error(), "cannot be aborted") {
+		t.Errorf("abort: %v", err)
+	}
+}
+
+// Before the commit was sent, a destination that has no record of the move
+// cannot run it, and the abort goes ahead: here after the fence, with the
+// destination's store lost.
+func TestMoveAbortBeforeTheCommitAcceptsAnUnknownMove(t *testing.T) {
+	f := newMoveFixture(t, false)
+	peer := newLocalPeer(f.dst)
+	_ = sourceMigrate(context.Background(), f.src, f.name, f.options(true), peer)
+	if got := f.srcRecord(t).State; got != srcTransferred {
+		t.Fatalf("source is %s", got)
+	}
+	if err := removeInstanceIn(f.dst, f.name, true); err == nil {
+		t.Fatal("rm of an arriving instance was allowed")
+	}
+	if err := f.dst.DeleteInstance(f.name); err != nil {
+		t.Fatal(err)
+	}
+	if r := destAbort(f.dst, f.srcRecord(t).TxID); r.OK || r.Code != codeUnknownTxID {
+		t.Fatalf("destination abort of an unknown move: %+v", r)
+	}
+	restored := 0
+	localRestore = func(*store.Store, string) error { restored++; return nil }
+	if err := sourceAbort(context.Background(), f.src, f.name, &bytes.Buffer{}, peer); err != nil {
+		t.Fatal(err)
+	}
+	if restored != 1 || f.srcRecord(t).State != migAborted {
+		t.Errorf("restored %d, source %s", restored, f.srcRecord(t).State)
+	}
+}
+
+// A destination abort whose cleanup fails is not an abort the source may
+// act on: the source stays fenced, nothing on the destination may run what
+// is left, and the abort run again finishes the job.
+func TestMoveAbortedDestinationWithALeftoverStaysGuarded(t *testing.T) {
+	f := newMoveFixture(t, true)
+	peer := newLocalPeer(f.dst)
+	peer.answer["migrate-commit"] = &migrateReply{OK: false, Code: codeFailed, Error: "lost"}
+	_ = sourceMigrate(context.Background(), f.src, f.name, f.options(false), peer)
+	delete(peer.answer, "migrate-commit")
+	txid := f.srcRecord(t).TxID
+	if got := f.dstRecord(t, txid).State; got != dstRestoredPaused {
+		t.Fatalf("destination is %s", got)
+	}
+	prev := destCleanup
+	t.Cleanup(func() { destCleanup = prev })
+	destCleanup = func(*store.Store, string) error { return errors.New("pid 4242 is still alive after SIGKILL") }
+	restored := 0
+	localRestore = func(*store.Store, string) error { restored++; return nil }
+	err := sourceAbort(context.Background(), f.src, f.name, &bytes.Buffer{}, peer)
+	if err == nil || !strings.Contains(err.Error(), "stays fenced") || !strings.Contains(err.Error(), "still alive") {
+		t.Fatalf("abort with a failed cleanup: %v", err)
+	}
+	if restored != 0 || f.srcRecord(t).State != srcCommitting {
+		t.Fatalf("the source was brought back (restored %d, %s)", restored, f.srcRecord(t).State)
+	}
+	if got := f.dstRecord(t, txid).State; got != migAborted {
+		t.Fatalf("destination is %s", got)
+	}
+	for _, verb := range []string{"resume", "restore", "checkpoint", "migrate"} {
+		if err := refuseDuringMove(f.dst, f.name, verb); err == nil || !strings.Contains(err.Error(), "aborted") {
+			t.Errorf("%s of the aborted copy: %v", verb, err)
+		}
+	}
+	st := mustInstance(t, f.dst, f.name)
+	if err := checkMoveRestore(f.dst, st, hviRestoreOptions{}); err == nil {
+		t.Error("a plain restore of the aborted copy was allowed")
+	}
+	back := f.options(false)
+	back.to, back.remote.Target = "pm@src", "pm@src"
+	if err := sourceMigrate(context.Background(), f.dst, f.name, back, newLocalPeer(shortStore(t))); err == nil {
+		t.Error("a move of the aborted copy was allowed")
+	}
+	// The commit stays refused, and a second abort finishes.
+	if r := destCommit(f.dst, txid, f.srcRecord(t).Epoch); r.OK || r.Code != codeAborted {
+		t.Errorf("late commit: %+v", r)
+	}
+	destCleanup = prev
+	if err := sourceAbort(context.Background(), f.src, f.name, &bytes.Buffer{}, peer); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(f.dst.InstanceDir(f.name)); !os.IsNotExist(err) {
+		t.Errorf("the destination kept the instance: %v", err)
+	}
+	if restored != 1 || f.srcRecord(t).State != migAborted {
+		t.Errorf("restored %d, source %s", restored, f.srcRecord(t).State)
+	}
+	if r := destCommit(f.dst, txid, f.srcRecord(t).Epoch); r.OK || r.Code != codeAborted {
+		t.Errorf("late commit after the cleanup: %+v", r)
+	}
+}
+
+// dropNthPeer runs a verb and loses its reply on the nth call of it.
+type dropNthPeer struct {
+	*localPeer
+	verb string
+	n    int
+	seen int
+}
+
+func (p *dropNthPeer) call(ctx context.Context, verb string, args []string, stdin io.Reader) (*migrateReply, error) {
+	r, err := p.localPeer.call(ctx, verb, args, stdin)
+	if verb == p.verb {
+		p.seen++
+		if p.seen == p.n {
+			return nil, errMoveNoAnswer
+		}
+	}
+	return r, err
+}
+
+// loseReceiveReply runs a move whose stream arrives and verifies, but whose
+// reply is lost: the source stays in transferring, the destination is
+// verified.
+func loseReceiveReply(t *testing.T, f *moveFixture) *localPeer {
+	t.Helper()
+	// The first migrate-receive is the reservation, the second the stream.
+	peer := &dropNthPeer{localPeer: newLocalPeer(f.dst), verb: "migrate-receive", n: 2}
+	_ = sourceMigrate(context.Background(), f.src, f.name, f.options(false), peer)
+	src := f.srcRecord(t)
+	if src.State != srcTransferring {
+		t.Fatalf("source %s", src.State)
+	}
+	if got := f.dstRecord(t, src.TxID).State; got != dstVerified {
+		t.Fatalf("destination %s", got)
+	}
+	return peer.localPeer
+}
+
+// A re-run that finds the destination verified checks the disk as a stream
+// would have: a disk written after the fence is refused there too.
+func TestMoveRetryAfterALostReceiveReplyChecksTheDisk(t *testing.T) {
+	f := newMoveFixture(t, true)
+	peer := loseReceiveReply(t, f)
+	if f.srcRecord(t).Disk.SHA256 == "" {
+		t.Error("the source did not record the hash of the disk it sent")
+	}
+	later := time.Now().Add(time.Hour)
+	if err := os.Chtimes(f.disk, later, later); err != nil {
+		t.Fatal(err)
+	}
+	opt := f.options(false)
+	opt.txid = f.srcRecord(t).TxID
+	err := sourceMigrate(context.Background(), f.src, f.name, opt, peer)
+	if err == nil || !strings.Contains(err.Error(), "changed after the fence") {
+		t.Errorf("err = %v", err)
+	}
+	if got := f.srcRecord(t).State; got != srcTransferring {
+		t.Errorf("source %s", got)
+	}
+}
+
+// The source compares the destination's disk with its own hash, never takes
+// the destination's: with none on record it hashes the disk again, and a
+// record that disagrees with the destination is refused.
+func TestMoveRetryAfterALostReceiveReplyComparesTheSourcesHash(t *testing.T) {
+	f := newMoveFixture(t, true)
+	peer := loseReceiveReply(t, f)
+	rec := f.srcRecord(t)
+	sent := rec.Disk.SHA256
+	path := f.src.InstanceMigrationRecord(f.name)
+	rec.Disk.SHA256 = strings.Repeat("0", 64)
+	if err := writeMigrationRecord(path, rec); err != nil {
+		t.Fatal(err)
+	}
+	opt := f.options(false)
+	opt.txid = rec.TxID
+	err := sourceMigrate(context.Background(), f.src, f.name, opt, peer)
+	if err == nil || !strings.Contains(err.Error(), "not the one the source sent") {
+		t.Errorf("a destination disk that differs from the source's hash: %v", err)
+	}
+	// As if hull had died before it recorded the hash.
+	rec = f.srcRecord(t)
+	rec.Disk.SHA256, rec.Disk.DataBytes = "", 0
+	if err := writeMigrationRecord(path, rec); err != nil {
+		t.Fatal(err)
+	}
+	if err := sourceMigrate(context.Background(), f.src, f.name, opt, peer); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.srcRecord(t); got.State != srcCommitted || got.Disk.SHA256 != sent || got.Disk.DataBytes == 0 {
+		t.Errorf("source %s, disk %+v, sent %s", got.State, got.Disk, sent)
+	}
+}
+
+// An abort before the fence that the destination does not confirm says a
+// second abort releases the reservation, and the second abort does.
+func TestMoveSecondAbortReleasesTheReservation(t *testing.T) {
+	f := newMoveFixture(t, true)
+	peer := newLocalPeer(f.dst)
+	f.vm.mu.Lock()
+	f.vm.failCheckpoint = true
+	f.vm.mu.Unlock()
+	_ = sourceMigrate(context.Background(), f.src, f.name, f.options(false), peer)
+	peer.down = true
+	var w bytes.Buffer
+	if err := sourceAbort(context.Background(), f.src, f.name, &w, peer); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(w.String(), "run again releases") || f.srcRecord(t).DestReleased {
+		t.Fatalf("first abort said %q, released %v", w.String(), f.srcRecord(t).DestReleased)
+	}
+	peer.down = false
+	w.Reset()
+	if err := sourceAbort(context.Background(), f.src, f.name, &w, peer); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(f.dst.InstanceDir(f.name)); !os.IsNotExist(err) {
+		t.Errorf("the reservation is still there after the second abort (%q): %v", w.String(), err)
+	}
+	if !f.srcRecord(t).DestReleased {
+		t.Error("the release is not on record")
+	}
+	// Once released, an abort asks nothing more.
+	before := peer.called("migrate-abort")
+	if err := sourceAbort(context.Background(), f.src, f.name, &w, peer); err != nil {
+		t.Fatal(err)
+	}
+	if peer.called("migrate-abort") != before || f.vm.stopped {
+		t.Error("a third abort asked the destination again, or stopped the source")
+	}
+}
+
+// An abort that recorded aborted but did not live to hand the fenced
+// checkpoint back is finished by running the abort again.
+func TestMoveAbortRunAgainRestoresTheSource(t *testing.T) {
+	f := newMoveFixture(t, false)
+	peer := newLocalPeer(f.dst)
+	_ = sourceMigrate(context.Background(), f.src, f.name, f.options(true), peer)
+	rec := f.srcRecord(t)
+	if r := destAbort(f.dst, rec.TxID); !r.OK {
+		t.Fatalf("destination abort: %+v", r)
+	}
+	// Recorded aborted here; the instance record still says migrating.
+	if err := rec.advance(f.src.InstanceMigrationRecord(f.name), migAborted); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustInstance(t, f.src, f.name).Migration.State; got != store.MigrationMigrating {
+		t.Fatalf("instance migration %s", got)
+	}
+	restored := 0
+	localRestore = func(s *store.Store, name string) error {
+		restored++
+		st := mustInstance(t, s, name)
+		if err := restorableMigration(st.Migration); err != nil {
+			return err
+		}
+		st.Migration.State = store.MigrationRestored
+		return s.SaveInstance(st)
+	}
+	if err := sourceAbort(context.Background(), f.src, f.name, &bytes.Buffer{}, peer); err != nil {
+		t.Fatal(err)
+	}
+	if restored != 1 || !f.vm.stopped {
+		t.Errorf("restored %d, fenced VMM stopped %v", restored, f.vm.stopped)
+	}
+	var w bytes.Buffer
+	if err := sourceAbort(context.Background(), f.src, f.name, &w, peer); err != nil ||
+		!strings.Contains(w.String(), "already aborted") || restored != 1 {
+		t.Errorf("abort of a finished abort: %v, %q, restored %d", err, w.String(), restored)
+	}
+}
+
+// A fence whose reply was lost before hull recorded it: the VM is fenced,
+// the record still says reserved. The abort counts it as fenced, adopts the
+// bundle, needs the destination's word, and restores the instance here.
+func TestMoveAbortAfterALostFenceReply(t *testing.T) {
+	f := newMoveFixture(t, true)
+	peer := newLocalPeer(f.dst)
+	f.vm.mu.Lock()
+	f.vm.failCheckpoint = true
+	f.vm.mu.Unlock()
+	_ = sourceMigrate(context.Background(), f.src, f.name, f.options(false), peer)
+	rec := f.srcRecord(t)
+	if rec.State != srcReserved {
+		t.Fatalf("source %s", rec.State)
+	}
+	f.vm.mu.Lock()
+	f.vm.fenced = true
+	f.vm.mu.Unlock()
+	root, _ := flagValue(mustInstance(t, f.src, f.name).CmdLine, "--checkpoint-root")
+	restored := 0
+	localRestore = func(*store.Store, string) error { restored++; return nil }
+
+	// No bundle of this move: nothing to bring back, and nothing changes.
+	err := sourceAbort(context.Background(), f.src, f.name, &bytes.Buffer{}, peer)
+	if err == nil || !strings.Contains(err.Error(), "no bundle of this move") {
+		t.Fatalf("abort with no bundle: %v", err)
+	}
+	if f.srcRecord(t).State != srcReserved || peer.called("migrate-abort") != 0 {
+		t.Fatal("the abort went ahead with nothing to restore")
+	}
+	dir := filepath.Join(root, rec.TxID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeBundle(t, dir, fixtureDiskSize)
+	// Fenced, so the destination's word is needed.
+	peer.down = true
+	if err := sourceAbort(context.Background(), f.src, f.name, &bytes.Buffer{}, peer); err == nil ||
+		!strings.Contains(err.Error(), "stays fenced") {
+		t.Fatalf("abort with no answer: %v", err)
+	}
+	peer.down = false
+	var w bytes.Buffer
+	if err := sourceAbort(context.Background(), f.src, f.name, &w, peer); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(w.String(), "never stopped") || restored != 1 || !f.vm.stopped {
+		t.Errorf("abort said %q; restored %d, stopped %v", w.String(), restored, f.vm.stopped)
+	}
+	if m := mustInstance(t, f.src, f.name).Migration; m == nil || m.TxID != rec.TxID || m.BundleDir != dir {
+		t.Errorf("instance migration %+v", m)
+	}
+}
+
+// A txid given to --abort or --status names that move, not whatever move the
+// instance holds now: after a move on, the first move's txid is only in the
+// ledger, and resolving it to the instance would act on the second move.
+func TestMoveTxIDArgumentNamesThatMove(t *testing.T) {
+	f := newMoveFixture(t, true)
+	if err := sourceMigrate(context.Background(), f.src, f.name, f.options(false), newLocalPeer(f.dst)); err != nil {
+		t.Fatal(err)
+	}
+	first := f.srcRecord(t).TxID
+	// The move on stops before the commit: c cannot restore.
+	c := newLocalPeer(shortStore(t))
+	c.answer["migrate-prepare"] = &migrateReply{OK: false, Code: codeRestoreRefused, Error: "no restore"}
+	on := f.options(false)
+	on.to, on.remote.Target = "pm@c", "pm@c"
+	_ = sourceMigrate(context.Background(), f.dst, f.name, on, c)
+	second, err := readMigrationRecord(f.dst.InstanceMigrationRecord(f.name))
+	if err != nil || second.State != srcTransferred {
+		t.Fatalf("the move on: %+v %v", second, err)
+	}
+	if _, err := moveInstanceName(f.dst, first); err == nil || !strings.Contains(err.Error(), "migrate-status") {
+		t.Errorf("the first move's txid resolved to the instance: %v", err)
+	}
+	if name, err := moveInstanceName(f.dst, second.TxID); err != nil || name != f.name {
+		t.Errorf("the second move's txid: %q %v", name, err)
+	}
+	if name, err := moveInstanceName(f.dst, f.name); err != nil || name != f.name {
+		t.Errorf("the name: %q %v", name, err)
 	}
 }
