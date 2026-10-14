@@ -889,12 +889,24 @@ func sourceAbort(ctx context.Context, s *store.Store, name string, w io.Writer, 
 	}
 	fenced := migrateStateOrder(roleSource, rec.State) >= migrateStateOrder(roleSource, srcFenced) ||
 		fencedFor(state, rec.TxID)
+	// From committing on the commit may have been delivered, so only the
+	// destination's record of this very move, aborted, lets the source go.
+	committing := rec.State == srcCommitting
 	p := peerFor(rec, peer)
 	reply, err := p.call(ctx, "migrate-abort", []string{"--txid", rec.TxID}, nil)
 	switch {
 	case err != nil && refusalCode(err) == codeRunning:
 		return fmt.Errorf("the destination %s says move %s committed there and runs %s: it cannot be "+
 			"aborted. `hull migrate %s --txid %s` records the commit here", rec.Peer, rec.TxID, name, name, rec.TxID)
+	case err != nil && refusalCode(err) == codeUnknownTxID && committing:
+		return rec.fail(path, fmt.Errorf("cannot abort move %s: %s has no record of it, but this host has "+
+			"sent it the commit, which it may have run before its record was lost. The source stays fenced: "+
+			"running %s here could put it on two hosts. Find out where it runs (docs/migration.md, "+
+			"\"Operator recovery\")", rec.TxID, rec.Peer, name))
+	case err != nil && refusalCode(err) == codeUnknownTxID:
+		// No commit was ever sent, so a destination that never heard of
+		// the move, or lost its reservation, cannot be running it.
+		err = nil
 	case err != nil && fenced:
 		return rec.fail(path, fmt.Errorf("cannot abort move %s: %w\nWithout the destination's word that it "+
 			"is not running %s and will refuse the commit, the source stays fenced: running it here could "+
@@ -903,7 +915,11 @@ func sourceAbort(ctx context.Context, s *store.Store, name string, w io.Writer, 
 		_, _ = fmt.Fprintf(w, "warning: %s did not confirm the abort (%v); it may still hold a reservation for %s, "+
 			"which `hull migrate --abort %s` again releases\n", rec.Peer, err, name, rec.TxID)
 	}
-	if reply != nil && reply.Error != "" {
+	if err == nil && fenced && reply.OK && !abortedThere(reply, rec) {
+		return rec.fail(path, fmt.Errorf("cannot abort move %s: the reply of %s does not say it aborted "+
+			"this move at epoch %d, so the source stays fenced. Retry", rec.TxID, rec.Peer, rec.Epoch))
+	}
+	if reply != nil && reply.OK && reply.Error != "" {
 		_, _ = fmt.Fprintf(w, "warning: %s: %s\n", rec.Peer, reply.Error)
 	}
 	if err := rec.advance(path, migAborted); err != nil {
@@ -933,6 +949,13 @@ func sourceAbort(ctx context.Context, s *store.Store, name string, w io.Writer, 
 			"restore %s` brings it back once that is fixed", rec.TxID, name, err, name)
 	}
 	return nil
+}
+
+// abortedThere reports whether reply is the destination's record of move rec,
+// aborted.
+func abortedThere(reply *migrateReply, rec *migrationRecord) bool {
+	r := reply.Record
+	return r != nil && r.State == migAborted && r.TxID == rec.TxID && r.Epoch == rec.Epoch
 }
 
 // localRestore runs `hull restore --detach NAME` here, as a child for the

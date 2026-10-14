@@ -679,15 +679,14 @@ func destCommit(s *store.Store, txid string, epoch uint64) *migrateReply {
 
 // destAbort is migrate-abort: refused once the move has committed here;
 // otherwise it records aborted first (so a commit that arrives later is
-// refused), then stops any paused VM the move restored, keeps the record as
-// a tombstone and frees the name. A move this store never heard of
-// answers ok with code unknown_txid: nothing here can run it.
+// refused), then stops any paused VM the move restored, keeps the record in
+// the ledger and frees the name. A move this store has no record of is
+// refused with code unknown_txid: whether that is enough for the source to
+// run the guest again depends on whether it ever sent the commit, which
+// only the source knows.
 func destAbort(s *store.Store, txid string) *migrateReply {
 	rec, path, unlock, no := destRecord(s, txid)
 	if no != nil {
-		if no.Code == codeUnknownTxID {
-			no.OK = true
-		}
 		return no
 	}
 	if unlock != nil {
