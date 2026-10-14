@@ -27,7 +27,7 @@ for the one build that reports `dev`.
 
 ## Commands
 
-There are nineteen top-level commands. `network-gateway` is the only hidden one:
+There are twenty-one top-level commands. `network-gateway` is the only hidden one:
 it does not appear in `hull --help`, but it runs and prints its own help when
 named. No flag anywhere in the tree is hidden.
 
@@ -38,8 +38,10 @@ named. No flag anywhere in the tree is hidden.
 | `exec <id> <cmd...>` | run a command in a running instance |
 | `ps` | list instances |
 | `stop <id>` | stop a running instance |
-| `checkpoint <id>` | pause a running `vz` instance, save VM and disk state, resume it |
-| `restore <id>` | restore a stopped `vz` instance from its checkpoint |
+| `pause <id>` | pause a running `hvi` instance: its I/O threads and every vCPU stop |
+| `resume <id>` | resume an `hvi` instance paused by `pause` |
+| `checkpoint <id>` | `vz`: pause, save VM and disk state, resume. `hvi`: write a checkpoint bundle, then continue or fence |
+| `restore <id>` | restore a stopped instance: `vz` from its saved state, `hvi` from a fenced bundle |
 | `rm <id>` | remove a stopped instance |
 | `logs <id>` | show an instance's log |
 | `inspect <id>` | print instance details as JSON |
@@ -145,8 +147,9 @@ as a default that an explicit `--env TERM` beats.
 | `images` | `--json` prints the store's records with full digests |
 | `rmi <image>...` | `--force`, `-f` remove one a stopped instance refers to; `--platform <p>` narrow to one platform |
 | `prune` | `--all` also remove every image no instance refers to; `--dry-run` print and remove nothing |
-| `checkpoint <id>` | `--timeout <secs>`, default 60 |
-| `restore <id>` | `--detach`, `-d`; `--stop-grace <secs>`, default 10; `--wait-ip`; `--gateway-sock <path>` |
+| `pause <id>`, `resume <id>` | none |
+| `checkpoint <id>` | `--timeout <secs>`, default 60; `hvi` only: `--then continue\|fence`, default `continue`; `--dir <path>`, an empty directory for the bundle |
+| `restore <id>` | `--detach`, `-d`; `--stop-grace <secs>`, default 10; `--wait-ip`; `--gateway-sock <path>` (`vz` only); `hvi` only: `--paused`, `--timeout <secs>`, default 120 |
 | `assets show` | none |
 | `assets dir` | none. Prints the directory and nothing else, for scripts |
 | `assets pull [REF]` | `--force` download even when the assets are present |
@@ -158,9 +161,19 @@ as a default that an explicit `--env TERM` beats.
 `-t` means two different things: a pseudo-terminal on `exec`, and a force-kill
 timeout in seconds on `stop`.
 
-`hull checkpoint` refuses an instance that is not running, one whose VMM is not
-`vz-runner`, one started without a checkpoint state directory, and one that is
-not on a block rootfs.
+`hull checkpoint` refuses an instance that is not running and one that is not
+on a block rootfs. For a `vz` instance it also refuses one started without a
+checkpoint state directory. For an `hvi` instance it also refuses one started
+without a control socket and one with a shared host directory, and `--then`
+and `--dir` are refused on any other backend.
+
+`hull pause` and `hull resume` take only `hvi` instances. `hull restore` on an
+`hvi` instance refuses unless its last checkpoint was fenced, while its VMM is
+still running, and when the `hvi` it ran has no `restore` subcommand. See
+[checkpoint-restore.md](checkpoint-restore.md#hvi).
+
+`hull stop` on an `hvi` instance asks hvi over its control socket first, then
+signals as for any VMM.
 
 `hull images` prints `No images found` and `hull ps` prints
 `No instances found` on an empty store. Both exit 0. `hull prune` prints

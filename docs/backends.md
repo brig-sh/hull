@@ -30,8 +30,8 @@ Start with `vz`. Move to another backend only for a reason on this list.
 
 | Choose | When |
 |---|---|
-| `vz` | the default. You want NAT with no setup, a GUI window, Rosetta, or checkpoint and restore |
-| `hvi` | you want a persistent writable root without a disk image, correct Linux file modes over a share, or the same device model hull's guests get on Linux |
+| `vz` | the default. You want NAT with no setup, a GUI window, Rosetta, or a checkpoint you can restore any number of times |
+| `hvi` | you want a persistent writable root without a disk image, correct Linux file modes over a share, the same device model hull's guests get on Linux, or pause and a checkpoint bundle |
 | `qemu` | you need a device or a machine option only QEMU has |
 
 ## Capability comparison
@@ -50,7 +50,8 @@ Start with `vz`. Move to another backend only for a reason on this list.
 | `--net shared` | Apple NAT, no extra privilege | **refused**, see below | vmnet, needs root or a signed QEMU | **refused** without `--gateway-sock` |
 | `--gateway-sock` | yes | yes | yes | yes |
 | `exec` | yes | yes | yes | yes |
-| Checkpoint and restore | yes, with a block rootfs | **no** | **no** | **no** |
+| Checkpoint and restore | yes, with a block rootfs | checkpoint with a block rootfs and no shares; restore from a fenced checkpoint | **no** | as on macOS |
+| Pause and resume | **no** | yes | **no** | yes |
 | `--gui`, `--gui-title` | yes | no | no | no |
 | `--rosetta` | yes | no | no | no |
 
@@ -114,8 +115,9 @@ pull platform, because the platform is decided before the image is pulled.
 to shut down and forces a stop after `--stop-grace` seconds, 10 by default. A
 second signal forces the stop at once.
 
-**Checkpoint and restore.** Only here, and only with a block rootfs. A virtiofs
-root goes stale across a restore, so hull refuses the combination. See
+**Checkpoint and restore.** Only with a block rootfs. A virtiofs root goes
+stale across a restore, so hull refuses the combination. `hvi` checkpoints
+too, by a different mechanism and with different rules. See
 [checkpoint-restore.md](checkpoint-restore.md).
 
 One operational note, recorded from CI rather than derived from code: machine
@@ -205,12 +207,16 @@ refused with an error naming the gateway flag, and the MAC flag has no effect.
 **Exec** works. `hvi` stands up a host Unix listener and bridges it over
 virtio-vsock to an in-guest agent, and hull wires that up on every run.
 
-**No checkpoint or restore.** `hvi` has no code that saves or reloads VM state
-at this pin. Its subcommands are `boot`, `dump-fdt`, `smoke`,
-`smoke-shm-verify`, `sandbox-selftest`, `seccomp-selftest` and `version`. The
-`Quiesce::checkpoint` name inside `hvi` is a vCPU park primitive used so a
-plugin can read registers consistently, not a VM snapshot. hull's `checkpoint`
-and `restore` commands refuse any backend but `vz`.
+**Pause, checkpoint and restore** go through the control socket hull gives
+every `hvi` run (`--control-sock`, with the machine profile at
+`--profile-out`). `hull pause` and `hull resume` stop and restart the I/O
+threads and every vCPU. `hull checkpoint` writes a bundle of RAM, vCPU,
+interrupt controller, timer and device state, then continues or fences the
+guest. `hull restore` restores a fenced bundle onto the disk the guest stopped
+with. `hull stop` asks over the socket before it signals. The hvi at hull's
+submodule pin predates the socket and refuses the flag; until the pin moves,
+`hvi` runs need a newer `hvi`. See
+[checkpoint-restore.md](checkpoint-restore.md#hvi).
 
 **Other limits `hvi` states about itself.** Eight vCPUs on a GICv2 arm64 Linux
 host, which does not apply on macOS because Apple's in-kernel GIC is a GICv3.
@@ -227,11 +233,12 @@ long-running `hvi` guest has no host time source to correct drift against.
 
 hull also builds for arm64 Linux, where it runs `hvi` on KVM and nothing else:
 `hvi`, a block rootfs, and either no network or a gateway. That is the
-configuration a sandbox needs to be moved between two KVM hosts, which is
-planned and not built yet; no checkpoint, restore or migration exists on
-Linux today. brig drives it with the same verbs it uses on macOS: `run`,
-`exec`, `ps`, `inspect`, `logs`, `stop`, `rm`, `assets dir` and
-`network-gateway`. `pull`, `images`, `rmi`, `prune`, `telemetry` and `version`
+configuration a sandbox needs to be moved between two KVM hosts. `pause`,
+`resume`, `checkpoint` and `restore` work as on macOS (see
+[checkpoint-restore.md](checkpoint-restore.md#hvi)); moving a sandbox to
+another host is planned and not built yet. brig drives it with the same verbs
+it uses on macOS: `run`, `exec`, `ps`, `inspect`, `logs`, `stop`, `rm`,
+`assets dir` and `network-gateway`. `pull`, `images`, `rmi`, `prune`, `telemetry` and `version`
 work too.
 
 A sandbox started on a Mac cannot be moved to Linux, and none of the planned
@@ -286,8 +293,9 @@ What is different from macOS:
   argument` on the first file owned by an id the namespace does not map
   (`/etc/shadow`, gid 42, in alpine). The pull stops there. Run hull as an
   ordinary user or as real root instead.
-- **Not on Linux:** `compose`, `checkpoint`, `restore`, `store`, `--gui` and
-  `--rosetta`.
+- **Not on Linux:** `compose`, `store`, `--gui` and `--rosetta`.
+  `checkpoint` and `restore` take `hvi` instances only, which on Linux is
+  every instance.
 
 The user running hull needs read-write access to `/dev/kvm`, usually through
 the `kvm` group. A group added to a logged-in user reaches only new sessions.
