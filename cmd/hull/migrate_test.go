@@ -761,3 +761,96 @@ func TestMoveAbortedDestinationWithALeftoverStaysGuarded(t *testing.T) {
 		t.Errorf("late commit after the cleanup: %+v", r)
 	}
 }
+
+// dropNthPeer runs a verb and loses its reply on the nth call of it.
+type dropNthPeer struct {
+	*localPeer
+	verb string
+	n    int
+	seen int
+}
+
+func (p *dropNthPeer) call(ctx context.Context, verb string, args []string, stdin io.Reader) (*migrateReply, error) {
+	r, err := p.localPeer.call(ctx, verb, args, stdin)
+	if verb == p.verb {
+		p.seen++
+		if p.seen == p.n {
+			return nil, errMoveNoAnswer
+		}
+	}
+	return r, err
+}
+
+// loseReceiveReply runs a move whose stream arrives and verifies, but whose
+// reply is lost: the source stays in transferring, the destination is
+// verified.
+func loseReceiveReply(t *testing.T, f *moveFixture) *localPeer {
+	t.Helper()
+	// The first migrate-receive is the reservation, the second the stream.
+	peer := &dropNthPeer{localPeer: newLocalPeer(f.dst), verb: "migrate-receive", n: 2}
+	_ = sourceMigrate(context.Background(), f.src, f.name, f.options(false), peer)
+	src := f.srcRecord(t)
+	if src.State != srcTransferring {
+		t.Fatalf("source %s", src.State)
+	}
+	if got := f.dstRecord(t, src.TxID).State; got != dstVerified {
+		t.Fatalf("destination %s", got)
+	}
+	return peer.localPeer
+}
+
+// A re-run that finds the destination verified checks the disk as a stream
+// would have: a disk written after the fence is refused there too.
+func TestMoveRetryAfterALostReceiveReplyChecksTheDisk(t *testing.T) {
+	f := newMoveFixture(t, true)
+	peer := loseReceiveReply(t, f)
+	if f.srcRecord(t).Disk.SHA256 == "" {
+		t.Error("the source did not record the hash of the disk it sent")
+	}
+	later := time.Now().Add(time.Hour)
+	if err := os.Chtimes(f.disk, later, later); err != nil {
+		t.Fatal(err)
+	}
+	opt := f.options(false)
+	opt.txid = f.srcRecord(t).TxID
+	err := sourceMigrate(context.Background(), f.src, f.name, opt, peer)
+	if err == nil || !strings.Contains(err.Error(), "changed after the fence") {
+		t.Errorf("err = %v", err)
+	}
+	if got := f.srcRecord(t).State; got != srcTransferring {
+		t.Errorf("source %s", got)
+	}
+}
+
+// The source compares the destination's disk with its own hash, never takes
+// the destination's: with none on record it hashes the disk again, and a
+// record that disagrees with the destination is refused.
+func TestMoveRetryAfterALostReceiveReplyComparesTheSourcesHash(t *testing.T) {
+	f := newMoveFixture(t, true)
+	peer := loseReceiveReply(t, f)
+	rec := f.srcRecord(t)
+	sent := rec.Disk.SHA256
+	path := f.src.InstanceMigrationRecord(f.name)
+	rec.Disk.SHA256 = strings.Repeat("0", 64)
+	if err := writeMigrationRecord(path, rec); err != nil {
+		t.Fatal(err)
+	}
+	opt := f.options(false)
+	opt.txid = rec.TxID
+	err := sourceMigrate(context.Background(), f.src, f.name, opt, peer)
+	if err == nil || !strings.Contains(err.Error(), "not the one the source sent") {
+		t.Errorf("a destination disk that differs from the source's hash: %v", err)
+	}
+	// As if hull had died before it recorded the hash.
+	rec = f.srcRecord(t)
+	rec.Disk.SHA256, rec.Disk.DataBytes = "", 0
+	if err := writeMigrationRecord(path, rec); err != nil {
+		t.Fatal(err)
+	}
+	if err := sourceMigrate(context.Background(), f.src, f.name, opt, peer); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.srcRecord(t); got.State != srcCommitted || got.Disk.SHA256 != sent || got.Disk.DataBytes == 0 {
+		t.Errorf("source %s, disk %+v, sent %s", got.State, got.Disk, sent)
+	}
+}

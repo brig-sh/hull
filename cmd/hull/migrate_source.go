@@ -666,11 +666,19 @@ func bundleFiles(dir string) ([]string, error) {
 
 // transfer streams the bundle and the disk to migrate-receive, which ends
 // verified on the destination. A destination already verified is not sent
-// it again.
+// it again, but the disk is checked as after a stream: unchanged since the
+// fence, and the same as what the destination holds by the source's own
+// hash.
 func (m *moveSource) transfer(ctx context.Context) error {
 	if reply, err := m.peer.call(ctx, "migrate-status", []string{"--txid", m.rec.TxID}, nil); err == nil &&
 		reply.Record != nil &&
 		migrateStateOrder(roleDestination, reply.Record.State) >= migrateStateOrder(roleDestination, dstVerified) {
+		if err := m.checkDiskUnchanged(); err != nil {
+			return err
+		}
+		if err := m.sourceDiskSum(); err != nil {
+			return err
+		}
 		if err := m.compareReceived(reply.Record); err != nil {
 			return err
 		}
@@ -726,6 +734,16 @@ func (m *moveSource) transfer(ctx context.Context) error {
 	reply, err := m.peer.call(ctx, "migrate-receive", []string{"--txid", m.rec.TxID, "--name", m.name}, pr)
 	_ = pr.CloseWithError(errors.New("the destination stopped reading"))
 	sendErr := <-sent
+	if sendErr == nil {
+		// The disk's hash as sent, on record before the reply is looked
+		// at: a reply that is lost leaves a re-run to compare the
+		// destination's copy with it.
+		m.rec.Disk.SHA256 = diskSum.SHA256
+		m.rec.Disk.DataBytes = diskSum.DataBytes
+		if werr := writeMigrationRecord(m.path, m.rec); werr != nil {
+			return werr
+		}
+	}
 	if sendErr != nil && !errors.Is(sendErr, io.ErrClosedPipe) && err == nil {
 		err = fmt.Errorf("send: %w", sendErr)
 	}
@@ -742,9 +760,12 @@ func (m *moveSource) transfer(ctx context.Context) error {
 	if reply.Record == nil {
 		return errors.New("the destination's receive reply has no record")
 	}
-	if sendErr == nil {
-		m.rec.Disk.SHA256 = diskSum.SHA256
-		m.rec.Disk.DataBytes = diskSum.DataBytes
+	if sendErr != nil {
+		// The destination answered without reading it all: it had it.
+		if err := m.sourceDiskSum(); err != nil {
+			return err
+		}
+	} else {
 		m.rec.Transfer = &migrateTransfer{Bytes: sw.written(), Seconds: took.Seconds(), StartedAt: started.UTC(),
 			BytesPerSec: int64(float64(sw.written()) / max(took.Seconds(), 1e-3))}
 		m.timing("transfer", started)
@@ -770,14 +791,28 @@ func (m *moveSource) compareReceived(dst *migrationRecord) error {
 	if dst.ManifestSHA256 != m.rec.ManifestSHA256 {
 		return fmt.Errorf("the destination has manifest sha256 %s, the source %s", dst.ManifestSHA256, m.rec.ManifestSHA256)
 	}
-	if dst.Disk == nil || dst.Disk.Size != m.rec.Disk.Size ||
-		(m.rec.Disk.SHA256 != "" && dst.Disk.SHA256 != m.rec.Disk.SHA256) {
+	if m.rec.Disk.SHA256 == "" {
+		return errors.New("the source has no hash of its disk to compare the destination's with")
+	}
+	if dst.Disk == nil || dst.Disk.Size != m.rec.Disk.Size || dst.Disk.SHA256 != m.rec.Disk.SHA256 {
 		return errors.New("the destination's disk is not the one the source sent")
 	}
-	if m.rec.Disk.SHA256 == "" {
-		m.rec.Disk.SHA256 = dst.Disk.SHA256
-		m.rec.Disk.DataBytes = dst.Disk.DataBytes
+	return nil
+}
+
+// sourceDiskSum hashes the source's disk as the stream would carry it, when
+// the record has no hash of it yet: the stream was cut before its end, or
+// hull did not live to record it.
+func (m *moveSource) sourceDiskSum() error {
+	if m.rec.Disk.SHA256 != "" {
+		return nil
 	}
+	sum, err := newMigrateStreamWriter(io.Discard).sparse("disk", m.rec.Disk.Path)
+	if err != nil {
+		return fmt.Errorf("hash the disk: %w", err)
+	}
+	m.rec.Disk.SHA256 = sum.SHA256
+	m.rec.Disk.DataBytes = sum.DataBytes
 	return nil
 }
 
