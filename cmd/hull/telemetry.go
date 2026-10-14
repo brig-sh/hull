@@ -64,10 +64,16 @@ func topLevelCommand() string {
 // initTelemetry runs the consent flow. Invoked from the root
 // Before hook, except for the telemetry subcommand itself (prompting for
 // consent on the way to `telemetry off` would be absurd, so that path
-// manages state directly) and the network-gateway daemon (a supervised
-// child; its parent's command already counts).
+// manages state directly), the network-gateway daemon (a supervised
+// child; its parent's command already counts) and the destination's
+// migrate-* verbs (steps of a `hull migrate` on another host, which counts
+// there; their stdout is a reply the source parses).
 func initTelemetry(cmd *cli.Command) {
 	telemetryCmdName = topLevelCommand()
+	if strings.HasPrefix(telemetryCmdName, "migrate-") {
+		telemetryCmdName = ""
+		return
+	}
 	if telemetryCmdName == "telemetry" || telemetryCmdName == "network-gateway" {
 		return
 	}

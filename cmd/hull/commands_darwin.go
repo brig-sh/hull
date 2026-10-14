@@ -20,7 +20,7 @@ const appUsage = "native macOS container CLI for unikernels"
 
 // platformCommands is every verb hull has on macOS.
 func platformCommands() []*cli.Command {
-	return []*cli.Command{
+	return append([]*cli.Command{
 		pullCommand(),
 		runCommand(),
 		execCommand(),
@@ -42,5 +42,5 @@ func platformCommands() []*cli.Command {
 		networkGatewayCommand(),
 		telemetryCommand(),
 		versionCommand(),
-	}
+	}, migrateRemoteCommands()...)
 }

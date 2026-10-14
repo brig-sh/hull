@@ -72,6 +72,12 @@ func removeInstanceIn(s *store.Store, instanceID string, force bool) error {
 	if err != nil {
 		return removeWedgedInstance(s, instanceID, err)
 	}
+	// A move in progress needs what is in the directory: on the source its
+	// fenced checkpoint, the only copy until the destination has one; on
+	// the destination, what it received. The move's abort ends it first.
+	if err := moveRefusal(s, instanceID, "rm"); err != nil && !moveCommittedAway(s, instanceID) {
+		return err
+	}
 
 	// Check if running and force flag is set. "starting" counts as running the
 	// moment a pid is on the record, because by then there really is a VMM.

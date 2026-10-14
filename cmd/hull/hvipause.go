@@ -146,6 +146,9 @@ func hviPauseResumeIn(s *store.Store, id, op string) error {
 		return err
 	}
 	if op == "resume" {
+		if err := refuseDuringMove(s, id, "resume"); err != nil {
+			return err
+		}
 		if err := markRestoredGuestRunning(s, id); err != nil {
 			return err
 		}
