@@ -1597,7 +1597,8 @@ exec %s "$@"
 		Profile:     profile,
 		Base:        instanceBase,
 	}
-	started, err := launchVMM(ctx, cmd, s, state, cmdArgs, append(gatewayFiles, shareFiles...), vmmType, detach, netMode, gatewayIP)
+	started, err := launchVMM(ctx, cmd, s, state, cmdArgs, append(gatewayFiles, shareFiles...), vmmType, detach, netMode,
+		gatewayIP, nil)
 	instanceStarted = started
 	return err
 }
@@ -2520,7 +2521,13 @@ func containerHosts(rootfsDir string, entries []string) (string, error) {
 // until the VMM exits. Shared by run and restore. The returned bool reports
 // whether the VMM process was started — once it was, the caller must keep
 // the instance directory even on error.
-func launchVMM(ctx context.Context, cmd *cli.Command, s *store.Store, state *store.InstanceState, cmdArgs []string, gatewayFiles []*os.File, vmmType hypervisors.VmmType, detach bool, netMode, gatewayIP string) (bool, error) {
+//
+// stdin is what a detached VMM reads on its standard input: nil, /dev/null,
+// for every VMM but hvi restoring from a stream (`restore --from-stream -`),
+// which reads the checkpoint there.
+func launchVMM(ctx context.Context, cmd *cli.Command, s *store.Store, state *store.InstanceState, cmdArgs []string,
+	gatewayFiles []*os.File, vmmType hypervisors.VmmType, detach bool, netMode, gatewayIP string,
+	stdin *os.File) (bool, error) {
 	// Register before spawning, including when called by restore. A canceled
 	// preparation cannot start a VMM; a signal racing the spawn must stop the
 	// child through the same graceful shutdown path as a foreground signal.
@@ -2599,6 +2606,9 @@ func launchVMM(ctx context.Context, cmd *cli.Command, s *store.Store, state *sto
 		}
 		vmmCmd.Stdout = logFd
 		vmmCmd.Stderr = logFd
+		if stdin != nil {
+			vmmCmd.Stdin = stdin
+		}
 	}
 
 	// Publish the record BEFORE the spawn, not after it.
