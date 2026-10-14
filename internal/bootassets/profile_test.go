@@ -1,0 +1,238 @@
+// Copyright (c) 2026, NOFire AI
+// SPDX-License-Identifier: Apache-2.0
+
+package bootassets
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// profileEnv isolates a test from the host's asset and profile settings and
+// pretends the host is arm64, the only architecture a profile variant has.
+func profileEnv(t *testing.T) string {
+	t.Helper()
+	for _, k := range []string{"HULL_BOOT_ASSETS", "BRIG_BOOT_ASSETS", PortableKernelEnv,
+		PortableKernelRefEnv, VerifyModeEnv} {
+		t.Setenv(k, "")
+	}
+	old := hostArch
+	hostArch = "arm64"
+	t.Cleanup(func() { hostArch = old })
+	return t.TempDir()
+}
+
+// seedDefaultAssets writes a default kernel and initrd with their record, as
+// a fetch would, so Ensure finds them and fetches nothing.
+func seedDefaultAssets(t *testing.T, store string) string {
+	t.Helper()
+	dir := filepath.Join(store, "assets")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]File{}
+	for name, body := range map[string]string{KernelName(): "default kernel", InitrdName: "initrd"} {
+		var rec File
+		if err := writeFile(filepath.Join(dir, name), strings.NewReader(body), 0o644, &rec); err != nil {
+			t.Fatal(err)
+		}
+		files[name] = rec
+	}
+	if err := writeProvenance(dir, Ref(), "sha256:feed", "", files); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func writeKernel(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "Image")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestNormalizeProfile(t *testing.T) {
+	for in, want := range map[string]string{"": "", "native": "", PortableArm64V1: PortableArm64V1} {
+		got, err := NormalizeProfile(in)
+		if err != nil || got != want {
+			t.Fatalf("NormalizeProfile(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	if _, err := NormalizeProfile("portable-arm64-v2"); !errors.Is(err, ErrUnknownProfile) {
+		t.Fatalf("an unknown profile gave %v, want ErrUnknownProfile", err)
+	}
+}
+
+// The variant sits inside the asset directory, so every way of moving that
+// directory (the store, HULL_BOOT_ASSETS) moves the variant with it.
+func TestProfileDirFollowsTheAssetDirectory(t *testing.T) {
+	store := profileEnv(t)
+	got, err := ProfileDir(store, PortableArm64V1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(store, "assets", PortableArm64V1); got != want {
+		t.Fatalf("ProfileDir = %q, want %q", got, want)
+	}
+	t.Setenv("HULL_BOOT_ASSETS", "/local/assets")
+	if got, _ := ProfileDir(store, PortableArm64V1); got != "/local/assets/"+PortableArm64V1 {
+		t.Fatalf("ProfileDir with HULL_BOOT_ASSETS = %q", got)
+	}
+	kernel, initrd, err := ProfilePaths(store, PortableArm64V1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kernel != "/local/assets/"+PortableArm64V1+"/Image" || initrd != "/local/assets/"+InitrdName {
+		t.Fatalf("ProfilePaths = %q, %q: want the variant kernel and the default initrd", kernel, initrd)
+	}
+}
+
+func TestProfileVariantRefusals(t *testing.T) {
+	store := profileEnv(t)
+	if _, err := ProfileDir(store, "native"); err == nil {
+		t.Fatal("the native profile has no variant directory")
+	}
+	hostArch = "amd64"
+	if _, err := ProfileDir(store, PortableArm64V1); err == nil || !strings.Contains(err.Error(), "amd64") {
+		t.Fatalf("an amd64 host gave %v, want a refusal naming the architecture", err)
+	}
+	hostArch = "arm64"
+	t.Setenv(PortableKernelEnv, "/a/Image")
+	t.Setenv(PortableKernelRefEnv, "ghcr.io/nofireai/hull-assets:portable")
+	if _, _, err := ProfileSource(PortableArm64V1); err == nil {
+		t.Fatal("both sources set must be refused")
+	}
+}
+
+// A local kernel is copied, hashed on the way and recorded, so a later boot
+// checks it like a fetched one; changing it afterwards is caught.
+func TestImportProfileKernelRecordsTheFile(t *testing.T) {
+	store := profileEnv(t)
+	src := writeKernel(t, "hvi-time kernel")
+	if err := ImportProfileKernel(store, PortableArm64V1, src); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := ProfileRecord(store, PortableArm64V1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum, size, err := hashFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Ref != "file://"+src || rec.Digest != "sha256:"+sum || rec.VerifiedDigest != "" {
+		t.Fatalf("record = %+v, want ref file://%s, digest sha256:%s and no verified digest", rec, src, sum)
+	}
+	if f := rec.Files["Image"]; f.SHA256 != sum || f.Size != size {
+		t.Fatalf("record file = %+v, want %s/%d", f, sum, size)
+	}
+	kernel, _, _ := ProfilePaths(store, PortableArm64V1)
+	if err := VerifyFiles(kernel); err != nil {
+		t.Fatalf("the imported kernel does not verify: %v", err)
+	}
+	if err := os.WriteFile(kernel, []byte("something else"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyFiles(kernel); err == nil {
+		t.Fatal("a kernel changed after the import verified clean")
+	}
+}
+
+func TestImportProfileKernelRefusals(t *testing.T) {
+	store := profileEnv(t)
+	if err := ImportProfileKernel(store, PortableArm64V1, writeKernel(t, "")); err == nil {
+		t.Fatal("an empty kernel was imported")
+	}
+	if err := ImportProfileKernel(store, PortableArm64V1, t.TempDir()); err == nil {
+		t.Fatal("a directory was imported as a kernel")
+	}
+	t.Setenv(VerifyModeEnv, "require")
+	err := ImportProfileKernel(store, PortableArm64V1, writeKernel(t, "k"))
+	if err == nil || !strings.Contains(err.Error(), "require") {
+		t.Fatalf("HULL_VERIFY=require gave %v, want a refusal", err)
+	}
+	if ProfileKernelPresent(store, PortableArm64V1) {
+		t.Fatal("a refused import left a kernel behind")
+	}
+}
+
+// The first run of a profile installs its kernel from the configured file,
+// takes the initrd from the default bundle, and a later run reuses the
+// installed kernel rather than copying the file again.
+func TestEnsureProfileInstallsFromTheConfiguredFile(t *testing.T) {
+	store := profileEnv(t)
+	defaultDir := seedDefaultAssets(t, store)
+	src := writeKernel(t, "portable kernel")
+	t.Setenv(PortableKernelEnv, src)
+	kernel, initrd, err := EnsureProfile(context.Background(), store, PortableArm64V1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kernel != filepath.Join(defaultDir, PortableArm64V1, "Image") || initrd != filepath.Join(defaultDir, InitrdName) {
+		t.Fatalf("EnsureProfile = %q, %q", kernel, initrd)
+	}
+	if b, _ := os.ReadFile(kernel); string(b) != "portable kernel" {
+		t.Fatalf("installed kernel holds %q", b)
+	}
+	if err := VerifyFiles(kernel, initrd); err != nil {
+		t.Fatalf("the pair a profile boots does not verify: %v", err)
+	}
+	// The source changes; the installed kernel stays until asked.
+	if err := os.WriteFile(src, []byte("rebuilt kernel"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := EnsureProfile(context.Background(), store, PortableArm64V1); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(kernel); string(b) != "portable kernel" {
+		t.Fatalf("a second run replaced the installed kernel with %q", b)
+	}
+	if err := InstallProfile(context.Background(), store, PortableArm64V1); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(kernel); string(b) != "rebuilt kernel" {
+		t.Fatalf("InstallProfile left %q", b)
+	}
+}
+
+func TestEnsureProfileWithoutASourceNamesTheRemedy(t *testing.T) {
+	store := profileEnv(t)
+	seedDefaultAssets(t, store)
+	_, _, err := EnsureProfile(context.Background(), store, PortableArm64V1)
+	if err == nil || !strings.Contains(err.Error(), PortableKernelEnv) {
+		t.Fatalf("EnsureProfile with nothing configured gave %v, want the %s remedy", err, PortableKernelEnv)
+	}
+}
+
+// A tampered variant kernel stops the run; it is not quietly reinstalled.
+func TestEnsureProfileRefusesATamperedKernel(t *testing.T) {
+	store := profileEnv(t)
+	seedDefaultAssets(t, store)
+	t.Setenv(PortableKernelEnv, writeKernel(t, "good"))
+	kernel, _, err := EnsureProfile(context.Background(), store, PortableArm64V1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(kernel, []byte("bad"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := EnsureProfile(context.Background(), store, PortableArm64V1); err == nil {
+		t.Fatal("a tampered profile kernel was accepted")
+	}
+}
+
+// An artifact reference goes through the same reference check as the
+// default bundle, before any bytes move.
+func TestFetchProfileChecksTheReference(t *testing.T) {
+	store := profileEnv(t)
+	err := FetchProfile(context.Background(), "ghcr.io/someone/else:portable", store, PortableArm64V1)
+	if err == nil || !strings.Contains(err.Error(), ForeignRepoEnv) {
+		t.Fatalf("a foreign repository gave %v, want the %s refusal", err, ForeignRepoEnv)
+	}
+}

@@ -40,7 +40,15 @@ func assetsCommand() *cli.Command {
 			{
 				Name:  "show",
 				Usage: "show where the boot assets are and whether they are present",
+				Flags: []cli.Flag{assetsProfileFlag()},
 				Action: func(_ context.Context, cmd *cli.Command) error {
+					profile, err := bootassets.NormalizeProfile(cmd.String("profile"))
+					if err != nil {
+						return err
+					}
+					if profile != "" {
+						return showProfileAssets(cmd.String("store-dir"), profile)
+					}
 					return showBootAssets(cmd.String("store-dir"))
 				},
 			},
@@ -57,8 +65,12 @@ func assetsCommand() *cli.Command {
 				//
 				// One bare line, no decoration, so a shell can consume it:
 				//	assets=$(hull assets dir)
+				//
+				// With --profile it is that profile's kernel directory
+				// instead; the initrd a profile boots stays in the plain one.
+				Flags: []cli.Flag{assetsProfileFlag()},
 				Action: func(_ context.Context, cmd *cli.Command) error {
-					dir, err := bootassets.Dir(cmd.String("store-dir"))
+					dir, err := assetsDir(cmd.String("store-dir"), cmd.String("profile"))
 					if err != nil {
 						return err
 					}
@@ -68,15 +80,23 @@ func assetsCommand() *cli.Command {
 			},
 			{
 				Name:      "pull",
-				Usage:     "download the boot assets for this host",
+				Usage:     "download the boot assets for this host, or install a profile's kernel",
 				ArgsUsage: "[REF]",
 				Flags: []cli.Flag{
 					&cli.BoolFlag{
 						Name:  "force",
 						Usage: "download even when the assets are already present",
 					},
+					assetsProfileFlag(),
 				},
 				Action: func(ctx context.Context, cmd *cli.Command) error {
+					profile, err := bootassets.NormalizeProfile(cmd.String("profile"))
+					if err != nil {
+						return err
+					}
+					if profile != "" {
+						return pullProfileAssets(ctx, cmd, profile)
+					}
 					ref := bootassets.Ref()
 					if cmd.Args().Len() > 0 {
 						ref = cmd.Args().First()
@@ -111,6 +131,109 @@ func assetsCommand() *cli.Command {
 			},
 		},
 	}
+}
+
+// assetsProfileFlag selects a machine profile whose kernel is a variant of
+// the bundle (see internal/bootassets/profile.go).
+func assetsProfileFlag() cli.Flag {
+	return &cli.StringFlag{
+		Name: "profile",
+		Usage: "the machine profile whose kernel to act on: " + bootassets.PortableArm64V1 +
+			" (default: native, the bundle itself)",
+	}
+}
+
+// assetsDir is the directory `hull assets dir` prints.
+func assetsDir(storeDir, name string) (string, error) {
+	profile, err := bootassets.NormalizeProfile(name)
+	if err != nil {
+		return "", err
+	}
+	if profile == "" {
+		return bootassets.Dir(storeDir)
+	}
+	return bootassets.ProfileDir(storeDir, profile)
+}
+
+// pullProfileAssets installs a profile's kernel: from REF when one is given,
+// otherwise from HULL_PORTABLE_KERNEL or HULL_PORTABLE_KERNEL_REF. The
+// default bundle is fetched too when it is missing, since the profile boots
+// its initrd.
+func pullProfileAssets(ctx context.Context, cmd *cli.Command, profile string) error {
+	storeDir := cmd.String("store-dir")
+	if _, err := bootassets.ProfileDir(storeDir, profile); err != nil {
+		return err
+	}
+	if err := ensureStore(storeDir, defaultStoreDir()); err != nil {
+		return err
+	}
+	if !bootassets.Present(storeDir) {
+		if err := bootassets.Fetch(ctx, bootassets.Ref(), storeDir); err != nil {
+			return err
+		}
+	}
+	if !cmd.Bool("force") && bootassets.ProfileKernelPresent(storeDir, profile) {
+		dir, err := bootassets.ProfileDir(storeDir, profile)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("the %s kernel is already present in %s (use --force to replace it)\n", profile, dir)
+		return nil
+	}
+	var err error
+	if cmd.Args().Len() > 0 {
+		err = bootassets.FetchProfile(ctx, cmd.Args().First(), storeDir, profile)
+	} else {
+		err = bootassets.InstallProfile(ctx, storeDir, profile)
+	}
+	if err != nil {
+		return err
+	}
+	return showProfileAssets(storeDir, profile)
+}
+
+// showProfileAssets is `hull assets show --profile`: the profile's kernel,
+// where it came from, and the default initrd it boots with.
+func showProfileAssets(storeDir, profile string) error {
+	dir, err := bootassets.ProfileDir(storeDir, profile)
+	if err != nil {
+		return err
+	}
+	kernel, initrd, err := bootassets.ProfilePaths(storeDir, profile)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("profile: %s\ndirectory: %s\n", profile, dir)
+	switch record, err := bootassets.ProfileRecord(storeDir, profile); {
+	case errors.Is(err, bootassets.ErrNoProvenance):
+		fmt.Printf("provenance: none\n")
+	case err != nil:
+		fmt.Printf("provenance: unreadable: %v\n", err)
+	case record.VerifiedDigest != "":
+		fmt.Printf("installed from: %s (%s)\nsignature: verified against %s\n", record.Ref,
+			record.Digest, record.VerifiedDigest)
+	default:
+		fmt.Printf("installed from: %s (%s)\nsignature: none (a local file, or nothing was checked)\n",
+			record.Ref, record.Digest)
+	}
+	fmt.Println()
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
+	row := func(format string, args ...any) {
+		_, _ = fmt.Fprintf(w, format, args...)
+	}
+	row("FILE\tSIZE\tSTATUS\n")
+	for _, path := range []string{kernel, initrd} {
+		info, statErr := os.Stat(path)
+		switch {
+		case statErr != nil:
+			row("%s\t-\tmissing\n", path)
+		case info.Size() == 0:
+			row("%s\t0\tempty\n", path)
+		default:
+			row("%s\t%d\tok\n", path, info.Size())
+		}
+	}
+	return w.Flush()
 }
 
 func showBootAssets(storeDir string) error {
