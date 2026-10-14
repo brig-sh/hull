@@ -123,6 +123,11 @@ type migrationRecord struct {
 
 	// Source only: how to reach the destination's hull again on a retry.
 	Remote *migrateRemote `json:"remote,omitempty"`
+	// DestReleased is set on the source of an aborted move once the
+	// destination has confirmed it keeps nothing of it. An abort that ran
+	// without that word (before the fence, with no answer) leaves it unset,
+	// and running the abort again asks again.
+	DestReleased bool `json:"destReleased,omitempty"`
 
 	// BundleDir and ManifestSHA256 name the fenced checkpoint the move
 	// carries, on either side once it is there.
