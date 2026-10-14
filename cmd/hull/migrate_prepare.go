@@ -50,8 +50,11 @@ import (
 
 // moveCapStream is the capability a destination's probe lists when it takes
 // a streamed move (`migrate-receive --stream`) and the prepare verbs. A hull
-// from before them lists nothing and gets the whole-bundle move.
-const moveCapStream = "stream-v1"
+// from before them lists nothing and gets the whole-bundle move. v2 is the
+// stream whose header names an attempt the destination accepts in its
+// record before hvi's migrate starts, and whose trailer accounts for the
+// disk rounds; a v1 hull refuses that trailer, so it gets the whole bundle.
+const moveCapStream = "stream-v2"
 
 // probeMaxBases bounds the bases a probe lists.
 const probeMaxBases = 512

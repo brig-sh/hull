@@ -243,6 +243,7 @@ const (
 	// here.
 	spoolStream = "stream"
 	// spoolSealed holds hvi's reply once the stream is complete and synced.
+	// A spool without it may still be whole: see verifySpool.
 	spoolSealed = "sealed"
 )
 
@@ -269,8 +270,10 @@ func restoreStreamSource(state *store.InstanceState, opt hviRestoreOptions) (*os
 	if _, err := os.Stat(spool); err != nil {
 		return nil, nil
 	}
-	if _, err := os.Stat(filepath.Join(m.BundleDir, spoolSealed)); err != nil {
-		return nil, fmt.Errorf("the streamed checkpoint %s was never sealed", m.BundleDir)
+	// A spool hull did not live to seal is sealed here if it checks out
+	// whole, frame by frame against its manifest.
+	if err := openSpool(m.BundleDir); err != nil {
+		return nil, err
 	}
 	if !opt.detach {
 		return nil, errors.New("a checkpoint kept as a stream restores detached (--detach)")

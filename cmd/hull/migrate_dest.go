@@ -889,8 +889,11 @@ func migrateRemoteCommands() []*cli.Command {
 				return destProbe(s, cmd.String("name"), cmd.String("hvi"), cmd.String("gateway-sock"))
 			}),
 		migrateRemoteVerb("migrate-receive", "reserve a name for a move, or receive its stream on stdin",
-			[]cli.Flag{txidFlag, nameFlag, &cli.BoolFlag{Name: "reserve"}},
+			[]cli.Flag{txidFlag, nameFlag, &cli.BoolFlag{Name: "reserve"}, &cli.BoolFlag{Name: "stream"}},
 			func(cmd *cli.Command, s *store.Store) *migrateReply {
+				if cmd.Bool("stream") {
+					return destReceiveStream(s, cmd.String("txid"), cmd.String("name"), os.Stdin)
+				}
 				if cmd.Bool("reserve") {
 					var req migrateReserveRequest
 					if err := json.NewDecoder(io.LimitReader(os.Stdin, 1<<20)).Decode(&req); err != nil {
