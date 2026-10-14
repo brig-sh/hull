@@ -80,6 +80,17 @@ type migrateProbe struct {
 	// HviProfile is whether the destination's hvi takes --profile: one
 	// that does not cannot restore a portable instance.
 	HviProfile bool `json:"hviProfile,omitempty"`
+	// HviStream is whether the destination's hvi restores from a stream
+	// (`restore --from-stream`), which a streamed move needs.
+	HviStream bool `json:"hviStream,omitempty"`
+	// Capabilities are the move features this hull takes beyond protocol
+	// 1, such as moveCapStream. A hull from before them lists none.
+	Capabilities []string `json:"capabilities,omitempty"`
+	// Bases are the disk digests of the bases the store holds.
+	Bases []string `json:"bases,omitempty"`
+	// ProfileKernels maps a machine profile to the sha256 of the kernel
+	// installed for it.
+	ProfileKernels map[string]string `json:"profileKernels,omitempty"`
 }
 
 // Reply codes a source branches on.

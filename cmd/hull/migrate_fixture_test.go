@@ -330,6 +330,14 @@ func (p *localPeer) call(_ context.Context, verb string, args []string, stdin io
 		}
 	case "migrate-prepare":
 		reply = destPrepare(p.s, flags["--txid"])
+	case "migrate-take-base":
+		reply = destTakeBase(p.s, flags["--sha256"], stdin)
+		_, _ = io.Copy(io.Discard, stdin)
+	case "migrate-take-kernel":
+		size, _ := strconv.ParseInt(flags["--size"], 10, 64)
+		reply = destTakeKernel(p.s, flags["--profile"], flags["--sha256"], size, stdin)
+	case "migrate-take-image":
+		reply = destTakeImage(p.s, flags["--ref"], flags["--digest"])
 	case "migrate-commit":
 		epoch, _ := strconv.ParseUint(flags["--epoch"], 10, 64)
 		reply = destCommit(p.s, flags["--txid"], epoch)

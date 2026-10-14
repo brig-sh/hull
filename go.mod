@@ -12,6 +12,7 @@ require (
 	github.com/inetaf/tcpproxy v0.0.0-20250222171855-c4b9df066048
 	github.com/miekg/dns v1.1.72
 	github.com/opencontainers/runtime-spec v1.2.1
+	github.com/pierrec/lz4/v4 v4.1.14
 	github.com/sirupsen/logrus v1.9.4
 	github.com/urfave/cli/v3 v3.10.1
 	github.com/urunc-dev/urunc v0.8.1-0.20261006162953-6c062f39c5bb
@@ -71,7 +72,6 @@ require (
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/opencontainers/runc v1.3.6 // indirect
 	github.com/opencontainers/selinux v1.13.1 // indirect
-	github.com/pierrec/lz4/v4 v4.1.14 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/rs/zerolog v1.35.1 // indirect
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.1 // indirect
