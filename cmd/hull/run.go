@@ -2030,14 +2030,15 @@ func verifyStagedBootAsset(storeDir, original, staged string) error {
 		if bootassets.VerifyModeFromEnv() == bootassets.VerifyRequire {
 			return fmt.Errorf("refusing to boot %s: %s=require and it has no provenance "+
 				"record beside it, so nothing vouches for its contents. Run "+
-				"`hull assets pull --force` to fetch and record them again",
-				original, bootassets.VerifyModeEnv)
+				"%s to fetch and record them again",
+				original, bootassets.VerifyModeEnv, bootassets.ReinstallCommand(filepath.Dir(original)))
 		}
 		if dirErr == nil && inOurs {
 			log.Warnf("%s is in hull's own boot-asset directory but has no provenance "+
 				"record beside it, so nothing vouches for its contents. Fetch writes one; "+
-				"`hull assets pull --force` will record them. Booting as given "+
-				"(%s=require refuses instead)", original, bootassets.VerifyModeEnv)
+				"%s will record them. Booting as given "+
+				"(%s=require refuses instead)", original,
+				bootassets.ReinstallCommand(filepath.Dir(original)), bootassets.VerifyModeEnv)
 			return nil
 		}
 		log.Warnf("%s has no provenance record beside it, so nothing vouches for its "+
