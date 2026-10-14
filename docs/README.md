@@ -23,6 +23,7 @@ have never run hull.
 | [network-egress.md](network-egress.md) | Restricting what a guest may reach, and what the filter does not cover |
 | [compose.md](compose.md) | Running several services together, one VM per service |
 | [checkpoint-restore.md](checkpoint-restore.md) | Saving a running VM and resuming it later |
+| [migration.md](migration.md) | Moving a running `hvi` VM to another host over ssh, and recovering a move that stopped |
 | [images.md](images.md) | Pull policy, digests, platforms, annotations, boot assets, private registries |
 | [troubleshooting.md](troubleshooting.md) | Errors you are likely to hit, and what each one means |
 

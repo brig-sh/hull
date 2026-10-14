@@ -71,6 +71,12 @@ func restoreCommand() *cli.Command {
 				Value: 120,
 				Usage: "hvi: seconds to wait for hvi to rebuild the VM from the bundle",
 			},
+			&cli.StringFlag{
+				Name:   "move",
+				Hidden: true,
+				Usage: "hvi: the txid of the move (`hull migrate`) whose received checkpoint this " +
+					"restores; with --paused, which a move's restore always is",
+			},
 			&cli.BoolFlag{
 				Name: "adopt-latest",
 				Usage: "hvi: restore from the fenced checkpoint latest.json names when the record " +
@@ -91,7 +97,7 @@ func restoreCommand() *cli.Command {
 				return fmt.Errorf("instance not found: %s", id)
 			}
 			if !isHviInstance(state) {
-				if cmd.IsSet("paused") || cmd.IsSet("timeout") || cmd.IsSet("adopt-latest") {
+				if cmd.IsSet("paused") || cmd.IsSet("timeout") || cmd.IsSet("adopt-latest") || cmd.IsSet("move") {
 					return errors.New("--paused, --timeout and --adopt-latest apply to hvi instances only")
 				}
 				return vzRestoreInstance(ctx, cmd)
@@ -105,6 +111,7 @@ func restoreCommand() *cli.Command {
 				paused:      cmd.Bool("paused"),
 				timeout:     time.Duration(cmd.Int("timeout")) * time.Second,
 				adoptLatest: cmd.Bool("adopt-latest"),
+				move:        cmd.String("move"),
 			})
 		},
 	}
@@ -115,6 +122,10 @@ type hviRestoreOptions struct {
 	paused      bool
 	timeout     time.Duration
 	adoptLatest bool
+	// move is the txid of the move whose received checkpoint this restores
+	// on its destination. Only that move's own restore may bring up an
+	// incoming instance, and only paused.
+	move string
 }
 
 // hviRestoreArgv turns the command line an hvi instance last ran with into
@@ -335,6 +346,14 @@ func restorableMigration(m *store.MigrationState) error {
 	case store.MigrationRestored:
 		return errors.New("its checkpoint was already restored and the restored guest ran, so " +
 			"its disk has moved on from the bundle")
+	case store.MigrationMigrating:
+		return fmt.Errorf("its fenced checkpoint belongs to move %s to %s, which decides what becomes "+
+			"of it: `hull migrate --abort %s` brings the instance back here", m.MoveTxID, m.Peer, m.MoveTxID)
+	case store.MigrationMigrated:
+		return fmt.Errorf("it moved to %s (move %s) and runs there; its checkpoint here is stale. "+
+			"Moving it back is a new `hull migrate` run on %s", m.Peer, m.MoveTxID, m.Peer)
+	case store.MigrationIncoming:
+		return fmt.Errorf("it is arriving from %s by move %s, and only that move restores it", m.Peer, m.MoveTxID)
 	}
 	return fmt.Errorf("its checkpoint is in an unknown state %q", m.State)
 }
@@ -368,11 +387,16 @@ func hviRestoreInstance(ctx context.Context, cmd *cli.Command, s *store.Store, s
 				"before restoring", id)
 		}
 	}
-	if err := reconcileLatestCheckpoint(s, state, opt.adoptLatest); err != nil {
+	if err := checkMoveRestore(s, state, opt); err != nil {
 		return fmt.Errorf("cannot restore %s: %w", id, err)
 	}
-	if err := restorableMigration(state.Migration); err != nil {
-		return fmt.Errorf("cannot restore %s: %w", id, err)
+	if opt.move == "" {
+		if err := reconcileLatestCheckpoint(s, state, opt.adoptLatest); err != nil {
+			return fmt.Errorf("cannot restore %s: %w", id, err)
+		}
+		if err := restorableMigration(state.Migration); err != nil {
+			return fmt.Errorf("cannot restore %s: %w", id, err)
+		}
 	}
 	bundle := state.Migration.BundleDir
 	if _, err := os.Stat(bundle); err != nil {
@@ -643,4 +667,34 @@ func keepRecordedMigration(s *store.Store, state *store.InstanceState) {
 	if fresh, err := s.GetInstance(state.ID); err == nil {
 		state.Migration = fresh.Migration
 	}
+}
+
+// checkMoveRestore holds a restore to the rules of a move. Without --move it
+// refuses an instance a move has in hand (refuseDuringMove). With it, the
+// restore must be that move's own, on its destination, paused, of the
+// received checkpoint, before the commit: the move's restore step.
+func checkMoveRestore(s *store.Store, state *store.InstanceState, opt hviRestoreOptions) error {
+	if opt.move == "" {
+		return refuseDuringMove(s, state.ID, "restore")
+	}
+	if !opt.paused {
+		return errors.New("a move's restore is always --paused; only its commit resumes the guest")
+	}
+	rec, err := readMigrationRecord(s.InstanceMigrationRecord(state.ID))
+	if err != nil {
+		return fmt.Errorf("move %s: %w", opt.move, err)
+	}
+	m := state.Migration
+	switch {
+	case rec.TxID != opt.move || rec.Role != roleDestination:
+		return fmt.Errorf("the instance is not the destination of move %s", opt.move)
+	case rec.State != dstVerified && rec.State != dstRestoredPaused:
+		return fmt.Errorf("move %s is %s here, and only a verified one is restored", opt.move, rec.State)
+	case m == nil || m.MoveTxID != opt.move || m.BundleDir == "":
+		return fmt.Errorf("the instance record holds no checkpoint of move %s", opt.move)
+	case m.State != store.MigrationIncoming && m.State != store.MigrationRestoring &&
+		m.State != store.MigrationRestoredPaused:
+		return fmt.Errorf("the checkpoint of move %s is %s, so it may have run already", opt.move, m.State)
+	}
+	return nil
 }

@@ -69,7 +69,10 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
-	os.Exit(m.Run())
+	testBinaryAsHull()
+	code := m.Run()
+	removeFakeHvi()
+	os.Exit(code)
 }
 
 // ReadSelfExecTrace reads back the argv of every intercepted selfExec call,
