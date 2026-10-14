@@ -43,9 +43,12 @@ hull migrate --abort 3f...e1                       # end a move that has not com
 
 The instance must be an `hvi` instance on a block rootfs, with no shared
 host directory, running or paused, started with a control socket. Both hosts
-must be the same OS and architecture. The checkpoint itself is checked by
-`hvi restore` on the destination, which refuses a host whose CPU, counter
-frequency, interrupt controller or hvi build differ.
+must be the same OS and architecture. Everything else about the host is left
+to `hvi restore` on the destination, which by its specification (SPEC H4)
+compares the bundle's machine profile with the host's (CPU, counter
+frequency, interrupt controller, hvi build) and refuses before it creates
+anything. No `hvi` has `restore` yet, so that check has not been seen to
+run.
 
 ## The steps
 
@@ -55,7 +58,7 @@ reply on stdout and nothing else.
 
 | # | Source state after it | What happens | Destination state after it |
 |---|---|---|---|
-| 1 | `preflight` | local checks; `migrate-probe` reports the destination's hull, hvi, hypervisor, free space and whether the name is free | (nothing) |
+| 1 | `preflight` | local checks; `migrate-probe` reports the destination's hull, hvi, hypervisor, free space and whether the name is free. A refusal here leaves no record on either host | (nothing) |
 | 2 | `reserved` | `migrate-receive --reserve` creates the instance directory and its `migration.json` | `reserved` |
 | 3 | `fenced` | `hull checkpoint --then fence` with the move's txid and epoch: the guest stops for good on this host | `reserved` |
 | 4 | `transferring`, then `transferred` | the bundle and the disk go over ssh to `migrate-receive`, which checks every sha256, puts them in place and runs `hvi checkpoint-verify` | `receiving`, `received`, `verified` |
@@ -160,8 +163,10 @@ with the same subnet, so that its address, its routes and its DNS stay valid.
 Start one there (`hull network-gateway`, or brig) and pass its socket with
 `--remote-gateway-sock`; the probe dials it before anything is fenced. Without
 it, the moved guest gets `hvi`'s stub NIC, which reaches nothing, and the
-source prints a warning. (H4's restore may refuse a net mode that differs from
-the bundle's; that refusal then comes back as "restore refused".)
+source prints a warning. SPEC H4 says `hvi restore` refuses a net mode that
+differs from the bundle's, so this fallback will likely end in "restore
+refused" once hvi has restore; the move can then be aborted. Neither gateway
+case has been run live.
 
 Agent connections over vsock do not survive a move: the guest sees them reset
 on restore. External connections may reconnect, since the guest keeps its
@@ -229,8 +234,8 @@ destination before the commit), and two fields, `moveTxid` and `peer`.
 
 | Where it stops | Source | Destination | What to do |
 |---|---|---|---|
-| preflight refuses | running, nothing written | nothing | fix what it names |
-| probe or reserve gets no answer | running, `preflight` | maybe `reserved` | run it again, or `--abort` (it warns if the destination does not confirm) |
+| preflight or the probe refuses | running, nothing written | nothing | fix what it names |
+| the reserve gets no answer | running, `preflight` | maybe `reserved` | run it again, or `--abort` (it warns if the destination does not confirm) |
 | the fence fails | running (hvi resumes after a failed capture), `reserved` | `reserved` | run it again, or `--abort` |
 | the transfer breaks | fenced, `transferring` | `receiving`, staging removed | run it again; it sends everything again |
 | a checksum differs | fenced, `transferring` | `receiving` with the error | find out why; run it again or `--abort` |
@@ -262,6 +267,10 @@ destination before the commit), and two fields, `moveTxid` and `peer`.
   instead of the other host's.
 - **A committed source.** `hull rm NAME` removes what is left. `hull migrate`
   of it is refused: move it back from where it runs.
+- **Moving back.** A move from B back to A is a new move, run on B. A still
+  has the stale copy the first move left under the same name, so the probe
+  refuses until `hull rm NAME` on A removes it. The owner epoch goes on
+  counting: 0 on A, 1 on B, 2 back on A.
 
 ## Testing a move
 
