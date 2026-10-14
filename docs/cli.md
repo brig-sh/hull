@@ -43,7 +43,7 @@ hidden flag is `restore --move`, which only a move's own restore passes.
 | `pause <id>` | pause a running `hvi` instance: its I/O threads and every vCPU stop |
 | `resume <id>` | resume an `hvi` instance paused by `pause` |
 | `checkpoint <id>` | `vz`: pause, save VM and disk state, resume. `hvi`: write a checkpoint bundle, then continue or fence |
-| `restore <id>` | restore a stopped instance: `vz` from its saved state; `hvi` from a fenced bundle, refused until `hvi` has a `restore` subcommand |
+| `restore <id>` | restore a stopped instance: `vz` from its saved state; `hvi` from a fenced bundle, with an `hvi` that has a `restore` subcommand (on macOS, from 4ea836f on `hvi`'s `feat/teleport`; a KVM bundle cannot be restored yet) |
 | `migrate <id> --to USER@HOST` | move a running `hvi` instance to another host over ssh; see [migration.md](migration.md) |
 | `rm <id>` | remove a stopped instance |
 | `logs <id>` | show an instance's log |
@@ -184,7 +184,8 @@ the guest here, streams the checkpoint and the disk over ssh, has the
 destination restore it paused, and only then commits, after which the
 destination resumes it and the copy here is stale. While a move holds an
 instance, `checkpoint`, `resume`, `restore` and `rm` of it are refused on
-both hosts. The protocol, its states and its recovery are in
+both hosts, and what an aborted move left on the destination can only be
+removed. The protocol, its states and its recovery are in
 [migration.md](migration.md).
 
 The destination's verbs each print one JSON object on stdout:

@@ -191,7 +191,7 @@ sets.
 │   └── provenance.json
 ├── volumes/<project>_<name>/     compose named volumes
 ├── compose/<project>.json        compose project state, plus its gateway sockets and log
-├── migrations/<txid>.json       the records of moves this store aborted as their destination
+├── migrations/<txid>.json       the ledger of moves that committed or aborted here as their destination
 └── instances/<id>/
     ├── state.json               0600
     ├── bundle/                  config.json plus the rootfs symlink or image
@@ -508,6 +508,7 @@ states. It is written through a temp file, an fsync, a rename and an fsync of
 the directory, because each state is a promise to the other host. The
 instance record's `migration` field gains `moveTxid` and `peer`, and three
 states (`migrating`, `migrated`, `incoming`); `state.json` gains
-`ownerEpoch`. A destination that aborts a move removes the instance directory
-and keeps the record as `<store>/migrations/<txid>.json`. See
+`ownerEpoch`. A destination keeps the record of every move that committed
+or aborted on it as `<store>/migrations/<txid>.json`, which neither `hull rm`
+nor a later move removes; an abort removes the instance directory. See
 [migration.md](migration.md#records).

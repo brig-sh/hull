@@ -10,7 +10,11 @@ what can go wrong, and how to recover.
 
 > **Status, 2026-10-14.** On macOS (HVF) a move runs end to end with the
 > `hvi` on `feat/teleport` at 4ea836f, the first with a `restore`
-> subcommand. On Linux (KVM) `hvi` has no restore yet (H5), so a move stops
+> subcommand. That commit is not pushed yet, and the `hvi-vmm` submodule of
+> this branch is still pinned at 890f9e0, which has neither the control
+> flags nor `restore`: a hull built with its pinned `hvi` refuses
+> `hull migrate` at preflight. The pin moves once `feat/teleport` is pushed.
+> On Linux (KVM) `hvi` cannot restore a bundle yet (H5), so a move stops
 > before the commit with the destination's answer "restore refused" (see
 > [Verified](#verified)). Without `--allow-no-restore`, `hull migrate`
 > refuses at preflight on an `hvi` with no restore, before anything is
@@ -107,19 +111,33 @@ the next epoch again.
    sends the commit again; the destination answers it the same way.
 6. `hull migrate --abort` works only before the commit. After the fence it
    first asks the destination, which records `aborted` (so a commit that
-   arrives later is refused) and stops any paused VM it restored. Only on that
-   answer does the source restore the instance locally. With no answer, or the
-   answer `running`, the source stays fenced and says why.
+   arrives later is refused), keeps that in its ledger, stops any paused VM
+   it restored and removes the instance. It answers ok only when all of that
+   is done. Only on that answer does the source restore the instance locally.
+   With no answer, a failure, or the answer `running`, the source stays
+   fenced and says why. A destination that has no record of the move answers
+   `unknown_txid`: before `committing` no commit was sent, so the abort goes
+   ahead; in `committing` the source stays fenced, since the commit may have
+   run there. What an aborted move leaves on the destination, until the
+   abort removes it, refuses every verb but `hull rm`.
 7. After the commit the source's checkpoint is `migrated` (stale): it cannot
    be restored, resumed, checkpointed or moved. `hull migrate --status`
    explains.
+8. The destination writes the move to its ledger,
+   `<store>/migrations/<txid>.json`, before its instance record says
+   `running`. `hull rm` and a later move of the instance leave the ledger,
+   so the destination answers for the txid of every move that committed or
+   aborted on it, whatever became of the instance.
 
 **Every step can be run again.** A re-run of `hull migrate NAME --txid T`
 starts from the recorded state. A step that finds its effect already there
 succeeds: a reserve of a name this move reserved, a fence the record already
 holds (or one hvi took but hull did not live to record, which is adopted
 after `hvi checkpoint-verify`), a transfer the destination has verified, a
-restore that is up and paused, a commit that is running.
+restore that is up and paused, a commit that is running. An abort run
+again on an aborted move asks the destination again if it never confirmed
+the release, and restores the instance if the first run recorded the abort
+but did not live to restore it.
 
 **Locks.** On each host a move takes `<instance>/migrate.lock` for each step.
 The source holds it for the whole run of `hull migrate`, and the fence also
@@ -144,12 +162,16 @@ which takes `migration.lock` itself, so the two locks nest in one order only:
 - **The records are the authority on each host.** `migration.json` and
   `state.json` live in the 0700 instance directory, outside the checkpoint
   root hvi may write to.
-- **A partition never leaves two hosts running.** If the network fails during
-  the commit, the source stays fenced in `committing` and the destination is
-  either `restored-paused` (paused, not running) or `running`. Both are
-  visible with `hull migrate --status` and the hidden `migrate-status` verb.
-  Either the commit is sent again, or the abort is confirmed by the
-  destination. Neither side guesses.
+- **A partition does not leave two hosts running.** If the network fails
+  during the commit, the source stays fenced in `committing` and the
+  destination is either `restored-paused` (paused, not running) or `running`.
+  Both are visible with `hull migrate --status` and the hidden
+  `migrate-status` verb. Either the commit is sent again, or the destination
+  confirms the abort with its record of this move, aborted. That stays true
+  after the destination moved the instance on or removed it, because its
+  ledger keeps the move. A destination with no record at all (its store lost
+  or replaced) leaves the source fenced; the operator decides, see
+  [Operator recovery](#operator-recovery).
 - **Operators can still break it.** Deleting a `migration.json` by hand, or
   running hvi directly on a bundle, is outside these rules.
 
@@ -200,8 +222,13 @@ it is refused.
 
 The source checks the disk's size and modification time against the ones it
 recorded at the fence before and after it sends, and refuses a disk that
-changed: something wrote it while the guest was fenced. It also checks each
-bundle file against the manifest as it reads it.
+changed: something wrote it while the guest was fenced. It records the
+disk's sha256 as sent before it reads the destination's reply. A re-run that
+finds the destination already verified (the reply was lost) checks the size
+and modification time again and compares the destination's sha256 with the
+source's own, hashing the disk again if hull did not live to record it. It
+never takes the destination's sha256 as its own. The source also checks
+each bundle file against the manifest as it reads it.
 
 `migration.json` records the stream's bytes, its duration and its rate.
 
@@ -214,6 +241,7 @@ Both hosts keep `<store>/instances/<name>/migration.json`, 0600:
 | `version` | 1 |
 | `txid`, `role` (`source` or `destination`), `name`, `epoch`, `state`, `peer` | the move |
 | `remote` | source only: `target`, `store`, `hull`, `hvi`, `gatewaySock`, `allowNoRestore` |
+| `destReleased` | source only, once aborted: the destination confirmed it keeps nothing of the move |
 | `bundleDir`, `manifestSha256` | the fenced checkpoint, on either host |
 | `disk` | `path`, `size`, `modNs` (at the fence), `sha256`, `dataBytes` |
 | `transfer` | `bytes`, `seconds`, `bytesPerSec`, `startedAt` |
@@ -223,8 +251,12 @@ Both hosts keep `<store>/instances/<name>/migration.json`, 0600:
 | `error` | why the last step stopped |
 | `history` | every state, with its time |
 
-A destination that aborts a move removes the instance directory, so the name
-is free again, and keeps the record at `<store>/migrations/<txid>.json`.
+A destination keeps a ledger of the moves that ended on it, committed or
+aborted, at `<store>/migrations/<txid>.json`. A commit writes its entry
+before the instance record says `running`; an abort writes it before it
+removes the instance directory, so the name is free again. Lookups by txid
+read the instance's `migration.json` first and the ledger after it. Nothing
+removes a ledger entry.
 
 The instance record's `migration` field (see [storage.md](storage.md)) gains
 three states: `migrating` (the source's fenced checkpoint, held by a move),
@@ -246,8 +278,12 @@ destination before the commit), and two fields, `moveTxid` and `peer`.
 | the commit's reply is lost | fenced, `committing` | `restored-paused` or `running` | run it again: it learns the commit |
 | commit refused (wrong epoch, aborted) | fenced, `committing` | `aborted` or other | `--abort` |
 | the resume fails after the commit | `committed` (the destination owns it) | `running` with the error | `hull resume NAME` on the destination |
-| `--abort` gets no answer | fenced, unchanged | unknown | retry when the destination answers |
-| `--abort` answered `running` | fenced, unchanged | `running` | `hull migrate NAME --txid T` records the commit |
+| `--abort` before the fence gets no answer | running, `aborted` | maybe `reserved` | `--abort` again releases the reservation |
+| `--abort` after the fence gets no answer | fenced, unchanged | unknown | retry when the destination answers |
+| `--abort` answered `running` (the destination committed, even if it has since moved the instance on or removed it) | fenced, unchanged | `running`, or only in the ledger | `hull migrate NAME --txid T` records the commit |
+| `--abort` in `committing` answered `unknown_txid` | fenced, unchanged | no record of the move | find where the guest runs; see [Operator recovery](#operator-recovery) |
+| the destination's cleanup after an abort fails | fenced, unchanged | `aborted`, its copy refused every verb but `rm` | `--abort` again |
+| hull dies after recording the abort | `aborted`, checkpoint still `migrating` | `aborted` | `--abort` again restores it |
 | the local restore after an abort fails | `aborted`, stopped, `fenced` checkpoint | `aborted` | `hull restore NAME` once hvi can |
 
 ## Operator recovery
@@ -260,8 +296,12 @@ destination before the commit), and two fields, `moveTxid` and `peer`.
   never runs the VM on its own. Abort it there with
   `hull migrate-abort --txid T`, which removes the received copy. The fenced
   checkpoint on the dead source was the only runnable copy.
-- **The destination is gone for good, after the fence.** `--abort` cannot be
-  confirmed, so it refuses. If you know the destination will never come back,
+- **The destination is gone for good, after the fence**, or in `committing`
+  it answers that it has no record of the move (its store was lost or
+  replaced). `--abort` cannot be confirmed, so it refuses. In `committing`,
+  first make sure no host runs the guest: the commit may have run on the
+  destination before its record was lost, and the guest may have moved on
+  from there. If you know the destination will never come back,
   stop the source's fenced VMM, set the source `migration.json` state to
   `aborted` and the instance record's `migration.state` to `fenced` by hand,
   and `hull restore NAME`. This is the one recovery that relies on your word
@@ -288,9 +328,12 @@ exec sh -c "$last"
 
 The unit tests (`cmd/hull/migrate_test.go`) run every step in one process
 with the destination behind an interface that can drop a reply or answer for
-it: a commit whose acknowledgement is lost, an abort before and after the
-commit, a destination that answers `running` to an abort, a transfer cut off
-midway, a disk changed after the fence. `TestMoveOverFakeSSH` runs the
+it: a commit whose acknowledgement is lost, then the destination moving the
+instance on or removing it before the source aborts, an abort before and
+after the commit, a destination that answers `running` or `unknown_txid` to
+an abort, a destination whose cleanup fails, an abort run again, a transfer
+cut off midway, a stream whose reply is lost, a disk changed after the
+fence. `TestMoveOverFakeSSH` runs the
 destination as a separate hull process through that transport, with a fake
 hvi that has no restore, and ends in "restore refused" and an abort.
 
