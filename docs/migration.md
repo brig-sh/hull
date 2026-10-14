@@ -288,4 +288,25 @@ Live runs are recorded in [Verified](#verified).
 
 ## Verified
 
-See the bottom of this page once the live runs are in.
+2026-10-14, hull at this branch, hvi `feat/teleport` at 263713c (no `restore`
+subcommand yet). Guest: alpine, block rootfs (15 GiB image, about 13 MiB of
+it data), 512 MiB, 2 vCPUs, `--net none`, printing a counter every second.
+Each run used `--allow-no-restore`.
+
+| | Mac to Mac (HVF) | rp1 to rp2 (KVM, Raspberry Pi 5) |
+|---|---|---|
+| Transport | `HULL_MIGRATE_SSH` stand-in (this Mac has no sshd), two stores | real ssh, rp1 to rp2 |
+| Preflight without `--allow-no-restore` | refused: the source hvi has no restore | |
+| Fence | capture 266 ms, 56.4 of 512 MiB RAM stored | capture 634 ms, 56.8 MiB |
+| Counter after the fence | held (TICK 10 to 10 over 3 s) | held (TICK 11 to 11) |
+| Stream | 69.6 MiB in 0.36 s | 69.5 MiB in 1.45 s (48 MiB/s) |
+| Disk carried | 13.0 MiB of 15.0 GiB | 12.7 MiB of 15.0 GiB |
+| Disk allocated, source / destination (`du`) | 151 / 13 MiB | 235 / 13 MiB |
+| Bundle and disk on both ends | `cmp` and `diff -r` identical | sha256 identical |
+| Destination's `hvi checkpoint-verify` | `complete: every part a restore needs is captured` | `partial: vCPU registers, interrupt controller and timer not captured` (H5 not done) |
+| Restore on the destination | refused: no `restore` subcommand; destination `verified`, source `transferred` | the same |
+| Plain `hull restore` of either side | refused by the move | refused by the move |
+| `--abort` | destination removed the instance, kept the tombstone; source stopped its fenced VMM and tried `hull restore`, refused for the same reason | the same |
+
+The commit and the resume on the destination have run only in the unit tests
+so far, with a stand-in for hvi's restore.
