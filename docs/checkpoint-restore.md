@@ -7,14 +7,16 @@ hull picks the path from the instance's record:
 | | `vz` | `hvi` |
 |---|---|---|
 | How | vz-runner, on a signal | hvi's control socket |
-| Captures | Virtualization.framework's machine state, plus an APFS clone of the disk | a bundle of RAM, vCPU, interrupt controller, timer and device state; not the disk |
+| Captures | Virtualization.framework's machine state, plus an APFS clone of the disk | today a [partial bundle](#what-a-bundle-holds): RAM and device state, not the vCPU, interrupt controller or timer state a resume needs; not the disk |
 | After `checkpoint` | the guest keeps running | `--then continue` (the default) or `--then fence` |
-| Restore from | the latest checkpoint, any number of times | a fenced checkpoint, onto the disk the guest stopped with |
+| Restore from | the latest checkpoint, any number of times | **not yet**: needs an `hvi` with a `restore` subcommand, which no `hvi` has. hull's side takes a fenced checkpoint, onto the disk the guest stopped with |
 | Also | | `hull pause` and `hull resume` |
 | Hosts | macOS 14+, Apple silicon | macOS (HVF) and Linux (KVM) |
 
 Both need a block rootfs (`run --rootfs-type block`) and no shared host
-directory.
+directory. For `hvi`, pause, resume and checkpoint work today; restore is
+built in hull and refuses until `hvi` gains `restore`, because no bundle `hvi`
+writes yet can be resumed.
 
 ## Vz
 
@@ -181,9 +183,14 @@ no authentication: anyone who can connect to it can pause or stop the VM. It
 sits in the instance directory, which is 0700.
 
 The control socket arrived in hvi after the commit hull's `hvi-vmm` submodule
-pins. Until that pin moves, an `hvi` run needs an `hvi` built from a newer
-commit next to hull; the pinned one refuses `--control-sock` as an unknown
-boot argument.
+pins (890f9e0), which answers these flags with `unknown boot arg` and would
+refuse the boot. So before each run hull asks the `hvi` it is about to start,
+with `hvi boot --checkpoint-root` and no value: that fails while parsing on
+every `hvi`, and names the flag as unknown only on one without it. An `hvi`
+without the flags runs as before, with no control socket: `hull stop` works,
+and `pause` and `checkpoint` say that this `hvi` predates the socket. For
+pause and checkpoint, put an `hvi` built from hvi's `feat/teleport` branch
+(bf3b1aa or later) next to hull.
 
 ### Usage
 
@@ -201,8 +208,9 @@ hull restore --paused --detach demo # from the bundle, left paused for `hull res
 ```
 
 `pause` and `resume` are idempotent. A paused guest's counter does not move,
-and neither does anything else in it: do not expect `hull exec` to answer
-until it is resumed. hull waits 5 s for each reply. hvi gives a pause 2 s in
+and neither does anything else in it. `hull ps` shows such an instance as
+STATUS `running` (its VMM is alive) and VM `paused` or `fenced`, and `hull
+exec` refuses it with the command that gets it running. hull waits 5 s for each reply. hvi gives a pause 2 s in
 all and asks clients for at least 3 s; a client that gives up sooner reports
 "not paused" for a VM that then pauses. If a pause times out anyway, hull says
 the VM may now be paused, and `hull resume` is harmless when it is not.
@@ -256,11 +264,12 @@ and `ram.bin` (the guest's RAM, sparse: all-zero pages take no space),
 devices and the UART), `disk.json` and `session.json`, which carries hull's
 txid. `hvi checkpoint-verify DIR` checks one.
 
-**At this stage the bundle is partial.** The hvi that serves the op today
+**Today the bundle is partial.** The hvi that serves the op today
 records only part of each vCPU's registers and none of the interrupt
 controller or timer state, and `checkpoint-verify` says so: "vCPU registers,
 interrupt controller and timer not captured, so no restore can resume this
-bundle". The full vCPU, GIC and timer capture comes with hvi's `restore`. The disk is not in the
+bundle". The full vCPU, GIC and timer capture comes with hvi's `restore`, and until
+then no bundle can be restored. The disk is not in the
 bundle: hvi syncs it and records its size and write count, and the restore
 reopens the same file. hvi's own
 [docs/checkpoint.md](../hvi-vmm/docs/checkpoint.md) describes the format and
@@ -271,6 +280,10 @@ wall clock is behind by the downtime until the guest corrects it. Agent
 connections over vsock are reset by a restore.
 
 ### Restore
+
+No `hvi` has a `restore` subcommand yet, so `hull restore` on an `hvi`
+instance ends at the last refusal below. What follows is what hull does once
+one does.
 
 `hull restore` on an `hvi` instance starts `hvi restore` from the bundle the
 record names. It refuses, with the reason:

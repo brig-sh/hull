@@ -41,7 +41,7 @@ named. No flag anywhere in the tree is hidden.
 | `pause <id>` | pause a running `hvi` instance: its I/O threads and every vCPU stop |
 | `resume <id>` | resume an `hvi` instance paused by `pause` |
 | `checkpoint <id>` | `vz`: pause, save VM and disk state, resume. `hvi`: write a checkpoint bundle, then continue or fence |
-| `restore <id>` | restore a stopped instance: `vz` from its saved state, `hvi` from a fenced bundle |
+| `restore <id>` | restore a stopped instance: `vz` from its saved state; `hvi` from a fenced bundle, refused until `hvi` has a `restore` subcommand |
 | `rm <id>` | remove a stopped instance |
 | `logs <id>` | show an instance's log |
 | `inspect <id>` | print instance details as JSON |
@@ -162,8 +162,9 @@ timeout in seconds on `stop`.
 `hull checkpoint` refuses an instance that is not running and one that is not
 on a block rootfs. For a `vz` instance it also refuses one started without a
 checkpoint state directory. For an `hvi` instance it also refuses one started
-without a control socket and one with a shared host directory, and `--then`
-and `--dir` are refused on any other backend.
+without a control socket (an `hvi` from before the socket gets none) and one
+with a shared host directory, and `--then` and `--dir` are refused on any
+other backend.
 
 `hull pause` and `hull resume` take only `hvi` instances. `hull restore` on an
 `hvi` instance refuses unless its last checkpoint was fenced, while its VMM is
