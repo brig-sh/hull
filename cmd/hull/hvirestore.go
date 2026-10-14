@@ -132,13 +132,14 @@ type hviRestoreOptions struct {
 // the `hvi restore` command line that brings it back from the bundle in from.
 //
 // The bundle holds the guest's RAM, so it already has the kernel, initramfs
-// and command line in it, and its profile fixes the memory size and vCPU
-// count: those flags are dropped. What the bundle cannot hold are the host
-// resources the devices were attached to, and those are kept: the disk, the
-// gateway socket (so a restore on the same host re-joins the same gateway),
-// the MAC the gateway's leases are keyed by, the agent socket, the sandbox id,
-// the event ledger, and the checkpoint root, without which the restored guest
-// could never be checkpointed again. A bare --net is the deprecated spelling of
+// and command line in it, and its profile fixes the memory size, the vCPU
+// count and the machine profile (--profile): those flags are dropped. What
+// the bundle cannot hold are the host resources the devices were attached
+// to, and those are kept: the disk, the gateway socket (so a restore on the
+// same host re-joins the same gateway), the MAC the gateway's leases are
+// keyed by, the agent socket, the sandbox id, the event ledger, and the
+// checkpoint root, without which the restored guest could never be
+// checkpointed again. A bare --net is the deprecated spelling of
 // --net-stub and is passed under its new name, since restore takes only that.
 //
 // An allowlist, not a list of flags to remove: a flag this function has never
@@ -162,6 +163,9 @@ func hviRestoreArgv(cmdLine []string, from, controlSock, profilePath string) ([]
 		"--kernel": true, "--initramfs": true, "--cmdline": true, "--mem-mib": true,
 		"--cpus": true, "--fs-uid": true, "--fs-gid": true, "--from": true,
 		"--control-sock": true, "--profile-out": true,
+		// The machine profile is in the bundle's own profile.json, which
+		// hvi restore checks against the host; it takes no --profile.
+		"--profile": true,
 	}
 	out := []string{cmdLine[0], "restore", "--from", from}
 	sawDisk := false

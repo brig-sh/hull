@@ -58,6 +58,17 @@ func TestHviRestoreArgv(t *testing.T) {
 				"--checkpoint-root", "/s/i/checkpoint"}, tail...),
 		},
 		{
+			// The bundle's profile.json names the machine; hvi restore
+			// takes no --profile, so a portable run maps like any other.
+			name: "linux run under the portable profile",
+			cmdLine: []string{"/h/hvi", "boot", "--kernel", "/k", "--mem-mib", "512", "--cpus", "1",
+				"--disk", "/r", "--agent-sock", "/s/i/agent.sock", "--checkpoint-root", "/s/i/checkpoint",
+				"--control-sock", "/s/i/control.sock", "--profile-out", "/s/i/profile.json",
+				"--profile", "portable-arm64-v1"},
+			want: append([]string{"/h/hvi", "restore", "--from", from, "--disk", "/r",
+				"--agent-sock", "/s/i/agent.sock", "--checkpoint-root", "/s/i/checkpoint"}, tail...),
+		},
+		{
 			name:    "a share",
 			cmdLine: []string{"hvi", "boot", "--disk", "/r", "--share-ro", "/src", "t"},
 			refusal: "shared a host directory",
