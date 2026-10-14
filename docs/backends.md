@@ -239,7 +239,16 @@ hull run --hypervisor hvi --profile portable-arm64-v1 --rootfs-type block IMAGE
 hull records the profile in `state.json` (`profile`), passes `--profile` to
 `hvi`, and boots the profile's kernel with the default initrd; `hvi` adds
 the kernel arguments the profile needs. A native run passes nothing new, so
-an `hvi` from before profiles still boots it. hull refuses the profile:
+an `hvi` from before profiles still boots it.
+
+The kernel is checked by its contents, whatever names it. When hull finds
+the kernel itself, it takes the profile's. When a
+`com.urunc.unikernel.bootKernel` annotation names it (as brig does), that
+file must hash to the kernel recorded in `hull assets dir --profile
+portable-arm64-v1`, so a copy of that kernel at another path boots and any
+other kernel is refused. The check runs before the disk is built.
+
+hull refuses the profile:
 
 - on `vz` and `qemu`;
 - without `--rootfs-type block` (on macOS an unset `--rootfs-type` is
@@ -247,7 +256,12 @@ an `hvi` from before profiles still boots it. hull refuses the profile:
 - with `--shared-dir` or `--shared-dir-fd`, and for an image that boots from
   its own initrd: none of these lives on the disk a checkpoint carries;
 - with an `hvi` that does not take `--profile` (hull asks it, as it asks
-  about the control flags). That `hvi` would boot the native machine.
+  about the control flags). That `hvi` would boot the native machine;
+- with an `hvi` that takes `--profile` but has no control socket
+  (`--control-sock`): that instance could never be checkpointed or moved;
+- with a kernel that is not the profile's: a bootKernel annotation that
+  hashes to another kernel, a kernel from the image, or `--no-boot-assets`,
+  which leaves the image to supply one.
 
 The annotation `com.nofire.hvi.profile` selects the profile too, but only
 from `--annotation`, never from the image: like the boot kernel, the
@@ -255,7 +269,10 @@ profile decides what host kernel boots. `hull restore` and a move take the
 machine from the checkpoint's own profile, so `hvi restore` gets no
 `--profile`. A move carries the profile to the destination's record, and a
 portable instance may move between macOS and Linux (see
-[migration.md](migration.md)); a native one only to the same OS.
+[migration.md](migration.md), and its runs in [The portable profile on this
+Mac](migration.md#the-portable-profile-on-this-mac) and [on the Linux
+pair](migration.md#the-portable-profile-on-the-linux-pair)); a native one
+only to the same OS.
 
 **Other limits `hvi` states about itself.** Eight vCPUs on a GICv2 arm64 Linux
 host, which does not apply on macOS because Apple's in-kernel GIC is a GICv3.

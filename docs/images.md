@@ -186,7 +186,10 @@ It is a variant of the bundle. It lives in a directory named after the
 profile inside the asset directory, `<store>/assets/portable-arm64-v1/Image`,
 with its own `provenance.json`, and the profile boots it with the default
 bundle's `container-initrd`. Each file is checked against the record in its
-own directory before a boot.
+own directory before a boot. A run with the profile boots no other kernel:
+one named in a `com.urunc.unikernel.bootKernel` annotation must hash to the
+`Image` this record describes, and a kernel from the image is refused (see
+[backends.md](backends.md#machine-profiles)).
 
 No artifact carries that kernel yet, so it comes from a local file for now:
 
@@ -200,15 +203,22 @@ hull assets pull --profile portable-arm64-v1 REF   # or from an OCI artifact
 | Source | How | Record |
 |---|---|---|
 | `HULL_PORTABLE_KERNEL=PATH` | copied into the variant directory and hashed on the way in | `ref` is `file://PATH`, `digest` the file's sha256, no verified digest |
-| `HULL_PORTABLE_KERNEL_REF=REF`, or `REF` on the command line | fetched like the bundle: the same reference check, signature check and staged writes; the artifact must carry a layer titled `Image` | as for the bundle |
+| `HULL_PORTABLE_KERNEL_REF=REF`, or `REF` on the command line | fetched like the bundle: the same reference check, signature check and staged writes; the artifact must carry a layer titled `Image`, and one without is refused before anything in the variant directory changes | as for the bundle |
 
-Setting both variables is refused. `HULL_VERIFY=require` refuses a local
-file, since no signature covers it. The first `hull run` with the profile
+Setting both variables is refused. `HULL_VERIFY=require` refuses to
+install a local file, since no signature covers it. It does not refuse to
+boot one already installed: a kernel installed from `HULL_PORTABLE_KERNEL`
+before `require` was set still boots under it, as an unverified default
+bundle does. `hull assets show --profile portable-arm64-v1` says which kind
+is installed (`signature: none`). The first `hull run` with the profile
 installs the kernel from whichever variable is set if none is installed; an
 installed kernel is never replaced unasked, so after rebuilding the file run
-`hull assets pull --profile portable-arm64-v1 --force`. A run whose
-configured source differs from the recorded one boots the installed kernel
-and says so in a warning. The variant follows `HULL_BOOT_ASSETS` and
+`hull assets pull --profile portable-arm64-v1 --force`. A plain `hull assets
+pull --force` re-fetches the default bundle and leaves the profile's kernel
+as it is. A kernel that no longer matches its record stops the run, and the
+refusal names the `--profile` pull and the source it would take the kernel
+from. A run whose configured source differs from the recorded one boots the
+installed kernel and says so in a warning. The variant follows `HULL_BOOT_ASSETS` and
 `BRIG_BOOT_ASSETS` like the rest of the asset directory. The profile is
 arm64 only.
 

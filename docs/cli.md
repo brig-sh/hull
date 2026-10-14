@@ -107,8 +107,11 @@ These fail before anything starts, rather than being documented and ignored:
   `--rootfs-type block` (on macOS an unset `--rootfs-type` is virtiofs, and is
   refused, not switched), with `--shared-dir` or `--shared-dir-fd`, with an
   image that boots from its own initrd, with an `hvi` that does not take
-  `--profile`, or with `--profile` and the annotation naming different
-  profiles
+  `--profile` or has no control socket, with `--profile` and the annotation
+  naming different profiles, or with a kernel that is not the profile's: a
+  `com.urunc.unikernel.bootKernel` that does not hash to the kernel in
+  `hull assets dir --profile NAME`, a kernel from the image, or
+  `--no-boot-assets`
 - `--rosetta` without the virtiofs rootfs mode, a `urunit` init, and a static
   arm64 `busybox` at `/.rosetta/busybox` in the image
 
@@ -161,8 +164,8 @@ as a default that an explicit `--env TERM` beats.
 | `restore <id>` | `--detach`, `-d`; `--stop-grace <secs>`, default 10; `--wait-ip`; `--gateway-sock <path>` (`vz` only); `hvi` only: `--paused`, `--timeout <secs>`, default 120, `--adopt-latest` |
 | `migrate <id>` | `--to USER@HOST`; `--remote-store <dir>`; `--remote-hull <path>`; `--remote-hvi <path>`; `--remote-gateway-sock <path>`; `--txid <txid>` resume a move; `--dry-run`; `--abort` and `--status` (with a name or a txid); `--timeout <secs>`, default 120, for the fence; `--allow-no-restore`, testing only |
 | `assets show` | `--profile NAME` shows that profile's kernel and the initrd it boots with |
-| `assets dir` | none. Prints the directory and nothing else, for scripts. `--profile NAME` prints the profile's kernel directory |
-| `assets pull [REF]` | `--force` download even when the assets are present. `--profile NAME` installs the profile's kernel from REF, `HULL_PORTABLE_KERNEL` or `HULL_PORTABLE_KERNEL_REF` (see [images.md](images.md#a-profiles-kernel)) |
+| `assets dir` | `--profile NAME` prints the profile's kernel directory instead. Prints the directory and nothing else, for scripts |
+| `assets pull [REF]` | `--force` download even when the assets are present. `--profile NAME` installs the profile's kernel from REF, `HULL_PORTABLE_KERNEL` or `HULL_PORTABLE_KERNEL_REF` (see [images.md](images.md#a-profiles-kernel)); without `--force` it checks the installed one against its record. Plain `--force` leaves the profile's kernel alone: replace it with `--profile NAME --force` |
 | `store detach` | `--force` detach even with files still open |
 | `store compact` | `--force` detach even with files still open, before compacting |
 | `telemetry on\|off\|status` | none |
