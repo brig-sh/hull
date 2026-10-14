@@ -332,12 +332,12 @@ The record goes `starting`, then `running`, as for any run, while
 `migration.state` goes `restoring`, then `restored-paused` once hvi reports it
 on the socket, then `restored` when hull sends `resume`. With `--paused`,
 hull stops at `restored-paused` and `hull resume` starts the guest. Whatever
-may run the restored guest (the restore's own resume, `hull resume`, `hull
-checkpoint --then continue`) records `restored` before it is sent, and a
-resume with no reply counts as one that ran. The state never moves back,
-whichever hull process writes it last, so a guest that may have run is never
-restored over again. hull waits
-up to `--timeout` seconds (120) for hvi to rebuild the VM.
+may run the restored guest (the restore's own resume, `hull resume`, any
+`hull checkpoint`, since a failed capture resumes the guest) records
+`restored` before it is sent, and a resume with no reply counts as one that
+ran. The state never moves back, whichever hull process writes it last, so a
+guest that may have run is never restored over again. hull waits up to
+`--timeout` seconds (120) for hvi to rebuild the VM.
 
 **The gateway.** hvi reaches the gateway by the socket path on its command
 line, so a restore on the same host re-joins the gateway the instance left,

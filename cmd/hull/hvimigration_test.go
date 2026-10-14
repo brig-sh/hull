@@ -200,21 +200,25 @@ func TestVMMExitKeepsAFenceTakenMeanwhile(t *testing.T) {
 	}
 }
 
-// `--then continue` may resume a restored guest that was never resumed, and
-// a failed capture resumes it too, so the record must say it ran before
-// the request goes out.
-func TestCheckpointContinueMarksARestoredGuestRun(t *testing.T) {
-	stub := newStubHvi(t, func(map[string]any) stubAnswer {
-		return stubAnswer{reply: `{"v":1,"ok":false,"code":"capture_failed","error":"disk sync failed"}`}
-	})
-	s := newCmdTestStore(t)
-	fakeHviInstance(t, s, "vm1", stub.path)
-	withMigration(t, s, "vm1", store.MigrationState{State: store.MigrationRestoredPaused, BundleDir: "/b", TxID: "t"})
-	if err := hviCheckpointInstance(s, mustInstance(t, s, "vm1"), hviThenContinue, "", time.Minute); err == nil {
-		t.Fatal("a failed capture was not reported")
-	}
-	if m := mustInstance(t, s, "vm1").Migration; restorableMigration(m) == nil {
-		t.Errorf("record says %s, which allows a restore", m.State)
+// `--then continue` may resume a restored guest that was never resumed,
+// and a failed capture of either kind may resume it too, so the record must
+// say it ran before the request goes out.
+func TestCheckpointMarksARestoredGuestRun(t *testing.T) {
+	for _, then := range []string{hviThenContinue, hviThenFence} {
+		t.Run(then, func(t *testing.T) {
+			stub := newStubHvi(t, func(map[string]any) stubAnswer {
+				return stubAnswer{reply: `{"v":1,"ok":false,"code":"capture_failed","error":"disk sync failed"}`}
+			})
+			s := newCmdTestStore(t)
+			fakeHviInstance(t, s, "vm1", stub.path)
+			withMigration(t, s, "vm1", store.MigrationState{State: store.MigrationRestoredPaused, BundleDir: "/b", TxID: "t"})
+			if err := hviCheckpointInstance(s, mustInstance(t, s, "vm1"), then, "", time.Minute); err == nil {
+				t.Fatal("a failed capture was not reported")
+			}
+			if m := mustInstance(t, s, "vm1").Migration; restorableMigration(m) == nil {
+				t.Errorf("record says %s, which allows a restore", m.State)
+			}
+		})
 	}
 }
 
