@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -161,7 +162,7 @@ func hviRestoreArgv(cmdLine []string, from, controlSock, profilePath string) ([]
 	}
 	drop := map[string]bool{
 		"--kernel": true, "--initramfs": true, "--cmdline": true, "--mem-mib": true,
-		"--cpus": true, "--fs-uid": true, "--fs-gid": true, "--from": true,
+		"--cpus": true, "--fs-uid": true, "--fs-gid": true, "--from": true, hviFromStreamFlag: true,
 		"--control-sock": true, "--profile-out": true,
 		// The base digest describes the boot; a restored disk has moved on
 		// from it, and the bundle's disk.json carries what hvi recorded.
@@ -233,6 +234,61 @@ func hviHasRestore(binary string) (bool, error) {
 		return false, fmt.Errorf("run %s: %w", binary, err)
 	}
 	return !strings.Contains(out.String(), `unknown subcommand "restore"`), nil
+}
+
+// Files a streamed move keeps in its spool directory on the source.
+const (
+	// spoolStream is hvi's migrate stream as hvi wrote it: what `hvi
+	// restore --from-stream` reads, should an abort bring the guest back
+	// here.
+	spoolStream = "stream"
+	// spoolSealed holds hvi's reply once the stream is complete and synced.
+	spoolSealed = "sealed"
+)
+
+// isStreamRestore reports whether cmdLine is an hvi restore from a stream:
+// what a streamed move records for the instance it brings in.
+func isStreamRestore(cmdLine []string) bool {
+	return len(cmdLine) > 1 && cmdLine[1] == "restore" && slices.Contains(cmdLine, hviFromStreamFlag)
+}
+
+// restoreStreamSource is where a restore reads a streamed checkpoint from,
+// or nil for a bundle directory: standard input for a streamed move's own
+// restore on its destination, which `migrate-receive --stream` feeds, and
+// the spooled stream for a source that takes back a streamed move it
+// aborted.
+func restoreStreamSource(state *store.InstanceState, opt hviRestoreOptions) (*os.File, error) {
+	m := state.Migration
+	if opt.move != "" && isStreamRestore(state.CmdLine) && m.State == store.MigrationIncoming {
+		if !opt.detach {
+			return nil, errors.New("a streamed move's restore is detached")
+		}
+		return os.Stdin, nil
+	}
+	spool := filepath.Join(m.BundleDir, spoolStream)
+	if _, err := os.Stat(spool); err != nil {
+		return nil, nil
+	}
+	if _, err := os.Stat(filepath.Join(m.BundleDir, spoolSealed)); err != nil {
+		return nil, fmt.Errorf("the streamed checkpoint %s was never sealed", m.BundleDir)
+	}
+	if !opt.detach {
+		return nil, errors.New("a checkpoint kept as a stream restores detached (--detach)")
+	}
+	return os.Open(spool)
+}
+
+// streamRestoreArgv turns `restore --from DIR ...` into `restore
+// --from-stream - ...`.
+func streamRestoreArgv(argv []string) []string {
+	out := slices.Clone(argv)
+	for i := 0; i+1 < len(out); i++ {
+		if out[i] == "--from" {
+			out[i], out[i+1] = hviFromStreamFlag, hviFromStreamStdin
+			break
+		}
+	}
+	return out
 }
 
 // hviRestoreTakesStream reports whether the hvi at binary restores from a
@@ -440,8 +496,19 @@ func hviRestoreInstance(ctx context.Context, cmd *cli.Command, s *store.Store, s
 	if _, err := os.Stat(bundle); err != nil {
 		return fmt.Errorf("cannot restore %s: its bundle %s is gone", id, bundle)
 	}
-	if err := checkBundleManifest(bundle, state.Migration.ManifestSHA256); err != nil {
+	stream, err := restoreStreamSource(state, opt)
+	if err != nil {
 		return fmt.Errorf("cannot restore %s: %w", id, err)
+	}
+	if stream != nil && stream != os.Stdin {
+		defer func() { _ = stream.Close() }()
+	}
+	// A move's streamed restore starts before its manifest has arrived;
+	// hvi checks every component of the stream against it as it reads.
+	if stream != os.Stdin {
+		if err := checkBundleManifest(bundle, state.Migration.ManifestSHA256); err != nil {
+			return fmt.Errorf("cannot restore %s: %w", id, err)
+		}
 	}
 	if err := hviCheckpointable(state.CmdLine); err != nil {
 		return err
@@ -463,6 +530,9 @@ func hviRestoreInstance(ctx context.Context, cmd *cli.Command, s *store.Store, s
 	argv, err := hviRestoreArgv(state.CmdLine, bundle, controlSock, profilePath)
 	if err != nil {
 		return fmt.Errorf("cannot restore %s: %w", id, err)
+	}
+	if stream != nil {
+		argv = streamRestoreArgv(argv)
 	}
 	// hvi relays the guest's NIC to the gateway socket by path, so a restore
 	// on the same host re-joins the gateway the instance left, with the same
@@ -504,7 +574,7 @@ func hviRestoreInstance(ctx context.Context, cmd *cli.Command, s *store.Store, s
 	}()
 	// The IP the record holds stays the guest's: it resumes with its network
 	// state in memory and the same MAC. So no rediscovery, as for Vz.
-	started, launchErr := launchVMM(ctx, cmd, s, state, argv, nil, hypervisors.HviVmm, opt.detach, "none", "")
+	started, launchErr := launchVMM(ctx, cmd, s, state, argv, nil, hypervisors.HviVmm, opt.detach, "none", "", stream)
 	// In the foreground launchVMM returns when the VMM has exited, and on a
 	// failed start there never was one. Either way nothing will answer on
 	// the socket, and the wait must end now rather than at its deadline.
@@ -731,6 +801,9 @@ func checkMoveRestore(s *store.Store, state *store.InstanceState, opt hviRestore
 	switch {
 	case rec.TxID != opt.move || rec.Role != roleDestination:
 		return fmt.Errorf("the instance is not the destination of move %s", opt.move)
+	case rec.State == dstReceiving && isStreamRestore(state.CmdLine):
+		// A streamed move restores while the stream arrives; its commit
+		// still waits for the stream to be verified.
 	case rec.State != dstVerified && rec.State != dstRestoredPaused:
 		return fmt.Errorf("move %s is %s here, and only a verified one is restored", opt.move, rec.State)
 	case m == nil || m.MoveTxID != opt.move || m.BundleDir == "":

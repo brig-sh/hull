@@ -70,7 +70,7 @@ func TestCanceledLaunchDoesNotSpawn(t *testing.T) {
 	cancel()
 	started, launchErr := launchVMM(ctx, &cli.Command{}, s, state,
 		[]string{"/bin/sh", "-c", `printf 'spawned\n' > "$1"`, "hull-canceled-launch", marker},
-		nil, hypervisors.VzVmm, true, "none", "")
+		nil, hypervisors.VzVmm, true, "none", "", nil)
 	if started && state.PID > 1 && state.PID != os.Getpid() {
 		// A regression can spawn this short-lived command. Reap it before
 		// checking the marker, without signalling any recorded process.
@@ -169,7 +169,7 @@ func TestCanceledDetachedLaunchStopsAndReapsChild(t *testing.T) {
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			var err error
 			started, err = launchVMM(ctx, cmd, s, state, args,
-				[]*os.File{readyWrite, controlRead}, hypervisors.VzVmm, true, "nat", "")
+				[]*os.File{readyWrite, controlRead}, hypervisors.VzVmm, true, "nat", "", nil)
 			return err
 		},
 	}
