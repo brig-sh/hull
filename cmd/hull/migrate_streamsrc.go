@@ -25,6 +25,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/brig-sh/hull/pkg/store"
@@ -435,8 +437,19 @@ func (ss *streamSender) diskFinal() error {
 type spoolWriter struct {
 	dir string
 	f   *os.File
+	cw  *countingWriter
 	bw  *bufio.Writer
+	// synced is how far the background syncs have been asked to reach;
+	// inflight waits for the one running.
+	synced   int64
+	inflight sync.WaitGroup
+	busy     atomic.Bool
 }
+
+// spoolSyncEvery is how much of the spool is written between the syncs
+// that run in the background while the stream goes on, so the sync at the
+// seal has only the tail left to write.
+const spoolSyncEvery = 32 << 20
 
 func newSpool(dir string) (*spoolWriter, error) {
 	emptyDir(dir)
@@ -447,7 +460,28 @@ func newSpool(dir string) (*spoolWriter, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &spoolWriter{dir: dir, f: f, bw: bufio.NewWriterSize(f, 1<<20)}, nil
+	cw := &countingWriter{w: f}
+	return &spoolWriter{dir: dir, f: f, cw: cw, bw: bufio.NewWriterSize(cw, 1<<20)}, nil
+}
+
+// maybeSync starts a sync of what is written, in the background, once
+// spoolSyncEvery more bytes have been written since the last, unless one
+// is still running.
+func (sp *spoolWriter) maybeSync() {
+	if sp.cw.n+int64(sp.bw.Buffered())-sp.synced < spoolSyncEvery || sp.busy.Load() {
+		return
+	}
+	if sp.bw.Flush() != nil {
+		return // the seal reports it
+	}
+	sp.synced = sp.cw.n
+	sp.busy.Store(true)
+	sp.inflight.Add(1)
+	go func() {
+		defer sp.inflight.Done()
+		_ = sp.f.Sync()
+		sp.busy.Store(false)
+	}()
 }
 
 // seal flushes and syncs the stream, writes the small components and the
@@ -456,6 +490,7 @@ func (sp *spoolWriter) seal(files map[string][]byte, reply []byte) error {
 	if err := sp.bw.Flush(); err != nil {
 		return err
 	}
+	sp.inflight.Wait()
 	if err := sp.f.Sync(); err != nil {
 		return err
 	}
@@ -474,6 +509,7 @@ func (sp *spoolWriter) seal(files map[string][]byte, reply []byte) error {
 }
 
 func (sp *spoolWriter) close() {
+	sp.inflight.Wait()
 	if sp.f != nil {
 		_ = sp.f.Close()
 	}
@@ -601,6 +637,7 @@ func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][
 		if err := ss.relayFrame(folder, line, hdr, body, also); err != nil {
 			return err
 		}
+		sp.maybeSync()
 		if keep != nil {
 			files[hdr.Component] = append(files[hdr.Component], keep.b...)
 			if hdr.Component == "manifest.json" {
@@ -892,29 +929,40 @@ func (ss *streamSender) send(replay bool) (json.RawMessage, error) {
 	if err == nil {
 		reply, files, err = ss.relayHvi(sp)
 	}
-	if err == nil {
-		ss.stats.HviReply = reply
-		err = sp.seal(files, reply)
-	}
-	sp.close()
-	if err == nil {
-		err = ss.recordFence()
-	}
-	unlock()
 	if err != nil {
+		sp.close()
+		unlock()
 		return nil, err
 	}
-	// hvi has fenced the guest, and its whole stream is in the spool: a
-	// destination that failed meanwhile is retried from it, or the abort
-	// restores the guest here from it.
-	if err := ss.link.err; err != nil {
+	ss.stats.HviReply = reply
+	// hvi has fenced the guest, and its whole stream is in the spool, which
+	// is synced and recorded as the instance's checkpoint while the last
+	// disk round and the trailer go out: the destination needs neither, and
+	// the guest is stopped until it has both. A destination that failed
+	// meanwhile is retried from the spool, or the abort restores the guest
+	// here from it.
+	sealed := make(chan error, 1)
+	go func() {
+		err := sp.seal(files, reply)
+		sp.close()
+		if err == nil {
+			err = ss.recordFence()
+		}
+		unlock()
+		sealed <- err
+	}()
+	sendErr := ss.link.err
+	if sendErr == nil {
+		sendErr = ss.diskFinal()
+	}
+	if sendErr == nil {
+		sendErr = ss.sw.trailer(reply)
+	}
+	if err := <-sealed; err != nil {
 		return nil, err
 	}
-	if err := ss.diskFinal(); err != nil {
-		return nil, err
-	}
-	if err := ss.sw.trailer(reply); err != nil {
-		return nil, err
+	if sendErr != nil {
+		return nil, sendErr
 	}
 	return reply, ss.link.err
 }
