@@ -54,8 +54,10 @@ const moveStreamMagic = "HULLMIG2"
 
 // Limits a reader holds the stream to before it allocates or writes.
 const (
-	moveMaxRecords    = 1 << 22
-	moveMaxComponents = 4096
+	moveMaxRecords = 1 << 22
+	// moveMaxComponents bounds hvi's frames: a RAM round comes in frames
+	// of about 1 MiB, so a 64 GiB guest's first round alone is 65536.
+	moveMaxComponents = 1 << 21
 	// moveMaxBatchBlocks is the most blocks one disk batch carries; hvi's
 	// own batches are at most 16.
 	moveMaxBatchBlocks = 64

@@ -17,7 +17,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -152,6 +151,8 @@ type streamReceiver struct {
 	zero      []byte
 	// restoreErr is why hvi's restore failed, once it did.
 	restoreErr error
+	// profileLine is hvi's header line of profile.json, held with it.
+	profileLine []byte
 }
 
 // toHvi writes data to hvi's stdin. A write that fails means hvi stopped
@@ -252,6 +253,7 @@ func (r *streamReceiver) component(line []byte, hdr hviComponentHeader, body io.
 		if hdr.Size > 1<<20 {
 			return fmt.Errorf("profile.json is %d bytes", hdr.Size)
 		}
+		r.profileLine = append([]byte{}, line...)
 		r.pending = &bytesBuffer{}
 		_, err := io.Copy(r.pending, body)
 		return err
@@ -300,7 +302,7 @@ func (r *streamReceiver) componentVerified(hdr hviComponentHeader) error {
 	if r.manifest != nil {
 		return fmt.Errorf("hvi's %s comes after its manifest", name)
 	}
-	r.files[name] = r.pending.b
+	r.files[name] = append(r.files[name], r.pending.b...)
 	switch name {
 	case "manifest.json":
 		r.manifest = r.pending.b
@@ -320,11 +322,7 @@ func (r *streamReceiver) componentVerified(hdr hviComponentHeader) error {
 		}
 		r.restore = restore
 		r.stage = 1
-		line, err := json.Marshal(hviComponentHeader{Component: name, Size: hdr.Size, SHA256: hdr.SHA256})
-		if err != nil {
-			return err
-		}
-		if err := r.toHvi(name, append(append(line, '\n'), r.pending.b...)); err != nil {
+		if err := r.toHvi(name, append(append(r.profileLine, '\n'), r.pending.b...)); err != nil {
 			return err
 		}
 	}
