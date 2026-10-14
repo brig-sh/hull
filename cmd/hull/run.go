@@ -1476,6 +1476,21 @@ exec %s "$@"
 		}
 	}
 
+	// Every hvi instance gets a control socket and a machine profile, the
+	// way every Vz instance gets a state dir: pause, checkpoint and a
+	// graceful stop all go through the socket, and a run started without one
+	// can only be signalled. Both live in the 0700 instance directory, since
+	// the socket answers anyone who can connect to it.
+	var controlSock, profilePath string
+	if vmmType == hypervisors.HviVmm {
+		controlSock = s.InstanceControlSocket(instanceName)
+		profilePath = s.InstanceProfilePath(instanceName)
+		if err := checkUnixSocketPath("control", controlSock); err != nil {
+			return err
+		}
+		cmdArgs = append(cmdArgs, "--control-sock", controlSock, "--profile-out", profilePath)
+	}
+
 	state := &store.InstanceState{
 		ID:          instanceName,
 		ImageDigest: imageDigest,
@@ -1484,6 +1499,8 @@ exec %s "$@"
 		BundleDir:   bundleDir,
 		MAC:         mac,
 		Backend:     string(vmmType),
+		ControlSock: controlSock,
+		ProfilePath: profilePath,
 	}
 	started, err := launchVMM(ctx, cmd, s, state, cmdArgs, append(gatewayFiles, shareFiles...), vmmType, detach, netMode, gatewayIP)
 	instanceStarted = started
