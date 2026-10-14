@@ -42,28 +42,9 @@ const (
 	ckptError     = "error"
 )
 
-func instanceCheckpointDir(s *store.Store, id string) string {
-	return filepath.Join(s.InstanceDir(id), "checkpoint")
-}
-
-func checkpointCommand() *cli.Command {
-	return &cli.Command{
-		Name:  "checkpoint",
-		Usage: "checkpoint a running Vz instance (pause, save VM + disk state, resume)",
-		Flags: []cli.Flag{
-			&cli.IntFlag{
-				Name:  "timeout",
-				Value: 60,
-				Usage: "seconds to wait for the checkpoint to complete",
-			},
-		},
-		Action: func(ctx context.Context, cmd *cli.Command) error {
-			return checkpointInstance(ctx, cmd)
-		},
-	}
-}
-
-func checkpointInstance(_ context.Context, cmd *cli.Command) error {
+// vzCheckpointInstance is `hull checkpoint` for a Vz instance: vz-runner
+// saves the machine state and clones the disk on SIGUSR1.
+func vzCheckpointInstance(_ context.Context, cmd *cli.Command) error {
 	args := cmd.Args()
 	if args.Len() == 0 {
 		return errors.New("instance ID required")
