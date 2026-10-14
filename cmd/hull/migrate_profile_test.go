@@ -118,3 +118,57 @@ func TestMovePortableNeedsAnHviWithProfiles(t *testing.T) {
 		t.Fatalf("a native instance to the same hvi: %v", err)
 	}
 }
+
+// The destination records the profile the move names only when the bundle
+// hvi wrote agrees: a native guest labelled portable is refused on receive,
+// and nothing is recorded that would relax the OS check on its next move.
+// The bundle of a portable guest moves through the commit.
+func TestReceiveChecksTheBundleProfile(t *testing.T) {
+	f := newMoveFixture(t, true)
+	state := mustInstance(t, f.src, f.name)
+	state.Profile = portable
+	if err := f.src.SaveInstance(state); err != nil {
+		t.Fatal(err)
+	}
+	peer := newLocalPeer(f.dst)
+	err := sourceMigrate(context.Background(), f.src, f.name, f.options(false), peer)
+	if err == nil || !strings.Contains(err.Error(), "profile.json records native") {
+		t.Fatalf("err = %v, want the destination's refusal of a native bundle labelled %s", err, portable)
+	}
+	if st, err := f.dst.GetInstance(f.name); err == nil && st.Profile != "" {
+		t.Fatalf("the destination recorded profile %q for the refused bundle", st.Profile)
+	}
+
+	g := newMoveFixture(t, true)
+	g.vm.profile = portable
+	state = mustInstance(t, g.src, g.name)
+	state.Profile = portable
+	if err := g.src.SaveInstance(state); err != nil {
+		t.Fatal(err)
+	}
+	if err := sourceMigrate(context.Background(), g.src, g.name, g.options(false), newLocalPeer(g.dst)); err != nil {
+		t.Fatalf("a portable bundle labelled portable: %v", err)
+	}
+	if st := mustInstance(t, g.dst, g.name); st.Profile != portable {
+		t.Fatalf("the destination recorded profile %q", st.Profile)
+	}
+}
+
+// A reserve takes only a profile this hull knows, and records native as "".
+func TestReserveNormalizesTheProfile(t *testing.T) {
+	s := shortStore(t)
+	hvi := fakeHviProgram(t, true)
+	req := migrateReserveRequest{Epoch: 1, Spec: migrateSpec{SourceHost: "src", Net: "none", Hvi: hvi,
+		Profile: "portable-arm64-v2"}}
+	if r := destReserve(s, strings.Repeat("ab", 16), "vm1", req); r.OK || !strings.Contains(r.Error, "portable-arm64-v2") {
+		t.Fatalf("reserve of an unknown profile: %+v", r)
+	}
+	if _, err := os.Stat(s.InstanceDir("vm1")); !os.IsNotExist(err) {
+		t.Fatal("a refused reserve left the instance directory")
+	}
+	req.Spec.Profile = "native"
+	r := destReserve(s, strings.Repeat("ab", 16), "vm1", req)
+	if !r.OK || r.Record.Spec.Profile != "" {
+		t.Fatalf("reserve of native: %+v", r)
+	}
+}
