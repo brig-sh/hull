@@ -21,10 +21,12 @@ import (
 	"github.com/urfave/cli/v3"
 )
 
-// errVzCheckpointMacOnly answers checkpoint for anything but an hvi instance.
-// On macOS that goes to vz-runner, whose saved state is
+// errVzCheckpointMacOnly answers checkpoint and restore for anything but an
+// hvi instance. On macOS those go to vz-runner, whose saved state is
 // Virtualization.framework's and bound to the Mac that wrote it; on Linux
 // every instance is hvi, so this is only reached by a record that is not.
-var errVzCheckpointMacOnly = errors.New("checkpoint on Linux takes hvi instances only")
+var errVzCheckpointMacOnly = errors.New("checkpoint and restore on Linux take hvi instances only")
 
 func vzCheckpointInstance(context.Context, *cli.Command) error { return errVzCheckpointMacOnly }
+
+func vzRestoreInstance(context.Context, *cli.Command) error { return errVzCheckpointMacOnly }
