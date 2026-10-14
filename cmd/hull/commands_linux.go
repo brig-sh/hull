@@ -44,6 +44,7 @@ func platformCommands() []*cli.Command {
 		resumeCommand(),
 		checkpointCommand(),
 		restoreCommand(),
+		migrateCommand(),
 		rmCommand(),
 		logsCommand(),
 		inspectCommand(),
