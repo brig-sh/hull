@@ -91,6 +91,29 @@ var migrateTransitions = map[string]map[string][]string{
 	},
 }
 
+// streamSourceTransitions are a streamed move's source transitions. It goes
+// from reserved straight to transferring: hvi fences the guest inside the
+// stream, after the pre-copy rounds, and hull records that fence on the
+// instance when hvi seals the stream. Past transferring they are the
+// whole-bundle move's.
+var streamSourceTransitions = func() map[string][]string {
+	t := map[string][]string{}
+	for from, to := range migrateTransitions[roleSource] {
+		t[from] = to
+	}
+	t[srcReserved] = []string{srcTransferring, migAborted}
+	delete(t, srcFenced)
+	return t
+}()
+
+// transitions is the table rec moves by.
+func (rec *migrationRecord) transitions() map[string][]string {
+	if rec.Role == roleSource && rec.Transport == transportStream {
+		return streamSourceTransitions
+	}
+	return migrateTransitions[rec.Role]
+}
+
 // migrateStateOrder ranks the states of role, for "has the move got this far
 // yet". aborted ranks with none of them.
 func migrateStateOrder(role, state string) int {
@@ -143,6 +166,18 @@ type migrationRecord struct {
 	Verify string `json:"verify,omitempty"`
 	// Timings are the milliseconds each step took, by step name.
 	Timings map[string]int64 `json:"timingsMs,omitempty"`
+	// Transport is how the move carries the guest: "stream" for the
+	// streamed move (pre-copy rounds, only the disk blocks that differ
+	// from the base), "" for the whole fenced bundle and disk. Chosen at
+	// preflight and kept, so a retry takes the same path.
+	Transport string `json:"transport,omitempty"`
+	// BaseSHA256 is the base a streamed move's disk blocks apply to.
+	BaseSHA256 string `json:"baseSha256,omitempty"`
+	// TransportWhy says why a move took the whole-bundle path.
+	TransportWhy string `json:"transportWhy,omitempty"`
+	// Stream is what a streamed move carried, round by round, and how
+	// long the guest was stopped.
+	Stream *migrateStreamStats `json:"stream,omitempty"`
 
 	// Error is the last step's failure, kept for `hull migrate --status`.
 	Error   string           `json:"error,omitempty"`
@@ -214,6 +249,60 @@ type migrateTransfer struct {
 	StartedAt   time.Time `json:"startedAt"`
 }
 
+// Transports a move takes.
+const (
+	transportBundle = ""
+	transportStream = "stream"
+)
+
+// migrateStreamStats are a streamed move's numbers.
+type migrateStreamStats struct {
+	// Mode is "live" (hvi's migrate op) or "replay" (the source's copy of
+	// a stream hvi sealed in an earlier attempt).
+	Mode string `json:"mode"`
+	// DiskEngine is how the changed disk blocks were found: "hvi" (hvi's
+	// dirty-block rounds) or "compare" (hull compared the disk with the
+	// base).
+	DiskEngine string        `json:"diskEngine"`
+	Rounds     []streamRound `json:"rounds"`
+	// Chain is the stream's trailer hash, which the destination's record
+	// of what it received must match.
+	Chain string `json:"chain,omitempty"`
+	// Bytes by kind: disk blocks as data and on the wire, RAM rounds, and
+	// the machine's state.
+	DiskBytes     int64   `json:"diskBytes"`
+	DiskWireBytes int64   `json:"diskWireBytes"`
+	RAMBytes      int64   `json:"ramBytes"`
+	StateBytes    int64   `json:"stateBytes"`
+	WireBytes     int64   `json:"wireBytes"`
+	Seconds       float64 `json:"seconds"`
+	// PausedAt is when the last RAM round began to arrive, the nearest
+	// this host sees to hvi pausing the guest; SealedMs is from then to
+	// hvi's reply, FinalDiskMs the disk round taken after it.
+	PausedAt    time.Time `json:"pausedAt,omitempty"`
+	SealedMs    int64     `json:"sealedMs,omitempty"`
+	FinalDiskMs int64     `json:"finalDiskMs,omitempty"`
+	// DowntimeMs is from PausedAt to the destination's resume, on two
+	// hosts' clocks.
+	DowntimeMs int64 `json:"downtimeMs,omitempty"`
+	// HviReply is hvi's reply to the migrate op, as hvi wrote it.
+	HviReply json.RawMessage `json:"hviReply,omitempty"`
+}
+
+// streamRound is one round of a streamed move.
+type streamRound struct {
+	Kind      string  `json:"kind"` // "disk", "ram" or "state"
+	Name      string  `json:"name"`
+	Final     bool    `json:"final,omitempty"`
+	Blocks    int64   `json:"blocks,omitempty"`
+	Bytes     int64   `json:"bytes"`
+	WireBytes int64   `json:"wireBytes"`
+	Seconds   float64 `json:"seconds"`
+	// DirtyPerSec is, for a disk round after the first, the blocks the
+	// guest wrote per second during the round before.
+	DirtyPerSec float64 `json:"dirtyPerSec,omitempty"`
+}
+
 // migrateHistory is one state change.
 type migrateHistory struct {
 	State string    `json:"state"`
@@ -251,7 +340,7 @@ func (rec *migrationRecord) advance(path, to string) error {
 		return nil
 	}
 	allowed := false
-	for _, next := range migrateTransitions[rec.Role][rec.State] {
+	for _, next := range rec.transitions()[rec.State] {
 		if next == to {
 			allowed = true
 			break

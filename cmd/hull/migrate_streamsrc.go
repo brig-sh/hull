@@ -1,0 +1,1022 @@
+// Copyright (c) 2026, NOFire AI
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package main
+
+import (
+	"bufio"
+	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/brig-sh/hull/pkg/store"
+)
+
+// The source's half of a streamed move (docs/migration.md, "The streamed
+// move"): one ssh session to `migrate-receive --stream`, whose stdin
+// carries, in order, the disk blocks that differ from the base (round 0,
+// then a few rounds of what the guest wrote meanwhile), hvi's migrate
+// stream (RAM rounds while the guest runs, then the pause, the last RAM
+// round, the machine's state and the manifest, after which hvi has fenced
+// the guest), the disk blocks the guest wrote during the RAM rounds, and
+// the trailer.
+//
+// hvi serves one control connection at a time, so the disk rounds hull
+// asks for cannot run while the migrate op holds the socket: the last disk
+// round is read once hvi has sealed the stream. The guest is fenced by
+// then, and its disk synced, so that round and the RAM describe the same
+// machine.
+
+// Disk pre-copy policy: stop when a round finds at most this many blocks
+// (2 MiB), or after streamRoundCap rounds.
+const (
+	streamDiskSettle = 32
+	streamRoundCap   = 5
+)
+
+// blockHash is what one disk block holds, as far as a comparison needs.
+type blockHash struct {
+	zero bool
+	sum  [32]byte
+}
+
+// diskCompare finds the blocks of a disk that differ from what the
+// destination holds: its copy of the base, plus every block sent since.
+// It is the disk engine when hvi has no dirty-block rounds, or when the
+// running hvi did not boot from the base, and it reads the whole disk on
+// every pass.
+type diskCompare struct {
+	size int64
+	base map[int64][32]byte
+	sent map[int64]blockHash
+}
+
+// newDiskCompare hashes the base's blocks.
+func newDiskCompare(basePath string, size int64) (*diskCompare, error) {
+	f, err := os.Open(basePath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if info.Size() != size {
+		return nil, fmt.Errorf("the base is %d bytes and the disk %d", info.Size(), size)
+	}
+	c := &diskCompare{size: size, base: map[int64][32]byte{}, sent: map[int64]blockHash{}}
+	err = forEachDataBlock(f, size, func(index int64, data []byte) error {
+		c.base[index] = sha256.Sum256(data)
+		return nil
+	})
+	return c, err
+}
+
+// held is what the destination holds at block index.
+func (c *diskCompare) held(index int64) blockHash {
+	if h, ok := c.sent[index]; ok {
+		return h
+	}
+	if sum, ok := c.base[index]; ok {
+		return blockHash{sum: sum}
+	}
+	return blockHash{zero: true}
+}
+
+// diff calls emit for every block of disk that differs from what the
+// destination holds, in index order, and records it as sent.
+func (c *diskCompare) diff(disk *os.File, emit func(index int64, data []byte) error) error {
+	seen := map[int64]bool{}
+	err := forEachDataBlock(disk, c.size, func(index int64, data []byte) error {
+		seen[index] = true
+		h := blockHash{sum: sha256.Sum256(data)}
+		if c.held(index) == h {
+			return nil
+		}
+		c.sent[index] = h
+		return emit(index, data)
+	})
+	if err != nil {
+		return err
+	}
+	// Blocks that are zero on the disk now but hold data there.
+	var zeroed []int64
+	for index := range c.base {
+		if !seen[index] && !c.held(index).zero {
+			zeroed = append(zeroed, index)
+		}
+	}
+	for index, h := range c.sent {
+		if !seen[index] && !h.zero {
+			if _, inBase := c.base[index]; !inBase {
+				zeroed = append(zeroed, index)
+			}
+		}
+	}
+	sortInt64(zeroed)
+	zero := make([]byte, diskBlockSize)
+	for _, index := range zeroed {
+		c.sent[index] = blockHash{zero: true}
+		if err := emit(index, zero[:blockLen(c.size, index)]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// sortInt64 sorts s ascending.
+func sortInt64(s []int64) {
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && s[j] < s[j-1]; j-- {
+			s[j], s[j-1] = s[j-1], s[j]
+		}
+	}
+}
+
+// batcher gathers adjacent blocks into disk batches of up to 16.
+type batcher struct {
+	size  int64
+	first int64
+	count int64
+	buf   []byte
+	flush func(first, count int64, data []byte) error
+}
+
+func newBatcher(size int64, flush func(first, count int64, data []byte) error) *batcher {
+	return &batcher{size: size, buf: make([]byte, 0, 16*diskBlockSize), flush: flush}
+}
+
+func (b *batcher) add(index int64, data []byte) error {
+	if b.count > 0 && (index != b.first+b.count || b.count == 16) {
+		if err := b.done(); err != nil {
+			return err
+		}
+	}
+	if b.count == 0 {
+		b.first = index
+	}
+	b.buf = append(b.buf, data...)
+	b.count++
+	return nil
+}
+
+func (b *batcher) done() error {
+	if b.count == 0 {
+		return nil
+	}
+	err := b.flush(b.first, b.count, b.buf)
+	b.buf, b.count = b.buf[:0], 0
+	return err
+}
+
+// streamSender writes one streamed move into sw.
+type streamSender struct {
+	m     *moveSource
+	state *store.InstanceState
+	sw    *moveStreamWriter
+	disk  *os.File
+	size  int64
+	stats *migrateStreamStats
+	// hviDisk is set while hvi answers disk-dirty; cmp is the compare
+	// engine, when it is the one in use.
+	hviDisk bool
+	cmp     *diskCompare
+	// lastRound is the round hvi numbered the last disk-dirty read.
+	lastRound int
+	// spoolDir is where hvi's stream is kept on this host.
+	spoolDir string
+	// manifest is hvi's manifest.json, once relayed.
+	manifest []byte
+	// roundTotal is the blocks of the disk round being sent, when known.
+	roundTotal int64
+	// link is what sw writes to; its error is the destination's failure.
+	link *softLink
+}
+
+func (ss *streamSender) progress(format string, args ...any) {
+	ss.m.logf("move: "+format, args...)
+}
+
+// sendBatch writes one disk batch and counts it in round r, of total
+// blocks when that is known (0 when not).
+func (ss *streamSender) sendBatch(r *streamRound, round int, final bool) func(first, count int64, data []byte) error {
+	started := time.Now()
+	last := started
+	return func(first, count int64, data []byte) error {
+		if err := ss.link.err; err != nil {
+			return err
+		}
+		wire, err := ss.sw.disk(round, final, first, count, data)
+		if err != nil {
+			return err
+		}
+		r.Blocks += count
+		r.Bytes += int64(len(data))
+		r.WireBytes += wire
+		if now := time.Now(); now.Sub(last) >= progressEvery {
+			last = now
+			line := fmt.Sprintf("%s: %d blocks so far, %s/s", r.Name, r.Blocks,
+				humanBytes(perSec(r.WireBytes, now.Sub(started).Seconds())))
+			if ss.roundTotal > 0 {
+				line += fmt.Sprintf(" (%d%% of %d)", r.Blocks*100/ss.roundTotal, ss.roundTotal)
+			}
+			ss.progress("%s", line)
+		}
+		return nil
+	}
+}
+
+// endRound records a round and prints it.
+func (ss *streamSender) endRound(r streamRound, started time.Time) {
+	r.Seconds = time.Since(started).Seconds()
+	ss.stats.Rounds = append(ss.stats.Rounds, r)
+	switch r.Kind {
+	case "disk":
+		ss.stats.DiskBytes += r.Bytes
+		ss.stats.DiskWireBytes += r.WireBytes
+		line := fmt.Sprintf("%s: %d blocks, %s (%s on the wire) in %.2f s, %s/s", r.Name, r.Blocks,
+			humanBytes(r.Bytes), humanBytes(r.WireBytes), r.Seconds, humanBytes(perSec(r.WireBytes, r.Seconds)))
+		if r.DirtyPerSec > 0 {
+			line += fmt.Sprintf(", guest wrote %.0f blocks/s", r.DirtyPerSec)
+		}
+		ss.progress("%s", line)
+	case "ram":
+		ss.stats.RAMBytes += r.Bytes
+		ss.progress("%s: %s in %.2f s, %s/s", r.Name, humanBytes(r.Bytes), r.Seconds,
+			humanBytes(perSec(r.Bytes, r.Seconds)))
+	default:
+		ss.stats.StateBytes += r.Bytes
+	}
+}
+
+// perSec is n per second over secs.
+func perSec(n int64, secs float64) int64 { return int64(float64(n) / max(secs, 1e-3)) }
+
+// diskPreCopy sends the disk rounds that run while the guest does: round 0,
+// every block that differs from the base, then the blocks written since,
+// until a round is small or the cap is reached.
+func (ss *streamSender) diskPreCopy(basePath string) error {
+	started := time.Now()
+	r := streamRound{Kind: "disk", Name: "disk round 0"}
+	read, err := ss.diskDirty("boot")
+	switch {
+	case err == nil:
+		ss.hviDisk = true
+		ss.lastRound = read.Round
+	case hviLacksOp(err):
+	default:
+		return fmt.Errorf("hvi's disk-dirty: %w", err)
+	}
+	fromBoot := ss.state.Base != nil && ss.state.Base.FromBoot
+	if ss.hviDisk && fromBoot {
+		// hvi's blocks since boot are every difference from the base.
+		ss.stats.DiskEngine = "hvi"
+		if read.Dirty > 0 {
+			if err := ss.hviRoundBlocks(&r, read.Round, false, read.Dirty); err != nil {
+				return err
+			}
+		}
+	} else {
+		// The running hvi did not boot from the base (it was restored),
+		// or keeps no rounds: compare. With hvi's rounds, the read above
+		// started round 0, so whatever the guest writes from here is in
+		// the next round, the comparison's torn reads included.
+		ss.stats.DiskEngine = "compare"
+		cmp, err := newDiskCompare(basePath, ss.size)
+		if err != nil {
+			return fmt.Errorf("read the base: %w", err)
+		}
+		ss.cmp = cmp
+		b := newBatcher(ss.size, ss.sendBatch(&r, 0, false))
+		if err := cmp.diff(ss.disk, b.add); err != nil {
+			return err
+		}
+		if err := b.done(); err != nil {
+			return err
+		}
+	}
+	ss.endRound(r, started)
+	if !ss.hviDisk {
+		return ss.sw.flush()
+	}
+	prev := time.Since(started).Seconds()
+	for round := 1; round < streamRoundCap; round++ {
+		started := time.Now()
+		read, err := ss.diskDirty("round")
+		if err != nil {
+			return fmt.Errorf("hvi's disk-dirty: %w", err)
+		}
+		ss.lastRound = read.Round
+		r := streamRound{Kind: "disk", Name: fmt.Sprintf("disk round %d", read.Round),
+			DirtyPerSec: float64(read.Dirty) / max(prev, 1e-3)}
+		if read.Dirty > 0 {
+			if err := ss.hviRoundBlocks(&r, read.Round, false, read.Dirty); err != nil {
+				return err
+			}
+		}
+		ss.endRound(r, started)
+		prev = time.Since(started).Seconds()
+		if read.Dirty <= streamDiskSettle {
+			break
+		}
+	}
+	return ss.sw.flush()
+}
+
+// diskDirty reads hvi's dirty blocks since boot or since the last round,
+// and holds its bitmap to the disk this host sees: the same block size, the
+// same number of blocks, as many set as it says.
+func (ss *streamSender) diskDirty(since string) (*hviDiskDirtyReply, error) {
+	read, err := hviDiskDirty(ss.state.ControlSock, since)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := read.dirtyBlocks(ss.size); err != nil {
+		return nil, err
+	}
+	return read, nil
+}
+
+// hviRoundBlocks sends hvi's blocks of round, which the compare engine
+// then holds as sent.
+func (ss *streamSender) hviRoundBlocks(r *streamRound, round int, final bool, total int64) error {
+	ss.roundTotal = total
+	defer func() { ss.roundTotal = 0 }()
+	send := ss.sendBatch(r, round, final)
+	_, err := hviDiskBlocks(ss.state.ControlSock, round, func(first, count int64, data []byte) error {
+		if ss.cmp != nil {
+			for i := int64(0); i < count; i++ {
+				lo := i * diskBlockSize
+				block := data[lo:min(lo+diskBlockSize, int64(len(data)))]
+				h := blockHash{sum: sha256.Sum256(block)}
+				if isZero(block) {
+					h = blockHash{zero: true}
+				}
+				ss.cmp.sent[first+i] = h
+			}
+		}
+		return send(first, count, data)
+	})
+	if err != nil {
+		return fmt.Errorf("hvi's disk-blocks of round %d: %w", round, err)
+	}
+	return nil
+}
+
+// diskFinal sends the blocks the guest wrote since the last disk round,
+// now that hvi has fenced it and synced its disk.
+func (ss *streamSender) diskFinal() error {
+	started := time.Now()
+	r := streamRound{Kind: "disk", Name: "disk final round", Final: true}
+	if ss.hviDisk {
+		read, err := ss.diskDirty("round")
+		if err != nil {
+			return fmt.Errorf("hvi's disk-dirty after the fence: %w", err)
+		}
+		r.Name = fmt.Sprintf("disk round %d (final)", read.Round)
+		if read.Dirty > 0 {
+			if err := ss.hviRoundBlocks(&r, read.Round, true, read.Dirty); err != nil {
+				return err
+			}
+		}
+	} else {
+		b := newBatcher(ss.size, ss.sendBatch(&r, streamRoundCap, true))
+		if err := ss.cmp.diff(ss.disk, b.add); err != nil {
+			return err
+		}
+		if err := b.done(); err != nil {
+			return err
+		}
+	}
+	ss.endRound(r, started)
+	ss.stats.FinalDiskMs = time.Since(started).Milliseconds()
+	return nil
+}
+
+// spoolWriter keeps hvi's stream on this host as hvi wrote it, and the
+// small components beside it as files.
+type spoolWriter struct {
+	dir string
+	f   *os.File
+	bw  *bufio.Writer
+}
+
+func newSpool(dir string) (*spoolWriter, error) {
+	emptyDir(dir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(filepath.Join(dir, spoolStream), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	return &spoolWriter{dir: dir, f: f, bw: bufio.NewWriterSize(f, 1<<20)}, nil
+}
+
+// seal flushes and syncs the stream, writes the small components and the
+// reply, and syncs the directory: from here an abort can restore from it.
+func (sp *spoolWriter) seal(files map[string][]byte, reply []byte) error {
+	if err := sp.bw.Flush(); err != nil {
+		return err
+	}
+	if err := sp.f.Sync(); err != nil {
+		return err
+	}
+	if err := sp.f.Close(); err != nil {
+		return err
+	}
+	for name, data := range files {
+		if err := writeFileSynced(filepath.Join(sp.dir, name), data); err != nil {
+			return err
+		}
+	}
+	if err := writeFileSynced(filepath.Join(sp.dir, spoolSealed), append(reply, '\n')); err != nil {
+		return err
+	}
+	return syncDir(sp.dir)
+}
+
+func (sp *spoolWriter) close() {
+	if sp.f != nil {
+		_ = sp.f.Close()
+	}
+}
+
+// writeFileSynced writes data to path and syncs it.
+func writeFileSynced(path string, data []byte) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(data)
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
+// progressEvery is how often a long round prints how far it is.
+const progressEvery = 2 * time.Second
+
+// meteredReader prints, at most every progressEvery, how much of a round of
+// total bytes has passed through it, the rate, and the time left at that
+// rate.
+type meteredReader struct {
+	r       io.Reader
+	label   string
+	total   int64
+	done    int64
+	started time.Time
+	last    time.Time
+	print   func(format string, args ...any)
+}
+
+func (m *meteredReader) Read(p []byte) (int, error) {
+	n, err := m.r.Read(p)
+	m.done += int64(n)
+	if now := time.Now(); now.Sub(m.last) >= progressEvery && m.total > 0 {
+		m.last = now
+		secs := now.Sub(m.started).Seconds()
+		rate := perSec(m.done, secs)
+		left := float64(m.total-m.done) / float64(max(rate, 1))
+		m.print("%s: %d%% (%s of %s), %s/s, about %.0f s left", m.label, m.done*100/m.total,
+			humanBytes(m.done), humanBytes(m.total), humanBytes(rate), left)
+	}
+	return n, err
+}
+
+// metered wraps body for a round of total bytes.
+func (ss *streamSender) metered(label string, total int64, body io.Reader) io.Reader {
+	now := time.Now()
+	return &meteredReader{r: body, label: label, total: total, started: now, last: now, print: ss.progress}
+}
+
+// isRAMRound reports whether an hvi component is one of the RAM rounds.
+func isRAMRound(name string) bool { return strings.HasPrefix(name, "ram-round-") }
+
+// spooledStateMax bounds the non-RAM components kept in memory to be
+// written beside the spool.
+const spooledStateMax = 64 << 20
+
+// relayHvi runs hvi's migrate op and relays its components into the
+// stream and the spool. It returns hvi's reply line once hvi has sealed the
+// stream and fenced the guest.
+func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][]byte, error) {
+	m := ss.m
+	conn, br, err := hviStreamOp(ss.state.ControlSock, map[string]any{"op": "migrate", "then": hviThenFence,
+		"txid": m.rec.TxID, "epoch": m.rec.Epoch}, hviStreamIdle)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = conn.Close() }()
+	files := map[string][]byte{}
+	var kept int64
+	var lastRAM time.Time
+	ramSeen := false
+	_, line, err := readHviComponents("migrate", br, func(line []byte, hdr hviComponentHeader, body io.Reader) error {
+		started := time.Now()
+		if _, err := sp.bw.Write(append(append([]byte{}, line...), '\n')); err != nil {
+			return err
+		}
+		ram := isRAMRound(hdr.Component)
+		var keep *bytesBuffer
+		if !ram {
+			if kept+hdr.Size > spooledStateMax {
+				return fmt.Errorf("hvi's %s of %d bytes is not a RAM round and too large to keep", hdr.Component, hdr.Size)
+			}
+			kept += hdr.Size
+			keep = &bytesBuffer{}
+			if ramSeen && ss.stats.PausedAt.IsZero() {
+				// The first state component after the RAM rounds: the
+				// round before it was the last, taken inside the pause.
+				ss.stats.PausedAt = lastRAM.UTC()
+			}
+		} else {
+			lastRAM, ramSeen = started, true
+		}
+		before := ss.sw.written()
+		var also io.Writer = sp.bw
+		if keep != nil {
+			also = io.MultiWriter(sp.bw, keep)
+		}
+		if err := ss.sw.component(line, hdr, ss.metered(hdr.Component, hdr.Size, body), also); err != nil {
+			return err
+		}
+		kind := "state"
+		if ram {
+			kind = "ram"
+		}
+		ss.endRound(streamRound{Kind: kind, Name: hdr.Component, Bytes: hdr.Size,
+			WireBytes: ss.sw.written() - before}, started)
+		if keep != nil {
+			files[hdr.Component] = keep.b
+			if hdr.Component == "manifest.json" {
+				ss.manifest = keep.b
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	if ss.manifest == nil {
+		return nil, nil, errors.New("hvi sealed its migrate stream without a manifest.json")
+	}
+	if !ss.stats.PausedAt.IsZero() {
+		ss.stats.SealedMs = time.Since(ss.stats.PausedAt).Milliseconds()
+	}
+	return line, files, nil
+}
+
+// bytesBuffer collects what is written to it.
+type bytesBuffer struct{ b []byte }
+
+func (b *bytesBuffer) Write(p []byte) (int, error) {
+	b.b = append(b.b, p...)
+	return len(p), nil
+}
+
+// replayHvi relays the spooled stream of an earlier attempt that hvi
+// sealed: the guest is fenced already, and its RAM exists only there.
+func (ss *streamSender) replayHvi(dir string) (json.RawMessage, error) {
+	f, err := os.Open(filepath.Join(dir, spoolStream))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	reply, err := os.ReadFile(filepath.Join(dir, spoolSealed))
+	if err != nil {
+		return nil, fmt.Errorf("the spooled stream %s was never sealed: %w", dir, err)
+	}
+	br := bufio.NewReaderSize(f, 1<<20)
+	for {
+		if _, err := br.Peek(1); errors.Is(err, io.EOF) {
+			break
+		}
+		line, err := readHviLine(br, migrateMaxHeader)
+		if err != nil {
+			return nil, fmt.Errorf("the spooled stream: %w", err)
+		}
+		hdr, err := parseHviComponentHeader(line)
+		if err != nil {
+			return nil, fmt.Errorf("the spooled stream: %w", err)
+		}
+		started := time.Now()
+		before := ss.sw.written()
+		var keep *bytesBuffer
+		var also io.Writer
+		if hdr.Component == "manifest.json" {
+			keep = &bytesBuffer{}
+			also = keep
+		}
+		if err := ss.sw.component(line, hdr, ss.metered(hdr.Component, hdr.Size, br), also); err != nil {
+			return nil, fmt.Errorf("the spooled stream: %w", err)
+		}
+		kind := "state"
+		if isRAMRound(hdr.Component) {
+			kind = "ram"
+		}
+		ss.endRound(streamRound{Kind: kind, Name: hdr.Component, Bytes: hdr.Size,
+			WireBytes: ss.sw.written() - before}, started)
+		if keep != nil {
+			ss.manifest = keep.b
+		}
+	}
+	if ss.manifest == nil {
+		return nil, errors.New("the spooled stream has no manifest.json")
+	}
+	return json.RawMessage(strings.TrimSpace(string(reply))), nil
+}
+
+// streamTransfer is transfer for a streamed move. A destination that has
+// verified the move already is not sent it again. A guest that hvi has not
+// fenced yet is sent live; one whose stream hvi sealed in an earlier
+// attempt is sent from the spool, with the disk compared against the base.
+func (m *moveSource) streamTransfer(ctx context.Context) error {
+	if reply, err := m.peer.call(ctx, "migrate-status", []string{"--txid", m.rec.TxID}, nil); err == nil &&
+		reply.Record != nil &&
+		migrateStateOrder(roleDestination, reply.Record.State) >= migrateStateOrder(roleDestination, dstVerified) {
+		if m.rec.Disk == nil || m.rec.Stream == nil {
+			return errors.New("the destination has verified this move, but this host has no record of what it sent")
+		}
+		if err := m.checkDiskUnchanged(); err != nil {
+			return err
+		}
+		if err := m.compareStreamReceived(reply.Record); err != nil {
+			return err
+		}
+		m.destPaused = reply.Record.State == dstRestoredPaused
+		return m.rec.advance(m.path, srcTransferred)
+	}
+	state, err := m.s.GetInstance(m.name)
+	if err != nil {
+		return err
+	}
+	replay := fencedFor(state, m.rec.TxID)
+	if !replay && hviVMState(state) == store.MigrationFenced {
+		if err := m.adoptStreamFence(state); err != nil {
+			return err
+		}
+		if state, err = m.s.GetInstance(m.name); err != nil {
+			return err
+		}
+		replay = true
+	}
+	if !replay {
+		if err := requireRunningHvi(state, "migrate"); err != nil {
+			return err
+		}
+		switch vm := hviVMState(state); vm {
+		case "running", "paused":
+		default:
+			return fmt.Errorf("its VM is %s; a move takes a running or paused one", vm)
+		}
+	} else if err := m.checkDiskUnchanged(); err != nil {
+		return err
+	}
+	disk, ok := flagValue(state.CmdLine, "--disk")
+	if !ok {
+		return errors.New("the instance has no --disk")
+	}
+	if !baseHeld(m.s, m.rec.BaseSHA256) {
+		return fmt.Errorf("the base %s is gone from this store", m.rec.BaseSHA256)
+	}
+	f, err := os.Open(disk)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	root, ok := flagValue(state.CmdLine, "--checkpoint-root")
+	if !ok {
+		return errors.New("the instance has no checkpoint root")
+	}
+	spoolDir := filepath.Join(root, m.rec.TxID)
+	mode := "live"
+	if replay {
+		mode = "replay"
+	}
+	stats := &migrateStreamStats{Mode: mode}
+	m.logf("Streaming %s to %s (%s)", m.name, m.rec.Peer, mode)
+	started := time.Now()
+	pr, pw := io.Pipe()
+	link := &softLink{w: pw}
+	sw := newMoveStreamWriter(link)
+	ss := &streamSender{m: m, state: state, sw: sw, link: link, disk: f, size: info.Size(), stats: stats,
+		spoolDir: spoolDir}
+	type sendResult struct {
+		hviReply json.RawMessage
+		err      error
+	}
+	sent := make(chan sendResult, 1)
+	go func() {
+		reply, err := ss.send(replay)
+		_ = pw.CloseWithError(err)
+		sent <- sendResult{reply, err}
+	}()
+	reply, err := m.peer.call(ctx, "migrate-receive", []string{"--stream", "--txid", m.rec.TxID, "--name", m.name}, pr)
+	_ = pr.CloseWithError(errors.New("the destination stopped reading"))
+	res := <-sent
+	if res.err == nil {
+		stats.Chain = sw.chain.sum()
+		stats.WireBytes = sw.written()
+		stats.Seconds = time.Since(started).Seconds()
+		stats.HviReply = res.hviReply
+	}
+	// What was sent is on record before the reply is looked at: a reply
+	// that is lost leaves a re-run to compare the destination's record
+	// with it.
+	m.rec.Stream = stats
+	if werr := writeMigrationRecord(m.path, m.rec); werr != nil {
+		return werr
+	}
+	if res.err != nil && !errors.Is(res.err, io.ErrClosedPipe) && err == nil {
+		err = fmt.Errorf("send: %w", res.err)
+	}
+	if err != nil {
+		if res.err != nil && !errors.Is(res.err, io.ErrClosedPipe) && !strings.Contains(err.Error(), res.err.Error()) {
+			err = fmt.Errorf("%w (sending: %v)", err, res.err)
+		}
+		return fmt.Errorf("transfer to %s: %w", m.rec.Peer, err)
+	}
+	if reply.Record == nil {
+		return errors.New("the destination's receive reply has no record")
+	}
+	if err := m.checkDiskUnchanged(); err != nil {
+		return err
+	}
+	if err := m.compareStreamReceived(reply.Record); err != nil {
+		return err
+	}
+	m.rec.Transfer = &migrateTransfer{Bytes: stats.WireBytes, Seconds: stats.Seconds, StartedAt: started.UTC(),
+		BytesPerSec: perSec(stats.WireBytes, stats.Seconds)}
+	m.timing("transfer", started)
+	m.destPaused = reply.Record.State == dstRestoredPaused
+	m.logf("Sent %s in %.1f s (%s/s): disk %s as %s, RAM %s, state %s; destination: %s",
+		humanBytes(stats.WireBytes), stats.Seconds, humanBytes(perSec(stats.WireBytes, stats.Seconds)),
+		humanBytes(stats.DiskBytes), humanBytes(stats.DiskWireBytes), humanBytes(stats.RAMBytes),
+		humanBytes(stats.StateBytes), reply.Record.Verify)
+	return m.rec.advance(m.path, srcTransferred)
+}
+
+// send writes the whole stream. Live, it ends with hvi having fenced the
+// guest, the fence recorded on the instance and in the move's record.
+func (ss *streamSender) send(replay bool) (json.RawMessage, error) {
+	m := ss.m
+	if err := ss.sw.header(moveStreamHeader{TxID: m.rec.TxID, Name: m.name, Epoch: m.rec.Epoch,
+		BaseSHA256: m.rec.BaseSHA256, DiskSize: ss.size, BlockSize: diskBlockSize, Replay: replay}); err != nil {
+		return nil, err
+	}
+	if err := ss.sw.flush(); err != nil {
+		return nil, err
+	}
+	basePath := m.s.BasePath(m.rec.BaseSHA256)
+	if replay {
+		// The guest is fenced: one comparison is the whole disk round.
+		ss.stats.DiskEngine = "compare"
+		cmp, err := newDiskCompare(basePath, ss.size)
+		if err != nil {
+			return nil, fmt.Errorf("read the base: %w", err)
+		}
+		ss.cmp = cmp
+		started := time.Now()
+		r := streamRound{Kind: "disk", Name: "disk round 0 (final)", Final: true}
+		b := newBatcher(ss.size, ss.sendBatch(&r, 0, true))
+		if err := cmp.diff(ss.disk, b.add); err != nil {
+			return nil, err
+		}
+		if err := b.done(); err != nil {
+			return nil, err
+		}
+		ss.endRound(r, started)
+		reply, err := ss.replayHvi(ss.spoolDir)
+		if err != nil {
+			return nil, err
+		}
+		if err := ss.sw.trailer(reply); err != nil {
+			return nil, err
+		}
+		return reply, ss.link.err
+	}
+
+	if err := ss.diskPreCopy(basePath); err != nil {
+		return nil, err
+	}
+	if err := ss.link.err; err != nil {
+		return nil, err
+	}
+	unlock, err := lockInstanceMigration(m.s, m.name)
+	if err != nil {
+		return nil, err
+	}
+	sp, err := newSpool(ss.spoolDir)
+	if err != nil {
+		unlock()
+		return nil, err
+	}
+	// A restored guest that was never resumed may be resumed by the
+	// migrate op: hvi resumes the guest when the stream fails before its
+	// seal.
+	err = markRestoredGuestRunning(m.s, m.name)
+	var reply json.RawMessage
+	var files map[string][]byte
+	if err == nil {
+		reply, files, err = ss.relayHvi(sp)
+	}
+	if err == nil {
+		ss.stats.HviReply = reply
+		err = sp.seal(files, reply)
+	}
+	sp.close()
+	if err == nil {
+		err = ss.recordFence()
+	}
+	unlock()
+	if err != nil {
+		return nil, err
+	}
+	// hvi has fenced the guest, and its whole stream is in the spool: a
+	// destination that failed meanwhile is retried from it, or the abort
+	// restores the guest here from it.
+	if err := ss.link.err; err != nil {
+		return nil, err
+	}
+	if err := ss.diskFinal(); err != nil {
+		return nil, err
+	}
+	if err := ss.sw.trailer(reply); err != nil {
+		return nil, err
+	}
+	return reply, ss.link.err
+}
+
+// softLink is the writer between the stream and the destination. Once a
+// write to the destination fails it keeps the error and takes every later
+// write without sending it, so a source that is reading hvi's migrate
+// stream reads it to the end into its spool whatever became of the
+// destination. Stopping half way would not stop hvi: the rest of a small
+// last round, the state and the manifest can all sit in the socket's
+// buffer, and hvi seals, and fences the guest, once they are written there.
+// A source that left them unread would be fenced with no whole copy of the
+// guest anywhere.
+type softLink struct {
+	w   io.Writer
+	err error
+}
+
+func (l *softLink) Write(p []byte) (int, error) {
+	if l.err != nil {
+		return len(p), nil
+	}
+	if _, err := l.w.Write(p); err != nil {
+		l.err = err
+	}
+	return len(p), nil
+}
+
+// recordFence records, once hvi has sealed the stream and fenced the guest,
+// the spool as the instance's checkpoint, taken over by this move, and the
+// disk as fenced.
+func (ss *streamSender) recordFence() error {
+	m := ss.m
+	state, err := m.s.GetInstance(m.name)
+	if err != nil {
+		return err
+	}
+	sum := sha256Hex(ss.manifest)
+	// latest.json first, as a checkpoint writes it: a restore that finds
+	// it naming a checkpoint the record never took in refuses rather than
+	// rewinding past it.
+	if err := writeHviCheckpointRecord(instanceCheckpointDir(m.s, m.name), hviCheckpointRecord{
+		Dir: ss.spoolDir, ManifestSHA256: sum, Then: hviThenFence, Stats: ss.stats.HviReply,
+		SavedAt: time.Now().UTC(), TxID: m.rec.TxID,
+	}); err != nil {
+		return fmt.Errorf("the stream is sealed in %s but recording it failed: %w", ss.spoolDir, err)
+	}
+	state.Migration = &store.MigrationState{State: store.MigrationMigrating, BundleDir: ss.spoolDir,
+		TxID: m.rec.TxID, ManifestSHA256: sum, MoveTxID: m.rec.TxID, Peer: m.rec.Peer}
+	if err := m.s.SaveInstance(state); err != nil {
+		return err
+	}
+	disk, _ := flagValue(state.CmdLine, "--disk")
+	size, mod, err := fileModNs(disk)
+	if err != nil {
+		return err
+	}
+	m.rec.BundleDir = ss.spoolDir
+	m.rec.ManifestSHA256 = sum
+	m.rec.Disk = &migrateDisk{Path: disk, Size: size, ModNs: mod}
+	if err := writeMigrationRecord(m.path, m.rec); err != nil {
+		return err
+	}
+	ss.progress("hvi sealed the stream and fenced %s (%d ms after the last RAM round began)", m.name,
+		ss.stats.SealedMs)
+	return nil
+}
+
+// adoptStreamFence records a stream hvi sealed for this move when hull did
+// not live to record it: its spool must have been sealed too.
+func (m *moveSource) adoptStreamFence(state *store.InstanceState) error {
+	root, ok := flagValue(state.CmdLine, "--checkpoint-root")
+	if !ok {
+		return errors.New("the instance has no checkpoint root")
+	}
+	dir := filepath.Join(root, m.rec.TxID)
+	man, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
+	if err == nil {
+		_, err = os.Stat(filepath.Join(dir, spoolSealed))
+	}
+	if err != nil {
+		return fmt.Errorf("the VM is fenced, but no sealed stream of this move is at %s: `hull migrate --abort %s`",
+			dir, m.rec.TxID)
+	}
+	state.Migration = &store.MigrationState{State: store.MigrationMigrating, BundleDir: dir, TxID: m.rec.TxID,
+		ManifestSHA256: sha256Hex(man), MoveTxID: m.rec.TxID, Peer: m.rec.Peer}
+	if err := m.s.SaveInstance(state); err != nil {
+		return err
+	}
+	disk, _ := flagValue(state.CmdLine, "--disk")
+	size, mod, err := fileModNs(disk)
+	if err != nil {
+		return err
+	}
+	m.rec.BundleDir, m.rec.ManifestSHA256 = dir, state.Migration.ManifestSHA256
+	m.rec.Disk = &migrateDisk{Path: disk, Size: size, ModNs: mod}
+	m.logf("Adopted the sealed stream %s", dir)
+	return writeMigrationRecord(m.path, m.rec)
+}
+
+// compareStreamReceived checks the destination's record of a streamed move
+// against what the source sent.
+func (m *moveSource) compareStreamReceived(dst *migrationRecord) error {
+	if dst.TxID != m.rec.TxID || dst.Epoch != m.rec.Epoch {
+		return fmt.Errorf("the destination recorded move %s epoch %d, not %s epoch %d", dst.TxID, dst.Epoch,
+			m.rec.TxID, m.rec.Epoch)
+	}
+	if m.rec.ManifestSHA256 == "" || dst.ManifestSHA256 != m.rec.ManifestSHA256 {
+		return fmt.Errorf("the destination has manifest sha256 %s, the source %s", dst.ManifestSHA256, m.rec.ManifestSHA256)
+	}
+	if m.rec.Stream == nil || dst.Stream == nil || dst.Stream.Chain == "" || dst.Stream.Chain != m.rec.Stream.Chain {
+		return errors.New("the destination's record of the stream is not the stream the source sent")
+	}
+	if dst.BaseSHA256 != m.rec.BaseSHA256 {
+		return fmt.Errorf("the destination applied the disk to base %s, not %s", dst.BaseSHA256, m.rec.BaseSHA256)
+	}
+	return nil
+}
+
+// sendBaseFirst puts the move's base on the destination before the guest
+// stops, as `hull migrate-prepare` would have. A base that cannot be sent
+// turns the move into a whole-bundle one: nothing is fenced yet.
+func (m *moveSource) sendBaseFirst(ctx context.Context) error {
+	m.logf("Sending base %s to %s (once per base; `hull migrate-prepare` does it ahead of a move)",
+		digestHead(m.rec.BaseSHA256), m.rec.Peer)
+	st, err := sendBase(ctx, m.s, m.peer, m.rec.BaseSHA256)
+	if err != nil {
+		m.rec.Transport, m.rec.BaseSHA256 = transportBundle, ""
+		m.rec.TransportWhy = "sending the base failed: " + refusalDetail(err)
+		m.logf("Transport: the whole checkpoint and disk, because %s", m.rec.TransportWhy)
+		return writeMigrationRecord(m.path, m.rec)
+	}
+	m.logf("  base: %s (%s)", st.Result, st.Detail)
+	return nil
+}
+
+// streamTransferWithBase is streamTransfer, which sends the base and tries
+// once more when the destination answers that it does not hold it.
+func (m *moveSource) streamTransferWithBase(ctx context.Context) error {
+	err := m.streamTransfer(ctx)
+	if refusalCode(err) != codeNoBase {
+		return err
+	}
+	m.logf("%s does not hold base %s", m.rec.Peer, digestHead(m.rec.BaseSHA256))
+	if _, err := sendBase(ctx, m.s, m.peer, m.rec.BaseSHA256); err != nil {
+		return fmt.Errorf("send base %s: %w", digestHead(m.rec.BaseSHA256), err)
+	}
+	return m.streamTransfer(ctx)
+}

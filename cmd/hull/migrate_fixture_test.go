@@ -276,6 +276,9 @@ type localPeer struct {
 	down   bool
 	answer map[string]*migrateReply
 	calls  []string
+	// mangle, when set, stands between a verb and its stdin, to damage or
+	// cut what crosses the link.
+	mangle func(verb string, args []string, in io.Reader) io.Reader
 }
 
 func newLocalPeer(s *store.Store) *localPeer {
@@ -304,9 +307,12 @@ func (p *localPeer) call(_ context.Context, verb string, args []string, stdin io
 		}
 		return canned, nil
 	}
+	if p.mangle != nil && stdin != nil {
+		stdin = p.mangle(verb, args, stdin)
+	}
 	flags := map[string]string{}
 	for i := 0; i < len(args); i++ {
-		if i+1 < len(args) && args[i] != "--reserve" {
+		if i+1 < len(args) && args[i] != "--reserve" && args[i] != "--stream" {
 			flags[args[i]] = args[i+1]
 			i++
 		} else {
@@ -318,7 +324,10 @@ func (p *localPeer) call(_ context.Context, verb string, args []string, stdin io
 	case "migrate-probe":
 		reply = destProbe(p.s, flags["--name"], flags["--hvi"], flags["--gateway-sock"])
 	case "migrate-receive":
-		if flags["--reserve"] == "true" {
+		if flags["--stream"] == "true" {
+			reply = destReceiveStream(p.s, flags["--txid"], flags["--name"], stdin)
+			_, _ = io.Copy(io.Discard, stdin)
+		} else if flags["--reserve"] == "true" {
 			var req migrateReserveRequest
 			if err := json.NewDecoder(stdin).Decode(&req); err != nil {
 				return nil, err
