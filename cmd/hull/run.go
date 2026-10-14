@@ -1547,6 +1547,11 @@ exec %s "$@"
 			}
 			cmdArgs = append(cmdArgs, "--control-sock", controlSock, "--profile-out", profilePath,
 				"--checkpoint-root", root)
+		} else if profile != "" {
+			// A profile exists to be checkpointed and moved, and without
+			// the control socket the instance never can be.
+			return fmt.Errorf("--profile %s needs an hvi with a control socket (--control-sock), "+
+				"and %s takes none: the instance could never be checkpointed or moved", profile, cmdArgs[0])
 		} else {
 			// Debug, not a warning: this is every run on the hvi hull
 			// ships with until that one has the socket, and nobody asked
