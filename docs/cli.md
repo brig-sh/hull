@@ -148,7 +148,7 @@ as a default that an explicit `--env TERM` beats.
 | `rmi <image>...` | `--force`, `-f` remove one a stopped instance refers to; `--platform <p>` narrow to one platform |
 | `prune` | `--all` also remove every image no instance refers to; `--dry-run` print and remove nothing |
 | `pause <id>`, `resume <id>` | none |
-| `checkpoint <id>` | `--timeout <secs>`, default 60; `hvi` only: `--then continue\|fence`, default `continue`; `--dir <path>`, an empty directory for the bundle |
+| `checkpoint <id>` | `--timeout <secs>`, default 60; `hvi` only: `--then continue\|fence`, default `continue`; `--dir <path>`, an empty directory for the bundle, below `<instance>/checkpoint` |
 | `restore <id>` | `--detach`, `-d`; `--stop-grace <secs>`, default 10; `--wait-ip`; `--gateway-sock <path>` (`vz` only); `hvi` only: `--paused`, `--timeout <secs>`, default 120 |
 | `assets show` | none |
 | `assets dir` | none. Prints the directory and nothing else, for scripts |

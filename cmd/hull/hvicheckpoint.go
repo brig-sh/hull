@@ -101,7 +101,7 @@ func checkpointCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:  "dir",
-				Usage: "hvi: directory to write the bundle to (default: a new one under <instance>/checkpoint)",
+				Usage: "hvi: empty directory below <instance>/checkpoint to write the bundle to (default: a new one there)",
 			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
@@ -248,15 +248,14 @@ func hviCheckpointInstance(s *store.Store, state *store.InstanceState, then, dir
 		return err
 	}
 	ckptDir := instanceCheckpointDir(s, id)
-	if err := os.MkdirAll(ckptDir, 0o700); err != nil {
-		return fmt.Errorf("create %s: %w", ckptDir, err)
+	root, ok := flagValue(state.CmdLine, "--checkpoint-root")
+	if !ok {
+		return fmt.Errorf("instance %s was started without a checkpoint root, so its hvi may not "+
+			"write a bundle anywhere; run it again with this version of hull", id)
 	}
-	ownDir := dir == ""
-	if ownDir {
-		dir = filepath.Join(ckptDir, txid)
-	}
-	dir, err = filepath.Abs(dir)
-	if err != nil {
+	if dir == "" {
+		dir = filepath.Join(root, txid)
+	} else if dir, err = bundleDirBelow(root, dir); err != nil {
 		return err
 	}
 	created, err := prepareBundleDir(dir)
@@ -310,17 +309,60 @@ func hviCheckpointInstance(s *store.Store, state *store.InstanceState, then, dir
 	if err := s.SaveInstance(fresh); err != nil {
 		return fmt.Errorf("the bundle is in %s but the instance record was not updated: %w", dir, err)
 	}
-	// One bundle per instance in hull's own directory: each is the size of
-	// the guest's touched RAM, and only the latest is ever restored. A bundle
-	// placed with --dir belongs to whoever chose the place and is never
-	// removed here.
-	if previous != nil && previous.BundleDir != dir && filepath.Dir(previous.BundleDir) == ckptDir {
+	// One bundle per instance of hull's own naming: each is the size of the
+	// guest's touched RAM, and only the latest is ever restored. A bundle
+	// placed with --dir was named by whoever chose it and is never removed
+	// here.
+	if previous != nil && previous.BundleDir != dir && previous.BundleDir == filepath.Join(root, previous.TxID) {
 		_ = store.RemoveTree(previous.BundleDir)
 	}
 
 	fmt.Printf("Checkpoint of %s written to %s in %s (%s)\n", id, dir,
 		time.Since(started).Round(time.Millisecond), describeCheckpointStats(then, reply.Stats))
 	return nil
+}
+
+// hviCheckpointRoot creates <instanceDir>/checkpoint, 0700, and returns it
+// with links resolved, for --checkpoint-root.
+//
+// hvi is confined before the guest runs, and its confinement grants file
+// writes below this one directory and nowhere else, so without it every
+// checkpoint is refused. It must exist at boot. It is passed resolved because
+// hvi resolves it and then compares the bundle paths it is sent against it
+// as given; hull sends those built from the same resolved root.
+func hviCheckpointRoot(instanceDir string) (string, error) {
+	root := filepath.Join(instanceDir, "checkpoint")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return "", fmt.Errorf("create %s: %w", root, err)
+	}
+	return filepath.EvalSymlinks(root)
+}
+
+// bundleDirBelow resolves a --dir and keeps it below root, the checkpoint
+// root the instance's hvi was started with.
+//
+// hvi's confinement lets it write there and nowhere else, and it refuses a
+// bundle directory outside it; saying so here names the root instead of
+// leaving the user an EPERM. hvi compares the path it is sent against the
+// root without resolving links, and the root it holds is resolved, so the
+// directory sent has to be resolved too: on macOS /tmp is a link to
+// /private/tmp, and a bundle under /tmp/... would never be "below"
+// /private/tmp/....
+func bundleDirBelow(root, dir string) (string, error) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", err
+	}
+	parent, err := filepath.EvalSymlinks(filepath.Dir(abs))
+	if err != nil {
+		return "", fmt.Errorf("--dir %s: %w", dir, err)
+	}
+	resolved := filepath.Join(parent, filepath.Base(abs))
+	if !strings.HasPrefix(resolved, root+string(filepath.Separator)) {
+		return "", fmt.Errorf("--dir %s is not below %s, the one directory this instance's hvi "+
+			"may write a bundle to", dir, root)
+	}
+	return resolved, nil
 }
 
 // prepareBundleDir makes dir ready for hvi to write a bundle into: created
