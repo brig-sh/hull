@@ -278,37 +278,9 @@ func freshCheckpointFailure(ckptDir string, started time.Time) (string, bool) {
 	return reason, true
 }
 
-func restoreCommand() *cli.Command {
-	return &cli.Command{
-		Name:  "restore",
-		Usage: "restore a stopped Vz instance from its checkpoint",
-		Flags: []cli.Flag{
-			&cli.BoolFlag{
-				Name:    "detach",
-				Aliases: []string{"d"},
-				Usage:   "run in background",
-			},
-			&cli.IntFlag{
-				Name:  "stop-grace",
-				Value: 10,
-				Usage: "seconds vz-runner waits for the guest to answer a stop request before forcing",
-			},
-			&cli.BoolFlag{
-				Name:  "wait-ip",
-				Usage: "with --detach and NAT networking, wait for the DHCP lease and record the IP before returning",
-			},
-			&cli.StringFlag{
-				Name:  "gateway-sock",
-				Usage: "re-join the user-mode network gateway at this control socket (required if the instance ran on the gateway)",
-			},
-		},
-		Action: func(ctx context.Context, cmd *cli.Command) error {
-			return restoreInstance(ctx, cmd)
-		},
-	}
-}
-
-func restoreInstance(_ context.Context, cmd *cli.Command) error {
+// vzRestoreInstance is `hull restore` for a Vz instance: vz-runner is started
+// again on the same command line with --restore.
+func vzRestoreInstance(_ context.Context, cmd *cli.Command) error {
 	args := cmd.Args()
 	if args.Len() == 0 {
 		return errors.New("instance ID required")
