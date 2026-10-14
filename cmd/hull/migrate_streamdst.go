@@ -24,6 +24,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -153,6 +155,30 @@ type streamReceiver struct {
 	restoreErr error
 	// profileLine is hvi's header line of profile.json, held with it.
 	profileLine []byte
+	// unsynced is what was written to the disk since the last background
+	// sync was started; syncing waits for the one running.
+	unsynced int64
+	syncing  sync.WaitGroup
+	busy     atomic.Bool
+}
+
+// maybeSyncDisk starts a sync of the disk in the background once
+// spoolSyncEvery bytes were written to it since the last, unless one is
+// running: the sync after the stream, which the guest waits for, then has
+// only the last rounds to write.
+func (r *streamReceiver) maybeSyncDisk(n int64) {
+	r.unsynced += n
+	if r.unsynced < spoolSyncEvery || r.busy.Load() {
+		return
+	}
+	r.unsynced = 0
+	r.busy.Store(true)
+	r.syncing.Add(1)
+	go func() {
+		defer r.syncing.Done()
+		_ = r.diskFile.Sync()
+		r.busy.Store(false)
+	}()
 }
 
 // toHvi writes data to hvi's stdin. A write that fails means hvi stopped
@@ -239,6 +265,7 @@ func (r *streamReceiver) disk(d diskBatchHeader, raw []byte) error {
 		if _, err := r.diskFile.WriteAt(block, off); err != nil {
 			return fmt.Errorf("write disk block %d: %w", index, err)
 		}
+		r.maybeSyncDisk(int64(len(block)))
 	}
 	return nil
 }
@@ -351,6 +378,7 @@ func (r *streamReceiver) finish() error {
 	if r.restore == nil || r.manifest == nil {
 		return errors.New("the stream carried no hvi checkpoint")
 	}
+	r.syncing.Wait()
 	if err := r.diskFile.Sync(); err != nil {
 		return err
 	}
@@ -376,6 +404,7 @@ func (r *streamReceiver) finish() error {
 // abandon ends a receive that failed: hvi's input is cut, and the restore
 // and any hvi it started are stopped.
 func (r *streamReceiver) abandon() {
+	r.syncing.Wait()
 	if r.diskFile != nil {
 		_ = r.diskFile.Close()
 	}
