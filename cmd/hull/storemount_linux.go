@@ -34,10 +34,17 @@ import (
 // instance state, the urunit config with the guest's environment, and the
 // block image all live under it.
 func ensureStore(storeDir, _ string) error {
+	return ensurePlainStore(storeDir, dirIsCaseSensitive)
+}
+
+// ensurePlainStore is ensureStore with the case probe passed in, so the
+// refusal can be tested on a host that has no case-folding filesystem to
+// point it at.
+func ensurePlainStore(storeDir string, caseSensitive func(string) (bool, error)) error {
 	if err := os.MkdirAll(storeDir, 0o700); err != nil {
 		return fmt.Errorf("create store directory: %w", err)
 	}
-	sensitive, err := dirIsCaseSensitive(storeDir)
+	sensitive, err := caseSensitive(storeDir)
 	if err != nil {
 		return fmt.Errorf("check whether %s is case-sensitive: %w", storeDir, err)
 	}

@@ -15,9 +15,13 @@
 package ociclient
 
 import (
+	"archive/tar"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -66,8 +70,92 @@ func TestGuestAttrRoundTripsOnLinux(t *testing.T) {
 	}
 }
 
-func TestRecordsOwnershipOnlyWhenNotRoot(t *testing.T) {
-	if recordsOwnership != (os.Geteuid() != 0) {
-		t.Fatalf("recordsOwnership = %v for euid %d", recordsOwnership, os.Geteuid())
+// An unprivileged unpack keeps what mke2fs and rmi need on the host -- owner
+// read on files, owner rwx on directories -- while the record keeps the mode
+// the image asked for, which is what the guest gets. Fedora's /etc/shadow is
+// 0000 and its sudo 04111; put on the host as is, neither can be read by the
+// user who owns it.
+func TestUnprivilegedUnpackKeepsFilesReadableAndRecordsTheImageMode(t *testing.T) {
+	if !recordsOwnership {
+		t.Skip("a root unpack keeps the image's modes on the host")
+	}
+	rootfs := t.TempDir()
+	layer := rawTarball(t,
+		tarEntry{hdr: tar.Header{Name: "etc/", Typeflag: tar.TypeDir, Mode: 0o755}},
+		tarEntry{hdr: tar.Header{Name: "etc/shadow", Typeflag: tar.TypeReg, Mode: 0o000, Gid: 42}, body: "root:!::0:::::\n"},
+		tarEntry{hdr: tar.Header{Name: "usr/bin/sudo", Typeflag: tar.TypeReg, Mode: 0o4111}, body: "#!/bin/sh\n"},
+		tarEntry{hdr: tar.Header{Name: "usr/lib/sealed/", Typeflag: tar.TypeDir, Mode: 0o555}},
+		tarEntry{hdr: tar.Header{Name: "usr/lib/sealed/f", Typeflag: tar.TypeReg, Mode: 0o444}, body: "x"},
+	)
+	if err := extractTarIgnoreChown(layer, rootfs); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name     string
+		hostPerm os.FileMode
+		recorded uint32
+	}{
+		{"etc/shadow", 0o400, 0o000},
+		{"usr/bin/sudo", 0o511 | os.ModeSetuid, 0o4111},
+		{"usr/lib/sealed", 0o755, 0o555},
+	} {
+		p := filepath.Join(rootfs, tc.name)
+		fi, err := os.Lstat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := fi.Mode() & (os.ModePerm | os.ModeSetuid); got != tc.hostPerm {
+			t.Errorf("%s is %v on the host, want %v", tc.name, got, tc.hostPerm)
+		}
+		mode, _, _, ok := GuestAttr(p, false)
+		if !ok {
+			t.Skipf("%s has no user xattr support", rootfs)
+		}
+		if mode&0o7777 != tc.recorded {
+			t.Errorf("%s recorded as %o, want %o", tc.name, mode&0o7777, tc.recorded)
+		}
+	}
+	if _, err := os.ReadFile(filepath.Join(rootfs, "etc/shadow")); err != nil {
+		t.Errorf("the owner cannot read the unpacked /etc/shadow, so mke2fs could not either: %v", err)
+	}
+}
+
+// Linux cannot put a user.* record on a symlink, so the unpack sets symlink
+// ownership aside beside the rootfs, and a later layer's link at the same name
+// wins.
+func TestUnprivilegedUnpackSetsSymlinkOwnershipAside(t *testing.T) {
+	if !recordsOwnership {
+		t.Skip("a root unpack chowns the links themselves")
+	}
+	rootfs := filepath.Join(t.TempDir(), "rootfs")
+	if err := os.Mkdir(rootfs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	first := rawTarball(t,
+		tarEntry{hdr: tar.Header{Name: "bin/sh", Typeflag: tar.TypeSymlink, Linkname: "busybox"}},
+		tarEntry{hdr: tar.Header{Name: "home/app/.profile", Typeflag: tar.TypeSymlink, Linkname: "/etc/profile", Uid: 1000, Gid: 1000}},
+	)
+	second := rawTarball(t,
+		tarEntry{hdr: tar.Header{Name: "bin/sh", Typeflag: tar.TypeSymlink, Linkname: "bash", Uid: 0, Gid: 7}},
+	)
+	for _, layer := range []io.Reader{first, second} {
+		if err := extractTarIgnoreChown(layer, rootfs); err != nil {
+			t.Fatal(err)
+		}
+	}
+	owners, err := LinkOwners(rootfs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]LinkOwner{
+		"bin/sh":            {UID: 0, GID: 7},
+		"home/app/.profile": {UID: 1000, GID: 1000},
+	}
+	if !reflect.DeepEqual(owners, want) {
+		t.Errorf("LinkOwners = %v, want %v", owners, want)
+	}
+	// Beside the rootfs, never in it: anything in it is in the guest image.
+	if rel, err := filepath.Rel(rootfs, linkOwnersPath(rootfs)); err != nil || !strings.HasPrefix(rel, "..") {
+		t.Errorf("the symlink record is at %s, inside the rootfs", linkOwnersPath(rootfs))
 	}
 }
