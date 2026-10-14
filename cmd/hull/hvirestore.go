@@ -113,8 +113,9 @@ type hviRestoreOptions struct {
 // count: those flags are dropped. What the bundle cannot hold are the host
 // resources the devices were attached to, and those are kept: the disk, the
 // gateway socket (so a restore on the same host re-joins the same gateway),
-// the MAC the gateway's leases are keyed by, the agent socket, the sandbox id
-// and the event ledger. A bare --net is the deprecated spelling of
+// the MAC the gateway's leases are keyed by, the agent socket, the sandbox id,
+// the event ledger, and the checkpoint root, without which the restored guest
+// could never be checkpointed again. A bare --net is the deprecated spelling of
 // --net-stub and is passed under its new name, since restore takes only that.
 //
 // An allowlist, not a list of flags to remove: a flag this function has never
@@ -132,6 +133,7 @@ func hviRestoreArgv(cmdLine []string, from, controlSock, profilePath string) ([]
 	keep := map[string]bool{
 		"--disk": true, "--net-gateway": true, "--net-mac": true,
 		"--agent-sock": true, "--sandbox-id": true, "--events": true,
+		"--checkpoint-root": true,
 	}
 	drop := map[string]bool{
 		"--kernel": true, "--initramfs": true, "--cmdline": true, "--mem-mib": true,

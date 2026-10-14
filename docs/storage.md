@@ -196,7 +196,7 @@ sets.
     ├── bundle/                  config.json plus the rootfs symlink or image
     ├── log                      0600, detached runs only
     ├── checkpoint/              vz: machine-id, vm.vzstate, rootfs.img, latest.json
-    │                            hvi: latest.json, <txid>/ (the bundle)
+    │                            hvi: latest.json, <txid>/ (the bundle); hvi's --checkpoint-root
     ├── control.sock             hvi only: the control socket (pause, checkpoint, stop)
     ├── profile.json             hvi only: the machine profile hvi writes at boot
     └── (QMP socket, agent socket, staged boot files)
@@ -474,8 +474,9 @@ a failure marker.
 
 For an `hvi` instance they are `latest.json`, 0600, which names the latest
 bundle (`dir`, `manifestSha256`, `then`, `stats`, `savedAt`, `txid`), and the
-bundle itself in a 0700 directory named by its txid, unless `--dir` put it
-elsewhere. hull writes `latest.json` through a temp file and a rename, and
+bundle itself in a 0700 directory named by its txid, or by `--dir`. hvi is
+started with this directory as its `--checkpoint-root`, created 0700 at run
+time: its confinement lets it write below it and nowhere else. hull writes `latest.json` through a temp file and a rename, and
 keeps one bundle of its own per instance. The record's `migration` field
 (`state`, `bundleDir`, `txid`) says which checkpoint is current and whether it
 was fenced. Every `hvi` instance also has `control.sock` and `profile.json`

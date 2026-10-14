@@ -171,9 +171,12 @@ console session.
 ## hvi
 
 hull drives `hvi` through the control socket hvi serves with `--control-sock`.
-Every `hvi` run gets one at `<instance>/control.sock`, and a machine profile at
-`<instance>/profile.json` (`--profile-out`). The record keeps both paths as
-`controlSock` and `profilePath`, which `hull inspect` prints. The socket has
+Every `hvi` run gets one at `<instance>/control.sock`, a machine profile at
+`<instance>/profile.json` (`--profile-out`), and `--checkpoint-root
+<instance>/checkpoint`, the one directory hvi's confinement lets it write a
+bundle under. The record keeps the first two as `controlSock` and
+`profilePath`, which `hull inspect` prints; the root is on the recorded
+command line. The socket has
 no authentication: anyone who can connect to it can pause or stop the VM. It
 sits in the instance directory, which is 0700.
 
@@ -223,7 +226,11 @@ it parked for good: hvi refuses a later `resume` with `fenced`, and only
 `stop` ends it. A failed capture resumes the guest and leaves no bundle.
 
 `DIR` is a new 0700 directory `<instance>/checkpoint/<txid>`, where the txid
-is a random id hull draws, or an empty directory you name with `--dir`. On
+is a random id hull draws, or an empty directory you name with `--dir`, which
+has to be below `<instance>/checkpoint` too. hull sends it with links
+resolved, because hvi compares it against the resolved root (on macOS `/tmp`
+is a link to `/private/tmp`). An instance started without a checkpoint root
+is refused. On
 success hull writes `<instance>/checkpoint/latest.json`:
 
 ```json
@@ -281,7 +288,8 @@ The `hvi restore` command line is built from the one the instance last ran.
 hull drops `--kernel`, `--initramfs`, `--cmdline`, `--mem-mib`, `--cpus`,
 `--fs-uid` and `--fs-gid`, because the bundle's RAM and profile fix them. It
 keeps `--disk`, `--net-gateway`, `--net-mac`, `--agent-sock`, `--sandbox-id`
-and `--events`, the host resources the devices attach to. A bare `--net`
+and `--events`, the host resources the devices attach to, and
+`--checkpoint-root`, so the restored guest can be checkpointed again. A bare `--net`
 becomes `--net-stub`. hull then adds `--from` and the instance's control
 socket and profile paths. Any other flag is refused by name rather than
 dropped.

@@ -121,9 +121,10 @@ func TestHviCheckpointRecordsTheBundle(t *testing.T) {
 		t.Fatalf("migration = %+v", first)
 	}
 	ckptDir := instanceCheckpointDir(s, "vm1")
+	root, _ := flagValue(state.CmdLine, "--checkpoint-root")
 	asked, _ := stub.seen()[0]["dir"].(string)
-	if first.BundleDir != filepath.Join(ckptDir, first.TxID) || asked != first.BundleDir {
-		t.Errorf("bundle %s, hvi asked for %s, want %s", first.BundleDir, asked, filepath.Join(ckptDir, first.TxID))
+	if first.BundleDir != filepath.Join(root, first.TxID) || asked != first.BundleDir {
+		t.Errorf("bundle %s, hvi asked for %s, want %s", first.BundleDir, asked, filepath.Join(root, first.TxID))
 	}
 	if info, err := os.Stat(first.BundleDir); err != nil || info.Mode().Perm() != 0o700 {
 		t.Errorf("bundle dir: %v %v, want a 0700 directory", info, err)
@@ -146,7 +147,7 @@ func TestHviCheckpointRecordsTheBundle(t *testing.T) {
 	}
 
 	// A bundle placed with --dir is never removed by a later checkpoint.
-	own := filepath.Join(t.TempDir(), "mine")
+	own := filepath.Join(instanceCheckpointDir(s, "vm1"), "mine")
 	st := mustInstance(t, s, "vm1")
 	st.Migration = nil
 	_ = s.SaveInstance(st)
@@ -204,11 +205,23 @@ func TestHviCheckpointRefusals(t *testing.T) {
 		!strings.Contains(err.Error(), "--then") {
 		t.Errorf("bad --then: %v", err)
 	}
-	full := t.TempDir()
+	full := filepath.Join(instanceCheckpointDir(s, "vm1"), "full")
+	_ = os.MkdirAll(full, 0o700)
 	_ = os.WriteFile(filepath.Join(full, "x"), nil, 0o600)
 	if err := hviCheckpointInstance(s, state, hviThenContinue, full, time.Minute); err == nil ||
 		!strings.Contains(err.Error(), "not empty") {
 		t.Errorf("non-empty --dir: %v", err)
+	}
+	// hvi may write below its checkpoint root and nowhere else.
+	if err := hviCheckpointInstance(s, state, hviThenContinue, t.TempDir(), time.Minute); err == nil ||
+		!strings.Contains(err.Error(), "not below") {
+		t.Errorf("--dir outside the root: %v", err)
+	}
+	rootless := *state
+	rootless.CmdLine = []string{"/x/hvi", "boot", "--disk", "/r.img"}
+	if err := hviCheckpointInstance(s, &rootless, hviThenContinue, "", time.Minute); err == nil ||
+		!strings.Contains(err.Error(), "without a checkpoint root") {
+		t.Errorf("no checkpoint root: %v", err)
 	}
 	stopped := *state
 	stopped.Status = "stopped"
@@ -235,5 +248,34 @@ func TestHviControlCheckpointRequest(t *testing.T) {
 	req := stub.seen()[0]
 	if req["op"] != "checkpoint" || req["dir"] != "/abs/b" || req["then"] != "fence" || req["v"] != float64(1) {
 		t.Errorf("request = %v", req)
+	}
+}
+
+// The root hvi is given must exist, be private and be resolved: hvi compares
+// bundle paths against the resolved root as given, so a root under a link
+// (/tmp on macOS) would make every bundle "not below" it.
+func TestHviCheckpointRootIsPrivateAndResolved(t *testing.T) {
+	base := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(base, link); err != nil {
+		t.Fatal(err)
+	}
+	root, err := hviCheckpointRoot(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := filepath.EvalSymlinks(filepath.Join(base, "checkpoint"))
+	if root != want {
+		t.Errorf("root = %s, want the resolved %s", root, want)
+	}
+	if info, err := os.Stat(root); err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
+		t.Errorf("root: %v %v, want a 0700 directory", info, err)
+	}
+	got, err := bundleDirBelow(root, filepath.Join(link, "checkpoint", "b1"))
+	if err != nil || got != filepath.Join(root, "b1") {
+		t.Errorf("a --dir reached through a link resolved to %q, %v; want %s", got, err, filepath.Join(root, "b1"))
+	}
+	if _, err := bundleDirBelow(root, root); err == nil {
+		t.Error("the root itself was accepted as a bundle directory")
 	}
 }

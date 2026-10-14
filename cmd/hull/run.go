@@ -1431,7 +1431,12 @@ exec %s "$@"
 		if err := checkUnixSocketPath("control", controlSock); err != nil {
 			return err
 		}
-		cmdArgs = append(cmdArgs, "--control-sock", controlSock, "--profile-out", profilePath)
+		root, err := hviCheckpointRoot(instanceDir)
+		if err != nil {
+			return err
+		}
+		cmdArgs = append(cmdArgs, "--control-sock", controlSock, "--profile-out", profilePath,
+			"--checkpoint-root", root)
 	}
 
 	state := &store.InstanceState{

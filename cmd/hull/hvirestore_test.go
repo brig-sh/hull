@@ -49,9 +49,11 @@ func TestHviRestoreArgv(t *testing.T) {
 		{
 			name: "linux run on the gateway",
 			cmdLine: []string{"/h/hvi", "boot", "--kernel", "/k", "--mem-mib", "256", "--cpus", "1",
-				"--disk", "/r", "--net-gateway", "/g.sock", "--net-mac", "m", "--events", "/e.ndjson"},
+				"--disk", "/r", "--net-gateway", "/g.sock", "--net-mac", "m", "--events", "/e.ndjson",
+				"--checkpoint-root", "/s/i/checkpoint"},
 			want: append([]string{"/h/hvi", "restore", "--from", from, "--disk", "/r",
-				"--net-gateway", "/g.sock", "--net-mac", "m", "--events", "/e.ndjson"}, tail...),
+				"--net-gateway", "/g.sock", "--net-mac", "m", "--events", "/e.ndjson",
+				"--checkpoint-root", "/s/i/checkpoint"}, tail...),
 		},
 		{
 			name:    "a share",
