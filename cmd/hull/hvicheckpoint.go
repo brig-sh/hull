@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/urfave/cli/v3"
@@ -243,6 +244,11 @@ func hviCheckpointInstance(s *store.Store, state *store.InstanceState, then, dir
 	if timeout < hviControlTimeout {
 		timeout = hviControlTimeout
 	}
+	unlock, err := lockInstanceMigration(s, id)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	txid, err := newTxID()
 	if err != nil {
@@ -277,10 +283,17 @@ func hviCheckpointInstance(s *store.Store, state *store.InstanceState, then, dir
 	if err != nil {
 		// hvi resumes the guest after a failed capture (unless the fence was
 		// already applied), and what it wrote is not a bundle: the manifest
-		// is written last and is missing. A directory hull made for it goes,
-		// so a failed attempt does not leave RAM-sized debris behind.
-		if created && !errors.Is(err, errHviNoReply) {
-			_ = store.RemoveTree(dir)
+		// is written last and is missing. A directory hull made for it goes;
+		// a --dir that was there before is emptied and kept, so a failed
+		// attempt leaves no RAM-sized debris and the same --dir can be
+		// retried (prepareBundleDir refuses one that is not empty). With no
+		// reply hvi may still be writing, and everything stays.
+		if !errors.Is(err, errHviNoReply) {
+			if created {
+				_ = store.RemoveTree(dir)
+			} else {
+				emptyDir(dir)
+			}
 		}
 		switch {
 		case errors.Is(err, errHviNoReply):
@@ -395,6 +408,44 @@ func prepareBundleDir(dir string) (bool, error) {
 		return false, fmt.Errorf("%s is not empty; a checkpoint bundle needs a directory of its own", dir)
 	}
 	return false, nil
+}
+
+// emptyDir removes everything inside dir and keeps dir itself.
+func emptyDir(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		_ = store.RemoveTree(filepath.Join(dir, e.Name()))
+	}
+}
+
+// lockInstanceMigration takes <instance>/migration.lock for one checkpoint
+// or restore of instance id, refusing at once if another hull holds it.
+//
+// Each of them reads the record's migration, talks to hvi and writes the
+// record back. Two at once interleave those steps: a checkpoint deletes the
+// bundle it read as previous, which the other one may just have recorded in
+// latest.json, and a restore could start from a bundle a checkpoint is about
+// to replace. The lock sits in the instance directory, not in the checkpoint
+// root hvi may write to.
+func lockInstanceMigration(s *store.Store, id string) (func(), error) {
+	f, err := os.OpenFile(filepath.Join(s.InstanceDir(id), "migration.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open the migration lock of %s: %w", id, err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, fmt.Errorf("another checkpoint or restore of %s is in progress", id)
+		}
+		return nil, fmt.Errorf("lock the migration of %s: %w", id, err)
+	}
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	}, nil
 }
 
 // describeCheckpointStats renders hvi's stats for a person, leaving out what

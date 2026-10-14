@@ -17,6 +17,8 @@ package main
 import (
 	"errors"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -235,5 +237,56 @@ func TestHviCheckpointWithoutReplyKeepsTheDirectory(t *testing.T) {
 	}
 	if _, err := readHviCheckpointRecord(instanceCheckpointDir(s, "vm1")); !os.IsNotExist(err) {
 		t.Errorf("a checkpoint with no reply wrote latest.json: %v", err)
+	}
+}
+
+// Two checkpoints, or a checkpoint and a restore, of one instance must not
+// interleave: the second is refused at once, before hvi is asked anything.
+func TestCheckpointAndRestoreRefuseWhileAnotherHoldsTheLock(t *testing.T) {
+	stub := newStubHvi(t, func(map[string]any) stubAnswer { return stubAnswer{reply: `{"v":1,"ok":true}`} })
+	s := newCmdTestStore(t)
+	state, _ := fakeHviInstance(t, s, "vm1", stub.path)
+	unlock, err := lockInstanceMigration(s, "vm1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hviCheckpointInstance(s, state, hviThenContinue, "", time.Minute); err == nil ||
+		!strings.Contains(err.Error(), "in progress") {
+		t.Errorf("checkpoint: %v", err)
+	}
+	if err := hviRestoreInstance(nil, s, state, hviRestoreOptions{timeout: time.Second}); err == nil ||
+		!strings.Contains(err.Error(), "in progress") {
+		t.Errorf("restore: %v", err)
+	}
+	if n := len(stub.seen()); n != 0 {
+		t.Errorf("hvi was sent %d requests", n)
+	}
+	unlock()
+	if err := hviCheckpointInstance(s, state, hviThenContinue, "", time.Minute); err != nil {
+		t.Errorf("after unlock: %v", err)
+	}
+}
+
+// A failed capture into a --dir that was there before empties it and keeps
+// it, so the same --dir can be retried.
+func TestHviCheckpointFailureEmptiesAnExistingDir(t *testing.T) {
+	stub := newStubHvi(t, func(req map[string]any) stubAnswer {
+		dir, _ := req["dir"].(string)
+		_ = os.WriteFile(filepath.Join(dir, "ram.bin"), []byte("partial"), 0o600)
+		_ = os.MkdirAll(filepath.Join(dir, "sub"), 0o700)
+		return stubAnswer{reply: `{"v":1,"ok":false,"code":"capture_failed","error":"disk sync failed"}`}
+	})
+	s := newCmdTestStore(t)
+	state, _ := fakeHviInstance(t, s, "vm1", stub.path)
+	own := filepath.Join(instanceCheckpointDir(s, "vm1"), "mine")
+	if err := os.MkdirAll(own, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := hviCheckpointInstance(s, state, hviThenContinue, own, time.Minute); hviRefusalCode(err) != "capture_failed" {
+		t.Fatalf("err = %v", err)
+	}
+	entries, err := os.ReadDir(own)
+	if err != nil || len(entries) != 0 {
+		t.Errorf("--dir after a failed capture: %v entries, %v; want it kept and empty", len(entries), err)
 	}
 }
