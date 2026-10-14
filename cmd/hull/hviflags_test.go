@@ -53,3 +53,32 @@ echo 'hvi: --checkpoint-root needs a directory' >&2; exit 1`)
 		t.Error("a missing binary was not reported")
 	}
 }
+
+// An hvi from before machine profiles (feat/teleport at 5aafb49) names
+// --profile unknown; one with them (the P1..P3 series) says it needs a name.
+// --profile-out, which both know, must not read as --profile.
+func TestHviBootTakesProfile(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	old := write("old", `[ "$1 $2 $#" = "boot --profile 2" ] || exit 9
+echo 'hvi: unknown boot arg "--profile"' >&2; exit 1`)
+	current := write("current", `[ "$1 $2 $#" = "boot --profile 2" ] || { echo 'hvi: unknown boot arg "--profile"' >&2; exit 1; }
+echo 'hvi: --profile needs a name' >&2; exit 1`)
+	outOnly := write("out-only", `echo 'hvi: unknown boot arg "--profile-out-x"' >&2; exit 1`)
+
+	if takes, err := hviBootTakesProfile(old); err != nil || takes {
+		t.Errorf("an hvi without profiles: takes=%v err=%v", takes, err)
+	}
+	if takes, err := hviBootTakesProfile(current); err != nil || !takes {
+		t.Errorf("an hvi with profiles: takes=%v err=%v", takes, err)
+	}
+	if takes, err := hviBootTakesProfile(outOnly); err != nil || !takes {
+		t.Errorf("another unknown flag read as --profile: takes=%v err=%v", takes, err)
+	}
+}

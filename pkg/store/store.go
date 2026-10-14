@@ -100,6 +100,13 @@ type InstanceState struct {
 	// ProfilePath is where hvi wrote its machine profile (--profile-out): the
 	// facts a destination host compares before it accepts a checkpoint.
 	ProfilePath string `json:"profilePath,omitempty"`
+	// Profile is the hvi machine profile the instance boots under
+	// (`run --profile`), passed to hvi as --profile. Empty is hvi's native
+	// profile, which hull never names, so the record and the command line
+	// of a native run are what they were before profiles existed.
+	// portable-arm64-v1 is a machine a checkpoint of which restores on an
+	// Apple host and on a Linux arm64 host alike.
+	Profile string `json:"profile,omitempty"`
 	// Migration is where this instance stands in a checkpoint, restore or
 	// move. Nil until the first `hull checkpoint`. Stopping the instance
 	// leaves it alone: a fenced instance that was stopped is exactly the one

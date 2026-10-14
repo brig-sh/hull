@@ -105,6 +105,13 @@ func runCommand() *cli.Command {
 				Usage: "path to qemu-system-aarch64 binary (default: auto-detect, prefers signed copy)",
 			},
 			&cli.StringFlag{
+				Name: "profile",
+				Usage: "hvi machine profile: 'native' (default) or 'portable-arm64-v1', a machine whose " +
+					"checkpoints restore on an Apple host and a Linux arm64 host alike (hvi only; needs " +
+					"--rootfs-type block and the profile's kernel, see `hull assets pull --profile`). " +
+					"Also the annotation com.nofire.hvi.profile",
+			},
+			&cli.StringFlag{
 				Name:  "rootfs-type",
 				Value: "",
 				Usage: "rootfs sharing mode: 'block' (ext4 disk image), 'virtiofs' (Vz and HVI default), '9pfs' (QEMU default)",
@@ -262,6 +269,13 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 	hypervisorOverride, rootfsTypeOverride = preflight.hypervisor, preflight.rootfsType
+	profile, err := resolveRunProfile(cmd.String("profile"), annotationOverrides)
+	if err != nil {
+		return err
+	}
+	if err := checkProfileRun(profile, preflight); err != nil {
+		return err
+	}
 
 	// Generate instance ID if not provided
 	if instanceName == "" {
@@ -534,6 +548,9 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	if err := platformCheckHypervisor(vmmName, vmmSource); err != nil {
 		return err
 	}
+	if err := checkProfileBackend(profile, vmmName, vmmSource); err != nil {
+		return err
+	}
 
 	vmmType := hypervisors.VmmType(vmmName)
 	telemetryBackendSource = vmmSource
@@ -569,7 +586,14 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 		annotationOverrides["com.urunc.unikernel.bootInitrd"] == "" &&
 		(vmmType == vzVmm || vmmType == hypervisors.HviVmm) &&
 		!imageCarriesKernel(ociSpec.Annotations) {
-		kernel, initrdFile, assetErr := bootassets.Ensure(ctx, cmd.String("store-dir"))
+		ensure := bootassets.Ensure
+		if profile != "" {
+			// The profile boots its own kernel with the default initrd.
+			ensure = func(ctx context.Context, storeDir string) (string, string, error) {
+				return bootassets.EnsureProfile(ctx, storeDir, profile)
+			}
+		}
+		kernel, initrdFile, assetErr := ensure(ctx, cmd.String("store-dir"))
 		if assetErr != nil {
 			return fmt.Errorf("this image carries no kernel, so it needs the generic boot assets: %w", assetErr)
 		}
@@ -1520,6 +1544,19 @@ exec %s "$@"
 				cmdArgs[0], instanceName)
 		}
 	}
+	if profile != "" {
+		// The image may have booted from its own initrd rather than the
+		// block rootfs the flags asked for; the profile needs the disk.
+		if rootfsDiskImage == "" {
+			return fmt.Errorf("--profile %s needs a block rootfs, and this image boots from its own "+
+				"initrd", profile)
+		}
+		profileArgs, err := hviProfileArgs(cmdArgs[0], profile)
+		if err != nil {
+			return err
+		}
+		cmdArgs = append(cmdArgs, profileArgs...)
+	}
 
 	state := &store.InstanceState{
 		ID:          instanceName,
@@ -1531,6 +1568,7 @@ exec %s "$@"
 		Backend:     string(vmmType),
 		ControlSock: controlSock,
 		ProfilePath: profilePath,
+		Profile:     profile,
 	}
 	started, err := launchVMM(ctx, cmd, s, state, cmdArgs, append(gatewayFiles, shareFiles...), vmmType, detach, netMode, gatewayIP)
 	instanceStarted = started
