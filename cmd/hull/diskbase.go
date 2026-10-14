@@ -293,3 +293,24 @@ func baseHeld(s *store.Store, sum string) bool {
 	return err == nil && info.Mode().IsRegular()
 }
 
+// keepRunBase keeps the base of a run's freshly built disk image and returns
+// the record of it, with the flag that hands its digest to hvi when the hvi
+// at binary takes one (hvi records it in the checkpoint's disk.json). A base
+// that cannot be kept costs the run nothing but the fast move: that move
+// sends the whole disk instead.
+func keepRunBase(s *store.Store, binary, disk string) (*store.BaseState, []string) {
+	sum, err := keepBase(s, disk)
+	if err != nil {
+		log.Warnf("Could not keep the base image of %s (%v); moving this instance will send its whole disk",
+			disk, err)
+		return nil, nil
+	}
+	base := &store.BaseState{SHA256: sum, FromBoot: true}
+	if knows, err := hviBootKnowsFlag(binary, hviDiskBaseFlag); err != nil || !knows {
+		return base, nil
+	}
+	return base, []string{hviDiskBaseFlag, sum}
+}
+
+// hviDiskBaseFlag hands hvi the digest of the base the disk started from.
+const hviDiskBaseFlag = "--disk-base-sha256"

@@ -163,6 +163,9 @@ func hviRestoreArgv(cmdLine []string, from, controlSock, profilePath string) ([]
 		"--kernel": true, "--initramfs": true, "--cmdline": true, "--mem-mib": true,
 		"--cpus": true, "--fs-uid": true, "--fs-gid": true, "--from": true,
 		"--control-sock": true, "--profile-out": true,
+		// The base digest describes the boot; a restored disk has moved on
+		// from it, and the bundle's disk.json carries what hvi recorded.
+		hviDiskBaseFlag: true,
 		// The machine profile is in the bundle's own profile.json, which
 		// hvi restore checks against the host; it takes no --profile.
 		"--profile": true,
@@ -449,6 +452,11 @@ func hviRestoreInstance(cmd *cli.Command, s *store.Store, state *store.InstanceS
 	state.ControlSock = controlSock
 	state.ProfilePath = profilePath
 	state.Migration.State = store.MigrationRestoring
+	if state.Base != nil {
+		// The restored hvi's own record of dirty blocks starts here, not
+		// at the boot from the base.
+		state.Base.FromBoot = false
+	}
 	txid := state.Migration.TxID
 
 	type awaited struct {
