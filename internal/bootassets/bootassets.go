@@ -202,13 +202,18 @@ func Fetch(ctx context.Context, ref, storeDir string) error {
 	if err != nil {
 		return err
 	}
-	return fetchInto(ctx, ref, dir)
+	return fetchInto(ctx, ref, dir, nil)
 }
 
 // fetchInto downloads a bundle into dir and records it there. The default
 // bundle and a profile's kernel (FetchProfile) come in through the same
 // checks: the reference, the signature, the staged writes and the record.
-func fetchInto(ctx context.Context, ref, dir string) error {
+//
+// required names layer titles the artifact must carry. They are checked in
+// the manifest, before anything is written: an artifact without them would
+// otherwise replace the files and the record already in dir and only then
+// be refused, leaving a record that no longer covers what boots.
+func fetchInto(ctx context.Context, ref, dir string, required []string) error {
 	// Decide whether this is a reference we are willing to take a kernel from
 	// before any bytes move, rather than after they are on disk.
 	warning, err := checkRef(ref)
@@ -240,6 +245,15 @@ func fetchInto(ctx context.Context, ref, dir string) error {
 	manifest, err := img.Manifest()
 	if err != nil {
 		return fmt.Errorf("read boot asset manifest from %s: %w", ref, err)
+	}
+	titles := make(map[string]bool, len(manifest.Layers))
+	for _, desc := range manifest.Layers {
+		titles[desc.Annotations[titleAnnotation]] = true
+	}
+	for _, name := range required {
+		if !titles[name] {
+			return fmt.Errorf("%s carries no layer titled %s; nothing in %s was changed", ref, name, dir)
+		}
 	}
 
 	// The manifest digest is what a signature would be made over, so it is

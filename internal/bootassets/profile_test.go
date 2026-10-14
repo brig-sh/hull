@@ -6,10 +6,19 @@ package bootassets
 import (
 	"context"
 	"errors"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/google/go-containerregistry/pkg/registry"
+	"github.com/google/go-containerregistry/pkg/v1/empty"
+	"github.com/google/go-containerregistry/pkg/v1/mutate"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/google/go-containerregistry/pkg/v1/static"
+	"github.com/google/go-containerregistry/pkg/v1/types"
 )
 
 // profileEnv isolates a test from the host's asset and profile settings and
@@ -248,6 +257,93 @@ func TestReinstallCommand(t *testing.T) {
 	}
 	if got := ReinstallCommand("/s/assets/" + PortableArm64V1); !strings.Contains(got, "--profile "+PortableArm64V1) {
 		t.Errorf("the profile's directory: %s", got)
+	}
+}
+
+// fakeRegistry serves an OCI registry over plain http on loopback, and lets
+// the fetch take a kernel from it as a mirror the operator allowed.
+func fakeRegistry(t *testing.T) string {
+	t.Helper()
+	srv := httptest.NewServer(registry.New())
+	t.Cleanup(srv.Close)
+	t.Setenv("HULL_BOOT_ASSETS_INSECURE", "1")
+	t.Setenv(ForeignRepoEnv, "1")
+	return strings.TrimPrefix(srv.URL, "http://")
+}
+
+// pushArtifact pushes an artifact whose layers are the given titled files.
+func pushArtifact(t *testing.T, ref string, files map[string]string) {
+	t.Helper()
+	img := empty.Image
+	for title, body := range files {
+		var err error
+		img, err = mutate.Append(img, mutate.Addendum{
+			Layer:       static.NewLayer([]byte(body), types.MediaType("application/octet-stream")),
+			Annotations: map[string]string{titleAnnotation: title},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	parsed, err := name.ParseReference(ref, name.Insecure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := remote.Write(parsed, img); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// An artifact without an Image layer is refused before it writes anything:
+// the installed kernel and its record are as they were, and the next run
+// still boots it.
+func TestFetchProfileWithoutAKernelChangesNothing(t *testing.T) {
+	store := profileEnv(t)
+	seedDefaultAssets(t, store)
+	if err := ImportProfileKernel(store, PortableArm64V1, writeKernel(t, "portable kernel")); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := ProfileDir(store, PortableArm64V1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(filepath.Join(dir, provenanceName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := fakeRegistry(t)
+	ref := host + "/kernels/portable:no-image"
+	pushArtifact(t, ref, map[string]string{"vmlinux": "a kernel by another name"})
+	err = FetchProfile(context.Background(), ref, store, PortableArm64V1)
+	if err == nil || !strings.Contains(err.Error(), "no layer titled "+ProfileKernelName) {
+		t.Fatalf("FetchProfile of an artifact with no Image layer: %v", err)
+	}
+	after, err := os.ReadFile(filepath.Join(dir, provenanceName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("the refused fetch rewrote the record:\n%s\nwas\n%s", after, before)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "vmlinux")); !os.IsNotExist(err) {
+		t.Fatalf("the refused fetch wrote its layer: %v", err)
+	}
+	if _, _, err := EnsureProfile(context.Background(), store, PortableArm64V1); err != nil {
+		t.Fatalf("the installed kernel no longer boots after the refused fetch: %v", err)
+	}
+
+	// The same registry with an Image layer installs it, recorded.
+	ref = host + "/kernels/portable:good"
+	pushArtifact(t, ref, map[string]string{ProfileKernelName: "fetched kernel"})
+	if err := FetchProfile(context.Background(), ref, store, PortableArm64V1); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, ProfileKernelName)); string(b) != "fetched kernel" {
+		t.Fatalf("the fetched kernel holds %q", b)
+	}
+	rec, err := ProfileRecord(store, PortableArm64V1)
+	if err != nil || rec.Ref != ref {
+		t.Fatalf("record after the fetch = %+v, %v", rec, err)
 	}
 }
 

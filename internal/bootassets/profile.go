@@ -166,21 +166,15 @@ func InstallProfile(ctx context.Context, storeDir, profile string) error {
 // FetchProfile downloads an OCI artifact carrying a profile's kernel into
 // the profile's directory. It goes through the same reference check,
 // signature check and record as the default bundle (Fetch), and the artifact
-// must carry a layer titled ProfileKernelName.
+// must carry a layer titled ProfileKernelName: one that does not is refused
+// before anything in the directory changes.
 func FetchProfile(ctx context.Context, ref, storeDir, profile string) error {
 	dir, err := ProfileDir(storeDir, profile)
 	if err != nil {
 		return err
 	}
-	if err := fetchInto(ctx, ref, dir); err != nil {
-		return err
-	}
-	rec, err := readProvenance(dir)
-	if err != nil {
-		return err
-	}
-	if _, ok := rec.Files[ProfileKernelName]; !ok {
-		return fmt.Errorf("%s carries no %s layer, so it holds no %s kernel", ref, ProfileKernelName, profile)
+	if err := fetchInto(ctx, ref, dir, []string{ProfileKernelName}); err != nil {
+		return fmt.Errorf("install the %s kernel: %w", profile, err)
 	}
 	return nil
 }
