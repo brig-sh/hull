@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"time"
 
 	"github.com/urfave/cli/v3"
 
@@ -44,6 +45,49 @@ func requireRunningHvi(state *store.InstanceState, verb string) error {
 		return fmt.Errorf("instance %s has no control socket, so it can only be stopped: the hvi "+
 			"it runs (%s) predates the socket, or an older hull started it. Run it again with an "+
 			"hvi that takes --control-sock", state.ID, state.CmdLine[0])
+	}
+	return nil
+}
+
+// hviVMStateTimeout bounds the status ask that ps, inspect and exec make.
+// Short: brig runs `hull ps` often, hvi serves one connection at a time, and
+// an hvi busy writing a checkpoint should cost a listing half a second, not
+// hviControlTimeout per instance.
+const hviVMStateTimeout = 500 * time.Millisecond
+
+// hviVMState asks a running hvi instance what its VM is doing, as hvi names
+// it: running, paused, fenced, restored-paused. "" when the record is not a
+// running hvi with a control socket; "?" when hvi did not answer in time.
+//
+// The record's status says only that the VMM process is alive. A paused or
+// fenced VM is alive and runs nothing, and an agent connection to it waits
+// for a guest that never answers, so anything about to talk to the guest
+// asks here first.
+func hviVMState(state *store.InstanceState) string {
+	if !isHviInstance(state) || state.ControlSock == "" || state.Status != "running" || state.PID <= 0 {
+		return ""
+	}
+	reply, err := hviControl(state.ControlSock, map[string]any{"op": "status"}, hviVMStateTimeout)
+	if err != nil {
+		return "?"
+	}
+	return reply.State
+}
+
+// refuseIfGuestHalted refuses to talk to the guest of an hvi instance whose
+// VM is paused or fenced, saying how to get it running. An hvi that does not
+// answer, or has no socket, is let through: an exec then behaves as it did
+// before the socket existed.
+func refuseIfGuestHalted(state *store.InstanceState) error {
+	id := state.ID
+	switch hviVMState(state) {
+	case "paused":
+		return fmt.Errorf("instance %s is paused, so its guest cannot answer; `hull resume %s` first", id, id)
+	case store.MigrationRestoredPaused:
+		return fmt.Errorf("instance %s was restored and is still paused; `hull resume %s` starts it", id, id)
+	case store.MigrationFenced:
+		return fmt.Errorf("instance %s was fenced by `hull checkpoint --then fence` and its guest "+
+			"will not run again in this process; `hull stop %s`, then `hull restore %s`", id, id, id)
 	}
 	return nil
 }

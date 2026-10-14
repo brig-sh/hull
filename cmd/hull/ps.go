@@ -62,7 +62,11 @@ func renderInstances(s *store.Store, out io.Writer) error {
 
 	// Create table output
 	w := tabwriter.NewWriter(out, 4, 8, 2, ' ', 0)
-	_, _ = fmt.Fprintln(w, "ID\tSTATUS\tEXIT\tPID\tIP\tCREATED")
+	// VM and CHECKPOINT come last: brig reads ID and STATUS by position,
+	// and STATUS keeps meaning "the VMM process is alive". VM is what an
+	// hvi VM says it is doing (a paused or fenced one is alive and runs
+	// nothing); CHECKPOINT is the record's migration state.
+	_, _ = fmt.Fprintln(w, "ID\tSTATUS\tEXIT\tPID\tIP\tCREATED\tVM\tCHECKPOINT")
 
 	for _, state := range instances {
 		status := state.Status
@@ -122,13 +126,23 @@ func renderInstances(s *store.Store, out io.Writer) error {
 		if !state.StartTime.IsZero() {
 			created = state.StartTime.Format("2006-01-02 15:04:05")
 		}
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+		vm := hviVMState(state)
+		if vm == "" {
+			vm = "-"
+		}
+		checkpoint := "-"
+		if state.Migration != nil && state.Migration.State != "" {
+			checkpoint = state.Migration.State
+		}
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			state.ID,
 			status,
 			exitStr,
 			pidStr,
 			ip,
 			created,
+			vm,
+			checkpoint,
 		)
 	}
 
