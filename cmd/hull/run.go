@@ -289,6 +289,17 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	if err := checkUnixSocketPath("agent", s.InstanceAgentSocket(instanceName)); err != nil {
 		return err
 	}
+	// hvi's control socket is two bytes longer than the agent's, so a name
+	// that passes the check above can still fail it, and checked only where
+	// it is added, that failure comes after the pull, the unpack and the
+	// block disk. The backend is only certain once the image's annotation
+	// is read; checked here when the flag or the platform default already
+	// says hvi, and again where the socket is added.
+	if early, _ := selectHypervisor(hypervisorOverride, nil, defaultHypervisor); early == string(hypervisors.HviVmm) {
+		if err := checkUnixSocketPath("control", s.InstanceControlSocket(instanceName)); err != nil {
+			return err
+		}
+	}
 
 	// Track image digest (will be set based on whether we use local bundle or pull from registry)
 	var imageDigest string
