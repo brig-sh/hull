@@ -85,17 +85,26 @@ func hviPauseResume(cmd *cli.Command, op string) error {
 	if cmd.Args().Len() == 0 {
 		return errors.New("instance ID required")
 	}
-	id := cmd.Args().First()
 	s, err := globalStore(cmd)
 	if err != nil {
 		return err
 	}
+	return hviPauseResumeIn(s, cmd.Args().First(), op)
+}
+
+// hviPauseResumeIn sends op, pause or resume, to instance id's hvi.
+func hviPauseResumeIn(s *store.Store, id, op string) error {
 	state, err := s.GetInstance(id)
 	if err != nil {
 		return fmt.Errorf("instance not found: %s", id)
 	}
 	if err := requireRunningHvi(state, op); err != nil {
 		return err
+	}
+	if op == "resume" {
+		if err := markRestoredGuestRunning(s, id); err != nil {
+			return err
+		}
 	}
 	reply, err := hviOp(state.ControlSock, op)
 	switch {

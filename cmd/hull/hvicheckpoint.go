@@ -264,6 +264,14 @@ func hviCheckpointInstance(s *store.Store, state *store.InstanceState, then, dir
 		return err
 	}
 
+	// A restored guest that was never resumed may be resumed by this
+	// checkpoint's "continue" (hvi resumes after a capture, and after a
+	// failed one), and a reply that never comes says nothing either way.
+	if then == hviThenContinue {
+		if err := markRestoredGuestRunning(s, id); err != nil {
+			return err
+		}
+	}
 	started := time.Now()
 	reply, err := hviCheckpoint(state.ControlSock, dir, then, txid, timeout)
 	if err != nil {

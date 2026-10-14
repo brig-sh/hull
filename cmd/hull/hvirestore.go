@@ -213,7 +213,10 @@ func hviHasRestore(binary string) (bool, error) {
 // only consistent if the guest never wrote to it after the capture:
 //   - fenced: the source never ran again. The case a restore is for.
 //   - restoring or restored-paused: a restore that did not get as far as
-//     running the guest, so the disk is still the one the bundle saw.
+//     running the guest, so the disk is still the one the bundle saw. Every
+//     op that may run that guest (the restore's own resume, `hull resume`,
+//     `hull checkpoint --then continue`) records restored before it is sent,
+//     and setRestoreState never moves a record back, so these two stay true.
 //
 // checkpointed (then continue) means the guest kept running and writing, and
 // restored means a restored guest ran: the disk has moved on from the RAM in
@@ -311,11 +314,16 @@ func hviRestoreInstance(cmd *cli.Command, s *store.Store, state *store.InstanceS
 	state.Migration.State = store.MigrationRestoring
 	txid := state.Migration.TxID
 
-	result := make(chan string, 1)
+	type awaited struct {
+		state string
+		err   error
+	}
+	result := make(chan awaited, 1)
 	gone := make(chan struct{})
 	since := time.Now()
 	go func() {
-		result <- awaitRestoredAndResume(s, id, controlSock, opt, since, gone)
+		st, err := awaitRestoredAndResume(s, id, txid, controlSock, opt, since, gone)
+		result <- awaited{st, err}
 	}()
 	// The IP the record holds stays the guest's: it resumes with its network
 	// state in memory and the same MAC. So no rediscovery, as for Vz.
@@ -327,91 +335,155 @@ func hviRestoreInstance(cmd *cli.Command, s *store.Store, state *store.InstanceS
 		close(gone)
 	}
 
-	// launchVMM's own saves carry the migration state as it was at launch.
-	// Write the outcome of the wait onto the newest record, keeping
-	// everything launchVMM recorded in between.
+	// The wait records each state as it is reached; this is the backstop
+	// for one it reached and could not record, written through the same
+	// one-way setter, so it cannot undo a `hull resume` given meanwhile.
 	final := <-result
-	if fresh, err := s.GetInstance(id); err == nil && fresh.Migration != nil && fresh.Migration.TxID == txid {
-		if strings.HasPrefix(final, "error: ") {
-			fresh.Migration.State = store.MigrationRestoring
-		} else {
-			fresh.Migration.State = final
-		}
-		_ = s.SaveInstance(fresh)
+	if final.state != "" {
+		setRestoreState(s, id, txid, final.state)
 	}
 	if launchErr != nil {
 		return launchErr
 	}
-	if reason, failed := strings.CutPrefix(final, "error: "); failed {
-		return fmt.Errorf("restore of %s: %s", id, reason)
+	if final.err != nil {
+		return fmt.Errorf("restore of %s: %w", id, final.err)
 	}
 	return nil
 }
 
 // awaitRestoredAndResume waits until hvi reports restored-paused on the
 // control socket, then resumes the guest unless opt.paused. It returns the
-// migration state reached, or "error: <reason>".
+// migration state reached, "" for none past restoring, and why it stopped
+// short if it did.
 //
 // It runs beside launchVMM, which in the foreground holds the terminal until
 // the VMM exits, so nothing after that call could ever send the resume. Until
 // hvi binds the socket, a dial finds nothing or the source's stale socket and
 // is refused; both mean "not yet". A VMM that died, or gone closing, ends the
 // wait at once rather than at the deadline. since is when the restore began.
-func awaitRestoredAndResume(s *store.Store, id, sock string, opt hviRestoreOptions, since time.Time, gone <-chan struct{}) string {
-	const exited = "error: hvi exited before the guest was restored; its reason is in " +
-		"`hull logs` (detached) or on the terminal"
+//
+// The state it returns errs toward "the guest ran": once a resume has been
+// sent, the guest may be writing to the disk, and a record that still said
+// restored-paused would let a second restore put the bundle's RAM over it.
+func awaitRestoredAndResume(s *store.Store, id, txid, sock string, opt hviRestoreOptions,
+	since time.Time, gone <-chan struct{}) (string, error) {
+	exited := errors.New("hvi exited before the guest was restored; its reason is in " +
+		"`hull logs` (detached) or on the terminal")
 	deadline := time.Now().Add(opt.timeout)
 	for {
 		if time.Now().After(deadline) {
-			return fmt.Sprintf("error: hvi did not report restored-paused within %s. If it is "+
+			return "", fmt.Errorf("hvi did not report restored-paused within %s. If it is "+
 				"still running, `hull stop %s` ends it; the bundle is kept", opt.timeout, id)
 		}
 		select {
 		case <-gone:
-			return exited
+			return "", exited
 		default:
 		}
 		// Only a pid recorded by this restore says anything about its VMM.
 		// Until launchVMM's first save the record is the old one, and a
 		// source that died without `hull stop` (a crash, a reboot) left its
 		// dead pid there; reading that as "hvi exited" would fail a restore
-		// that is going fine. launchVMM stamps StartTime on that save.
+		// that is going fine. launchVMM stamps StartTime on that save. Until
+		// it has saved, the state is not written either: a write from a
+		// record read before that save would put back the pid-less one.
+		ours := false
 		if rec, err := s.GetInstance(id); err == nil && rec.PID > 0 && !rec.StartTime.Before(since) {
 			if syscall.Kill(rec.PID, 0) != nil {
-				return exited
+				return "", exited
 			}
+			ours = true
 		}
 		reply, err := hviOp(sock, "status")
-		if err == nil && reply.State == store.MigrationRestoredPaused {
+		if err == nil && reply.State == store.MigrationRestoredPaused && ours {
 			break
 		}
 		if err == nil && (reply.State == "running" || reply.State == "stopping") {
-			return fmt.Sprintf("error: hvi reported %s before the guest was resumed", reply.State)
+			return store.MigrationRestored, fmt.Errorf("hvi reported %s before hull resumed the "+
+				"guest; it is recorded as having run", reply.State)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	if opt.paused {
-		recordMigrationState(s, id, store.MigrationRestoredPaused)
+		setRestoreState(s, id, txid, store.MigrationRestoredPaused)
 		fmt.Fprintf(os.Stderr, "Instance %s restored and paused; `hull resume %s` starts it\n", id, id)
-		return store.MigrationRestoredPaused
+		return store.MigrationRestoredPaused, nil
 	}
+	// Recorded before the resume is sent: after it, the guest may be
+	// running whatever the reply says, and a crash of hull between the two
+	// must not leave a record that allows another restore.
+	setRestoreState(s, id, txid, store.MigrationRestored)
 	if _, err := hviOp(sock, "resume"); err != nil {
-		return "error: resume after restore: " + err.Error()
+		if errors.Is(err, errHviNoReply) {
+			return store.MigrationRestored, fmt.Errorf("resume after restore: %w; the guest may "+
+				"be running. `hull resume %s` again is harmless if it is", err, id)
+		}
+		return store.MigrationRestored, fmt.Errorf("resume after restore: %w", err)
 	}
-	recordMigrationState(s, id, store.MigrationRestored)
 	fmt.Fprintf(os.Stderr, "Instance %s restored and running\n", id)
-	return store.MigrationRestored
+	return store.MigrationRestored, nil
 }
 
-// recordMigrationState sets the migration state on the newest record, while
-// launchVMM may be holding the record it started from. Only once the pid is
-// recorded, so this write cannot put back the pid-less record launchVMM had
-// just replaced.
-func recordMigrationState(s *store.Store, id, migrationState string) {
+// setRestoreState records how far the restore of checkpoint txid got.
+//
+// One way only: restoring, then restored-paused, then restored, and never
+// back. Several hull processes write this field while one restore runs (the
+// restore itself, its own backstop write, a `hull resume` from another
+// terminal), and the last writer is not always the one that knows most. A
+// guest recorded as having run must stay so, or a second restore would put
+// the bundle's RAM over a disk that guest has written since. A record that
+// has moved on to another checkpoint, or out of a restore, is left alone.
+func setRestoreState(s *store.Store, id, txid, to string) {
 	fresh, err := s.GetInstance(id)
-	if err != nil || fresh.Migration == nil || fresh.PID <= 0 {
+	if err != nil || fresh.Migration == nil || fresh.Migration.TxID != txid {
 		return
 	}
-	fresh.Migration.State = migrationState
+	rank := map[string]int{
+		store.MigrationRestoring:      1,
+		store.MigrationRestoredPaused: 2,
+		store.MigrationRestored:       3,
+	}
+	from := rank[fresh.Migration.State]
+	if from == 0 || rank[to] <= from {
+		return
+	}
+	fresh.Migration.State = to
 	_ = s.SaveInstance(fresh)
+}
+
+// markRestoredGuestRunning records that a restored guest is about to run,
+// before the op that may run it is sent: `hull resume`, or a checkpoint that
+// resumes it after. From then on the disk may move on from the bundle, so a
+// restore from it is refused. Sent first, because the reply may never come
+// and the op may still take effect. A record not in a restore is left alone.
+func markRestoredGuestRunning(s *store.Store, id string) error {
+	fresh, err := s.GetInstance(id)
+	if err != nil {
+		return err
+	}
+	m := fresh.Migration
+	if m == nil || (m.State != store.MigrationRestoring && m.State != store.MigrationRestoredPaused) {
+		return nil
+	}
+	m.State = store.MigrationRestored
+	if err := s.SaveInstance(fresh); err != nil {
+		return fmt.Errorf("record that the restored guest of %s runs: %w", id, err)
+	}
+	return nil
+}
+
+// keepRecordedMigration replaces state.Migration with the record's on disk,
+// for a caller about to save a record it has held while the VMM ran.
+//
+// Other hull processes write Migration while a VMM runs: `hull checkpoint`
+// records a fenced bundle, `hull resume` that a restored guest ran. In the
+// foreground launchVMM holds the record it started from for the VMM's whole
+// life, and saving it at exit as it was would put back the migration state
+// from launch: a fenced checkpoint forgotten, so it cannot be restored, or a
+// restored guest that ran recorded as one that never did, so it can be
+// restored again over a disk it has written.
+func keepRecordedMigration(s *store.Store, state *store.InstanceState) {
+	if fresh, err := s.GetInstance(state.ID); err == nil {
+		state.Migration = fresh.Migration
+	}
 }

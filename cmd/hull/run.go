@@ -2472,6 +2472,7 @@ func launchVMM(cmd *cli.Command, s *store.Store, state *store.InstanceState, cmd
 	state.PID = vmmCmd.Process.Pid
 	state.Status = "running"
 
+	keepRecordedMigration(s, state)
 	if err := s.SaveInstance(state); err != nil {
 		log.WithError(err).Warn("failed to save instance state")
 	}
@@ -2553,6 +2554,7 @@ func launchVMM(cmd *cli.Command, s *store.Store, state *store.InstanceState, cmd
 		if state.ExitedAt.IsZero() {
 			state.ExitedAt = time.Now()
 		}
+		keepRecordedMigration(s, state)
 		_ = s.SaveInstance(state)
 		sendEndOnce(s, state)
 	}
