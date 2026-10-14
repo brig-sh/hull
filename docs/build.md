@@ -126,9 +126,13 @@ There is no release archive for Linux yet. Build both halves yourself:
 make linux                          # dist/hull_linux_arm64, cross-built from any host
 ```
 
-Build `hvi` on the Linux host itself, from the same submodule commit. That is
-the tested path; hvi-vmm's own CI builds its Linux targets on Linux runners
-too.
+Build `hvi` on the Linux host itself, from the `hvi-vmm` submodule commit
+hull pins. That is the tested path: the Raspberry Pi 5 runs that reviewed
+and then checked hull on Linux, gateway mode included, used `hvi` built on the
+Pi from the pin, `890f9e0`. hvi-vmm's own CI does not build or test
+aarch64 Linux at that commit. It builds and tests x86_64 Linux, boots it on an
+x86 KVM runner, and only lints the `aarch64-unknown-linux-gnu` target, from an
+x86 runner.
 
 ```bash
 cd hvi-vmm && cargo build --release  # target/release/hvi

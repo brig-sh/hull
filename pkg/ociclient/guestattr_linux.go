@@ -59,8 +59,14 @@ const CopiedRecordXattr = guestAttrXattr
 // mke2fs then copies the real one, and there is nothing to record.
 //
 // It is decided by the effective uid, not by whether archive.Apply happened to
-// fail: inside a user namespace containerd swallows the chown EPERM and
-// reports success, and the files still belong to the mapped user.
+// fail: an image whose files all belong to the unpacking user unpacks without
+// a chown error, and its ownership still has to be recorded.
+//
+// A single-id user namespace (`unshare -r`) is not handled. There the euid is
+// 0, so nothing is recorded, and containerd chowns as root would: the first
+// file owned by an unmapped id fails with EINVAL, which is not the expected
+// permission error, so the pull stops. Treating EINVAL as expected would also
+// swallow failures that are not about ownership at all.
 var recordsOwnership = os.Geteuid() != 0
 
 // recordsLinksAside says symlink ownership goes in the file LinkOwners reads,
