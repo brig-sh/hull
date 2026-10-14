@@ -129,6 +129,9 @@ func TestHviCheckpointRecordsTheBundle(t *testing.T) {
 	if info, err := os.Stat(first.BundleDir); err != nil || info.Mode().Perm() != 0o700 {
 		t.Errorf("bundle dir: %v %v, want a 0700 directory", info, err)
 	}
+	if stub.seen()[0]["txid"] != first.TxID {
+		t.Errorf("hvi was sent txid %v, the record has %s", stub.seen()[0]["txid"], first.TxID)
+	}
 	rec, err := readHviCheckpointRecord(ckptDir)
 	if err != nil || rec.Dir != first.BundleDir || rec.ManifestSHA256 != "m1" || rec.Then != "continue" || rec.TxID != first.TxID {
 		t.Errorf("latest.json = %+v, %v", rec, err)
@@ -238,7 +241,7 @@ func TestHviControlCheckpointRequest(t *testing.T) {
 	stub := newStubHvi(t, func(map[string]any) stubAnswer {
 		return stubAnswer{reply: `{"v":1,"ok":true,"manifest_sha256":"ab12","stats":{"pause_ms":7}}`}
 	})
-	reply, err := hviCheckpoint(stub.path, "/abs/b", hviThenFence, time.Minute)
+	reply, err := hviCheckpoint(stub.path, "/abs/b", hviThenFence, "t1", time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +249,7 @@ func TestHviControlCheckpointRequest(t *testing.T) {
 		t.Errorf("reply = %+v", reply)
 	}
 	req := stub.seen()[0]
-	if req["op"] != "checkpoint" || req["dir"] != "/abs/b" || req["then"] != "fence" || req["v"] != float64(1) {
+	if req["op"] != "checkpoint" || req["dir"] != "/abs/b" || req["then"] != "fence" || req["txid"] != "t1" || req["v"] != float64(1) {
 		t.Errorf("request = %v", req)
 	}
 }
