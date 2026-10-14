@@ -313,7 +313,7 @@ func checkBundleManifest(dir, want string) error {
 //   - restoring or restored-paused: a restore that did not get as far as
 //     running the guest, so the disk is still the one the bundle saw. Every
 //     op that may run that guest (the restore's own resume, `hull resume`,
-//     `hull checkpoint --then continue`) records restored before it is sent,
+//     any `hull checkpoint`) records restored before it is sent,
 //     and setRestoreState never moves a record back, so these two stay true.
 //
 // checkpointed (then continue) means the guest kept running and writing, and
@@ -562,10 +562,11 @@ func setRestoreState(s *store.Store, id, txid, to string) {
 }
 
 // markRestoredGuestRunning records that a restored guest is about to run,
-// before the op that may run it is sent: `hull resume`, or a checkpoint that
-// resumes it after. From then on the disk may move on from the bundle, so a
-// restore from it is refused. Sent first, because the reply may never come
-// and the op may still take effect. A record not in a restore is left alone.
+// before the op that may run it is sent: `hull resume`, or any checkpoint,
+// which resumes it after "continue" or a failed capture. From then on the
+// disk may move on from the bundle, so a restore from it is refused. Sent
+// first, because the reply may never come and the op may still take
+// effect. A record not in a restore is left alone.
 func markRestoredGuestRunning(s *store.Store, id string) error {
 	fresh, err := s.GetInstance(id)
 	if err != nil {
