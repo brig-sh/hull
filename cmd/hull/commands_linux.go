@@ -34,7 +34,7 @@ const appUsage = "container CLI for hvi sandboxes on Linux/KVM"
 //
 // compose is listed but refuses; see linuxCompose.
 func platformCommands() []*cli.Command {
-	return []*cli.Command{
+	return append([]*cli.Command{
 		pullCommand(),
 		runCommand(),
 		execCommand(),
@@ -55,7 +55,7 @@ func platformCommands() []*cli.Command {
 		networkGatewayCommand(),
 		telemetryCommand(),
 		versionCommand(),
-	}
+	}, migrateRemoteCommands()...)
 }
 
 // errComposeMacOnly is what every compose subcommand answers on Linux.

@@ -247,6 +247,9 @@ func hviCheckpointInstance(s *store.Store, state *store.InstanceState, then, dir
 	if err := hviCheckpointable(state.CmdLine); err != nil {
 		return err
 	}
+	if err := refuseDuringMove(s, id, "checkpoint"); err != nil {
+		return err
+	}
 	unlock, err := lockInstanceMigration(s, id)
 	if err != nil {
 		return err
