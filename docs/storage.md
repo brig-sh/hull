@@ -191,6 +191,7 @@ sets.
 │   └── provenance.json
 ├── volumes/<project>_<name>/     compose named volumes
 ├── compose/<project>.json        compose project state, plus its gateway sockets and log
+├── migrations/<txid>.json       the records of moves this store aborted as their destination
 └── instances/<id>/
     ├── state.json               0600
     ├── bundle/                  config.json plus the rootfs symlink or image
@@ -200,6 +201,8 @@ sets.
     ├── control.sock             hvi only: the control socket (pause, checkpoint, stop)
     ├── profile.json             hvi only: the machine profile hvi writes at boot
     ├── migration.lock           hvi only: held by one checkpoint or restore at a time
+    ├── migration.json           hvi only: the record of a move to or from another host
+    ├── migrate.lock             hvi only: held by one step of a move at a time
     └── (QMP socket, agent socket, staged boot files)
 ```
 
@@ -494,3 +497,17 @@ refused: Virtualization.framework does not rehydrate the guest's FUSE state in
 a new VMM process, so every inode would go stale at restore.
 
 See [checkpoint-restore.md](checkpoint-restore.md).
+
+## Moves
+
+`hull migrate` keeps `<instance>/migration.json` (0600) on both hosts of a
+move: its txid, role, owner epoch, state, the other host, the fenced bundle,
+the disk's size, sha256 and modification time at the fence, the stream's
+bytes and rate, the time each step took, the last error and the history of
+states. It is written through a temp file, an fsync, a rename and an fsync of
+the directory, because each state is a promise to the other host. The
+instance record's `migration` field gains `moveTxid` and `peer`, and three
+states (`migrating`, `migrated`, `incoming`); `state.json` gains
+`ownerEpoch`. A destination that aborts a move removes the instance directory
+and keeps the record as `<store>/migrations/<txid>.json`. See
+[migration.md](migration.md#records).

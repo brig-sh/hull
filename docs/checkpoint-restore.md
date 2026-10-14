@@ -18,6 +18,12 @@ directory. For `hvi`, pause, resume and checkpoint work today; restore is
 built in hull and refuses until `hvi` gains `restore`, because no bundle `hvi`
 writes yet can be resumed.
 
+An `hvi` checkpoint taken with `--then fence` is also what moves an instance
+to another host: `hull migrate` takes one, sends it and the disk over ssh, and
+restores it there. See [migration.md](migration.md). While a move holds an
+instance, its checkpoint is `migrating` and a plain `hull restore` of it is
+refused; after the move commits it is `migrated`, stale for good.
+
 ## Vz
 
 The Vz backend can checkpoint a running microVM, meaning pause, save the machine
