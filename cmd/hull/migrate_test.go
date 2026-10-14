@@ -17,6 +17,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -697,5 +698,66 @@ func TestMoveAbortBeforeTheCommitAcceptsAnUnknownMove(t *testing.T) {
 	}
 	if restored != 1 || f.srcRecord(t).State != migAborted {
 		t.Errorf("restored %d, source %s", restored, f.srcRecord(t).State)
+	}
+}
+
+// A destination abort whose cleanup fails is not an abort the source may
+// act on: the source stays fenced, nothing on the destination may run what
+// is left, and the abort run again finishes the job.
+func TestMoveAbortedDestinationWithALeftoverStaysGuarded(t *testing.T) {
+	f := newMoveFixture(t, true)
+	peer := newLocalPeer(f.dst)
+	peer.answer["migrate-commit"] = &migrateReply{OK: false, Code: codeFailed, Error: "lost"}
+	_ = sourceMigrate(context.Background(), f.src, f.name, f.options(false), peer)
+	delete(peer.answer, "migrate-commit")
+	txid := f.srcRecord(t).TxID
+	if got := f.dstRecord(t, txid).State; got != dstRestoredPaused {
+		t.Fatalf("destination is %s", got)
+	}
+	prev := destCleanup
+	t.Cleanup(func() { destCleanup = prev })
+	destCleanup = func(*store.Store, string) error { return errors.New("pid 4242 is still alive after SIGKILL") }
+	restored := 0
+	localRestore = func(*store.Store, string) error { restored++; return nil }
+	err := sourceAbort(context.Background(), f.src, f.name, &bytes.Buffer{}, peer)
+	if err == nil || !strings.Contains(err.Error(), "stays fenced") || !strings.Contains(err.Error(), "still alive") {
+		t.Fatalf("abort with a failed cleanup: %v", err)
+	}
+	if restored != 0 || f.srcRecord(t).State != srcCommitting {
+		t.Fatalf("the source was brought back (restored %d, %s)", restored, f.srcRecord(t).State)
+	}
+	if got := f.dstRecord(t, txid).State; got != migAborted {
+		t.Fatalf("destination is %s", got)
+	}
+	for _, verb := range []string{"resume", "restore", "checkpoint", "migrate"} {
+		if err := refuseDuringMove(f.dst, f.name, verb); err == nil || !strings.Contains(err.Error(), "aborted") {
+			t.Errorf("%s of the aborted copy: %v", verb, err)
+		}
+	}
+	st := mustInstance(t, f.dst, f.name)
+	if err := checkMoveRestore(f.dst, st, hviRestoreOptions{}); err == nil {
+		t.Error("a plain restore of the aborted copy was allowed")
+	}
+	back := f.options(false)
+	back.to, back.remote.Target = "pm@src", "pm@src"
+	if err := sourceMigrate(context.Background(), f.dst, f.name, back, newLocalPeer(shortStore(t))); err == nil {
+		t.Error("a move of the aborted copy was allowed")
+	}
+	// The commit stays refused, and a second abort finishes.
+	if r := destCommit(f.dst, txid, f.srcRecord(t).Epoch); r.OK || r.Code != codeAborted {
+		t.Errorf("late commit: %+v", r)
+	}
+	destCleanup = prev
+	if err := sourceAbort(context.Background(), f.src, f.name, &bytes.Buffer{}, peer); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(f.dst.InstanceDir(f.name)); !os.IsNotExist(err) {
+		t.Errorf("the destination kept the instance: %v", err)
+	}
+	if restored != 1 || f.srcRecord(t).State != migAborted {
+		t.Errorf("restored %d, source %s", restored, f.srcRecord(t).State)
+	}
+	if r := destCommit(f.dst, txid, f.srcRecord(t).Epoch); r.OK || r.Code != codeAborted {
+		t.Errorf("late commit after the cleanup: %+v", r)
 	}
 }
