@@ -241,7 +241,7 @@ func TestHviControlCheckpointRequest(t *testing.T) {
 	stub := newStubHvi(t, func(map[string]any) stubAnswer {
 		return stubAnswer{reply: `{"v":1,"ok":true,"manifest_sha256":"ab12","stats":{"pause_ms":7}}`}
 	})
-	reply, err := hviCheckpoint(stub.path, "/abs/b", hviThenFence, "t1", time.Minute)
+	reply, err := hviCheckpoint(stub.path, "/abs/b", hviThenFence, "t1", 0, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,6 +251,16 @@ func TestHviControlCheckpointRequest(t *testing.T) {
 	req := stub.seen()[0]
 	if req["op"] != "checkpoint" || req["dir"] != "/abs/b" || req["then"] != "fence" || req["txid"] != "t1" || req["v"] != float64(1) {
 		t.Errorf("request = %v", req)
+	}
+	if _, ok := req["epoch"]; ok {
+		t.Errorf("a checkpoint outside a move sent an epoch: %v", req)
+	}
+	// A move's fence carries the epoch it hands over.
+	if _, err := hviCheckpoint(stub.path, "/abs/c", hviThenFence, "t2", 7, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if req := stub.seen()[1]; req["epoch"] != float64(7) || req["txid"] != "t2" {
+		t.Errorf("request = %v, want epoch 7", req)
 	}
 }
 

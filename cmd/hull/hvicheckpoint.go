@@ -48,8 +48,14 @@ const (
 // hviCheckpoint asks hvi to write a checkpoint bundle into dir, an absolute
 // path, and then either resume the guest or fence it. txid goes into the
 // bundle's session record, so the bundle names the checkpoint hull recorded.
-func hviCheckpoint(sock, dir, then, txid string, timeout time.Duration) (*hviReply, error) {
-	return hviControl(sock, map[string]any{"op": "checkpoint", "dir": dir, "then": then, "txid": txid}, timeout)
+// epoch, when not 0, is the owner epoch a move hands over with this bundle;
+// hvi records it beside the txid.
+func hviCheckpoint(sock, dir, then, txid string, epoch uint64, timeout time.Duration) (*hviReply, error) {
+	req := map[string]any{"op": "checkpoint", "dir": dir, "then": then, "txid": txid}
+	if epoch != 0 {
+		req["epoch"] = epoch
+	}
+	return hviControl(sock, req, timeout)
 }
 
 // hviCheckpointable refuses an hvi command line whose guest a checkpoint
@@ -241,9 +247,6 @@ func hviCheckpointInstance(s *store.Store, state *store.InstanceState, then, dir
 	if err := hviCheckpointable(state.CmdLine); err != nil {
 		return err
 	}
-	if timeout < hviControlTimeout {
-		timeout = hviControlTimeout
-	}
 	unlock, err := lockInstanceMigration(s, id)
 	if err != nil {
 		return err
@@ -254,20 +257,43 @@ func hviCheckpointInstance(s *store.Store, state *store.InstanceState, then, dir
 	if err != nil {
 		return err
 	}
+	started := time.Now()
+	rec, err := hviCheckpointLocked(s, state, then, dir, txid, 0, timeout)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Checkpoint of %s written to %s in %s (%s)\n", id, rec.Dir,
+		time.Since(started).Round(time.Millisecond), describeCheckpointStats(then, rec.Stats))
+	return nil
+}
+
+// hviCheckpointLocked takes checkpoint txid of a running hvi instance into
+// dir (a new directory below the checkpoint root when ""), records it in
+// latest.json and the instance record, and returns what it recorded. The
+// caller holds the instance's migration lock and has checked that the
+// instance can be checkpointed; a move calls it with its own txid and the
+// epoch it hands over.
+func hviCheckpointLocked(s *store.Store, state *store.InstanceState, then, dir, txid string,
+	epoch uint64, timeout time.Duration) (*hviCheckpointRecord, error) {
+	id := state.ID
+	if timeout < hviControlTimeout {
+		timeout = hviControlTimeout
+	}
 	ckptDir := instanceCheckpointDir(s, id)
 	root, ok := flagValue(state.CmdLine, "--checkpoint-root")
 	if !ok {
-		return fmt.Errorf("instance %s was started without a checkpoint root, so its hvi may not "+
+		return nil, fmt.Errorf("instance %s was started without a checkpoint root, so its hvi may not "+
 			"write a bundle anywhere; run it again with an hvi that takes --checkpoint-root", id)
 	}
+	var err error
 	if dir == "" {
 		dir = filepath.Join(root, txid)
 	} else if dir, err = bundleDirBelow(root, dir); err != nil {
-		return err
+		return nil, err
 	}
 	created, err := prepareBundleDir(dir)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// A restored guest that was never resumed may be resumed by this
@@ -276,10 +302,9 @@ func hviCheckpointInstance(s *store.Store, state *store.InstanceState, then, dir
 	// A reply that never comes says nothing either way. On success the
 	// record moves on to the new bundle, so this costs nothing then.
 	if err := markRestoredGuestRunning(s, id); err != nil {
-		return err
+		return nil, err
 	}
-	started := time.Now()
-	reply, err := hviCheckpoint(state.ControlSock, dir, then, txid, timeout)
+	reply, err := hviCheckpoint(state.ControlSock, dir, then, txid, epoch, timeout)
 	if err != nil {
 		// hvi resumes the guest after a failed capture (unless the fence was
 		// already applied), and what it wrote is not a bundle: the manifest
@@ -297,13 +322,13 @@ func hviCheckpointInstance(s *store.Store, state *store.InstanceState, then, dir
 		}
 		switch {
 		case errors.Is(err, errHviNoReply):
-			return fmt.Errorf("%w; hvi may still be writing the bundle to %s with the guest "+
+			return nil, fmt.Errorf("%w; hvi may still be writing the bundle to %s with the guest "+
 				"paused. Once it is done, `hull resume %s` either resumes the guest or answers "+
 				"that it was fenced; retry with a longer --timeout", err, dir, id)
 		case hviRefusalCode(err) == "not_implemented":
-			return fmt.Errorf("this hvi (%s) cannot checkpoint yet: %w", state.CmdLine[0], err)
+			return nil, fmt.Errorf("this hvi (%s) cannot checkpoint yet: %w", state.CmdLine[0], err)
 		}
-		return err
+		return nil, err
 	}
 
 	rec := hviCheckpointRecord{
@@ -315,12 +340,12 @@ func hviCheckpointInstance(s *store.Store, state *store.InstanceState, then, dir
 		TxID:           txid,
 	}
 	if err := writeHviCheckpointRecord(ckptDir, rec); err != nil {
-		return fmt.Errorf("the bundle is in %s but recording it failed: %w", dir, err)
+		return nil, fmt.Errorf("the bundle is in %s but recording it failed: %w", dir, err)
 	}
 
 	fresh, err := s.GetInstance(id)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	previous := fresh.Migration
 	migrationState := store.MigrationCheckpointed
@@ -330,7 +355,7 @@ func hviCheckpointInstance(s *store.Store, state *store.InstanceState, then, dir
 	fresh.Migration = &store.MigrationState{State: migrationState, BundleDir: dir, TxID: txid,
 		ManifestSHA256: reply.ManifestSHA256}
 	if err := s.SaveInstance(fresh); err != nil {
-		return fmt.Errorf("the bundle is in %s but the instance record was not updated: %w", dir, err)
+		return nil, fmt.Errorf("the bundle is in %s but the instance record was not updated: %w", dir, err)
 	}
 	// One bundle per instance of hull's own naming: each is the size of the
 	// guest's touched RAM, and only the latest is ever restored. A bundle
@@ -339,10 +364,7 @@ func hviCheckpointInstance(s *store.Store, state *store.InstanceState, then, dir
 	if previous != nil && previous.BundleDir != dir && previous.BundleDir == filepath.Join(root, previous.TxID) {
 		_ = store.RemoveTree(previous.BundleDir)
 	}
-
-	fmt.Printf("Checkpoint of %s written to %s in %s (%s)\n", id, dir,
-		time.Since(started).Round(time.Millisecond), describeCheckpointStats(then, reply.Stats))
-	return nil
+	return &rec, nil
 }
 
 // hviCheckpointRoot creates <instanceDir>/checkpoint, 0700, and returns it
