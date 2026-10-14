@@ -37,6 +37,7 @@ import (
 	"github.com/urunc-dev/urunc/pkg/unikontainers/hypervisors"
 	"golang.org/x/sys/unix"
 
+	"github.com/brig-sh/hull/internal/bootassets"
 	"github.com/brig-sh/hull/pkg/store"
 )
 
@@ -200,6 +201,12 @@ func destReserve(s *store.Store, txid, name string, req migrateReserveRequest) *
 	if _, err := destHviPath(req.Spec.Hvi); err != nil {
 		return refuse(codeFailed, err)
 	}
+	// The profile is the source's word for now; the bundle's own
+	// profile.json is checked against it on receive.
+	profile, err := bootassets.NormalizeProfile(req.Spec.Profile)
+	if err != nil {
+		return refuse(codeFailed, fmt.Errorf("the move's machine profile: %w", err))
+	}
 	for _, sock := range []struct{ what, path string }{
 		{"agent", s.InstanceAgentSocket(name)}, {"control", s.InstanceControlSocket(name)},
 	} {
@@ -215,6 +222,7 @@ func destReserve(s *store.Store, txid, name string, req migrateReserveRequest) *
 		return refuse(codeFailed, err)
 	}
 	spec := req.Spec
+	spec.Profile = profile
 	rec := &migrationRecord{
 		TxID: txid, Role: roleDestination, Name: name, Epoch: req.Epoch, State: dstReserved,
 		Peer: spec.SourceHost, Spec: &spec,
@@ -301,6 +309,9 @@ func destReceive(s *store.Store, txid, name string, in io.Reader) *migrateReply 
 	}
 	took := time.Since(started)
 	disk, err := checkReceivedBundle(filepath.Join(staging, "bundle"), res)
+	if err == nil {
+		err = checkBundleProfile(filepath.Join(staging, "bundle"), rec.Spec.Profile)
+	}
 	if err != nil {
 		_ = store.RemoveTree(staging)
 		return refuseWith(codeVerifyFailed, rec.fail(path, err), rec)
@@ -341,6 +352,51 @@ func destReceive(s *store.Store, txid, name string, in io.Reader) *migrateReply 
 		return refuseWith(codeFailed, err, rec)
 	}
 	return &migrateReply{OK: true, Record: rec}
+}
+
+// checkBundleProfile refuses a bundle whose machine profile is not the one
+// the move's spec names. The spec's profile is what the destination records
+// and what relaxes the OS check on the instance's next move, so it is taken
+// only when the machine hvi captured agrees: a native bundle labelled
+// portable would be let through to a host it cannot restore on.
+func checkBundleProfile(dir, want string) error {
+	got, err := bundleProfile(dir)
+	if err != nil {
+		return err
+	}
+	if got != want {
+		return fmt.Errorf("the move says the instance runs the %s machine profile, and the bundle's "+
+			"profile.json records %s", profileName(want), profileName(got))
+	}
+	return nil
+}
+
+// bundleProfile is the machine profile a bundle's profile.json records,
+// as hull names it: "" for native, which hvi leaves out of the file.
+func bundleProfile(dir string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(dir, "profile.json"))
+	if err != nil {
+		return "", fmt.Errorf("read the bundle's machine profile: %w", err)
+	}
+	var p struct {
+		Profile string `json:"profile"`
+	}
+	if err := json.Unmarshal(data, &p); err != nil {
+		return "", fmt.Errorf("the bundle's profile.json: %w", err)
+	}
+	profile, err := bootassets.NormalizeProfile(p.Profile)
+	if err != nil {
+		return "", fmt.Errorf("the bundle's profile.json: %w", err)
+	}
+	return profile, nil
+}
+
+// profileName is a profile as a message names it.
+func profileName(profile string) string {
+	if profile == "" {
+		return "native"
+	}
+	return profile
 }
 
 // checkReceivedBundle checks the received bundle against its manifest:
