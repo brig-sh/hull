@@ -27,9 +27,11 @@ for the one build that reports `dev`.
 
 ## Commands
 
-There are twenty-one top-level commands. `network-gateway` is the only hidden one:
-it does not appear in `hull --help`, but it runs and prints its own help when
-named. No flag anywhere in the tree is hidden.
+There are twenty-two top-level commands you call, plus hidden ones.
+`network-gateway` is hidden: it does not appear in `hull --help`, but it runs
+and prints its own help when named. The six `migrate-*` verbs are hidden too:
+`hull migrate` runs them on the destination over ssh (see below). The one
+hidden flag is `restore --move`, which only a move's own restore passes.
 
 | Command | What it does |
 |---|---|
@@ -42,6 +44,7 @@ named. No flag anywhere in the tree is hidden.
 | `resume <id>` | resume an `hvi` instance paused by `pause` |
 | `checkpoint <id>` | `vz`: pause, save VM and disk state, resume. `hvi`: write a checkpoint bundle, then continue or fence |
 | `restore <id>` | restore a stopped instance: `vz` from its saved state; `hvi` from a fenced bundle, refused until `hvi` has a `restore` subcommand |
+| `migrate <id> --to USER@HOST` | move a running `hvi` instance to another host over ssh; see [migration.md](migration.md) |
 | `rm <id>` | remove a stopped instance |
 | `logs <id>` | show an instance's log |
 | `inspect <id>` | print instance details as JSON |
@@ -54,6 +57,7 @@ named. No flag anywhere in the tree is hidden.
 | `telemetry` | control usage and crash telemetry |
 | `version` | print the version and the build behind this binary |
 | `network-gateway` | run the user-mode network gateway daemon (hidden) |
+| `migrate-probe`, `migrate-receive`, `migrate-prepare`, `migrate-commit`, `migrate-status`, `migrate-abort` | the destination's half of a move (hidden) |
 
 ## `hull run`
 
@@ -150,6 +154,7 @@ as a default that an explicit `--env TERM` beats.
 | `pause <id>`, `resume <id>` | none |
 | `checkpoint <id>` | `--timeout <secs>`, default 60; `hvi` only: `--then continue\|fence`, default `continue`; `--dir <path>`, an empty directory for the bundle, below `<instance>/checkpoint` |
 | `restore <id>` | `--detach`, `-d`; `--stop-grace <secs>`, default 10; `--wait-ip`; `--gateway-sock <path>` (`vz` only); `hvi` only: `--paused`, `--timeout <secs>`, default 120, `--adopt-latest` |
+| `migrate <id>` | `--to USER@HOST`; `--remote-store <dir>`; `--remote-hull <path>`; `--remote-hvi <path>`; `--remote-gateway-sock <path>`; `--txid <txid>` resume a move; `--dry-run`; `--abort` and `--status` (with a name or a txid); `--timeout <secs>`, default 120, for the fence; `--allow-no-restore`, testing only |
 | `assets show` | none |
 | `assets dir` | none. Prints the directory and nothing else, for scripts |
 | `assets pull [REF]` | `--force` download even when the assets are present |
@@ -175,6 +180,26 @@ still running, and when the `hvi` it ran has no `restore` subcommand. See
 
 `hull stop` on an `hvi` instance asks hvi over its control socket first, then
 signals as for any VMM.
+
+`hull migrate` moves a running `hvi` instance to `--to USER@HOST`: it fences
+the guest here, streams the checkpoint and the disk over ssh, has the
+destination restore it paused, and only then commits, after which the
+destination resumes it and the copy here is stale. While a move holds an
+instance, `checkpoint`, `resume`, `restore` and `rm` of it are refused on
+both hosts. The protocol, its states and its recovery are in
+[migration.md](migration.md).
+
+The destination's verbs each print one JSON object on stdout:
+`{"protocol":1,"ok":bool,"code":...,"error":...,"record":{...}}`. They are:
+
+| Verb | Flags | What it does |
+|---|---|---|
+| `migrate-probe` | `--name`, `--hvi`, `--gateway-sock` | reports hull and hvi versions, whether hvi takes the control flags and has `restore`, the hypervisor, free space, whether the name is taken, and whether the gateway answers |
+| `migrate-receive` | `--txid`, `--name`, `--reserve` | with `--reserve`, claims the name (a JSON request on stdin); without, reads the move stream on stdin and ends `verified` |
+| `migrate-prepare` | `--txid` | restores the received checkpoint paused |
+| `migrate-commit` | `--txid`, `--epoch` | records `running`, then resumes the guest |
+| `migrate-status` | `--txid` | prints the move's record and the VM's state |
+| `migrate-abort` | `--txid` | refused once running; otherwise records `aborted`, stops what the move restored and frees the name |
 
 `hull images` prints `No images found` and `hull ps` prints
 `No instances found` on an empty store. Both exit 0. `hull prune` prints
@@ -311,6 +336,7 @@ See [telemetry.md](telemetry.md).
 | `CI` | counts the session as non-interactive, so the consent prompt never shows |
 | `TERM` | forwarded into the guest for a pty `exec` |
 | `COMPOSE_FILE`, `COMPOSE_PROJECT_NAME`, `COMPOSE_PROFILES`, `COMPOSE_DISABLE_ENV_FILE` | compose equivalents of the flags above |
+| `HULL_MIGRATE_SSH` | a program `hull migrate` runs instead of `ssh`, with the same arguments; for testing a move on one machine (see [migration.md](migration.md#testing-a-move)) |
 
 A session counts as interactive only when `CI` is unset **and** both stdin and
 stderr are terminals.
