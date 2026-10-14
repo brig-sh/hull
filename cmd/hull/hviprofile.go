@@ -96,6 +96,36 @@ func checkProfileBackend(profile, vmmName, source string) error {
 		"pass --hypervisor hvi", profile, vmmName, source)
 }
 
+// checkProfileKernel refuses a profile run whose kernel is not the
+// profile's. hull resolves the profile's kernel itself only when no
+// bootKernel annotation is given, --no-boot-assets is not set and the image
+// has no kernel of its own; any other way of arriving at a kernel would boot
+// it under the profile's name and record a portable machine whose guest
+// cannot keep time on it. So the kernel is checked by its bytes, wherever it
+// came from: the staged copy must hash to the kernel the profile's record
+// in the asset directory describes. That keeps brig's path, a bootKernel
+// annotation naming the installed Image or a copy of it, and refuses the
+// rest.
+//
+// bootKernel is the annotation as the run resolved it ("" when the kernel
+// came from the image), staged the copy the VMM will boot ("" when none was
+// found), and why says where a kernel not from the annotation came from.
+func checkProfileKernel(storeDir, profile, bootKernel, staged, why string) error {
+	if profile == "" {
+		return nil
+	}
+	if bootKernel == "" || staged == "" {
+		return fmt.Errorf("--profile %s boots the profile's own kernel, and this run %s; drop it, "+
+			"or name the profile's kernel (`hull assets dir --profile %s`) in "+
+			"com.urunc.unikernel.bootKernel", profile, why, profile)
+	}
+	what := "the kernel in com.urunc.unikernel.bootKernel (" + bootKernel + ")"
+	if err := bootassets.VerifyProfileKernel(storeDir, profile, staged, what); err != nil {
+		return fmt.Errorf("--profile %s: %w", profile, err)
+	}
+	return nil
+}
+
 // hviProfileArgs is what a run passes hvi for its profile: nothing for the
 // native one, so its command line stays the one an hvi from before profiles
 // accepts, and --profile NAME otherwise, once the hvi that will run has said

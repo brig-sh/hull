@@ -331,6 +331,47 @@ func describeProfileSource(profile, recorded string) string {
 		PortableKernelEnv, PortableKernelRefEnv, recorded)
 }
 
+// VerifyProfileKernel checks that the file at path is the kernel installed
+// for profile: that it hashes to the kernel entry of the record in the
+// profile's directory. what names the kernel in the refusal, since path
+// may be a staged copy the operator never named. It is the check for a kernel hull did not resolve
+// itself, a bootKernel annotation (brig's path) or a copy of the kernel at
+// another path: the bytes decide, not the path they were named by.
+//
+// The profile needs its own kernel, so this refuses rather than warns: a
+// run with --profile that booted another kernel would record a portable
+// machine whose guest cannot keep time on it, and a move would treat it
+// as portable.
+func VerifyProfileKernel(storeDir, profile, path, what string) error {
+	dir, err := ProfileDir(storeDir, profile)
+	if err != nil {
+		return err
+	}
+	rec, err := readProvenance(dir)
+	if errors.Is(err, ErrNoProvenance) {
+		return fmt.Errorf("no %s kernel is installed in %s, so nothing says which kernel the "+
+			"profile boots: `hull assets pull --profile %s` installs one", profile, dir, profile)
+	}
+	if err != nil {
+		return err
+	}
+	want, ok := rec.Files[ProfileKernelName]
+	if !ok {
+		return fmt.Errorf("the record in %s does not cover %s. %s after working out what wrote to %s",
+			dir, ProfileKernelName, refetchHint(dir, rec), dir)
+	}
+	got, size, err := hashFile(path)
+	if err != nil {
+		return fmt.Errorf("hash the kernel for %s: %w", profile, err)
+	}
+	if got != want.SHA256 || size != want.Size {
+		return fmt.Errorf("%s is not the %s kernel: it hashes sha256:%s (%d bytes), and the kernel "+
+			"installed in %s is sha256:%s (%d bytes, from %s)",
+			what, profile, got, size, dir, want.SHA256, want.Size, rec.Ref)
+	}
+	return nil
+}
+
 // ProfileRecord returns a profile's provenance record.
 func ProfileRecord(storeDir, profile string) (Provenance, error) {
 	dir, err := ProfileDir(storeDir, profile)

@@ -240,6 +240,64 @@ func TestRunWiresTheProfile(t *testing.T) {
 	}
 }
 
+// A profile boots its own kernel however the run arrives at one. A
+// bootKernel annotation is checked by its bytes: the installed kernel, or a
+// copy of it elsewhere (brig's BRIG_PORTABLE_KERNEL), boots; the default
+// bundle's kernel is refused, as is a run whose kernel comes from the image.
+// Each refusal comes before the disk is built and leaves no instance.
+func TestRunRefusesAKernelThatIsNotTheProfiles(t *testing.T) {
+	requireArm64(t)
+	storeDir, bundle, argvFile := runProfileEnv(t, true)
+	assets := filepath.Join(storeDir, "assets")
+	initrd := "com.urunc.unikernel.bootInitrd=" + filepath.Join(assets, bootassets.InitrdName)
+	copyOf := filepath.Join(t.TempDir(), "Image")
+	if err := os.WriteFile(copyOf, []byte(runPortableKernel), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	profile := []string{"--profile", bootassets.PortableArm64V1}
+
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"default", []string{"--annotation", "com.urunc.unikernel.bootKernel=" +
+			filepath.Join(assets, bootassets.KernelName()), "--annotation", initrd},
+			"is not the " + bootassets.PortableArm64V1 + " kernel"},
+		{"noassets", []string{"--no-boot-assets"}, "--no-boot-assets"},
+	} {
+		err := hullRun(t, storeDir, append(append([]string{"--name", tc.name}, profile...),
+			append(tc.args, bundle)...)...)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want a refusal naming %q", tc.name, err, tc.want)
+		}
+		if _, statErr := os.Stat(filepath.Join(storeDir, "instances", tc.name)); !os.IsNotExist(statErr) {
+			t.Errorf("%s: the refused run left its instance directory: %v", tc.name, statErr)
+		}
+	}
+	if _, err := os.Stat(argvFile); !os.IsNotExist(err) {
+		t.Fatalf("a refused run started hvi: %v", err)
+	}
+
+	for _, tc := range []struct{ name, kernel string }{
+		{"installed", filepath.Join(assets, bootassets.PortableArm64V1, bootassets.ProfileKernelName)},
+		{"copy", copyOf},
+	} {
+		_ = os.Remove(argvFile)
+		err := hullRun(t, storeDir, append(append([]string{"--name", tc.name}, profile...),
+			"--annotation", "com.urunc.unikernel.bootKernel="+tc.kernel, "--annotation", initrd, bundle)...)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if argv := recordedArgv(t, argvFile); !slices.Contains(argv, bootassets.PortableArm64V1) {
+			t.Fatalf("%s: the hvi argv has no profile: %v", tc.name, argv)
+		}
+		if got := stagedKernel(t, storeDir, tc.name); got != runPortableKernel {
+			t.Fatalf("%s: staged %q", tc.name, got)
+		}
+	}
+}
+
 // `assets pull --profile` without --force does not call a kernel that fails
 // its record "already present": it says what is wrong and names the pull
 // that replaces it.
