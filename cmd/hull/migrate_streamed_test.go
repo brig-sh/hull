@@ -34,6 +34,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/brig-sh/hull/pkg/store"
 )
@@ -219,7 +220,10 @@ func (h *fakeStreamHvi) serve(conn net.Conn) {
 			}
 		}
 		emit("profile.json", []byte(`{"profile_version":1,"checkpoint_format":2}`))
-		emit("ram-round-0", bytes.Repeat([]byte("page"), 64<<10))
+		// hvi cuts a round into frames of about 1 MiB, all of one name.
+		for i := 0; i < 3; i++ {
+			emit("ram-round-0", bytes.Repeat([]byte{'p', byte(i)}, 48<<10))
+		}
 		emit("ram-round-1", bytes.Repeat([]byte("dirt"), 4<<10))
 		if h.sealFail {
 			reply(`{"v":1,"ok":false,"code":"capture_failed","error":"the capture failed; the VM runs on"}`)
@@ -236,8 +240,9 @@ func (h *fakeStreamHvi) serve(conn net.Conn) {
 		}
 		h.state = "fenced"
 		sum := sha256.Sum256(man)
-		reply(`{"v":1,"ok":true,"state":"fenced","manifest_sha256":"%s","stats":{"rounds":3,"pause_ms":4}}`,
-			hex.EncodeToString(sum[:]))
+		now := time.Now().UnixMilli()
+		reply(`{"v":1,"ok":true,"state":"fenced","manifest_sha256":"%s","stats":{"pause_ms":4,`+
+			`"precopy_end_unix_ms":%d,"sealed_at_unix_ms":%d}}`, hex.EncodeToString(sum[:]), now-7, now)
 	case "stop":
 		h.state = "stopped"
 		if h.pid > 0 {
@@ -483,7 +488,8 @@ func TestStreamedMove(t *testing.T) {
 	if ram != 3 || final == nil || final.Blocks != 3 || st.Rounds[0].Blocks != 3 {
 		t.Errorf("rounds %+v", st.Rounds)
 	}
-	if st.PausedAt.IsZero() || st.DowntimeMs <= 0 || st.RAMBytes == 0 || st.WireBytes == 0 {
+	if st.PausedAt.IsZero() || st.SealedMs != 7 || st.DowntimeMs <= 0 || st.RAMBytes != 3*96<<10+16<<10+4<<10 ||
+		st.WireBytes == 0 {
 		t.Errorf("numbers %+v", st)
 	}
 	if !baseHeld(f.dst, rec.BaseSHA256) || f.peer.called("migrate-take-base") != 1 {
@@ -518,21 +524,36 @@ func TestStreamedMove(t *testing.T) {
 }
 
 // Without hvi's dirty-block rounds, or when the running hvi did not boot
-// from the base, hull compares the disk with the base instead, and the
-// destination still ends with the source's disk.
+// from the base and does not say it carries the base, hull compares the
+// disk with the base instead; a restored hvi whose profile names the base
+// carries its blocks since boot, and its rounds are used. Either way the
+// destination ends with the source's disk.
 func TestStreamedMoveComparesWithoutHviRounds(t *testing.T) {
 	for _, tc := range []struct {
 		name              string
 		diskOps, fromBoot bool
-	}{{"no disk ops", false, true}, {"restored hvi", true, false}} {
+		carries           bool
+		engine            string
+	}{
+		{"no disk ops", false, true, false, "compare"},
+		{"restored hvi", true, false, false, "compare"},
+		{"restored hvi carrying the base", true, false, true, "hvi"},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newStreamFixture(t, tc.diskOps, tc.fromBoot)
+			if tc.carries {
+				st := mustInstance(t, f.src, f.name)
+				prof := fmt.Sprintf(`{"profile_version":1,"checkpoint_format":2,"disk_base_sha256":%q}`, st.Base.SHA256)
+				if err := os.WriteFile(st.ProfilePath, []byte(prof), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			f.hvi.writesAt["ram-round-1"] = []int64{3, 701}
 			if err := f.migrate(t, ""); err != nil {
 				t.Fatal(err)
 			}
 			rec := f.srcRecord(t)
-			if rec.State != srcCommitted || rec.Stream.DiskEngine != "compare" {
+			if rec.State != srcCommitted || rec.Stream.DiskEngine != tc.engine {
 				t.Fatalf("record %s engine %s", rec.State, rec.Stream.DiskEngine)
 			}
 			f.checkArrived(t, rec)

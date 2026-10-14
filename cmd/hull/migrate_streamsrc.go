@@ -286,7 +286,7 @@ func (ss *streamSender) diskPreCopy(basePath string) error {
 	default:
 		return fmt.Errorf("hvi's disk-dirty: %w", err)
 	}
-	fromBoot := ss.state.Base != nil && ss.state.Base.FromBoot
+	fromBoot := ss.state.Base != nil && (ss.state.Base.FromBoot || hviCarriesBase(ss.state, ss.state.Base.SHA256))
 	if ss.hviDisk && fromBoot {
 		// hvi's blocks since boot are every difference from the base.
 		ss.stats.DiskEngine = "hvi"
@@ -340,6 +340,24 @@ func (ss *streamSender) diskPreCopy(basePath string) error {
 		}
 	}
 	return ss.sw.flush()
+}
+
+// hviCarriesBase reports whether the running hvi's machine profile names
+// base: an hvi that does carries its blocks written since boot across a
+// restore (from disk.json), so they still cover every difference from the
+// base on a restored guest.
+func hviCarriesBase(state *store.InstanceState, base string) bool {
+	if state.ProfilePath == "" {
+		return false
+	}
+	data, err := os.ReadFile(state.ProfilePath)
+	if err != nil {
+		return false
+	}
+	var p struct {
+		DiskBase string `json:"disk_base_sha256"`
+	}
+	return json.Unmarshal(data, &p) == nil && p.DiskBase != "" && p.DiskBase == base
 }
 
 // diskDirty reads hvi's dirty blocks since boot or since the last round,
@@ -480,39 +498,6 @@ func writeFileSynced(path string, data []byte) error {
 // progressEvery is how often a long round prints how far it is.
 const progressEvery = 2 * time.Second
 
-// meteredReader prints, at most every progressEvery, how much of a round of
-// total bytes has passed through it, the rate, and the time left at that
-// rate.
-type meteredReader struct {
-	r       io.Reader
-	label   string
-	total   int64
-	done    int64
-	started time.Time
-	last    time.Time
-	print   func(format string, args ...any)
-}
-
-func (m *meteredReader) Read(p []byte) (int, error) {
-	n, err := m.r.Read(p)
-	m.done += int64(n)
-	if now := time.Now(); now.Sub(m.last) >= progressEvery && m.total > 0 {
-		m.last = now
-		secs := now.Sub(m.started).Seconds()
-		rate := perSec(m.done, secs)
-		left := float64(m.total-m.done) / float64(max(rate, 1))
-		m.print("%s: %d%% (%s of %s), %s/s, about %.0f s left", m.label, m.done*100/m.total,
-			humanBytes(m.done), humanBytes(m.total), humanBytes(rate), left)
-	}
-	return n, err
-}
-
-// metered wraps body for a round of total bytes.
-func (ss *streamSender) metered(label string, total int64, body io.Reader) io.Reader {
-	now := time.Now()
-	return &meteredReader{r: body, label: label, total: total, started: now, last: now, print: ss.progress}
-}
-
 // isRAMRound reports whether an hvi component is one of the RAM rounds.
 func isRAMRound(name string) bool { return strings.HasPrefix(name, "ram-round-") }
 
@@ -520,9 +505,74 @@ func isRAMRound(name string) bool { return strings.HasPrefix(name, "ram-round-")
 // written beside the spool.
 const spooledStateMax = 64 << 20
 
-// relayHvi runs hvi's migrate op and relays its components into the
-// stream and the spool. It returns hvi's reply line once hvi has sealed the
-// stream and fenced the guest.
+// roundFolder folds hvi's frames into rounds for the record and the
+// progress lines: hvi cuts a RAM round into frames of about 1 MiB, all
+// named after the round.
+type roundFolder struct {
+	ss      *streamSender
+	cur     *streamRound
+	started time.Time
+	printed time.Time
+	lastRAM time.Time
+	ramSeen bool
+}
+
+// begin starts the frame of component name, which ends the round before
+// it when it is another one.
+func (f *roundFolder) begin(name string) {
+	if f.cur != nil && f.cur.Name == name {
+		return
+	}
+	f.flush()
+	now := time.Now()
+	kind := "state"
+	if isRAMRound(name) {
+		kind = "ram"
+		f.lastRAM, f.ramSeen = now, true
+	} else if f.ramSeen && f.ss.stats.PausedAt.IsZero() {
+		// The first document after the RAM rounds: the round before it
+		// was the last, which hvi takes with the guest paused.
+		f.ss.stats.PausedAt = f.lastRAM.UTC()
+	}
+	f.cur = &streamRound{Kind: kind, Name: name}
+	f.started, f.printed = now, now
+}
+
+// add counts a frame of bytes, wire bytes on the wire.
+func (f *roundFolder) add(bytes, wire int64) {
+	f.cur.Bytes += bytes
+	f.cur.WireBytes += wire
+	if now := time.Now(); f.cur.Kind == "ram" && now.Sub(f.printed) >= progressEvery {
+		f.printed = now
+		f.ss.progress("%s: %s so far, %s/s", f.cur.Name, humanBytes(f.cur.Bytes),
+			humanBytes(perSec(f.cur.WireBytes, now.Sub(f.started).Seconds())))
+	}
+}
+
+// flush records the round in progress.
+func (f *roundFolder) flush() {
+	if f.cur != nil {
+		f.ss.endRound(*f.cur, f.started)
+		f.cur = nil
+	}
+}
+
+// relayFrame relays one of hvi's frames into the stream, and into also
+// when that is not nil, and folds it into its round.
+func (ss *streamSender) relayFrame(f *roundFolder, line []byte, hdr hviComponentHeader, body io.Reader,
+	also io.Writer) error {
+	f.begin(hdr.Component)
+	before := ss.sw.written()
+	if err := ss.sw.component(line, hdr, body, also); err != nil {
+		return err
+	}
+	f.add(hdr.Size, ss.sw.written()-before)
+	return nil
+}
+
+// relayHvi runs hvi's migrate op and relays its frames into the stream and
+// the spool. It returns hvi's reply line once hvi has sealed the stream and
+// fenced the guest.
 func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][]byte, error) {
 	m := ss.m
 	conn, br, err := hviStreamOp(ss.state.ControlSock, map[string]any{"op": "migrate", "then": hviThenFence,
@@ -533,61 +583,61 @@ func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][
 	defer func() { _ = conn.Close() }()
 	files := map[string][]byte{}
 	var kept int64
-	var lastRAM time.Time
-	ramSeen := false
-	_, line, err := readHviComponents("migrate", br, func(line []byte, hdr hviComponentHeader, body io.Reader) error {
-		started := time.Now()
+	folder := &roundFolder{ss: ss}
+	reply, line, err := readHviComponents("migrate", br, func(line []byte, hdr hviComponentHeader, body io.Reader) error {
 		if _, err := sp.bw.Write(append(append([]byte{}, line...), '\n')); err != nil {
 			return err
 		}
-		ram := isRAMRound(hdr.Component)
+		var also io.Writer = sp.bw
 		var keep *bytesBuffer
-		if !ram {
+		if !isRAMRound(hdr.Component) {
 			if kept+hdr.Size > spooledStateMax {
 				return fmt.Errorf("hvi's %s of %d bytes is not a RAM round and too large to keep", hdr.Component, hdr.Size)
 			}
 			kept += hdr.Size
 			keep = &bytesBuffer{}
-			if ramSeen && ss.stats.PausedAt.IsZero() {
-				// The first state component after the RAM rounds: the
-				// round before it was the last, taken inside the pause.
-				ss.stats.PausedAt = lastRAM.UTC()
-			}
-		} else {
-			lastRAM, ramSeen = started, true
-		}
-		before := ss.sw.written()
-		var also io.Writer = sp.bw
-		if keep != nil {
 			also = io.MultiWriter(sp.bw, keep)
 		}
-		if err := ss.sw.component(line, hdr, ss.metered(hdr.Component, hdr.Size, body), also); err != nil {
+		if err := ss.relayFrame(folder, line, hdr, body, also); err != nil {
 			return err
 		}
-		kind := "state"
-		if ram {
-			kind = "ram"
-		}
-		ss.endRound(streamRound{Kind: kind, Name: hdr.Component, Bytes: hdr.Size,
-			WireBytes: ss.sw.written() - before}, started)
 		if keep != nil {
-			files[hdr.Component] = keep.b
+			files[hdr.Component] = append(files[hdr.Component], keep.b...)
 			if hdr.Component == "manifest.json" {
 				ss.manifest = keep.b
 			}
 		}
 		return nil
 	})
+	folder.flush()
 	if err != nil {
 		return nil, nil, err
 	}
 	if ss.manifest == nil {
 		return nil, nil, errors.New("hvi sealed its migrate stream without a manifest.json")
 	}
+	ss.takeHviTimes(reply)
+	return line, files, nil
+}
+
+// takeHviTimes takes, from hvi's reply, when the pre-copy rounds ended and
+// when hvi sealed the stream, by this host's clock: closer to the pause than
+// what hull sees of the frames.
+func (ss *streamSender) takeHviTimes(reply *hviReply) {
+	var st struct {
+		PrecopyEnd int64 `json:"precopy_end_unix_ms"`
+		SealedAt   int64 `json:"sealed_at_unix_ms"`
+	}
+	if reply != nil && json.Unmarshal(reply.Stats, &st) == nil && st.PrecopyEnd > 0 {
+		ss.stats.PausedAt = time.UnixMilli(st.PrecopyEnd).UTC()
+		if st.SealedAt >= st.PrecopyEnd {
+			ss.stats.SealedMs = st.SealedAt - st.PrecopyEnd
+			return
+		}
+	}
 	if !ss.stats.PausedAt.IsZero() {
 		ss.stats.SealedMs = time.Since(ss.stats.PausedAt).Milliseconds()
 	}
-	return line, files, nil
 }
 
 // bytesBuffer collects what is written to it.
@@ -611,6 +661,7 @@ func (ss *streamSender) replayHvi(dir string) (json.RawMessage, error) {
 		return nil, fmt.Errorf("the spooled stream %s was never sealed: %w", dir, err)
 	}
 	br := bufio.NewReaderSize(f, 1<<20)
+	folder := &roundFolder{ss: ss}
 	for {
 		if _, err := br.Peek(1); errors.Is(err, io.EOF) {
 			break
@@ -623,27 +674,20 @@ func (ss *streamSender) replayHvi(dir string) (json.RawMessage, error) {
 		if err != nil {
 			return nil, fmt.Errorf("the spooled stream: %w", err)
 		}
-		started := time.Now()
-		before := ss.sw.written()
 		var keep *bytesBuffer
 		var also io.Writer
 		if hdr.Component == "manifest.json" {
 			keep = &bytesBuffer{}
 			also = keep
 		}
-		if err := ss.sw.component(line, hdr, ss.metered(hdr.Component, hdr.Size, br), also); err != nil {
+		if err := ss.relayFrame(folder, line, hdr, br, also); err != nil {
 			return nil, fmt.Errorf("the spooled stream: %w", err)
 		}
-		kind := "state"
-		if isRAMRound(hdr.Component) {
-			kind = "ram"
-		}
-		ss.endRound(streamRound{Kind: kind, Name: hdr.Component, Bytes: hdr.Size,
-			WireBytes: ss.sw.written() - before}, started)
 		if keep != nil {
 			ss.manifest = keep.b
 		}
 	}
+	folder.flush()
 	if ss.manifest == nil {
 		return nil, errors.New("the spooled stream has no manifest.json")
 	}
