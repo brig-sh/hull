@@ -177,6 +177,41 @@ kernel, and an `assets pull` against one store cannot change what a run using
 another store boots. That was a real defect once. An unrelated command in
 another shell could change what a CI job booted.
 
+### A profile's kernel
+
+`hull run --hypervisor hvi --profile portable-arm64-v1` boots a different
+kernel: one built with the `hvi-time` clock driver, which keeps time on
+hvi's portable machine (see [backends.md](backends.md#machine-profiles)).
+It is a variant of the bundle. It lives in a directory named after the
+profile inside the asset directory, `<store>/assets/portable-arm64-v1/Image`,
+with its own `provenance.json`, and the profile boots it with the default
+bundle's `container-initrd`. Each file is checked against the record in its
+own directory before a boot.
+
+No artifact carries that kernel yet, so it comes from a local file for now:
+
+```bash
+HULL_PORTABLE_KERNEL=/path/to/Image hull assets pull --profile portable-arm64-v1
+hull assets show --profile portable-arm64-v1   # where it came from, and its sha256
+hull assets dir --profile portable-arm64-v1    # the variant directory, for scripts
+hull assets pull --profile portable-arm64-v1 REF   # or from an OCI artifact
+```
+
+| Source | How | Record |
+|---|---|---|
+| `HULL_PORTABLE_KERNEL=PATH` | copied into the variant directory and hashed on the way in | `ref` is `file://PATH`, `digest` the file's sha256, no verified digest |
+| `HULL_PORTABLE_KERNEL_REF=REF`, or `REF` on the command line | fetched like the bundle: the same reference check, signature check and staged writes; the artifact must carry a layer titled `Image` | as for the bundle |
+
+Setting both variables is refused. `HULL_VERIFY=require` refuses a local
+file, since no signature covers it. The first `hull run` with the profile
+installs the kernel from whichever variable is set if none is installed; an
+installed kernel is never replaced unasked, so after rebuilding the file run
+`hull assets pull --profile portable-arm64-v1 --force`. A run whose
+configured source differs from the recorded one boots the installed kernel
+and says so in a warning. The variant follows `HULL_BOOT_ASSETS` and
+`BRIG_BOOT_ASSETS` like the rest of the asset directory. The profile is
+arm64 only.
+
 ### Offline preparation
 
 ```bash
