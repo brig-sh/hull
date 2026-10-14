@@ -638,3 +638,64 @@ func TestMoveLedgerAnswersAfterRm(t *testing.T) {
 	}
 	abortRefusedThenCommitted(t, f, peer)
 }
+
+// Once the source has sent the commit, a destination with no record of the
+// move, or a reply that is not its record of this move aborted, leaves the
+// source fenced: the commit may have run there.
+func TestMoveAbortWhileCommittingNeedsTheAbortedRecord(t *testing.T) {
+	f := newMoveFixture(t, true)
+	peer := loseCommitAck(t, f)
+	rec := f.srcRecord(t)
+	restored := 0
+	localRestore = func(*store.Store, string) error { restored++; return nil }
+	for _, answer := range []*migrateReply{
+		{OK: false, Code: codeUnknownTxID, Error: "no move is recorded here"},
+		{OK: true},
+		{OK: true, Record: &migrationRecord{TxID: rec.TxID, Epoch: rec.Epoch + 1, State: migAborted}},
+		{OK: true, Record: &migrationRecord{TxID: rec.TxID, Epoch: rec.Epoch, State: dstRestoredPaused}},
+	} {
+		peer.answer["migrate-abort"] = answer
+		err := sourceAbort(context.Background(), f.src, f.name, &bytes.Buffer{}, peer)
+		if err == nil || !strings.Contains(err.Error(), "stays fenced") {
+			t.Errorf("abort answered %+v: %v", answer, err)
+		}
+		if restored != 0 || f.vm.stopped || f.srcRecord(t).State != srcCommitting {
+			t.Fatalf("abort answered %+v brought the source back", answer)
+		}
+	}
+	// The destination's own answer, from its ledger, is "running".
+	delete(peer.answer, "migrate-abort")
+	if err := sourceAbort(context.Background(), f.src, f.name, &bytes.Buffer{}, peer); err == nil ||
+		!strings.Contains(err.Error(), "cannot be aborted") {
+		t.Errorf("abort: %v", err)
+	}
+}
+
+// Before the commit was sent, a destination that has no record of the move
+// cannot run it, and the abort goes ahead: here after the fence, with the
+// destination's store lost.
+func TestMoveAbortBeforeTheCommitAcceptsAnUnknownMove(t *testing.T) {
+	f := newMoveFixture(t, false)
+	peer := newLocalPeer(f.dst)
+	_ = sourceMigrate(context.Background(), f.src, f.name, f.options(true), peer)
+	if got := f.srcRecord(t).State; got != srcTransferred {
+		t.Fatalf("source is %s", got)
+	}
+	if err := removeInstanceIn(f.dst, f.name, true); err == nil {
+		t.Fatal("rm of an arriving instance was allowed")
+	}
+	if err := f.dst.DeleteInstance(f.name); err != nil {
+		t.Fatal(err)
+	}
+	if r := destAbort(f.dst, f.srcRecord(t).TxID); r.OK || r.Code != codeUnknownTxID {
+		t.Fatalf("destination abort of an unknown move: %+v", r)
+	}
+	restored := 0
+	localRestore = func(*store.Store, string) error { restored++; return nil }
+	if err := sourceAbort(context.Background(), f.src, f.name, &bytes.Buffer{}, peer); err != nil {
+		t.Fatal(err)
+	}
+	if restored != 1 || f.srcRecord(t).State != migAborted {
+		t.Errorf("restored %d, source %s", restored, f.srcRecord(t).State)
+	}
+}
