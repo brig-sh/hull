@@ -434,3 +434,55 @@ func TestAwaitRestoredIgnoresTheSourcesStalePid(t *testing.T) {
 		t.Errorf("result = %q, %v, want restored: the source's dead pid ended the wait", got, err)
 	}
 }
+
+// A checkpoint kept as hvi's stream restores with `--from-stream -`, its
+// stream on stdin: a move's restore reads the stream it is being sent, and
+// a source that takes back a streamed move reads its sealed spool; a spool
+// that was never sealed is refused, and a bundle directory restores as it
+// always did.
+func TestRestoreFromAStream(t *testing.T) {
+	streamed := []string{"/bin/hvi", "restore", "--from-stream", "-", "--disk", "/d", "--checkpoint-root", "/r"}
+	if !isStreamRestore(streamed) || isStreamRestore([]string{"/bin/hvi", "boot", "--disk", "/d"}) ||
+		isStreamRestore([]string{"/bin/hvi", "restore", "--from", "/b", "--disk", "/d"}) {
+		t.Fatal("isStreamRestore")
+	}
+	argv, err := hviRestoreArgv(streamed, "/b", "/c", "/p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(streamRestoreArgv(argv), " "); got !=
+		"/bin/hvi restore --from-stream - --disk /d --checkpoint-root /r --control-sock /c --profile-out /p" {
+		t.Fatalf("argv %s", got)
+	}
+
+	dir := t.TempDir()
+	incoming := &store.InstanceState{CmdLine: streamed, Migration: &store.MigrationState{
+		State: store.MigrationIncoming, BundleDir: dir, MoveTxID: "t"}}
+	if f, err := restoreStreamSource(incoming, hviRestoreOptions{move: "t", paused: true, detach: true}); err != nil || f != os.Stdin {
+		t.Fatalf("a move's restore reads %v, %v", f, err)
+	}
+	if _, err := restoreStreamSource(incoming, hviRestoreOptions{move: "t", paused: true}); err == nil {
+		t.Fatal("a streamed move's restore in the foreground was allowed")
+	}
+
+	fenced := &store.InstanceState{CmdLine: []string{"/bin/hvi", "boot", "--disk", "/d"},
+		Migration: &store.MigrationState{State: store.MigrationFenced, BundleDir: dir}}
+	if f, err := restoreStreamSource(fenced, hviRestoreOptions{detach: true}); f != nil || err != nil {
+		t.Fatalf("a bundle directory reads %v, %v", f, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, spoolStream), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := restoreStreamSource(fenced, hviRestoreOptions{detach: true}); err == nil ||
+		!strings.Contains(err.Error(), "never sealed") {
+		t.Fatalf("an unsealed spool: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, spoolSealed), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := restoreStreamSource(fenced, hviRestoreOptions{detach: true})
+	if err != nil || f == nil || f.Name() != filepath.Join(dir, spoolStream) {
+		t.Fatalf("a sealed spool reads %v, %v", f, err)
+	}
+	_ = f.Close()
+}
