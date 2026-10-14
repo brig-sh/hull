@@ -42,28 +42,9 @@ const (
 	ckptError     = "error"
 )
 
-func instanceCheckpointDir(s *store.Store, id string) string {
-	return filepath.Join(s.InstanceDir(id), "checkpoint")
-}
-
-func checkpointCommand() *cli.Command {
-	return &cli.Command{
-		Name:  "checkpoint",
-		Usage: "checkpoint a running Vz instance (pause, save VM + disk state, resume)",
-		Flags: []cli.Flag{
-			&cli.IntFlag{
-				Name:  "timeout",
-				Value: 60,
-				Usage: "seconds to wait for the checkpoint to complete",
-			},
-		},
-		Action: func(ctx context.Context, cmd *cli.Command) error {
-			return checkpointInstance(ctx, cmd)
-		},
-	}
-}
-
-func checkpointInstance(_ context.Context, cmd *cli.Command) error {
+// vzCheckpointInstance is `hull checkpoint` for a Vz instance: vz-runner
+// saves the machine state and clones the disk on SIGUSR1.
+func vzCheckpointInstance(_ context.Context, cmd *cli.Command) error {
 	args := cmd.Args()
 	if args.Len() == 0 {
 		return errors.New("instance ID required")
@@ -297,37 +278,9 @@ func freshCheckpointFailure(ckptDir string, started time.Time) (string, bool) {
 	return reason, true
 }
 
-func restoreCommand() *cli.Command {
-	return &cli.Command{
-		Name:  "restore",
-		Usage: "restore a stopped Vz instance from its checkpoint",
-		Flags: []cli.Flag{
-			&cli.BoolFlag{
-				Name:    "detach",
-				Aliases: []string{"d"},
-				Usage:   "run in background",
-			},
-			&cli.IntFlag{
-				Name:  "stop-grace",
-				Value: 10,
-				Usage: "seconds vz-runner waits for the guest to answer a stop request before forcing",
-			},
-			&cli.BoolFlag{
-				Name:  "wait-ip",
-				Usage: "with --detach and NAT networking, wait for the DHCP lease and record the IP before returning",
-			},
-			&cli.StringFlag{
-				Name:  "gateway-sock",
-				Usage: "re-join the user-mode network gateway at this control socket (required if the instance ran on the gateway)",
-			},
-		},
-		Action: func(ctx context.Context, cmd *cli.Command) error {
-			return restoreInstance(ctx, cmd)
-		},
-	}
-}
-
-func restoreInstance(ctx context.Context, cmd *cli.Command) error {
+// vzRestoreInstance is `hull restore` for a Vz instance: vz-runner is started
+// again on the same command line with --restore.
+func vzRestoreInstance(ctx context.Context, cmd *cli.Command) error {
 	args := cmd.Args()
 	if args.Len() == 0 {
 		return errors.New("instance ID required")

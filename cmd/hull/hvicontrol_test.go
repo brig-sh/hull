@@ -78,7 +78,10 @@ func newStubHvi(t *testing.T, handle func(req map[string]any) stubAnswer) *stubH
 				case <-done:
 					return
 				}
-				_, _ = conn.Write([]byte(ans.reply + "\n"))
+				// An empty reply is a hangup with no answer at all.
+				if ans.reply != "" {
+					_, _ = conn.Write([]byte(ans.reply + "\n"))
+				}
 			}()
 		}
 	}()

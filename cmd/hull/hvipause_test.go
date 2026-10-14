@@ -29,12 +29,17 @@ import (
 func fakeHviInstance(t *testing.T, s *store.Store, id, sock string) (*store.InstanceState, <-chan struct{}) {
 	t.Helper()
 	pid, done := startProcessAs(t, "hvi", "/bin/sleep", "30")
-	if _, err := s.CreateInstance(id); err != nil {
+	dir, err := s.CreateInstance(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := hviCheckpointRoot(dir)
+	if err != nil {
 		t.Fatal(err)
 	}
 	state := &store.InstanceState{
 		ID: id, Status: "running", PID: pid, Backend: "hvi", ControlSock: sock,
-		CmdLine: []string{"/x/hvi", "boot", "--kernel", "/k", "--disk", "/r.img"},
+		CmdLine: []string{"/x/hvi", "boot", "--kernel", "/k", "--disk", "/r.img", "--checkpoint-root", root},
 	}
 	if err := s.SaveInstance(state); err != nil {
 		t.Fatal(err)

@@ -42,8 +42,9 @@ func requireRunningHvi(state *store.InstanceState, verb string) error {
 		return fmt.Errorf("instance %s is not running", state.ID)
 	}
 	if state.ControlSock == "" {
-		return fmt.Errorf("instance %s was started without a control socket, so it can only be "+
-			"stopped; run it again with this version of hull", state.ID)
+		return fmt.Errorf("instance %s has no control socket, so it can only be stopped: the hvi "+
+			"it runs (%s) predates the socket, or an older hull started it. Run it again with an "+
+			"hvi that takes --control-sock", state.ID, state.CmdLine[0])
 	}
 	return nil
 }
@@ -128,17 +129,26 @@ func hviPauseResume(cmd *cli.Command, op string) error {
 	if cmd.Args().Len() == 0 {
 		return errors.New("instance ID required")
 	}
-	id := cmd.Args().First()
 	s, err := globalStore(cmd)
 	if err != nil {
 		return err
 	}
+	return hviPauseResumeIn(s, cmd.Args().First(), op)
+}
+
+// hviPauseResumeIn sends op, pause or resume, to instance id's hvi.
+func hviPauseResumeIn(s *store.Store, id, op string) error {
 	state, err := s.GetInstance(id)
 	if err != nil {
 		return fmt.Errorf("instance not found: %s", id)
 	}
 	if err := requireRunningHvi(state, op); err != nil {
 		return err
+	}
+	if op == "resume" {
+		if err := markRestoredGuestRunning(s, id); err != nil {
+			return err
+		}
 	}
 	reply, err := hviOp(state.ControlSock, op)
 	switch {
