@@ -434,8 +434,12 @@ func destTakeImage(s *store.Store, ref, digest string) *migrateReply {
 	if !s.ImageComplete(digest) {
 		return refuse(codeFailed, fmt.Errorf("pulled %s, which is not image %s any more", ref, digest))
 	}
-	return &migrateReply{OK: true}
+	return &migrateReply{OK: true, Code: codePulled}
 }
+
+// codePulled is migrate-take-image's answer when it pulled the image, not
+// found it there.
+const codePulled = "pulled"
 
 // prepareOptions are the flags of `hull migrate-prepare`.
 type prepareOptions struct {
@@ -523,13 +527,15 @@ func prepareDestination(ctx context.Context, s *store.Store, state *store.Instan
 		if img, err := s.GetImage(state.ImageDigest); err == nil {
 			ref = img.Ref
 		}
-		_, err := p.call(ctx, "migrate-take-image", []string{"--digest", state.ImageDigest, "--ref", ref}, nil)
+		reply, err := p.call(ctx, "migrate-take-image", []string{"--digest", state.ImageDigest, "--ref", ref}, nil)
 		switch {
 		case err != nil:
 			step(prepareStep{What: "image " + digestHead(state.ImageDigest), Result: "failed", Detail: refusalDetail(err)})
+		case reply.Code == codePulled:
+			step(prepareStep{What: "image " + digestHead(state.ImageDigest), Result: "sent",
+				Detail: "pulled there as " + ref, Seconds: time.Since(started).Seconds()})
 		default:
-			step(prepareStep{What: "image " + digestHead(state.ImageDigest), Result: "held",
-				Seconds: time.Since(started).Seconds()})
+			step(prepareStep{What: "image " + digestHead(state.ImageDigest), Result: "held"})
 		}
 	}
 
