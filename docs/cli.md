@@ -203,7 +203,7 @@ The destination's verbs each print one JSON object on stdout:
 
 | Verb | Flags | What it does |
 |---|---|---|
-| `migrate-probe` | `--name`, `--hvi`, `--gateway-sock` | reports hull and hvi versions, whether hvi takes the control flags and `--profile` and has `restore`, the hypervisor, free space, whether the name is taken, and whether the gateway answers |
+| `migrate-probe` | `--name`, `--hvi`, `--gateway-sock` | reports hull and hvi versions, whether hvi takes the control flags and `--profile` (a stand-in for "can restore a portable bundle"; see [migration.md](migration.md#usage)) and has `restore`, the hypervisor, free space, whether the name is taken, and whether the gateway answers |
 | `migrate-receive` | `--txid`, `--name`, `--reserve` | with `--reserve`, claims the name (a JSON request on stdin); without, reads the move stream on stdin and ends `verified` |
 | `migrate-prepare` | `--txid` | restores the received checkpoint paused |
 | `migrate-commit` | `--txid`, `--epoch` | records `running`, then resumes the guest |
