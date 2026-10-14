@@ -679,11 +679,14 @@ func destCommit(s *store.Store, txid string, epoch uint64) *migrateReply {
 
 // destAbort is migrate-abort: refused once the move has committed here;
 // otherwise it records aborted first (so a commit that arrives later is
-// refused), then stops any paused VM the move restored, keeps the record in
-// the ledger and frees the name. A move this store has no record of is
-// refused with code unknown_txid: whether that is enough for the source to
-// run the guest again depends on whether it ever sent the commit, which
-// only the source knows.
+// refused), keeps the record in the ledger, then stops any paused VM the
+// move restored and frees the name. It answers ok only once all of that is
+// done: a source that hears ok runs the guest again, so a copy left here
+// that something could still resume is a refusal, and running the abort
+// again finishes the job. A move this store has no record of is refused
+// with code unknown_txid: whether that is enough for the source to run the
+// guest again depends on whether it ever sent the commit, which only the
+// source knows.
 func destAbort(s *store.Store, txid string) *migrateReply {
 	rec, path, unlock, no := destRecord(s, txid)
 	if no != nil {
@@ -693,29 +696,46 @@ func destAbort(s *store.Store, txid string) *migrateReply {
 		defer unlock()
 	}
 	switch rec.State {
-	case migAborted:
-		return &migrateReply{OK: true, Record: rec}
 	case dstRunning:
 		return refuseWith(codeRunning, fmt.Errorf("move %s committed here and %s runs here, at epoch %d",
 			txid, rec.Name, rec.Epoch), rec)
+	case migAborted:
+		if path != s.InstanceMigrationRecord(rec.Name) {
+			// From the ledger: the instance is gone already.
+			return &migrateReply{OK: true, Record: rec}
+		}
+	default:
+		if err := rec.advance(path, migAborted); err != nil {
+			return refuseWith(codeFailed, err, rec)
+		}
 	}
-	if err := rec.advance(path, migAborted); err != nil {
-		return refuseWith(codeFailed, err, rec)
+	// The ledger before the name is freed: once the instance directory is
+	// gone, it is what refuses a late commit.
+	if err := writeMoveLedger(s, rec, migAborted); err != nil {
+		return refuseWith(codeFailed, fmt.Errorf("move %s is aborted here, but recording it in the ledger "+
+			"failed: %w; run the abort again", txid, err), rec)
 	}
-	if err := os.MkdirAll(s.MigrationTombstoneDir(), 0o700); err == nil {
-		_ = writeMigrationRecord(filepath.Join(s.MigrationTombstoneDir(), txid+".json"), rec)
+	err := destCleanup(s, rec.Name)
+	if err == nil {
+		if _, serr := os.Stat(s.InstanceDir(rec.Name)); serr == nil {
+			err = errors.New("its directory is still there")
+		}
 	}
-	var cleanup error
-	if _, err := s.GetInstance(rec.Name); err == nil {
-		cleanup = removeInstanceIn(s, rec.Name, true)
-	} else {
-		cleanup = s.DeleteInstance(rec.Name)
+	if err != nil {
+		return refuseWith(codeFailed, fmt.Errorf("move %s is aborted here, but removing %s failed: %w; "+
+			"run the abort again", txid, rec.Name, err), rec)
 	}
-	reply := &migrateReply{OK: true, Record: rec}
-	if cleanup != nil {
-		reply.Error = fmt.Sprintf("aborted, but removing %s failed: %v", rec.Name, cleanup)
+	return &migrateReply{OK: true, Record: rec}
+}
+
+// destCleanup removes what an aborted move left of instance name: the VM
+// its restore started, if any, and the directory. A variable so the tests
+// can make it fail.
+var destCleanup = func(s *store.Store, name string) error {
+	if _, err := s.GetInstance(name); err == nil {
+		return removeInstanceIn(s, name, true)
 	}
-	return reply
+	return s.DeleteInstance(name)
 }
 
 // writeMoveLedger writes rec, in state, to <store>/migrations/<txid>.json:

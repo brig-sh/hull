@@ -430,6 +430,12 @@ func moveRefusal(s *store.Store, id, verb string) error {
 	case rec.Role == roleSource && rec.State != migAborted:
 		return fmt.Errorf("instance %s is being moved to %s (move %s, %s): no %s until the move "+
 			"commits, or `hull migrate --abort %s` ends it", id, rec.Peer, rec.TxID, rec.State, verb, rec.TxID)
+	case rec.Role == roleDestination && rec.State == migAborted && verb != "rm":
+		// The abort's cleanup did not finish: whatever is left may be the
+		// restored, paused guest, which the source now runs again.
+		return fmt.Errorf("instance %s is what is left here of move %s from %s, which was aborted: no %s. "+
+			"`hull migrate-abort --txid %s` here, or `hull rm --force %s`, removes it", id, rec.TxID, rec.Peer,
+			verb, rec.TxID, id)
 	case rec.Role == roleDestination && rec.State != dstRunning && rec.State != migAborted:
 		return fmt.Errorf("instance %s is arriving from %s (move %s, %s): only the move's commit "+
 			"runs it, and `hull migrate --abort %s` on the source ends it", id, rec.Peer, rec.TxID,
