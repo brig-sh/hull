@@ -991,3 +991,33 @@ func TestMoveAbortAfterALostFenceReply(t *testing.T) {
 		t.Errorf("instance migration %+v", m)
 	}
 }
+
+// A txid given to --abort or --status names that move, not whatever move the
+// instance holds now: after a move on, the first move's txid is only in the
+// ledger, and resolving it to the instance would act on the second move.
+func TestMoveTxIDArgumentNamesThatMove(t *testing.T) {
+	f := newMoveFixture(t, true)
+	if err := sourceMigrate(context.Background(), f.src, f.name, f.options(false), newLocalPeer(f.dst)); err != nil {
+		t.Fatal(err)
+	}
+	first := f.srcRecord(t).TxID
+	// The move on stops before the commit: c cannot restore.
+	c := newLocalPeer(shortStore(t))
+	c.answer["migrate-prepare"] = &migrateReply{OK: false, Code: codeRestoreRefused, Error: "no restore"}
+	on := f.options(false)
+	on.to, on.remote.Target = "pm@c", "pm@c"
+	_ = sourceMigrate(context.Background(), f.dst, f.name, on, c)
+	second, err := readMigrationRecord(f.dst.InstanceMigrationRecord(f.name))
+	if err != nil || second.State != srcTransferred {
+		t.Fatalf("the move on: %+v %v", second, err)
+	}
+	if _, err := moveInstanceName(f.dst, first); err == nil || !strings.Contains(err.Error(), "migrate-status") {
+		t.Errorf("the first move's txid resolved to the instance: %v", err)
+	}
+	if name, err := moveInstanceName(f.dst, second.TxID); err != nil || name != f.name {
+		t.Errorf("the second move's txid: %q %v", name, err)
+	}
+	if name, err := moveInstanceName(f.dst, f.name); err != nil || name != f.name {
+		t.Errorf("the name: %q %v", name, err)
+	}
+}

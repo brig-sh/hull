@@ -113,10 +113,17 @@ func migrateCommand() *cli.Command {
 }
 
 // moveInstanceName resolves the argument of --abort or --status: a move's
-// txid recorded in this store, or an instance name.
+// txid recorded in this store, or an instance name. A txid must name the
+// move the instance holds now: one found only in the ledger, or one the
+// instance has since been moved on from, is not that instance's move, and
+// acting on the instance's current move instead would act on another one.
 func moveInstanceName(s *store.Store, arg string) (string, error) {
 	if txidPattern.MatchString(arg) {
-		if rec, _, err := findMigrationByTxID(s, arg); err == nil {
+		if rec, path, err := findMigrationByTxID(s, arg); err == nil {
+			if path != s.InstanceMigrationRecord(rec.Name) {
+				return "", fmt.Errorf("move %s ended here as its %s (%s) and no instance holds it now; "+
+					"`hull migrate-status --txid %s` prints its record", arg, rec.Role, rec.State, arg)
+			}
 			return rec.Name, nil
 		}
 	}
