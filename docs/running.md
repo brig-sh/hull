@@ -87,9 +87,18 @@ inspect or exec into.
 hull ps
 ```
 
-Columns are ID, STATUS, EXIT, PID, IP and CREATED. `hull ps` reconciles as it
-prints: a record marked running whose process is gone is rewritten to stopped.
-There is no JSON mode.
+Columns are ID, STATUS, EXIT, PID, IP, CREATED, VM and CHECKPOINT. `hull ps`
+reconciles as it prints: a record marked running whose process is gone is
+rewritten to stopped. There is no JSON mode.
+
+STATUS says whether the VMM process is alive. For an hvi instance, VM is what
+the VM itself reports over its control socket: `running`, `paused`, `fenced`
+or `restored-paused`, `?` if hvi did not answer within half a second, and `-`
+for any other instance. A paused or fenced instance shows STATUS `running` and
+runs nothing; `hull exec` refuses it and says how to get it running.
+CHECKPOINT is the record's migration state from the last `hull checkpoint` or
+`hull restore` (see [checkpoint-restore.md](checkpoint-restore.md)), or `-`.
+`hull inspect` prints the VM column as `vmState`.
 
 ```bash
 hull inspect "$ID"        # always JSON

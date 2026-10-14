@@ -332,6 +332,17 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	if err := checkUnixSocketPath("agent", s.InstanceAgentSocket(instanceName)); err != nil {
 		return err
 	}
+	// hvi's control socket is two bytes longer than the agent's, so a name
+	// that passes the check above can still fail it, and checked only where
+	// it is added, that failure comes after the pull, the unpack and the
+	// block disk. The backend is only certain once the image's annotation
+	// is read; checked here when the flag or the platform default already
+	// says hvi, and again where the socket is added.
+	if early, _ := selectHypervisor(hypervisorOverride, nil, defaultHypervisor); early == string(hypervisors.HviVmm) {
+		if err := checkUnixSocketPath("control", s.InstanceControlSocket(instanceName)); err != nil {
+			return err
+		}
+	}
 
 	// Track image digest (will be set based on whether we use local bundle or pull from registry)
 	var imageDigest string
@@ -1476,6 +1487,21 @@ exec %s "$@"
 		}
 	}
 
+	// Every hvi instance gets a control socket and a machine profile, the
+	// way every Vz instance gets a state dir: pause, checkpoint and a
+	// graceful stop all go through the socket, and a run started without one
+	// can only be signalled. Both live in the 0700 instance directory, since
+	// the socket answers anyone who can connect to it.
+	var controlSock, profilePath string
+	if vmmType == hypervisors.HviVmm {
+		controlSock = s.InstanceControlSocket(instanceName)
+		profilePath = s.InstanceProfilePath(instanceName)
+		if err := checkUnixSocketPath("control", controlSock); err != nil {
+			return err
+		}
+		cmdArgs = append(cmdArgs, "--control-sock", controlSock, "--profile-out", profilePath)
+	}
+
 	state := &store.InstanceState{
 		ID:          instanceName,
 		ImageDigest: imageDigest,
@@ -1484,6 +1510,8 @@ exec %s "$@"
 		BundleDir:   bundleDir,
 		MAC:         mac,
 		Backend:     string(vmmType),
+		ControlSock: controlSock,
+		ProfilePath: profilePath,
 	}
 	started, err := launchVMM(ctx, cmd, s, state, cmdArgs, append(gatewayFiles, shareFiles...), vmmType, detach, netMode, gatewayIP)
 	instanceStarted = started

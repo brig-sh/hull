@@ -54,8 +54,20 @@ func inspectInstance(ctx context.Context, cmd *cli.Command) error {
 	}
 
 	// An instance name can carry a C1 control; printJSON keeps it off the
-	// terminal.
-	return printJSON(os.Stdout, state)
+	// terminal. vmState is hvi's own answer for a running hvi instance:
+	// "status" says the VMM is alive, not that its guest runs.
+	return printJSON(os.Stdout, inspectView(state))
+}
+
+// inspectedInstance is the record as inspect prints it, with the VM's live
+// state alongside.
+type inspectedInstance struct {
+	*store.InstanceState
+	VMState string `json:"vmState,omitempty"`
+}
+
+func inspectView(state *store.InstanceState) inspectedInstance {
+	return inspectedInstance{InstanceState: state, VMState: hviVMState(state)}
 }
 
 // instanceReadError reports a GetInstance failure.
