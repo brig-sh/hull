@@ -298,6 +298,31 @@ func TestRunRefusesAKernelThatIsNotTheProfiles(t *testing.T) {
 	}
 }
 
+// A portable run on an hvi that takes --profile but not the control flags
+// is refused: it would be a portable instance that can never be
+// checkpointed or moved.
+func TestRunRefusesAProfileWithoutTheControlSocket(t *testing.T) {
+	requireArm64(t)
+	storeDir, bundle, argvFile := runProfileEnv(t, false)
+	err := hullRun(t, storeDir, "--name", "nosock", "--profile", bootassets.PortableArm64V1, bundle)
+	if err == nil || !strings.Contains(err.Error(), "--control-sock") {
+		t.Fatalf("err = %v, want the refusal naming the control socket", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(storeDir, "instances", "nosock")); !os.IsNotExist(statErr) {
+		t.Fatalf("the refused run left its instance directory: %v", statErr)
+	}
+	if _, statErr := os.Stat(argvFile); !os.IsNotExist(statErr) {
+		t.Fatal("the refused run started hvi")
+	}
+	// A native run on the same hvi still boots, without the socket.
+	if err := hullRun(t, storeDir, "--name", "nat", bundle); err != nil {
+		t.Fatal(err)
+	}
+	if argv := recordedArgv(t, argvFile); slices.Contains(argv, "--control-sock") {
+		t.Fatalf("the native run passed --control-sock to an hvi that takes none: %v", argv)
+	}
+}
+
 // `assets pull --profile` without --force does not call a kernel that fails
 // its record "already present": it says what is wrong and names the pull
 // that replaces it.
