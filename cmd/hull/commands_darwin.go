@@ -26,6 +26,8 @@ func platformCommands() []*cli.Command {
 		execCommand(),
 		psCommand(),
 		stopCommand(),
+		pauseCommand(),
+		resumeCommand(),
 		checkpointCommand(),
 		restoreCommand(),
 		rmCommand(),

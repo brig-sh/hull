@@ -25,7 +25,8 @@ const appUsage = "container CLI for hvi sandboxes on Linux/KVM"
 
 // platformCommands is the Linux verb set: what it takes to run an hvi sandbox
 // on KVM, and what brig calls to drive one (run, exec, ps, inspect, logs,
-// stop, rm, assets dir, network-gateway).
+// stop, rm, assets dir, network-gateway), plus pause and resume over hvi's
+// control socket.
 //
 // Left out, because they drive something Linux does not have:
 //   - checkpoint and restore: vz-runner's saved-state files, which are
@@ -40,6 +41,8 @@ func platformCommands() []*cli.Command {
 		execCommand(),
 		psCommand(),
 		stopCommand(),
+		pauseCommand(),
+		resumeCommand(),
 		rmCommand(),
 		logsCommand(),
 		inspectCommand(),
