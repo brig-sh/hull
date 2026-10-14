@@ -785,6 +785,17 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 		}
 	}
 
+	// Before the disk is built: a profile boots its own kernel, whichever
+	// way the run arrived at one.
+	profileKernelWhy := "takes its kernel from the image"
+	if cmd.Bool("no-boot-assets") {
+		profileKernelWhy = "has --no-boot-assets, so its kernel comes from the image"
+	}
+	if err := checkProfileKernel(cmd.String("store-dir"), profile, bootKernel, kernelPath,
+		profileKernelWhy); err != nil {
+		return err
+	}
+
 	// Determine rootfs mode: initrd file vs directory (virtiofs/9pfs/block)
 	initrdPath := ""
 	rootfsDir := ""

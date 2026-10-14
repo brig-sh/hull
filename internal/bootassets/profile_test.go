@@ -260,6 +260,33 @@ func TestReinstallCommand(t *testing.T) {
 	}
 }
 
+// VerifyProfileKernel goes by the bytes: the installed kernel and a copy of
+// it at another path pass, another kernel does not, and with no kernel
+// installed there is nothing to compare against.
+func TestVerifyProfileKernel(t *testing.T) {
+	store := profileEnv(t)
+	defaultDir := seedDefaultAssets(t, store)
+	copyOf := writeKernel(t, "portable kernel")
+	err := VerifyProfileKernel(store, PortableArm64V1, copyOf, "the copy")
+	if err == nil || !strings.Contains(err.Error(), "hull assets pull --profile") {
+		t.Fatalf("with no profile kernel installed: %v", err)
+	}
+	if err := ImportProfileKernel(store, PortableArm64V1, copyOf); err != nil {
+		t.Fatal(err)
+	}
+	installed := filepath.Join(defaultDir, PortableArm64V1, ProfileKernelName)
+	for _, path := range []string{installed, copyOf} {
+		if err := VerifyProfileKernel(store, PortableArm64V1, path, path); err != nil {
+			t.Errorf("%s: %v", path, err)
+		}
+	}
+	native := filepath.Join(defaultDir, KernelName())
+	err = VerifyProfileKernel(store, PortableArm64V1, native, "the default kernel")
+	if err == nil || !strings.Contains(err.Error(), "the default kernel is not the "+PortableArm64V1+" kernel") {
+		t.Fatalf("the default bundle's kernel: %v", err)
+	}
+}
+
 // fakeRegistry serves an OCI registry over plain http on loopback, and lets
 // the fetch take a kernel from it as a mirror the operator allowed.
 func fakeRegistry(t *testing.T) string {
