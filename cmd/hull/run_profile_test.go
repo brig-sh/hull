@@ -98,6 +98,9 @@ func runProfileEnv(t *testing.T, controlFlags bool) (storeDir, bundle, argvFile 
 		"case \"$1 $2\" in\n" +
 		"\"boot --checkpoint-root\") " + checkpointRoot + " ;;\n" +
 		"\"boot --profile\") echo 'error: --profile needs a name' >&2; exit 2 ;;\n" +
+		"\"boot --disk-base-sha256\") if [ -f '" + filepath.Join(bin, "knows-base") + "' ]; then " +
+		"echo 'error: --disk-base-sha256 needs a digest' >&2; else " +
+		"echo 'error: unknown boot arg \"--disk-base-sha256\"' >&2; fi; exit 2 ;;\n" +
 		"esac\n" +
 		"printf '%s\\n' \"$@\" > '" + argvFile + ".tmp' && mv '" + argvFile + ".tmp' '" + argvFile + "'\n"
 	if err := os.WriteFile(filepath.Join(bin, "hvi"), []byte(script), 0o755); err != nil {
@@ -341,5 +344,62 @@ func TestAssetsPullProfileReportsATamperedKernel(t *testing.T) {
 	err := app.Run(context.Background(), []string{"hull", "assets", "pull", "--profile", bootassets.PortableArm64V1})
 	if err == nil || !strings.Contains(err.Error(), "`hull assets pull --profile "+bootassets.PortableArm64V1+" --force`") {
 		t.Fatalf("err = %v, want the mismatch and the profile's pull", err)
+	}
+}
+
+// A run on a block rootfs keeps the image as built under the store's bases
+// by its digest before hvi starts, records it, and hands the digest to an
+// hvi that takes --disk-base-sha256; an hvi that does not is not given it.
+func TestRunKeepsTheBase(t *testing.T) {
+	storeDir, bundle, argvFile := runProfileEnv(t, true)
+	if err := hullRun(t, storeDir, "--name", "b1", bundle); err != nil {
+		t.Fatal(err)
+	}
+	argv := recordedArgv(t, argvFile)
+	if slices.Contains(argv, hviDiskBaseFlag) {
+		t.Fatalf("an hvi without %s was given it: %v", hviDiskBaseFlag, argv)
+	}
+	state := instanceState(t, storeDir, "b1")
+	if state.Base == nil || !state.Base.FromBoot {
+		t.Fatalf("state.json has no base from the boot: %+v", state.Base)
+	}
+	s, err := store.New(storeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	disk := filepath.Join(storeDir, "instances", "b1", "bundle", "rootfs.ext4")
+	sum, _, err := diskDigestFile(disk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum != state.Base.SHA256 || !baseHeld(s, sum) {
+		t.Fatalf("base %s recorded, the disk hashes %s, held %v", state.Base.SHA256, sum, baseHeld(s, sum))
+	}
+
+	if err := os.WriteFile(filepath.Join(filepath.Dir(argvFile), "knows-base"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(argvFile)
+	if err := hullRun(t, storeDir, "--name", "b2", bundle); err != nil {
+		t.Fatal(err)
+	}
+	argv = recordedArgv(t, argvFile)
+	state = instanceState(t, storeDir, "b2")
+	i := slices.Index(argv, hviDiskBaseFlag)
+	if state.Base == nil || i < 0 || i+1 >= len(argv) || argv[i+1] != state.Base.SHA256 {
+		t.Fatalf("the hvi argv does not carry the recorded base %+v: %v", state.Base, argv)
+	}
+	// The restore command line drops the flag: a restored disk has moved
+	// on from the base.
+	if _, err := hviRestoreArgv(argv[:0:0], "", "", ""); err == nil {
+		t.Fatal("an empty command line mapped")
+	}
+	full := append([]string{"hvi"}, argv...)
+	restore, err := hviRestoreArgv(full, "/b", "/c", "/p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(restore, hviDiskBaseFlag) {
+		t.Fatalf("the restore argv carries the base: %v", restore)
 	}
 }

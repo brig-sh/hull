@@ -1530,6 +1530,7 @@ exec %s "$@"
 	// the flags would refuse to boot with them, so it runs without: it can
 	// still be stopped, and pause and checkpoint say why they cannot.
 	var controlSock, profilePath string
+	var instanceBase *store.BaseState
 	if vmmType == hypervisors.HviVmm && len(cmdArgs) > 0 {
 		takesFlags, err := hviBootTakesControlFlags(cmdArgs[0])
 		if err != nil {
@@ -1547,6 +1548,15 @@ exec %s "$@"
 			}
 			cmdArgs = append(cmdArgs, "--control-sock", controlSock, "--profile-out", profilePath,
 				"--checkpoint-root", root)
+			// A checkpointable guest on a block rootfs can be moved, and a
+			// move sends only what differs from the image as built when the
+			// destination holds that image: keep it now, before the guest
+			// writes to its copy.
+			if rootfsDiskImage != "" {
+				base, baseArgs := keepRunBase(s, cmdArgs[0], rootfsDiskImage)
+				instanceBase = base
+				cmdArgs = append(cmdArgs, baseArgs...)
+			}
 		} else if profile != "" {
 			// A profile exists to be checkpointed and moved, and without
 			// the control socket the instance never can be.
@@ -1585,6 +1595,7 @@ exec %s "$@"
 		ControlSock: controlSock,
 		ProfilePath: profilePath,
 		Profile:     profile,
+		Base:        instanceBase,
 	}
 	started, err := launchVMM(ctx, cmd, s, state, cmdArgs, append(gatewayFiles, shareFiles...), vmmType, detach, netMode, gatewayIP)
 	instanceStarted = started
