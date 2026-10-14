@@ -192,12 +192,14 @@ sets.
 ├── volumes/<project>_<name>/     compose named volumes
 ├── compose/<project>.json        compose project state, plus its gateway sockets and log
 ├── migrations/<txid>.json       the ledger of moves that committed or aborted here as their destination
+├── bases/<digest>.ext4          0400: block rootfs images as built, before the guest wrote, by disk digest
+├── bases/kernels/<sha256>.Image a profile kernel a prepare sent here, which its install record names
 └── instances/<id>/
     ├── state.json               0600
     ├── bundle/                  config.json plus the rootfs symlink or image
     ├── log                      0600, detached runs only
     ├── checkpoint/              vz: machine-id, vm.vzstate, rootfs.img, latest.json
-    │                            hvi: latest.json, <txid>/ (the bundle); hvi's --checkpoint-root
+    │                            hvi: latest.json, <txid>/ (the bundle, or a streamed move's spool); hvi's --checkpoint-root
     ├── control.sock             hvi only: the control socket (pause, checkpoint, stop)
     ├── profile.json             hvi only: the machine profile hvi writes at boot
     ├── migration.lock           hvi only: held by one checkpoint or restore at a time
@@ -512,3 +514,14 @@ states (`migrating`, `migrated`, `incoming`); `state.json` gains
 or aborted on it as `<store>/migrations/<txid>.json`, which neither `hull rm`
 nor a later move removes; an abort removes the instance directory. See
 [migration.md](migration.md#records).
+
+An `hvi` run on a block rootfs with a control socket keeps its disk image,
+as built and before the guest writes to it, under `<store>/bases/` as a
+read-only file named by its disk digest, and records the digest in
+`state.json` as `base`. A streamed move sends only the blocks that differ
+from it (see [migration.md](migration.md#bases)). On APFS the base is a
+clone and costs no space until the guest writes; on ext4 it is a copy of
+the image's data. Nothing removes a base yet: `hull rm` and `hull prune`
+leave `<store>/bases` alone. A streamed move keeps hvi's stream on the
+source in `<instance>/checkpoint/<txid>/`, as large as the guest's touched
+RAM, for an abort to restore from.
