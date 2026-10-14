@@ -28,6 +28,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -749,7 +750,10 @@ func writeMoveLedger(s *store.Store, rec *migrationRecord, state string) error {
 		return err
 	}
 	entry := *rec
-	entry.State = state
+	if entry.State != state {
+		entry.State = state
+		entry.History = append(slices.Clone(rec.History), migrateHistory{State: state, At: time.Now().UTC()})
+	}
 	return writeMigrationRecord(filepath.Join(s.MigrationTombstoneDir(), rec.TxID+".json"), &entry)
 }
 
