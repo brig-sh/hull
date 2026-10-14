@@ -142,7 +142,13 @@ func destProbe(s *store.Store, name, hviOverride, gatewaySock string) *migrateRe
 		} else {
 			p.HviProfile = ok
 		}
+		if ok, err := hviRestoreTakesStream(hvi); err != nil {
+			p.HviError = err.Error()
+		} else {
+			p.HviStream = ok
+		}
 	}
+	destHolds(s, p)
 	if name != "" {
 		if err := store.ValidateInstanceID(name); err != nil {
 			return refuse(codeFailed, err)
@@ -876,7 +882,7 @@ func migrateRemoteVerb(name, usage string, flags []cli.Flag,
 func migrateRemoteCommands() []*cli.Command {
 	txidFlag := &cli.StringFlag{Name: "txid", Required: true, Usage: "the move's txid"}
 	nameFlag := &cli.StringFlag{Name: "name", Usage: "the instance's name on this host"}
-	return []*cli.Command{
+	return append([]*cli.Command{
 		migrateRemoteVerb("migrate-probe", "report whether this host can take a moved instance",
 			[]cli.Flag{nameFlag, &cli.StringFlag{Name: "hvi"}, &cli.StringFlag{Name: "gateway-sock"}},
 			func(cmd *cli.Command, s *store.Store) *migrateReply {
@@ -894,9 +900,7 @@ func migrateRemoteCommands() []*cli.Command {
 				}
 				return destReceive(s, cmd.String("txid"), cmd.String("name"), os.Stdin)
 			}),
-		migrateRemoteVerb("migrate-prepare", "restore a received move paused",
-			[]cli.Flag{txidFlag},
-			func(cmd *cli.Command, s *store.Store) *migrateReply { return destPrepare(s, cmd.String("txid")) }),
+		migratePrepareCommand(),
 		migrateRemoteVerb("migrate-commit", "take over a moved instance and run it",
 			[]cli.Flag{txidFlag, &cli.Uint64Flag{Name: "epoch", Required: true}},
 			func(cmd *cli.Command, s *store.Store) *migrateReply {
@@ -908,7 +912,7 @@ func migrateRemoteCommands() []*cli.Command {
 		migrateRemoteVerb("migrate-abort", "abort a move on this host unless it committed",
 			[]cli.Flag{txidFlag},
 			func(cmd *cli.Command, s *store.Store) *migrateReply { return destAbort(s, cmd.String("txid")) }),
-	}
+	}, migratePrepareRemoteCommands()...)
 }
 
 // fileSHA256 hashes the file at path.
