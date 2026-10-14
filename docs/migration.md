@@ -48,7 +48,13 @@ hull migrate --abort 3f...e1                       # end a move that has not com
 
 The instance must be an `hvi` instance on a block rootfs, with no shared
 host directory, running or paused, started with a control socket. Both hosts
-must be the same OS and architecture. Everything else about the host is left
+must be the same architecture, and for a native instance the same OS. An
+instance started with `--profile portable-arm64-v1` (see
+[backends.md](backends.md#machine-profiles)) may move between macOS and
+Linux arm64, since its checkpoint holds the profile's machine rather than
+the host's; the probe then also needs the destination's `hvi` to take
+`--profile`, and refuses before the fence when it does not. Everything else
+about the host is left
 to `hvi restore` on the destination, which by its specification (SPEC H4)
 compares the bundle's machine profile with the host's (CPU, counter
 frequency, interrupt controller, hvi build) and refuses before it creates
