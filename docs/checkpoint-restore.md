@@ -235,9 +235,9 @@ it parked for good: hvi refuses a later `resume` with `fenced`, and only
 
 `DIR` is a new 0700 directory `<instance>/checkpoint/<txid>`, where the txid
 is a random id hull draws, or an empty directory you name with `--dir`, which
-has to be below `<instance>/checkpoint` too. hull sends it with links
-resolved, because hvi compares it against the resolved root (on macOS `/tmp`
-is a link to `/private/tmp`). An instance started without a checkpoint root
+has to be below `<instance>/checkpoint` too. hull resolves links in it and in
+the root it passes at boot, so the two are compared in one spelling (on macOS
+`/tmp` is a link to `/private/tmp`), and sends hvi that resolved path. An instance started without a checkpoint root
 is refused. On
 success hull writes `<instance>/checkpoint/latest.json`:
 

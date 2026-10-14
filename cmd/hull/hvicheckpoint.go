@@ -336,9 +336,11 @@ func hviCheckpointInstance(s *store.Store, state *store.InstanceState, then, dir
 //
 // hvi is confined before the guest runs, and its confinement grants file
 // writes below this one directory and nowhere else, so without it every
-// checkpoint is refused. It must exist at boot. It is passed resolved because
-// hvi resolves it and then compares the bundle paths it is sent against it
-// as given; hull sends those built from the same resolved root.
+// checkpoint is refused. It must exist at boot. It is passed resolved, and
+// every bundle path hull sends is built from or checked against this same
+// resolved spelling, so the two always agree as strings: on macOS /tmp is a
+// link to /private/tmp, and a check that mixed spellings would put a
+// directory below the root outside it.
 func hviCheckpointRoot(instanceDir string) (string, error) {
 	root := filepath.Join(instanceDir, "checkpoint")
 	if err := os.MkdirAll(root, 0o700); err != nil {
@@ -352,11 +354,11 @@ func hviCheckpointRoot(instanceDir string) (string, error) {
 //
 // hvi's confinement lets it write there and nowhere else, and it refuses a
 // bundle directory outside it; saying so here names the root instead of
-// leaving the user an EPERM. hvi compares the path it is sent against the
-// root without resolving links, and the root it holds is resolved, so the
-// directory sent has to be resolved too: on macOS /tmp is a link to
-// /private/tmp, and a bundle under /tmp/... would never be "below"
-// /private/tmp/....
+// leaving the user an EPERM. The root on the recorded command line is
+// resolved (hviCheckpointRoot), so the directory is resolved too before the
+// prefix check: on macOS /tmp is a link to /private/tmp, and a --dir under
+// /tmp/... would otherwise never be "below" /private/tmp/.... hvi is sent
+// the same resolved path, which matches the root it was given.
 func bundleDirBelow(root, dir string) (string, error) {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
