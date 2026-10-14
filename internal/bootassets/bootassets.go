@@ -202,6 +202,13 @@ func Fetch(ctx context.Context, ref, storeDir string) error {
 	if err != nil {
 		return err
 	}
+	return fetchInto(ctx, ref, dir)
+}
+
+// fetchInto downloads a bundle into dir and records it there. The default
+// bundle and a profile's kernel (FetchProfile) come in through the same
+// checks: the reference, the signature, the staged writes and the record.
+func fetchInto(ctx context.Context, ref, dir string) error {
 	// Decide whether this is a reference we are willing to take a kernel from
 	// before any bytes move, rather than after they are on disk.
 	warning, err := checkRef(ref)
