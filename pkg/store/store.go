@@ -118,6 +118,24 @@ type InstanceState struct {
 	// next epoch, and the destination accepts its commit only for that
 	// epoch, so a commit meant for an earlier move is refused.
 	OwnerEpoch uint64 `json:"ownerEpoch,omitempty"`
+	// Base names the immutable copy of the disk image this instance's disk
+	// started from, kept under <store>/bases by its digest, so that a move
+	// sends only the blocks that differ from it. Nil for an instance with
+	// no block rootfs, one run by an hvi without a control socket, and one
+	// recorded before bases existed.
+	Base *BaseState `json:"base,omitempty"`
+}
+
+// BaseState is the base image an instance's disk started from.
+type BaseState struct {
+	// SHA256 is the base's disk digest (docs/migration.md, "Bases"), which
+	// is also its file name under <store>/bases.
+	SHA256 string `json:"sha256"`
+	// FromBoot is set while the VMM that runs the instance is the one that
+	// booted from the fresh copy of the base. Only then do hvi's blocks
+	// dirtied since boot cover every difference from the base; a restore
+	// clears it, and a move then finds the difference by comparing.
+	FromBoot bool `json:"fromBoot,omitempty"`
 }
 
 // Migration states. A checkpointed instance kept running after the capture,
@@ -710,6 +728,21 @@ func (s *Store) InstanceMigrationRecord(id string) string {
 // for its txid still gets the true answer.
 func (s *Store) MigrationTombstoneDir() string {
 	return filepath.Join(s.rootDir, "migrations")
+}
+
+// BasesDir holds the base images of block rootfs disks, each an immutable
+// file named <sha256>.ext4 by its disk digest. A run puts the image it built
+// there before the guest writes to its own copy, and a move's preparation
+// puts the same file on the destination, so the move itself carries only
+// the blocks the guest changed.
+func (s *Store) BasesDir() string {
+	return filepath.Join(s.rootDir, "bases")
+}
+
+// BasePath is where the base with disk digest sha256 is kept. The digest is
+// not checked here; callers validate it before they read or write the file.
+func (s *Store) BasePath(sha256 string) string {
+	return filepath.Join(s.BasesDir(), filepath.Base(sha256)+".ext4")
 }
 
 // DeleteInstance removes an instance directory
