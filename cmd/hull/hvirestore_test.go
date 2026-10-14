@@ -18,6 +18,7 @@ import (
 	"context"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -224,6 +225,46 @@ func TestAwaitRestoredEndsWhenTheVMMIsGone(t *testing.T) {
 	}
 	if took := time.Since(start); took > 5*time.Second {
 		t.Errorf("waited %s after the VMM was gone", took)
+	}
+}
+
+// A detached restore never waits on the hvi it started, so an hvi that
+// refuses the bundle and exits at once is a zombie child: alive to signal 0.
+// The wait must see it exit (and say what it printed) at once, not at its
+// deadline. Seen live on KVM, where hvi restore refused and hull waited the
+// full two minutes.
+func TestAwaitRestoredSeesADetachedVMMExit(t *testing.T) {
+	s := newCmdTestStore(t)
+	dir, err := s.CreateInstance("vm1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	logFile := filepath.Join(dir, "vmm.log")
+	child := exec.Command("/bin/sh", "-c", `echo "restoring /b ..." > "$1"; `+
+		`echo "hvi: the KVM restore is not built yet" >> "$1"; exit 1`, "sh", logFile)
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	since := time.Now()
+	state := &store.InstanceState{ID: "vm1", Status: "running", PID: child.Process.Pid, Backend: "hvi",
+		LogFile: logFile, StartTime: since,
+		Migration: &store.MigrationState{State: store.MigrationRestoring, BundleDir: "/b", TxID: "t"}}
+	if err := s.SaveInstance(state); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond) // the child is a zombie by now
+	if syscall.Kill(child.Process.Pid, 0) != nil {
+		t.Fatal("the exited child is not a zombie; the test proves nothing")
+	}
+	start := time.Now()
+	got, err := awaitRestoredAndResume(s, "vm1", "t", filepath.Join(shortSocketDir(t), "none.sock"),
+		hviRestoreOptions{detach: true, timeout: time.Minute}, since, make(chan struct{}))
+	if got != "" || err == nil || !strings.HasPrefix(err.Error(), "hvi exited") ||
+		!strings.Contains(err.Error(), "the KVM restore is not built yet") {
+		t.Errorf("result = %q, %v", got, err)
+	}
+	if took := time.Since(start); took > 5*time.Second {
+		t.Errorf("waited %s for a VMM that had exited", took)
 	}
 }
 
