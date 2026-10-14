@@ -29,9 +29,10 @@ for the one build that reports `dev`.
 
 There are twenty-two top-level commands you call, plus hidden ones.
 `network-gateway` is hidden: it does not appear in `hull --help`, but it runs
-and prints its own help when named. The six `migrate-*` verbs are hidden too:
-`hull migrate` runs them on the destination over ssh (see below). The one
-hidden flag is `restore --move`, which only a move's own restore passes.
+and prints its own help when named. The `migrate-*` verbs other than
+`migrate-prepare` are hidden too: `hull migrate` runs them on the
+destination over ssh (see below). The one hidden flag is `restore --move`,
+which only a move's own restore passes.
 
 | Command | What it does |
 |---|---|
@@ -45,6 +46,7 @@ hidden flag is `restore --move`, which only a move's own restore passes.
 | `checkpoint <id>` | `vz`: pause, save VM and disk state, resume. `hvi`: write a checkpoint bundle, then continue or fence |
 | `restore <id>` | restore a stopped instance: `vz` from its saved state; `hvi` from a fenced bundle, with an `hvi` that has a `restore` subcommand (on macOS, from 4ea836f on `hvi`'s `feat/teleport`; a KVM bundle cannot be restored yet) |
 | `migrate <id> --to USER@HOST` | move a running `hvi` instance to another host over ssh; see [migration.md](migration.md) |
+| `migrate-prepare <id> --to USER@HOST` | put the instance's base, its profile's kernel and its image on another host ahead of a move; see [migration.md](migration.md#preparing-a-destination) |
 | `rm <id>` | remove a stopped instance |
 | `logs <id>` | show an instance's log |
 | `inspect <id>` | print instance details as JSON |
@@ -57,7 +59,7 @@ hidden flag is `restore --move`, which only a move's own restore passes.
 | `telemetry` | control usage and crash telemetry |
 | `version` | print the version and the build behind this binary |
 | `network-gateway` | run the user-mode network gateway daemon (hidden) |
-| `migrate-probe`, `migrate-receive`, `migrate-prepare`, `migrate-commit`, `migrate-status`, `migrate-abort` | the destination's half of a move (hidden) |
+| `migrate-probe`, `migrate-receive`, `migrate-commit`, `migrate-status`, `migrate-abort`, `migrate-take-base`, `migrate-take-kernel`, `migrate-take-image` | the destination's half of a move and of a prepare (hidden); `migrate-prepare --txid` is the destination's step too |
 
 ## `hull run`
 
@@ -164,7 +166,8 @@ as a default that an explicit `--env TERM` beats.
 | `pause <id>`, `resume <id>` | none |
 | `checkpoint <id>` | `--timeout <secs>`, default 60; `hvi` only: `--then continue\|fence`, default `continue`; `--dir <path>`, an empty directory for the bundle, below `<instance>/checkpoint` |
 | `restore <id>` | `--detach`, `-d`; `--stop-grace <secs>`, default 10; `--wait-ip`; `--gateway-sock <path>` (`vz` only); `hvi` only: `--paused`, `--timeout <secs>`, default 120, `--adopt-latest` |
-| `migrate <id>` | `--to USER@HOST`; `--remote-store <dir>`; `--remote-hull <path>`; `--remote-hvi <path>`; `--remote-gateway-sock <path>`; `--txid <txid>` resume a move; `--dry-run`; `--abort` and `--status` (with a name or a txid); `--timeout <secs>`, default 120, for the fence; `--allow-no-restore`, testing only |
+| `migrate <id>` | `--to USER@HOST`; `--remote-store <dir>`; `--remote-hull <path>`; `--remote-hvi <path>`; `--remote-gateway-sock <path>`; `--txid <txid>` resume a move; `--dry-run`; `--abort` and `--status` (with a name or a txid); `--timeout <secs>`, default 120, for the fence; `--allow-no-restore`, testing only; `--whole-bundle` send the whole checkpoint and disk even when both hosts can stream |
+| `migrate-prepare <id>` | `--to USER@HOST`; `--remote-store <dir>`; `--remote-hull <path>`; `--remote-hvi <path>`; `--remote-gateway-sock <path>`, checked, not started; `--json` prints what was done and what the destination holds |
 | `assets show` | `--profile NAME` shows that profile's kernel and the initrd it boots with |
 | `assets dir` | `--profile NAME` prints the profile's kernel directory instead. Prints the directory and nothing else, for scripts |
 | `assets pull [REF]` | `--force` download even when the assets are present. `--profile NAME` installs the profile's kernel from REF, `HULL_PORTABLE_KERNEL` or `HULL_PORTABLE_KERNEL_REF` (see [images.md](images.md#a-profiles-kernel)); without `--force` it checks the installed one against its record. Plain `--force` leaves the profile's kernel alone: replace it with `--profile NAME --force` |
@@ -194,7 +197,10 @@ signals as for any VMM.
 `hull migrate` moves a running `hvi` instance to `--to USER@HOST`: it fences
 the guest here, streams the checkpoint and the disk over ssh, has the
 destination restore it paused, and only then commits, after which the
-destination resumes it and the copy here is stale. While a move holds an
+destination resumes it and the copy here is stale. When both hosts can, it
+sends the guest's RAM in rounds while the guest runs and only the disk
+blocks that differ from the instance's base, and the guest stops only for
+the last round (see [migration.md](migration.md#the-streamed-move)). While a move holds an
 instance, `checkpoint`, `resume`, `restore` and `rm` of it are refused on
 both hosts, and what an aborted move left on the destination can only be
 removed. The protocol, its states and its recovery are in
@@ -205,12 +211,15 @@ The destination's verbs each print one JSON object on stdout:
 
 | Verb | Flags | What it does |
 |---|---|---|
-| `migrate-probe` | `--name`, `--hvi`, `--gateway-sock` | reports hull and hvi versions, whether hvi takes the control flags and `--profile` (a stand-in for "can restore a portable bundle"; see [migration.md](migration.md#usage)) and has `restore`, the hypervisor, free space, whether the name is taken, and whether the gateway answers |
-| `migrate-receive` | `--txid`, `--name`, `--reserve` | with `--reserve`, claims the name (a JSON request on stdin); without, reads the move stream on stdin and ends `verified` |
+| `migrate-probe` | `--name`, `--hvi`, `--gateway-sock` | reports hull and hvi versions, whether hvi takes the control flags and `--profile` (a stand-in for "can restore a portable bundle"; see [migration.md](migration.md#usage)), has `restore` and restores from a stream, the hypervisor, free space, whether the name is taken, whether the gateway answers, the bases and profile kernels the store holds, and the capability `stream-v1` |
+| `migrate-receive` | `--txid`, `--name`, `--reserve`, `--stream` | with `--reserve`, claims the name (a JSON request on stdin); with `--stream`, reads a streamed move on stdin, restores it paused as it arrives and ends `restored-paused`; with neither, reads the whole-bundle stream and ends `verified` |
 | `migrate-prepare` | `--txid` | restores the received checkpoint paused |
 | `migrate-commit` | `--txid`, `--epoch` | records `running`, then resumes the guest |
 | `migrate-status` | `--txid` | prints the move's record and the VM's state |
 | `migrate-abort` | `--txid` | refused once running; otherwise records `aborted`, stops what the move restored and frees the name |
+| `migrate-take-base` | `--sha256` | keeps the base the stream on stdin carries, if it has that digest |
+| `migrate-take-kernel` | `--profile`, `--sha256`, `--size` | installs the profile kernel on stdin, if it has that sha256 and size |
+| `migrate-take-image` | `--digest`, `--ref` | pulls the image by its reference unless the store has its digest |
 
 `hull images` prints `No images found` and `hull ps` prints
 `No instances found` on an empty store. Both exit 0. `hull prune` prints
@@ -350,6 +359,7 @@ See [telemetry.md](telemetry.md).
 | `TERM` | forwarded into the guest for a pty `exec` |
 | `COMPOSE_FILE`, `COMPOSE_PROJECT_NAME`, `COMPOSE_PROFILES`, `COMPOSE_DISABLE_ENV_FILE` | compose equivalents of the flags above |
 | `HULL_MIGRATE_SSH` | a program `hull migrate` runs instead of `ssh`, with the same arguments; for testing a move on one machine (see [migration.md](migration.md#testing-a-move)) |
+| `HULL_MIGRATE_SSH_MUX` | `off` gives every step of a move its own ssh connection. Otherwise the steps share one (`ControlMaster`, socket `/tmp/hull-ssh-%C`), kept a minute after the last, so the commit pays for no handshake |
 
 A session counts as interactive only when `CI` is unset **and** both stdin and
 stderr are terminals.
