@@ -222,8 +222,32 @@ func TestEnsureProfileRefusesATamperedKernel(t *testing.T) {
 	if err := os.WriteFile(kernel, []byte("bad"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := EnsureProfile(context.Background(), store, PortableArm64V1); err == nil {
+	_, _, err = EnsureProfile(context.Background(), store, PortableArm64V1)
+	if err == nil {
 		t.Fatal("a tampered profile kernel was accepted")
+	}
+	// The remedy is the one that replaces the variant, and it names where
+	// that command takes the kernel from. The plain `assets pull --force`
+	// re-fetches the default bundle and leaves the variant as it is.
+	msg := err.Error()
+	if !strings.Contains(msg, "`hull assets pull --profile "+PortableArm64V1+" --force`") ||
+		!strings.Contains(msg, PortableKernelEnv+"=") {
+		t.Fatalf("the tampered kernel's refusal names the wrong remedy: %v", err)
+	}
+	t.Setenv(PortableKernelEnv, "")
+	_, _, err = EnsureProfile(context.Background(), store, PortableArm64V1)
+	if err == nil || !strings.Contains(err.Error(), "neither is set now") {
+		t.Fatalf("with no source configured the remedy should say so: %v", err)
+	}
+}
+
+// ReinstallCommand names the command that puts a directory's files back.
+func TestReinstallCommand(t *testing.T) {
+	if got := ReinstallCommand("/s/assets"); got != "`hull assets pull --force`" {
+		t.Errorf("the bundle's directory: %s", got)
+	}
+	if got := ReinstallCommand("/s/assets/" + PortableArm64V1); !strings.Contains(got, "--profile "+PortableArm64V1) {
+		t.Errorf("the profile's directory: %s", got)
 	}
 }
 

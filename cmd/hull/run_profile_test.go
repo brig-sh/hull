@@ -239,3 +239,24 @@ func TestRunWiresTheProfile(t *testing.T) {
 		t.Fatalf("the native run staged %q, not the default kernel", got)
 	}
 }
+
+// `assets pull --profile` without --force does not call a kernel that fails
+// its record "already present": it says what is wrong and names the pull
+// that replaces it.
+func TestAssetsPullProfileReportsATamperedKernel(t *testing.T) {
+	requireArm64(t)
+	storeDir, _, _ := runProfileEnv(t, true)
+	kernel := filepath.Join(storeDir, "assets", bootassets.PortableArm64V1, bootassets.ProfileKernelName)
+	if err := os.WriteFile(kernel, []byte("something else"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app := &cli.Command{
+		Name:     "hull",
+		Flags:    []cli.Flag{&cli.StringFlag{Name: "store-dir", Value: storeDir}},
+		Commands: []*cli.Command{assetsCommand()},
+	}
+	err := app.Run(context.Background(), []string{"hull", "assets", "pull", "--profile", bootassets.PortableArm64V1})
+	if err == nil || !strings.Contains(err.Error(), "`hull assets pull --profile "+bootassets.PortableArm64V1+" --force`") {
+		t.Fatalf("err = %v, want the mismatch and the profile's pull", err)
+	}
+}

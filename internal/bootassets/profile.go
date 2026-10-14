@@ -297,6 +297,46 @@ func warnIfSourceMoved(storeDir, profile string) {
 	}
 }
 
+// ReinstallCommand is the command that puts the files of an asset directory
+// back: `hull assets pull --force` for the bundle, and `hull assets pull
+// --profile NAME --force` for a profile's directory, which the plain one
+// leaves alone. A profile's directory is recognised by its name, which
+// ProfileDir makes the profile's.
+func ReinstallCommand(dir string) string {
+	if profile, err := NormalizeProfile(filepath.Base(dir)); err == nil && profile != "" {
+		return fmt.Sprintf("`hull assets pull --profile %s --force`", profile)
+	}
+	return "`hull assets pull --force`"
+}
+
+// refetchHint is the remedy a failed check of dir names: the command, and
+// for a profile's kernel where that command takes it from now.
+func refetchHint(dir string, rec Provenance) string {
+	profile, err := NormalizeProfile(filepath.Base(dir))
+	if err != nil || profile == "" {
+		return "Re-fetch with `hull assets pull --force`"
+	}
+	return fmt.Sprintf("Install it again with %s, which takes it from %s,", ReinstallCommand(dir),
+		describeProfileSource(profile, rec.Ref))
+}
+
+// describeProfileSource names the source `hull assets pull --profile`
+// would install from now, and says so when none is configured.
+func describeProfileSource(profile, recorded string) string {
+	file, ref, err := ProfileSource(profile)
+	switch {
+	case err != nil:
+		return fmt.Sprintf("one of %s and %s (both are set now; unset one)", PortableKernelEnv,
+			PortableKernelRefEnv)
+	case file != "":
+		return fmt.Sprintf("%s=%s", PortableKernelEnv, file)
+	case ref != "":
+		return fmt.Sprintf("%s=%s", PortableKernelRefEnv, ref)
+	}
+	return fmt.Sprintf("%s or %s (neither is set now; the installed kernel came from %s)",
+		PortableKernelEnv, PortableKernelRefEnv, recorded)
+}
+
 // ProfileRecord returns a profile's provenance record.
 func ProfileRecord(storeDir, profile string) (Provenance, error) {
 	dir, err := ProfileDir(storeDir, profile)

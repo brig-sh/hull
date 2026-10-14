@@ -303,9 +303,8 @@ func verifyAgainstRecord(dir string, p Provenance, required []string) error {
 		if got != want.SHA256 || size != want.Size {
 			return fmt.Errorf("cached boot asset %s does not match what was fetched from %s "+
 				"(recorded sha256:%s, %d bytes; found sha256:%s, %d bytes). Something has "+
-				"replaced it since. Re-fetch with `hull assets pull --force` after working out "+
-				"what wrote to %s",
-				path, p.Ref, want.SHA256, want.Size, got, size, dir)
+				"replaced it since. %s after working out what wrote to %s",
+				path, p.Ref, want.SHA256, want.Size, got, size, refetchHint(dir, p), dir)
 		}
 	}
 
@@ -313,8 +312,8 @@ func verifyAgainstRecord(dir string, p Provenance, required []string) error {
 		if _, ok := p.Files[name]; !ok {
 			return fmt.Errorf("the boot asset provenance in %s does not cover %s, so nothing "+
 				"vouches for the file about to be booted -- a record that omits an entry is "+
-				"not a record that passed. Re-fetch with `hull assets pull --force` after "+
-				"working out what wrote to %s", dir, name, dir)
+				"not a record that passed. %s after working out what wrote to %s",
+				dir, name, refetchHint(dir, p), dir)
 		}
 	}
 	return nil

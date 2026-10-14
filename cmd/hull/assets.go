@@ -177,6 +177,16 @@ func pullProfileAssets(ctx context.Context, cmd *cli.Command, profile string) er
 		if err != nil {
 			return err
 		}
+		// Present is not the same as intact: a kernel that no longer
+		// matches its record would otherwise be reported as installed,
+		// and the run that boots it refused.
+		kernel, _, err := bootassets.ProfilePaths(storeDir, profile)
+		if err != nil {
+			return err
+		}
+		if verr := bootassets.VerifyFiles(kernel); verr != nil && !errors.Is(verr, bootassets.ErrNoProvenance) {
+			return verr
+		}
 		fmt.Printf("the %s kernel is already present in %s (use --force to replace it)\n", profile, dir)
 		return nil
 	}
