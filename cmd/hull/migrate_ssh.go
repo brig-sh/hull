@@ -72,8 +72,11 @@ type migrateProbe struct {
 	FreeBytes        int64  `json:"freeBytes"`
 	NameTaken        bool   `json:"nameTaken"`
 	NameTxID         string `json:"nameTxid,omitempty"`
-	GatewayOK        bool   `json:"gatewayOk,omitempty"`
-	GatewayDetail    string `json:"gatewayDetail,omitempty"`
+	// NameMove is the role and state of that move here, "source
+	// committed" for the stale copy a move away left behind.
+	NameMove      string `json:"nameMove,omitempty"`
+	GatewayOK     bool   `json:"gatewayOk,omitempty"`
+	GatewayDetail string `json:"gatewayDetail,omitempty"`
 }
 
 // Reply codes a source branches on.
