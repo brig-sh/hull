@@ -327,7 +327,8 @@ func hviCheckpointInstance(s *store.Store, state *store.InstanceState, then, dir
 	if then == hviThenFence {
 		migrationState = store.MigrationFenced
 	}
-	fresh.Migration = &store.MigrationState{State: migrationState, BundleDir: dir, TxID: txid}
+	fresh.Migration = &store.MigrationState{State: migrationState, BundleDir: dir, TxID: txid,
+		ManifestSHA256: reply.ManifestSHA256}
 	if err := s.SaveInstance(fresh); err != nil {
 		return fmt.Errorf("the bundle is in %s but the instance record was not updated: %w", dir, err)
 	}

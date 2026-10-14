@@ -248,7 +248,9 @@ success hull writes `<instance>/checkpoint/latest.json`:
 ```
 
 and sets the record's `migration` to `{"state": "checkpointed"|"fenced",
-"bundleDir": "...", "txid": "..."}`. `stats` is what hvi reported. hull keeps
+"bundleDir": "...", "txid": "...", "manifestSha256": "..."}`. The record keeps
+the manifest's sha256 too, outside the directory hvi may write to, and a
+restore checks the bundle's `manifest.json` against it. `stats` is what hvi reported. hull keeps
 one bundle of its own per instance and removes the previous one after a new
 checkpoint succeeds; a bundle placed with `--dir` is never removed by hull.
 
@@ -296,8 +298,14 @@ record names. It refuses, with the reason:
   after a restored guest has run it has moved on: a guest given that disk with
   the older RAM sees a filesystem that disagrees with its own caches.
 - when `latest.json` names a later checkpoint than the record. That is a
-  checkpoint whose record update failed, and hull cannot tell what became of
-  its guest.
+  checkpoint whose record update failed. If it was fenced, the guest never ran
+  after it, and `hull restore --adopt-latest` records it and restores from it,
+  once its bundle is below the checkpoint root and its `manifest.json` hashes
+  to the sha256 in `latest.json`. One taken with `--then continue` cannot be
+  restored, and neither can the record's older one, since the guest ran on
+  after both. A `latest.json` that does not parse is refused too.
+- when the bundle's `manifest.json` no longer hashes to the sha256 the record
+  kept from hvi's reply.
 - when the gateway the instance ran on does not answer on its socket.
 - when the `hvi` the instance ran has no `restore` subcommand.
 

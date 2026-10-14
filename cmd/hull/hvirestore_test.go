@@ -317,7 +317,7 @@ func TestHviRestoreRefusals(t *testing.T) {
 			ckpt := instanceCheckpointDir(s, "vm1")
 			_ = os.Remove(filepath.Join(ckpt, "latest.json"))
 			if tc.latest != "" {
-				if err := writeHviCheckpointRecord(ckpt, hviCheckpointRecord{Dir: bundle, TxID: tc.latest}); err != nil {
+				if err := writeHviCheckpointRecord(ckpt, hviCheckpointRecord{Dir: bundle, TxID: tc.latest, Then: hviThenFence}); err != nil {
 					t.Fatal(err)
 				}
 			}

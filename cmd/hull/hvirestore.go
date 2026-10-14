@@ -17,11 +17,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -68,6 +71,11 @@ func restoreCommand() *cli.Command {
 				Value: 120,
 				Usage: "hvi: seconds to wait for hvi to rebuild the VM from the bundle",
 			},
+			&cli.BoolFlag{
+				Name: "adopt-latest",
+				Usage: "hvi: restore from the fenced checkpoint latest.json names when the record " +
+					"missed it (a checkpoint whose record update failed)",
+			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			if cmd.Args().Len() == 0 {
@@ -83,8 +91,8 @@ func restoreCommand() *cli.Command {
 				return fmt.Errorf("instance not found: %s", id)
 			}
 			if !isHviInstance(state) {
-				if cmd.IsSet("paused") || cmd.IsSet("timeout") {
-					return errors.New("--paused and --timeout apply to hvi instances only")
+				if cmd.IsSet("paused") || cmd.IsSet("timeout") || cmd.IsSet("adopt-latest") {
+					return errors.New("--paused, --timeout and --adopt-latest apply to hvi instances only")
 				}
 				return vzRestoreInstance(ctx, cmd)
 			}
@@ -93,18 +101,20 @@ func restoreCommand() *cli.Command {
 					"(--net-gateway on its command line); --gateway-sock is for Vz instances")
 			}
 			return hviRestoreInstance(ctx, cmd, s, state, hviRestoreOptions{
-				detach:  cmd.Bool("detach"),
-				paused:  cmd.Bool("paused"),
-				timeout: time.Duration(cmd.Int("timeout")) * time.Second,
+				detach:      cmd.Bool("detach"),
+				paused:      cmd.Bool("paused"),
+				timeout:     time.Duration(cmd.Int("timeout")) * time.Second,
+				adoptLatest: cmd.Bool("adopt-latest"),
 			})
 		},
 	}
 }
 
 type hviRestoreOptions struct {
-	detach  bool
-	paused  bool
-	timeout time.Duration
+	detach      bool
+	paused      bool
+	timeout     time.Duration
+	adoptLatest bool
 }
 
 // hviRestoreArgv turns the command line an hvi instance last ran with into
@@ -207,6 +217,93 @@ func hviHasRestore(binary string) (bool, error) {
 	return !strings.Contains(out.String(), `unknown subcommand "restore"`), nil
 }
 
+// reconcileLatestCheckpoint compares the record's checkpoint with the one
+// <instance>/checkpoint/latest.json names, and adopts the latter into the
+// record when asked and safe.
+//
+// checkpoint writes latest.json before the record, so a failure between the
+// two leaves latest.json naming a later checkpoint than the record does.
+// Restoring the record's would rewind past a checkpoint whose fate the
+// record never learned, so a mismatch is refused unless adopt is set. Even
+// then only a fenced one is adopted, since the guest never ran after it,
+// and only a bundle below the instance's checkpoint root whose manifest.json
+// still hashes to the sha256 latest.json recorded from hvi's reply.
+//
+// A latest.json that is there and does not parse is refused rather than
+// skipped: it is the file that would say a later checkpoint exists, and it
+// sits in the directory hvi may write to.
+func reconcileLatestCheckpoint(s *store.Store, state *store.InstanceState, adopt bool) error {
+	latest, err := readHviCheckpointRecord(instanceCheckpointDir(s, state.ID))
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return nil
+	case err != nil:
+		return fmt.Errorf("%w; hull cannot tell whether a later checkpoint was taken", err)
+	}
+	recorded := ""
+	if state.Migration != nil {
+		recorded = state.Migration.TxID
+	}
+	if latest.TxID == recorded {
+		return nil
+	}
+	if latest.Then != hviThenFence {
+		return fmt.Errorf("latest.json names checkpoint %s in %s, a later one the record never "+
+			"took in, taken with --then %s: the guest ran on after it, so neither it nor the "+
+			"record's can be restored", latest.TxID, latest.Dir, latest.Then)
+	}
+	if !adopt {
+		return fmt.Errorf("its record names checkpoint %q, but latest.json names %s in %s, a later "+
+			"one the record never took in. It was fenced, so it can be restored: `hull restore "+
+			"--adopt-latest %s` checks its manifest and records it first", recorded, latest.TxID,
+			latest.Dir, state.ID)
+	}
+	root, ok := flagValue(state.CmdLine, "--checkpoint-root")
+	if !ok {
+		return errors.New("the instance ran without a checkpoint root, so latest.json cannot name a bundle of its own")
+	}
+	dir, err := bundleDirBelow(root, latest.Dir)
+	if err != nil {
+		return fmt.Errorf("latest.json: %w", err)
+	}
+	if latest.ManifestSHA256 == "" {
+		return errors.New("latest.json records no manifest sha256 to check its bundle against")
+	}
+	if err := checkBundleManifest(dir, latest.ManifestSHA256); err != nil {
+		return err
+	}
+	state.Migration = &store.MigrationState{State: store.MigrationFenced, BundleDir: dir,
+		TxID: latest.TxID, ManifestSHA256: latest.ManifestSHA256}
+	if err := s.SaveInstance(state); err != nil {
+		return fmt.Errorf("record the adopted checkpoint: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "Adopted checkpoint %s in %s from latest.json\n", latest.TxID, dir)
+	return nil
+}
+
+// checkBundleManifest checks that dir/manifest.json hashes to want, the
+// sha256 hvi reported when it sealed the bundle. hvi hashes the file's bytes
+// as written. The manifest lists every other part with its sha256, which hvi
+// checks on restore, so this one hash binds the whole bundle to the
+// checkpoint hull recorded, and a bundle rewritten since, by anything that
+// can write the checkpoint root, is refused. "" (a record from before hull
+// kept the hash) checks nothing.
+func checkBundleManifest(dir, want string) error {
+	if want == "" {
+		return nil
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
+	if err != nil {
+		return fmt.Errorf("bundle %s has no readable manifest: %w", dir, err)
+	}
+	sum := sha256.Sum256(data)
+	if got := hex.EncodeToString(sum[:]); got != want {
+		return fmt.Errorf("bundle %s: manifest.json has sha256 %s, but hvi reported %s when it "+
+			"sealed the checkpoint; the bundle was changed since", dir, got, want)
+	}
+	return nil
+}
+
 // restorableMigration reports whether the record's last checkpoint can be
 // restored onto the instance's disk.
 //
@@ -271,6 +368,9 @@ func hviRestoreInstance(ctx context.Context, cmd *cli.Command, s *store.Store, s
 				"before restoring", id)
 		}
 	}
+	if err := reconcileLatestCheckpoint(s, state, opt.adoptLatest); err != nil {
+		return fmt.Errorf("cannot restore %s: %w", id, err)
+	}
 	if err := restorableMigration(state.Migration); err != nil {
 		return fmt.Errorf("cannot restore %s: %w", id, err)
 	}
@@ -278,15 +378,8 @@ func hviRestoreInstance(ctx context.Context, cmd *cli.Command, s *store.Store, s
 	if _, err := os.Stat(bundle); err != nil {
 		return fmt.Errorf("cannot restore %s: its bundle %s is gone", id, bundle)
 	}
-	// checkpoint writes latest.json before the record, so a failure between
-	// the two leaves latest.json naming a newer checkpoint than the record
-	// does. Restoring the record's would rewind past a checkpoint whose fate
-	// (continued or fenced) the record never learned; refuse and say which.
-	if latest, err := readHviCheckpointRecord(instanceCheckpointDir(s, id)); err == nil &&
-		latest.TxID != state.Migration.TxID {
-		return fmt.Errorf("cannot restore %s: its record names checkpoint %s in %s, but latest.json "+
-			"names %s in %s, a later one the record never took in. Take a new checkpoint with "+
-			"--then fence", id, state.Migration.TxID, bundle, latest.TxID, latest.Dir)
+	if err := checkBundleManifest(bundle, state.Migration.ManifestSHA256); err != nil {
+		return fmt.Errorf("cannot restore %s: %w", id, err)
 	}
 	if err := hviCheckpointable(state.CmdLine); err != nil {
 		return err
