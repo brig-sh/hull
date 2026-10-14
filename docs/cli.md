@@ -147,7 +147,7 @@ as a default that an explicit `--env TERM` beats.
 | `prune` | `--all` also remove every image no instance refers to; `--dry-run` print and remove nothing |
 | `pause <id>`, `resume <id>` | none |
 | `checkpoint <id>` | `--timeout <secs>`, default 60; `hvi` only: `--then continue\|fence`, default `continue`; `--dir <path>`, an empty directory for the bundle, below `<instance>/checkpoint` |
-| `restore <id>` | `--detach`, `-d`; `--stop-grace <secs>`, default 10; `--wait-ip`; `--gateway-sock <path>` (`vz` only); `hvi` only: `--paused`, `--timeout <secs>`, default 120 |
+| `restore <id>` | `--detach`, `-d`; `--stop-grace <secs>`, default 10; `--wait-ip`; `--gateway-sock <path>` (`vz` only); `hvi` only: `--paused`, `--timeout <secs>`, default 120, `--adopt-latest` |
 | `assets show` | none |
 | `assets dir` | none. Prints the directory and nothing else, for scripts |
 | `assets pull [REF]` | `--force` download even when the assets are present |

@@ -15,6 +15,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -237,6 +239,187 @@ func TestHviCheckpointWithoutReplyKeepsTheDirectory(t *testing.T) {
 	}
 	if _, err := readHviCheckpointRecord(instanceCheckpointDir(s, "vm1")); !os.IsNotExist(err) {
 		t.Errorf("a checkpoint with no reply wrote latest.json: %v", err)
+	}
+}
+
+// writeBundle makes a bundle directory below root holding a manifest.json and
+// returns the directory and the manifest's sha256.
+func writeBundle(t *testing.T, root, name, manifest string) (string, string) {
+	t.Helper()
+	dir := filepath.Join(root, name)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte(manifest))
+	return dir, hex.EncodeToString(sum[:])
+}
+
+// stoppedHviInstance records a stopped hvi instance that ran binary with a
+// checkpoint root, and returns it with the root.
+func stoppedHviInstance(t *testing.T, s *store.Store, binary string) (*store.InstanceState, string) {
+	t.Helper()
+	dir, err := s.CreateInstance("vm1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := hviCheckpointRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := &store.InstanceState{
+		ID: "vm1", Status: "stopped", Backend: "hvi",
+		CmdLine: []string{binary, "boot", "--kernel", "/k", "--disk", "/r.img", "--checkpoint-root", root},
+	}
+	if err := s.SaveInstance(st); err != nil {
+		t.Fatal(err)
+	}
+	return st, root
+}
+
+func hviWithoutRestore(t *testing.T) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "hvi")
+	if err := os.WriteFile(p, []byte("#!/bin/sh\necho 'hvi: unknown subcommand \"restore\"; expected `boot`' >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// A fenced checkpoint whose record update failed is named only by
+// latest.json. Restore says how to adopt it, and --adopt-latest records it
+// once its manifest checks out.
+func TestRestoreAdoptsAFencedLatestCheckpoint(t *testing.T) {
+	s, err := store.New(shortSocketDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, root := stoppedHviInstance(t, s, hviWithoutRestore(t))
+	old, oldSum := writeBundle(t, root, "t1", `{"old":1}`)
+	st.Migration = &store.MigrationState{State: store.MigrationFenced, BundleDir: old, TxID: "t1", ManifestSHA256: oldSum}
+	_ = s.SaveInstance(st)
+	newer, newerSum := writeBundle(t, root, "t2", `{"new":1}`)
+	if err := writeHviCheckpointRecord(root, hviCheckpointRecord{Dir: newer, TxID: "t2", Then: hviThenFence, ManifestSHA256: newerSum}); err != nil {
+		t.Fatal(err)
+	}
+
+	err = hviRestoreInstance(nil, s, st, hviRestoreOptions{timeout: time.Second})
+	if err == nil || !strings.Contains(err.Error(), "--adopt-latest") {
+		t.Fatalf("without --adopt-latest: %v", err)
+	}
+	if m := mustInstance(t, s, "vm1").Migration; m.TxID != "t1" {
+		t.Errorf("a refused restore changed the record to %+v", m)
+	}
+
+	// Adopted; this hvi has no restore, so that is where it stops.
+	err = hviRestoreInstance(nil, s, mustInstance(t, s, "vm1"), hviRestoreOptions{timeout: time.Second, adoptLatest: true})
+	if err == nil || !strings.Contains(err.Error(), "no restore subcommand") {
+		t.Fatalf("with --adopt-latest: %v", err)
+	}
+	m := mustInstance(t, s, "vm1").Migration
+	if m.TxID != "t2" || m.State != store.MigrationFenced || m.BundleDir != newer || m.ManifestSHA256 != newerSum {
+		t.Errorf("adopted record = %+v", m)
+	}
+}
+
+func TestRestoreRefusesToAdoptAnUnsafeLatest(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		rec     func(dir, sum string) hviCheckpointRecord
+		refusal string
+	}{
+		{"continued", func(dir, sum string) hviCheckpointRecord {
+			return hviCheckpointRecord{Dir: dir, TxID: "t2", Then: hviThenContinue, ManifestSHA256: sum}
+		}, "neither it nor"},
+		{"manifest changed", func(dir, _ string) hviCheckpointRecord {
+			return hviCheckpointRecord{Dir: dir, TxID: "t2", Then: hviThenFence, ManifestSHA256: strings.Repeat("0", 64)}
+		}, "changed since"},
+		{"no manifest hash", func(dir, _ string) hviCheckpointRecord {
+			return hviCheckpointRecord{Dir: dir, TxID: "t2", Then: hviThenFence}
+		}, "no manifest sha256"},
+		{"outside the root", func(_, sum string) hviCheckpointRecord {
+			return hviCheckpointRecord{Dir: "/etc", TxID: "t2", Then: hviThenFence, ManifestSHA256: sum}
+		}, "not below"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := store.New(shortSocketDir(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			st, root := stoppedHviInstance(t, s, hviWithoutRestore(t))
+			dir, sum := writeBundle(t, root, "t2", `{"new":1}`)
+			if err := writeHviCheckpointRecord(root, tc.rec(dir, sum)); err != nil {
+				t.Fatal(err)
+			}
+			err = hviRestoreInstance(nil, s, st, hviRestoreOptions{timeout: time.Second, adoptLatest: true})
+			if err == nil || !strings.Contains(err.Error(), tc.refusal) {
+				t.Errorf("err = %v, want a refusal naming %q", err, tc.refusal)
+			}
+			if m := mustInstance(t, s, "vm1").Migration; m != nil {
+				t.Errorf("an unsafe latest.json was adopted: %+v", m)
+			}
+		})
+	}
+}
+
+// latest.json is the file that would say a later checkpoint exists, in a
+// directory hvi may write to: one that does not parse is refused, not
+// skipped.
+func TestRestoreRefusesAnUnreadableLatest(t *testing.T) {
+	s, err := store.New(shortSocketDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, root := stoppedHviInstance(t, s, hviWithoutRestore(t))
+	dir, sum := writeBundle(t, root, "t1", `{}`)
+	st.Migration = &store.MigrationState{State: store.MigrationFenced, BundleDir: dir, TxID: "t1", ManifestSHA256: sum}
+	_ = s.SaveInstance(st)
+	if err := os.WriteFile(filepath.Join(root, "latest.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = hviRestoreInstance(nil, s, st, hviRestoreOptions{timeout: time.Second})
+	if err == nil || !strings.Contains(err.Error(), "cannot tell") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+// The record keeps the manifest's sha256 hvi reported; a bundle whose
+// manifest no longer matches it is refused before anything is launched.
+func TestRestoreRefusesABundleChangedSinceTheCheckpoint(t *testing.T) {
+	s, err := store.New(shortSocketDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, root := stoppedHviInstance(t, s, hviWithoutRestore(t))
+	dir, sum := writeBundle(t, root, "t1", `{"a":1}`)
+	if err := writeHviCheckpointRecord(root, hviCheckpointRecord{Dir: dir, TxID: "t1", Then: hviThenFence, ManifestSHA256: sum}); err != nil {
+		t.Fatal(err)
+	}
+	st.Migration = &store.MigrationState{State: store.MigrationFenced, BundleDir: dir, TxID: "t1", ManifestSHA256: sum}
+	_ = s.SaveInstance(st)
+	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(`{"a":2}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = hviRestoreInstance(nil, s, st, hviRestoreOptions{timeout: time.Second})
+	if err == nil || !strings.Contains(err.Error(), "changed since") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+// The record names the sha256 hvi reported, so restore can check it.
+func TestHviCheckpointRecordsTheManifestHash(t *testing.T) {
+	stub := newStubHvi(t, func(map[string]any) stubAnswer {
+		return stubAnswer{reply: `{"v":1,"ok":true,"manifest_sha256":"abc"}`}
+	})
+	s := newCmdTestStore(t)
+	state, _ := fakeHviInstance(t, s, "vm1", stub.path)
+	if err := hviCheckpointInstance(s, state, hviThenFence, "", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if m := mustInstance(t, s, "vm1").Migration; m.ManifestSHA256 != "abc" {
+		t.Errorf("record = %+v", m)
 	}
 }
 

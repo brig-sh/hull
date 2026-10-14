@@ -478,8 +478,8 @@ bundle itself in a 0700 directory named by its txid, or by `--dir`. hvi is
 started with this directory as its `--checkpoint-root`, created 0700 at run
 time: its confinement lets it write below it and nowhere else. hull writes `latest.json` through a temp file and a rename, and
 keeps one bundle of its own per instance. The record's `migration` field
-(`state`, `bundleDir`, `txid`) says which checkpoint is current and whether it
-was fenced. Every `hvi` instance also has `control.sock` and `profile.json`
+(`state`, `bundleDir`, `txid`, `manifestSha256`) says which checkpoint is
+current, whether it was fenced, and which manifest a restore must find. Every `hvi` instance also has `control.sock` and `profile.json`
 beside `state.json`, recorded as `controlSock` and `profilePath`. The socket
 has no authentication, so the 0700 instance directory is what keeps other
 accounts away from it.
