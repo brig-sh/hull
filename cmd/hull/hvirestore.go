@@ -527,8 +527,8 @@ func awaitRestoredAndResume(s *store.Store, id, txid, sock string, opt hviRestor
 		// record read before that save would put back the pid-less one.
 		ours := false
 		if rec, err := s.GetInstance(id); err == nil && rec.PID > 0 && !rec.StartTime.Before(since) {
-			if syscall.Kill(rec.PID, 0) != nil {
-				return "", exited
+			if restoreVMMExited(rec.PID, opt.detach) {
+				return "", hviExitedError(exited, rec.LogFile)
 			}
 			ours = true
 		}
@@ -560,6 +560,52 @@ func awaitRestoredAndResume(s *store.Store, id, txid, sock string, opt hviRestor
 	}
 	fmt.Fprintf(os.Stderr, "Instance %s restored and running\n", id)
 	return store.MigrationRestored, nil
+}
+
+// restoreVMMExited reports whether the VMM a restore started has exited.
+//
+// A detached restore starts hvi as this process's child and never waits on
+// it, so an hvi that exits at once (one that refuses the bundle, or has no
+// restore for this backend) stays a zombie while the wait runs, and a
+// zombie answers signal 0 like a live process. The wait then ran to its
+// deadline, two minutes by default, for a VMM that was gone in a
+// millisecond. So a detached restore asks wait4 without blocking first,
+// which also reaps the zombie. In the foreground launchVMM waits on the
+// child itself and closes gone, and reaping it here would take its exit
+// status from that wait, so only signal 0 is asked there.
+func restoreVMMExited(pid int, detached bool) bool {
+	if detached {
+		var ws syscall.WaitStatus
+		switch wpid, err := syscall.Wait4(pid, &ws, syscall.WNOHANG, nil); {
+		case wpid == pid:
+			return true
+		case err == nil:
+			return false
+		}
+		// ECHILD: not this process's child after all; fall through.
+	}
+	return syscall.Kill(pid, 0) != nil
+}
+
+// hviExitedError adds the last line of the instance log, which is where a
+// detached hvi says why it stopped, to the "hvi exited" error.
+func hviExitedError(exited error, logFile string) error {
+	if logFile == "" {
+		return exited
+	}
+	data, err := os.ReadFile(logFile)
+	if err != nil {
+		return exited
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	last := strings.TrimSpace(lines[len(lines)-1])
+	if last == "" {
+		return exited
+	}
+	if len(last) > 400 {
+		last = last[:400] + "..."
+	}
+	return fmt.Errorf("%w; it said: %s", exited, last)
 }
 
 // setRestoreState records how far the restore of checkpoint txid got.
