@@ -565,3 +565,76 @@ func TestMoveThereAndBack(t *testing.T) {
 		t.Errorf("the second move's source record: %+v %v", away, err)
 	}
 }
+
+// loseCommitAck runs a move whose commit reply is lost: the destination
+// runs the guest, the source stays fenced in committing.
+func loseCommitAck(t *testing.T, f *moveFixture) *localPeer {
+	t.Helper()
+	peer := newLocalPeer(f.dst)
+	peer.drop["migrate-commit"] = 1
+	_ = sourceMigrate(context.Background(), f.src, f.name, f.options(false), peer)
+	if got := f.srcRecord(t).State; got != srcCommitting {
+		t.Fatalf("source is %s, want committing", got)
+	}
+	return peer
+}
+
+// abortRefusedThenCommitted checks that the source's abort is refused
+// because the destination committed, and that a re-run records the commit.
+func abortRefusedThenCommitted(t *testing.T, f *moveFixture, peer movePeer) {
+	t.Helper()
+	restored := 0
+	localRestore = func(*store.Store, string) error { restored++; return nil }
+	err := sourceAbort(context.Background(), f.src, f.name, &bytes.Buffer{}, peer)
+	if err == nil || !strings.Contains(err.Error(), "cannot be aborted") {
+		t.Errorf("abort of a move the destination committed: %v", err)
+	}
+	if restored != 0 || f.srcRecord(t).State != srcCommitting {
+		t.Fatalf("the source was brought back (restored %d, record %s)", restored, f.srcRecord(t).State)
+	}
+	opt := f.options(false)
+	opt.txid = f.srcRecord(t).TxID
+	if err := sourceMigrate(context.Background(), f.src, f.name, opt, peer); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.srcRecord(t).State; got != srcCommitted {
+		t.Errorf("after the re-run the source is %s", got)
+	}
+}
+
+// The commit's acknowledgement is lost and the destination then moves the
+// instance on to a third host, which replaces its migration.json. Its
+// ledger still says the first move committed there, so the source's abort
+// is refused and a re-run records the commit: the guest never runs on two
+// hosts.
+func TestMoveLedgerAnswersAfterTheInstanceMovedOn(t *testing.T) {
+	f := newMoveFixture(t, true)
+	peerB := loseCommitAck(t, f)
+	txid := f.srcRecord(t).TxID
+	c := shortStore(t)
+	on := f.options(false)
+	on.to, on.remote.Target = "pm@c", "pm@c"
+	if err := sourceMigrate(context.Background(), f.dst, f.name, on, newLocalPeer(c)); err != nil {
+		t.Fatalf("moving on to c: %v", err)
+	}
+	if mustInstance(t, c, f.name).Status != "running" {
+		t.Fatal("c does not run the guest")
+	}
+	r := destStatus(f.dst, txid)
+	if !r.OK || r.Record.State != dstRunning || r.VM != "" {
+		t.Errorf("status of the first move after the move on: %+v", r)
+	}
+	abortRefusedThenCommitted(t, f, peerB)
+}
+
+// The same with the destination's operator removing the instance after the
+// commit: `hull rm` leaves the ledger, so the source cannot abort a move
+// that ran on the destination and resume the guest from before it.
+func TestMoveLedgerAnswersAfterRm(t *testing.T) {
+	f := newMoveFixture(t, true)
+	peer := loseCommitAck(t, f)
+	if err := removeInstanceIn(f.dst, f.name, true); err != nil {
+		t.Fatalf("rm on the destination: %v", err)
+	}
+	abortRefusedThenCommitted(t, f, peer)
+}
