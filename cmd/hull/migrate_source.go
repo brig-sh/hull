@@ -890,6 +890,8 @@ func (m *moveSource) finish() error {
 // sourceAbort is `hull migrate --abort`: before the commit, and only once
 // the destination has confirmed that it is not running the VM and will
 // refuse the commit, it ends the move and brings the instance back here.
+// Running it again on an aborted move finishes what the first run left
+// undone: a release the destination did not confirm, or the local restore.
 func sourceAbort(ctx context.Context, s *store.Store, name string, w io.Writer, peer movePeer) error {
 	unlock, err := lockMove(s.InstanceDir(name), 0)
 	if errors.Is(err, errMoveBusy) {
@@ -915,20 +917,30 @@ func sourceAbort(ctx context.Context, s *store.Store, name string, w io.Writer, 
 		return fmt.Errorf("move %s committed: %s runs on %s at epoch %d. Moving it back is a new "+
 			"`hull migrate` run on %s", rec.TxID, name, rec.Peer, rec.Epoch, rec.Peer)
 	case migAborted:
-		_, _ = fmt.Fprintf(w, "Move %s was already aborted\n", rec.TxID)
-		return nil
+		return finishAbort(ctx, s, name, rec, path, w, peer)
 	}
 	state, err := s.GetInstance(name)
 	if err != nil {
 		return err
 	}
+	// Fenced by the record, by the instance record, or by hvi itself: a
+	// fence whose reply was lost before hull recorded it.
 	fenced := migrateStateOrder(roleSource, rec.State) >= migrateStateOrder(roleSource, srcFenced) ||
 		fencedFor(state, rec.TxID)
+	if !fenced && hviVMState(state) == store.MigrationFenced {
+		// Adopted before anything changes: the abort must have the bundle
+		// to restore the instance from, or it has nothing to bring back.
+		if err := adoptFenceForAbort(s, name, state, rec, w); err != nil {
+			return err
+		}
+		fenced = true
+	}
 	// From committing on the commit may have been delivered, so only the
 	// destination's record of this very move, aborted, lets the source go.
 	committing := rec.State == srcCommitting
 	p := peerFor(rec, peer)
 	reply, err := p.call(ctx, "migrate-abort", []string{"--txid", rec.TxID}, nil)
+	released := err == nil && abortedThere(reply, rec)
 	switch {
 	case err != nil && refusalCode(err) == codeRunning:
 		return fmt.Errorf("the destination %s says move %s committed there and runs %s: it cannot be "+
@@ -941,22 +953,20 @@ func sourceAbort(ctx context.Context, s *store.Store, name string, w io.Writer, 
 	case err != nil && refusalCode(err) == codeUnknownTxID:
 		// No commit was ever sent, so a destination that never heard of
 		// the move, or lost its reservation, cannot be running it.
-		err = nil
+		err, released = nil, true
 	case err != nil && fenced:
 		return rec.fail(path, fmt.Errorf("cannot abort move %s: %w\nWithout the destination's word that it "+
 			"is not running %s and will refuse the commit, the source stays fenced: running it here could "+
 			"put it on two hosts. Retry when %s answers", rec.TxID, err, name, rec.Peer))
 	case err != nil:
 		_, _ = fmt.Fprintf(w, "warning: %s did not confirm the abort (%v); it may still hold a reservation for %s, "+
-			"which `hull migrate --abort %s` again releases\n", rec.Peer, err, name, rec.TxID)
+			"which `hull migrate --abort %s` run again releases\n", rec.Peer, err, name, rec.TxID)
 	}
 	if err == nil && fenced && reply.OK && !abortedThere(reply, rec) {
 		return rec.fail(path, fmt.Errorf("cannot abort move %s: the reply of %s does not say it aborted "+
 			"this move at epoch %d, so the source stays fenced. Retry", rec.TxID, rec.Peer, rec.Epoch))
 	}
-	if reply != nil && reply.OK && reply.Error != "" {
-		_, _ = fmt.Fprintf(w, "warning: %s: %s\n", rec.Peer, reply.Error)
-	}
+	rec.DestReleased = released
 	if err := rec.advance(path, migAborted); err != nil {
 		return err
 	}
@@ -964,12 +974,78 @@ func sourceAbort(ctx context.Context, s *store.Store, name string, w io.Writer, 
 		_, _ = fmt.Fprintf(w, "Aborted move %s; %s never stopped running here\n", rec.TxID, name)
 		return nil
 	}
-	// The destination is out of it. The instance is the fenced checkpoint
-	// again, and is restored from it here.
-	if state.Migration != nil && state.Migration.TxID == rec.TxID {
+	return abortLocally(s, name, rec, w)
+}
+
+// finishAbort is `hull migrate --abort` of a move already aborted here. It
+// asks the destination again if it never confirmed the release, and it
+// restores the instance if the first run recorded the abort but did not
+// live to hand the fenced checkpoint back.
+func finishAbort(ctx context.Context, s *store.Store, name string, rec *migrationRecord, path string, w io.Writer,
+	peer movePeer) error {
+	if !rec.DestReleased && rec.Remote != nil {
+		reply, err := peerFor(rec, peer).call(ctx, "migrate-abort", []string{"--txid", rec.TxID}, nil)
+		if (err == nil && abortedThere(reply, rec)) || refusalCode(err) == codeUnknownTxID {
+			rec.DestReleased = true
+			if err := writeMigrationRecord(path, rec); err != nil {
+				return err
+			}
+			_, _ = fmt.Fprintf(w, "%s has released move %s\n", rec.Peer, rec.TxID)
+		} else {
+			if err == nil {
+				err = errors.New("its reply does not say it aborted the move")
+			}
+			_, _ = fmt.Fprintf(w, "warning: %s still did not confirm the abort (%v); `hull migrate --abort %s` "+
+				"run again asks it again\n", rec.Peer, err, rec.TxID)
+		}
+	}
+	state, err := s.GetInstance(name)
+	if err != nil {
+		return err
+	}
+	if m := state.Migration; m != nil && m.TxID == rec.TxID &&
+		(m.State == store.MigrationMigrating || m.State == store.MigrationFenced) {
+		return abortLocally(s, name, rec, w)
+	}
+	_, _ = fmt.Fprintf(w, "Move %s was already aborted\n", rec.TxID)
+	return nil
+}
+
+// adoptFenceForAbort records the bundle hvi fenced the VM into for move rec
+// when hull did not live to record it, as a re-run of the move would.
+func adoptFenceForAbort(s *store.Store, name string, state *store.InstanceState, rec *migrationRecord,
+	w io.Writer) error {
+	unlock, err := lockInstanceMigration(s, name)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	root, ok := flagValue(state.CmdLine, "--checkpoint-root")
+	if !ok {
+		return errors.New("the instance is fenced and has no checkpoint root")
+	}
+	dir := filepath.Join(root, rec.TxID)
+	if _, err := os.Stat(filepath.Join(dir, "manifest.json")); err != nil {
+		return fmt.Errorf("cannot abort move %s: the VM of %s is fenced, but no bundle of this move is at %s "+
+			"to restore it from. Nothing was changed", rec.TxID, name, dir)
+	}
+	m := &moveSource{s: s, name: name, rec: rec, out: w}
+	return m.adoptFence(state, dir)
+}
+
+// abortLocally is the source's half of an abort, once the move is recorded
+// aborted: the instance is the fenced checkpoint again, the fenced VMM is
+// stopped, and the instance is restored from the checkpoint here.
+func abortLocally(s *store.Store, name string, rec *migrationRecord, w io.Writer) error {
+	state, err := s.GetInstance(name)
+	if err != nil {
+		return err
+	}
+	if state.Migration != nil && state.Migration.TxID == rec.TxID && state.Migration.State != store.MigrationFenced {
 		state.Migration.State = store.MigrationFenced
 		if err := s.SaveInstance(state); err != nil {
-			return err
+			return fmt.Errorf("aborted move %s, but recording its checkpoint as %s's again failed: %w; "+
+				"`hull migrate --abort %s` run again finishes", rec.TxID, name, err, rec.TxID)
 		}
 	}
 	if state.Status == "running" && state.PID > 0 && processIsAVMM(state.PID, state) {

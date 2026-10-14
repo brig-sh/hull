@@ -854,3 +854,134 @@ func TestMoveRetryAfterALostReceiveReplyComparesTheSourcesHash(t *testing.T) {
 		t.Errorf("source %s, disk %+v, sent %s", got.State, got.Disk, sent)
 	}
 }
+
+// An abort before the fence that the destination does not confirm says a
+// second abort releases the reservation, and the second abort does.
+func TestMoveSecondAbortReleasesTheReservation(t *testing.T) {
+	f := newMoveFixture(t, true)
+	peer := newLocalPeer(f.dst)
+	f.vm.mu.Lock()
+	f.vm.failCheckpoint = true
+	f.vm.mu.Unlock()
+	_ = sourceMigrate(context.Background(), f.src, f.name, f.options(false), peer)
+	peer.down = true
+	var w bytes.Buffer
+	if err := sourceAbort(context.Background(), f.src, f.name, &w, peer); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(w.String(), "run again releases") || f.srcRecord(t).DestReleased {
+		t.Fatalf("first abort said %q, released %v", w.String(), f.srcRecord(t).DestReleased)
+	}
+	peer.down = false
+	w.Reset()
+	if err := sourceAbort(context.Background(), f.src, f.name, &w, peer); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(f.dst.InstanceDir(f.name)); !os.IsNotExist(err) {
+		t.Errorf("the reservation is still there after the second abort (%q): %v", w.String(), err)
+	}
+	if !f.srcRecord(t).DestReleased {
+		t.Error("the release is not on record")
+	}
+	// Once released, an abort asks nothing more.
+	before := peer.called("migrate-abort")
+	if err := sourceAbort(context.Background(), f.src, f.name, &w, peer); err != nil {
+		t.Fatal(err)
+	}
+	if peer.called("migrate-abort") != before || f.vm.stopped {
+		t.Error("a third abort asked the destination again, or stopped the source")
+	}
+}
+
+// An abort that recorded aborted but did not live to hand the fenced
+// checkpoint back is finished by running the abort again.
+func TestMoveAbortRunAgainRestoresTheSource(t *testing.T) {
+	f := newMoveFixture(t, false)
+	peer := newLocalPeer(f.dst)
+	_ = sourceMigrate(context.Background(), f.src, f.name, f.options(true), peer)
+	rec := f.srcRecord(t)
+	if r := destAbort(f.dst, rec.TxID); !r.OK {
+		t.Fatalf("destination abort: %+v", r)
+	}
+	// Recorded aborted here; the instance record still says migrating.
+	if err := rec.advance(f.src.InstanceMigrationRecord(f.name), migAborted); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustInstance(t, f.src, f.name).Migration.State; got != store.MigrationMigrating {
+		t.Fatalf("instance migration %s", got)
+	}
+	restored := 0
+	localRestore = func(s *store.Store, name string) error {
+		restored++
+		st := mustInstance(t, s, name)
+		if err := restorableMigration(st.Migration); err != nil {
+			return err
+		}
+		st.Migration.State = store.MigrationRestored
+		return s.SaveInstance(st)
+	}
+	if err := sourceAbort(context.Background(), f.src, f.name, &bytes.Buffer{}, peer); err != nil {
+		t.Fatal(err)
+	}
+	if restored != 1 || !f.vm.stopped {
+		t.Errorf("restored %d, fenced VMM stopped %v", restored, f.vm.stopped)
+	}
+	var w bytes.Buffer
+	if err := sourceAbort(context.Background(), f.src, f.name, &w, peer); err != nil ||
+		!strings.Contains(w.String(), "already aborted") || restored != 1 {
+		t.Errorf("abort of a finished abort: %v, %q, restored %d", err, w.String(), restored)
+	}
+}
+
+// A fence whose reply was lost before hull recorded it: the VM is fenced,
+// the record still says reserved. The abort counts it as fenced, adopts the
+// bundle, needs the destination's word, and restores the instance here.
+func TestMoveAbortAfterALostFenceReply(t *testing.T) {
+	f := newMoveFixture(t, true)
+	peer := newLocalPeer(f.dst)
+	f.vm.mu.Lock()
+	f.vm.failCheckpoint = true
+	f.vm.mu.Unlock()
+	_ = sourceMigrate(context.Background(), f.src, f.name, f.options(false), peer)
+	rec := f.srcRecord(t)
+	if rec.State != srcReserved {
+		t.Fatalf("source %s", rec.State)
+	}
+	f.vm.mu.Lock()
+	f.vm.fenced = true
+	f.vm.mu.Unlock()
+	root, _ := flagValue(mustInstance(t, f.src, f.name).CmdLine, "--checkpoint-root")
+	restored := 0
+	localRestore = func(*store.Store, string) error { restored++; return nil }
+
+	// No bundle of this move: nothing to bring back, and nothing changes.
+	err := sourceAbort(context.Background(), f.src, f.name, &bytes.Buffer{}, peer)
+	if err == nil || !strings.Contains(err.Error(), "no bundle of this move") {
+		t.Fatalf("abort with no bundle: %v", err)
+	}
+	if f.srcRecord(t).State != srcReserved || peer.called("migrate-abort") != 0 {
+		t.Fatal("the abort went ahead with nothing to restore")
+	}
+	dir := filepath.Join(root, rec.TxID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeBundle(t, dir, fixtureDiskSize)
+	// Fenced, so the destination's word is needed.
+	peer.down = true
+	if err := sourceAbort(context.Background(), f.src, f.name, &bytes.Buffer{}, peer); err == nil ||
+		!strings.Contains(err.Error(), "stays fenced") {
+		t.Fatalf("abort with no answer: %v", err)
+	}
+	peer.down = false
+	var w bytes.Buffer
+	if err := sourceAbort(context.Background(), f.src, f.name, &w, peer); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(w.String(), "never stopped") || restored != 1 || !f.vm.stopped {
+		t.Errorf("abort said %q; restored %d, stopped %v", w.String(), restored, f.vm.stopped)
+	}
+	if m := mustInstance(t, f.src, f.name).Migration; m == nil || m.TxID != rec.TxID || m.BundleDir != dir {
+		t.Errorf("instance migration %+v", m)
+	}
+}
