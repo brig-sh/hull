@@ -77,6 +77,9 @@ type migrateProbe struct {
 	NameMove      string `json:"nameMove,omitempty"`
 	GatewayOK     bool   `json:"gatewayOk,omitempty"`
 	GatewayDetail string `json:"gatewayDetail,omitempty"`
+	// HviProfile is whether the destination's hvi takes --profile: one
+	// that does not cannot restore a portable instance.
+	HviProfile bool `json:"hviProfile,omitempty"`
 }
 
 // Reply codes a source branches on.
