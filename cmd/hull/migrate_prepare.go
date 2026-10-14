@@ -491,9 +491,9 @@ func sourcePrepare(ctx context.Context, s *store.Store, name string, opt prepare
 // state needs and reports each step. It fails only when a step the move
 // needs failed: the base. The image and the kernel are reported.
 func prepareDestination(ctx context.Context, s *store.Store, state *store.InstanceState, p movePeer,
-	remote migrateRemote, out io.Writer) (*prepareResult, error) {
+	remote migrateRemote, w io.Writer) (*prepareResult, error) {
 	res := &prepareResult{Name: state.ID, To: remote.Target}
-	logf := func(format string, args ...any) { _, _ = fmt.Fprintf(out, format+"\n", args...) }
+	logf := func(format string, args ...any) { _, _ = fmt.Fprintf(w, format+"\n", args...) }
 	reply, err := p.call(ctx, "migrate-probe", probeArgs(remote, ""), nil)
 	if err != nil {
 		return res, fmt.Errorf("probe %s: %w", remote.Target, err)
