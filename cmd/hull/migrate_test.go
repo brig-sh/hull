@@ -205,7 +205,9 @@ func TestMoveRestoreRefusedThenAbort(t *testing.T) {
 	if r := destCommit(f.dst, src.TxID, src.Epoch); r.OK || r.Code != codeAborted {
 		t.Errorf("late commit: %+v", r)
 	}
-	// A new move after the abort is allowed.
+	// The aborted move's record does not hold the instance: a new move is
+	// refused only because the fixture's VMM is stopped now (the stub
+	// restore here does not start one), not by the old move.
 	if err := sourceMigrate(context.Background(), f.src, f.name, f.options(true), newLocalPeer(shortStore(t))); err == nil {
 		t.Error("expected the fixture's stopped VMM to refuse a new move")
 	} else if strings.Contains(err.Error(), "in move") {
@@ -378,6 +380,10 @@ func TestMoveGuards(t *testing.T) {
 	peer := newLocalPeer(f.dst)
 	_ = sourceMigrate(context.Background(), f.src, f.name, f.options(true), peer)
 	// Source: checkpoint, resume, rm.
+	if err := hviCheckpointInstance(f.src, mustInstance(t, f.src, f.name), hviThenContinue, "", time.Second); err == nil ||
+		!strings.Contains(err.Error(), "being moved") {
+		t.Errorf("checkpoint of a source in a move: %v", err)
+	}
 	if err := refuseDuringMove(f.src, f.name, "resume"); err == nil {
 		t.Error("resume of a source in a move was allowed")
 	}
