@@ -197,6 +197,7 @@ in the name only keeps two pulls' directories apart.
     │                            hvi: latest.json, <txid>/ (the bundle); hvi's --checkpoint-root
     ├── control.sock             hvi only: the control socket (pause, checkpoint, stop)
     ├── profile.json             hvi only: the machine profile hvi writes at boot
+    ├── migration.lock           hvi only: held by one checkpoint or restore at a time
     └── (QMP socket, agent socket, staged boot files)
 ```
 

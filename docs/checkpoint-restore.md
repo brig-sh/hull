@@ -231,7 +231,13 @@ hull sends `{"v":1,"op":"checkpoint","dir":DIR,"then":"continue"|"fence"}`
 and waits up to `--timeout` seconds (60). hvi pauses the guest, writes a
 bundle into `DIR`, and then either resumes the guest or, with `fence`, keeps
 it parked for good: hvi refuses a later `resume` with `fenced`, and only
-`stop` ends it. A failed capture resumes the guest and leaves no bundle.
+`stop` ends it. A failed capture resumes the guest (a guest that was paused
+stays paused) and leaves no bundle: hull removes a directory it made for one,
+and empties a `--dir` you gave so the same one can be retried. With no reply
+in time hull leaves everything in place, since hvi may still be writing.
+
+One checkpoint or restore of an instance runs at a time: each takes
+`<instance>/migration.lock`, and a second one is refused at once.
 
 `DIR` is a new 0700 directory `<instance>/checkpoint/<txid>`, where the txid
 is a random id hull draws, or an empty directory you name with `--dir`, which
@@ -324,8 +330,13 @@ dropped.
 
 The record goes `starting`, then `running`, as for any run, while
 `migration.state` goes `restoring`, then `restored-paused` once hvi reports it
-on the socket, then `restored` after hull sends `resume`. With `--paused`,
-hull stops at `restored-paused` and `hull resume` starts the guest. hull waits
+on the socket, then `restored` when hull sends `resume`. With `--paused`,
+hull stops at `restored-paused` and `hull resume` starts the guest. Whatever
+may run the restored guest (the restore's own resume, `hull resume`, `hull
+checkpoint --then continue`) records `restored` before it is sent, and a
+resume with no reply counts as one that ran. The state never moves back,
+whichever hull process writes it last, so a guest that may have run is never
+restored over again. hull waits
 up to `--timeout` seconds (120) for hvi to rebuild the VM.
 
 **The gateway.** hvi reaches the gateway by the socket path on its command
