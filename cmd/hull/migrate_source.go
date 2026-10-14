@@ -32,6 +32,7 @@ import (
 
 	"github.com/urfave/cli/v3"
 
+	"github.com/brig-sh/hull/internal/bootassets"
 	"github.com/brig-sh/hull/pkg/store"
 )
 
@@ -293,7 +294,7 @@ func sourcePreflight(s *store.Store, state *store.InstanceState, opt migrateOpti
 	}
 	host, _ := os.Hostname()
 	spec := &migrateSpec{SourceHost: host, ImageDigest: state.ImageDigest, MAC: state.MAC, IP: state.IP,
-		Hvi: opt.remote.Hvi, Net: "none"}
+		Hvi: opt.remote.Hvi, Net: "none", Profile: state.Profile}
 	argv := state.CmdLine
 	if v, ok := flagValue(argv, "--net-mac"); ok {
 		spec.MAC = v
@@ -337,11 +338,7 @@ func probeDestination(ctx context.Context, peer movePeer, rec *migrationRecord, 
 	if p == nil {
 		return nil, fmt.Errorf("probe %s: the reply has no probe", rec.Peer)
 	}
-	var why []string
-	if p.OS != runtime.GOOS || p.Arch != runtime.GOARCH {
-		why = append(why, fmt.Sprintf("it is %s/%s and this host %s/%s: a checkpoint restores only on "+
-			"the same kind of host", p.OS, p.Arch, runtime.GOOS, runtime.GOARCH))
-	}
+	why := hostKindMismatch(p, rec.Spec.Profile)
 	if !p.Hypervisor {
 		why = append(why, "it cannot run a VM: "+p.HypervisorDetail)
 	}
@@ -352,6 +349,9 @@ func probeDestination(ctx context.Context, peer movePeer, rec *migrationRecord, 
 		why = append(why, fmt.Sprintf("its hvi (%s) predates the control socket", p.Hvi))
 	case !p.HviRestore && !rec.Remote.AllowNoRestore:
 		why = append(why, fmt.Sprintf("its hvi (%s) has no restore subcommand", p.Hvi))
+	case rec.Spec.Profile != "" && !p.HviProfile:
+		why = append(why, fmt.Sprintf("its hvi (%s) has no machine profiles, so it cannot restore a "+
+			"%s instance", p.Hvi, rec.Spec.Profile))
 	}
 	switch {
 	case p.NameTaken && p.NameTxID != rec.TxID && p.NameMove == roleSource+" "+srcCommitted:
@@ -373,6 +373,26 @@ func probeDestination(ctx context.Context, peer movePeer, rec *migrationRecord, 
 		return p, fmt.Errorf("%s cannot take %s: %s", rec.Peer, rec.Name, strings.Join(why, "; "))
 	}
 	return p, nil
+}
+
+// hostKindMismatch says why a checkpoint taken here cannot restore on the
+// probed host's kind of machine, or nothing. A native checkpoint holds the
+// host's own interrupt controller, timer and CPU, so it restores only on the
+// same OS and architecture. A portable-arm64-v1 one holds the profile's
+// machine, which hvi presents on an Apple host and on a Linux arm64 host
+// alike, so only the architecture has to match; the destination hvi still
+// compares the bundle's profile with its own host before it restores.
+func hostKindMismatch(p *migrateProbe, profile string) []string {
+	switch {
+	case p.Arch != runtime.GOARCH:
+		return []string{fmt.Sprintf("it is %s/%s and this host %s/%s: a checkpoint restores only on "+
+			"the same architecture", p.OS, p.Arch, runtime.GOOS, runtime.GOARCH)}
+	case p.OS != runtime.GOOS && profile != bootassets.PortableArm64V1:
+		return []string{fmt.Sprintf("it is %s/%s and this host %s/%s: a checkpoint restores only on "+
+			"the same kind of host, unless the instance runs --profile %s", p.OS, p.Arch,
+			runtime.GOOS, runtime.GOARCH, bootassets.PortableArm64V1)}
+	}
+	return nil
 }
 
 // moveSpaceNeeded estimates what a move writes on the destination: the

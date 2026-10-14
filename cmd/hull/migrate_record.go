@@ -181,6 +181,9 @@ type migrateSpec struct {
 	GatewaySock string `json:"gatewaySock,omitempty"`
 	// Hvi is the destination's hvi, when the operator named one.
 	Hvi string `json:"hvi,omitempty"`
+	// Profile is the instance's hvi machine profile ("" for native), which
+	// the destination records on the instance it takes in.
+	Profile string `json:"profile,omitempty"`
 }
 
 // migrateReserveRequest is migrate-receive --reserve's standard input.

@@ -65,7 +65,7 @@ The image reference is the first positional argument. Everything after it
 replaces the image's `Cmd`, the way `docker run` does. The image entrypoint is
 kept when that entrypoint is `urunit`.
 
-Twenty-three flags:
+Twenty-four flags:
 
 | Flag | Default | What it does |
 |---|---|---|
@@ -80,6 +80,7 @@ Twenty-three flags:
 | `--hypervisor <name>` | from image annotation, else `qemu` | `vz`, `hvi`, `qemu`, or `qemu-hvf` |
 | `--qemu-path <path>` | auto-detect, prefers a signed copy | path to `qemu-system-aarch64` |
 | `--rootfs-type <mode>` | `virtiofs` on `vz` and `hvi`, `9pfs` on `qemu` | `block`, `virtiofs` or `9pfs` |
+| `--profile <name>` | `native` | `hvi` machine profile: `native` or `portable-arm64-v1`, whose checkpoints restore on an Apple host and a Linux arm64 host alike. Also the annotation `com.nofire.hvi.profile`, read from `--annotation` only. Recorded in `state.json` as `profile` and passed to `hvi` as `--profile`. See [backends.md](backends.md#machine-profiles) |
 | `--annotation <k=v>` | | set an OCI runtime annotation. Repeatable |
 | `--no-boot-assets` | off | do not fall back to the published boot assets when the image carries no kernel |
 | `--env`, `-e <spec>` | | `KEY=VALUE`, or a bare `KEY` to inherit it from the host without putting the value in argv. Repeatable |
@@ -104,6 +105,15 @@ These fail before anything starts, rather than being documented and ignored:
   because hvi's built-in stack forwards no traffic. The error names the gateway
 - `--gui` or `--rosetta` on any backend but `vz`
 - `--gui-title` without `--gui`
+- `--profile` other than `native` with a backend other than `hvi`, without
+  `--rootfs-type block` (on macOS an unset `--rootfs-type` is virtiofs, and is
+  refused, not switched), with `--shared-dir` or `--shared-dir-fd`, with an
+  image that boots from its own initrd, with an `hvi` that does not take
+  `--profile` or has no control socket, with `--profile` and the annotation
+  naming different profiles, or with a kernel that is not the profile's: a
+  `com.urunc.unikernel.bootKernel` that does not hash to the kernel in
+  `hull assets dir --profile NAME`, a kernel from the image, or
+  `--no-boot-assets`
 - `--rosetta` without the virtiofs rootfs mode, a `urunit` init, and a static
   arm64 `busybox` at `/.rosetta/busybox` in the image
 
@@ -155,9 +165,9 @@ as a default that an explicit `--env TERM` beats.
 | `checkpoint <id>` | `--timeout <secs>`, default 60; `hvi` only: `--then continue\|fence`, default `continue`; `--dir <path>`, an empty directory for the bundle, below `<instance>/checkpoint` |
 | `restore <id>` | `--detach`, `-d`; `--stop-grace <secs>`, default 10; `--wait-ip`; `--gateway-sock <path>` (`vz` only); `hvi` only: `--paused`, `--timeout <secs>`, default 120, `--adopt-latest` |
 | `migrate <id>` | `--to USER@HOST`; `--remote-store <dir>`; `--remote-hull <path>`; `--remote-hvi <path>`; `--remote-gateway-sock <path>`; `--txid <txid>` resume a move; `--dry-run`; `--abort` and `--status` (with a name or a txid); `--timeout <secs>`, default 120, for the fence; `--allow-no-restore`, testing only |
-| `assets show` | none |
-| `assets dir` | none. Prints the directory and nothing else, for scripts |
-| `assets pull [REF]` | `--force` download even when the assets are present |
+| `assets show` | `--profile NAME` shows that profile's kernel and the initrd it boots with |
+| `assets dir` | `--profile NAME` prints the profile's kernel directory instead. Prints the directory and nothing else, for scripts |
+| `assets pull [REF]` | `--force` download even when the assets are present. `--profile NAME` installs the profile's kernel from REF, `HULL_PORTABLE_KERNEL` or `HULL_PORTABLE_KERNEL_REF` (see [images.md](images.md#a-profiles-kernel)); without `--force` it checks the installed one against its record. Plain `--force` leaves the profile's kernel alone: replace it with `--profile NAME --force` |
 | `store detach` | `--force` detach even with files still open |
 | `store compact` | `--force` detach even with files still open, before compacting |
 | `telemetry on\|off\|status` | none |
@@ -195,7 +205,7 @@ The destination's verbs each print one JSON object on stdout:
 
 | Verb | Flags | What it does |
 |---|---|---|
-| `migrate-probe` | `--name`, `--hvi`, `--gateway-sock` | reports hull and hvi versions, whether hvi takes the control flags and has `restore`, the hypervisor, free space, whether the name is taken, and whether the gateway answers |
+| `migrate-probe` | `--name`, `--hvi`, `--gateway-sock` | reports hull and hvi versions, whether hvi takes the control flags and `--profile` (a stand-in for "can restore a portable bundle"; see [migration.md](migration.md#usage)) and has `restore`, the hypervisor, free space, whether the name is taken, and whether the gateway answers |
 | `migrate-receive` | `--txid`, `--name`, `--reserve` | with `--reserve`, claims the name (a JSON request on stdin); without, reads the move stream on stdin and ends `verified` |
 | `migrate-prepare` | `--txid` | restores the received checkpoint paused |
 | `migrate-commit` | `--txid`, `--epoch` | records `running`, then resumes the guest |
@@ -312,6 +322,8 @@ whole kernel command line.
 | `HULL_VERIFY` | how the bundle's cosign signature is checked: `warn` (default), `require`, `strict`, or `off`/`none`/`0`. Anything unrecognized is `warn` |
 | `HULL_BOOT_ASSETS_ALLOW_FOREIGN` | `1`, or the repository being allowed, to fetch from a repository other than the published one |
 | `HULL_BOOT_ASSETS_INSECURE` | `1` to fetch from a registry that resolves to a scheme other than https |
+| `HULL_PORTABLE_KERNEL` | a local kernel `Image` for `--profile portable-arm64-v1`, installed by `hull assets pull --profile portable-arm64-v1` or the first run that needs it |
+| `HULL_PORTABLE_KERNEL_REF` | an OCI artifact carrying that kernel instead. Setting both is refused |
 | `XDG_DATA_HOME` | consulted only with no store and off macOS; assets then live under `$XDG_DATA_HOME/brig/assets` |
 
 With no store, the fallback asset directory is `~/.hull/assets` on macOS.

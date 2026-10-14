@@ -19,6 +19,16 @@ what can go wrong, and how to recover.
 > [Verified](#verified)). Without `--allow-no-restore`, `hull migrate`
 > refuses at preflight on an `hvi` with no restore, before anything is
 > fenced.
+>
+> A `--profile portable-arm64-v1` instance moves through the commit on
+> this Mac with the `hvi` at c580223, which checkpoints and restores the
+> portable machine (see [The portable profile on this
+> Mac](#the-portable-profile-on-this-mac)). That move ran between two
+> stores through the `HULL_MIGRATE_SSH` stand-in, not real ssh. With the
+> `hvi` at f4594f0 a portable move stops at the fence on the Linux pair (see
+> [The portable profile on the Linux
+> pair](#the-portable-profile-on-the-linux-pair)). A portable move between
+> this Mac and a Pi has not run.
 
 ## Usage
 
@@ -48,7 +58,19 @@ hull migrate --abort 3f...e1                       # end a move that has not com
 
 The instance must be an `hvi` instance on a block rootfs, with no shared
 host directory, running or paused, started with a control socket. Both hosts
-must be the same OS and architecture. Everything else about the host is left
+must be the same architecture, and for a native instance the same OS. An
+instance started with `--profile portable-arm64-v1` (see
+[backends.md](backends.md#machine-profiles)) may move between macOS and
+Linux arm64, since its checkpoint holds the profile's machine rather than
+the host's; the probe then also needs the destination's `hvi` to take
+`--profile`, and refuses before the fence when it does not. That is a
+proxy: `hvi` has no answer that says it can restore a portable bundle, and
+one that takes `--profile` but cannot checkpoint or restore the portable
+machine (f4594f0) passes the probe, so the move stops later, at the fence
+or at the restore. On receive, the destination reads the bundle's own
+`profile.json` and refuses the bundle, as a failed verification, when its
+profile is not the one the source named; the profile it records is the
+one `hvi` captured. Everything else about the host is left
 to `hvi restore` on the destination, which by its specification (SPEC H4)
 compares the bundle's machine profile with the host's (CPU, counter
 frequency, interrupt controller, hvi build) and refuses before it creates
@@ -409,3 +431,96 @@ Not run live: an abort answered `unknown_txid`, a destination whose cleanup
 fails, a transfer cut midway, a stream whose reply is lost and a disk
 changed after the fence (the unit tests cover each), any gateway case, and
 a move on KVM past the restore.
+
+### The portable profile on this Mac
+
+2026-10-14, hull at this branch, `hvi` at `feat/teleport` c580223 (built
+from `git archive` with `cargo build --release`, signed ad hoc with
+`hvi.entitlements`), HVF. The store held the default boot assets and the
+portable kernel (sha256 `32725b9b...`) installed from
+`HULL_PORTABLE_KERNEL`. Guest: alpine on a block rootfs, 512 MiB, 2
+vCPUs, `--net none`, printing a counter every second. Each run below was
+done twice, in the review of the profile commits and again after the
+fixes that followed it; the numbers are the range of the two.
+
+- **Run.** `hull run --hypervisor hvi --profile portable-arm64-v1
+  --rootfs-type block --net none` passed `--control-sock ... --profile
+  portable-arm64-v1` and recorded `"profile": "portable-arm64-v1"`. In the
+  guest: clocksource `hvi-time`, kernel 6.12.95-00002, CPU part 0xd0b.
+- **Same host, fence and restore.** `hull checkpoint --then fence` took
+  426 to 433 ms (capture 398 to 408 ms, 80 to 81 of 512 MiB RAM stored).
+  The counter held at TICK 10 for 3 s, and exec and resume were refused.
+  After `hull stop`, `hull restore --detach` took 0.55 to 0.57 s, with no
+  `--profile` on the restore argv. The guest went on (counter 19, then
+  21) on `hvi-time`, a file written before the fence was there, and it
+  printed no boot line.
+- **A move between two stores.** Through the `HULL_MIGRATE_SSH` stand-in
+  (see [Testing a move](#testing-a-move)), not real ssh. The destination's
+  probe answered `hviProfile` true. A dry run with `--remote-hvi` naming a
+  wrapper that rejects `--profile` was refused before the fence, and no
+  record was written. `hull migrate` then ran through the commit in 2.2 s:
+  fence 472 ms, transfer 639 to 643 ms (95.9 to 96.6 MiB), restore paused
+  585 to 586 ms, commit 88 to 93 ms. On the destination the counter went
+  on from 11 to 15 to 17 on `hvi-time`, the file was intact, and there
+  was no boot line. The destination recorded that profile and owner
+  epoch 1. After the fixes, the bundle's `profile.json` was also read on
+  both stores: it named `portable-arm64-v1`. The source was stopped and `migrated`, and
+  its `hull restore` was refused as stale.
+- **The kernel rule** (after the fixes only). With `--profile`, a
+  bootKernel annotation naming the default bundle's kernel was refused
+  before the disk was built, with no instance left. The annotation naming
+  the installed portable kernel, and naming a copy of it at another path,
+  booted on `hvi-time`. `--no-boot-assets` was refused, and so was an
+  `hvi` wrapper that takes `--profile` but not `--checkpoint-root`. A
+  portable kernel changed by one byte was refused, and the refusal named
+  `hull assets pull --profile portable-arm64-v1 --force`; after that
+  command the next run booted.
+
+Not run: real ssh, KVM, and a move between this Mac and a Pi.
+
+### The portable profile on the Linux pair
+
+2026-10-14, hull at this branch (f2a7a5c), between two Raspberry Pi 5
+hosts (rp1, rp2: Linux 6.12.25, KVM with a vGICv2) over real ssh with a
+key from each Pi to the other. Each store held the default boot assets
+and the portable kernel (Linux 6.12.95 with `hvi-time`, sha256
+`32725b9b...`) installed by `hull assets pull --profile
+portable-arm64-v1` from `HULL_PORTABLE_KERNEL`. Guest: alpine on a block
+rootfs, 512 MiB, 1 vCPU, `--net none`. Its init only sleeps; `hull exec`
+starts a detached shell that counts in a variable and writes the count
+to `/dev/shm/counter` every second, and writes a 5.5 KiB random file to
+`/root/marker` with `sync`.
+
+- **Run.** With `hvi` at `feat/teleport` f4594f0 (the first with
+  `--profile` and the control flags), `hull run --hypervisor hvi
+  --profile portable-arm64-v1 --rootfs-type block --net none` booted in
+  0.9 s on hvi-time (`Switched to clocksource hvi-time`, the A76 CPU
+  baseline, PSCI 1.1), recorded `"profile": "portable-arm64-v1"` and
+  passed `--control-sock ... --profile portable-arm64-v1`. `hull pause`
+  and `hull resume` worked. The same run on this Mac (HVF, `hvi` from the
+  P1 to P3 series) booted on the software GICv2 with hvi-time at 24 MHz.
+- **Probe.** A dry run to rp2 passed. With `--remote-hvi` naming an
+  `hvi` without profiles (5aafb49), the probe refused before the fence:
+  "its hvi ... has no machine profiles, so it cannot restore a
+  portable-arm64-v1 instance".
+- **Fence.** `hvi` f4594f0 refuses to checkpoint a portable guest ("no
+  backend checkpoints yet"). `hull migrate` stopped at `reserved` in
+  0.6 s with that reason, the guest kept running on rp1, and `--abort`
+  released rp2's reservation.
+- **Native, up to the restore** (`hvi` 5aafb49): fence 655 ms (capture
+  649 ms, 55.5 of 512 MiB RAM stored), 70.8 MiB in 1.44 s (49 MiB/s)
+  with 15.2 MiB of the 15 GiB disk, bundle sha256 identical on both
+  hosts, rp2 `verified`. rp2's `hvi restore` refused ("the KVM restore is
+  not built yet"); the move stopped at `transferred`, and the abort
+  removed rp2's copy and tried the source's restore, refused the same way.
+  Before f2a7a5c each of those two refusals took the full two-minute
+  restore deadline (`hull migrate` 123 s); after it, 3.4 s, with hvi's
+  reason in the error.
+
+Not run yet: a portable move past the fence on the Linux pair, and a
+portable move between this Mac and a Pi. The `hvi` branch at c580223
+is meant to checkpoint and restore the portable profile on HVF and on
+KVM; only HVF was run here, and its move on this Mac is in [The portable profile on this
+Mac](#the-portable-profile-on-this-mac). This Mac's same-host move over
+real ssh was not run either, as enabling Remote Login needs a password
+for sudo.

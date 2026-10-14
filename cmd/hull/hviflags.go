@@ -41,10 +41,28 @@ import (
 // answer is taken as "supported": the boot itself then fails with hvi's own
 // reason, which says more than a guess here would.
 func hviBootTakesControlFlags(binary string) (bool, error) {
+	return hviBootKnowsFlag(binary, "--checkpoint-root")
+}
+
+// hviBootTakesProfile reports whether the hvi at binary accepts --profile
+// on `boot`. Asked the same way: `boot --profile` with no name fails while
+// parsing, and an hvi from before machine profiles answers `unknown boot arg
+// "--profile"` (its --profile-out is a different argument, matched whole).
+//
+// Unlike the control flags, a run that asked for a profile does not go on
+// without it: an hvi that cannot take --profile would boot the native
+// machine, whose checkpoints restore only on the same kind of host.
+func hviBootTakesProfile(binary string) (bool, error) {
+	return hviBootKnowsFlag(binary, "--profile")
+}
+
+// hviBootKnowsFlag runs `binary boot FLAG` with no value and reports
+// whether hvi named the flag unknown.
+func hviBootKnowsFlag(binary, flag string) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var out bytes.Buffer
-	probe := exec.CommandContext(ctx, binary, "boot", "--checkpoint-root")
+	probe := exec.CommandContext(ctx, binary, "boot", flag)
 	probe.Stdout = &out
 	probe.Stderr = &out
 	err := probe.Run()
@@ -55,5 +73,5 @@ func hviBootTakesControlFlags(binary string) (bool, error) {
 	if err != nil && !errors.As(err, &exitErr) {
 		return false, fmt.Errorf("run %s: %w", binary, err)
 	}
-	return !strings.Contains(out.String(), `unknown boot arg "--checkpoint-root"`), nil
+	return !strings.Contains(out.String(), fmt.Sprintf("unknown boot arg %q", flag)), nil
 }

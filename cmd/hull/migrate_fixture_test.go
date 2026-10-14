@@ -45,8 +45,20 @@ import (
 // It returns the manifest's sha256.
 func writeFakeBundle(t *testing.T, dir string, diskSize int64) string {
 	t.Helper()
+	return writeFakeBundleWithProfile(t, dir, diskSize, "")
+}
+
+// writeFakeBundleWithProfile is writeFakeBundle for a guest of the given
+// machine profile, which profile.json names unless it is native, as hvi
+// writes it.
+func writeFakeBundleWithProfile(t *testing.T, dir string, diskSize int64, profile string) string {
+	t.Helper()
+	profileJSON := `{"profile_version":1}`
+	if profile != "" {
+		profileJSON = `{"profile_version":1,"profile":"` + profile + `"}`
+	}
 	parts := map[string][]byte{
-		"profile.json": []byte(`{"profile_version":1}`),
+		"profile.json": []byte(profileJSON),
 		"ram.bin":      bytes.Repeat([]byte("ram!"), 4096),
 		"disk.json": []byte(fmt.Sprintf(`{"version":1,"path_hint":"/d","size_bytes":%d,"sha256_sparse":null,`+
 			`"generation":3,"synced":true}`, diskSize)),
@@ -80,6 +92,8 @@ type moveVM struct {
 	fenced         bool
 	stopped        bool
 	failCheckpoint bool
+	// profile is the machine profile the bundles it writes record.
+	profile string
 }
 
 func (v *moveVM) ops() []string {
@@ -136,7 +150,7 @@ func newMoveFixture(t *testing.T, hasRestore bool) *moveFixture {
 			if vm.failCheckpoint {
 				return stubAnswer{reply: `{"v":1,"ok":false,"code":"capture_failed","error":"disk sync failed"}`}
 			}
-			sum := writeFakeBundle(t, req["dir"].(string), fixtureDiskSize)
+			sum := writeFakeBundleWithProfile(t, req["dir"].(string), fixtureDiskSize, vm.profile)
 			if req["then"] == "fence" {
 				vm.fenced = true
 			}
