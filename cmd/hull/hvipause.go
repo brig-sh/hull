@@ -41,8 +41,9 @@ func requireRunningHvi(state *store.InstanceState, verb string) error {
 		return fmt.Errorf("instance %s is not running", state.ID)
 	}
 	if state.ControlSock == "" {
-		return fmt.Errorf("instance %s was started without a control socket, so it can only be "+
-			"stopped; run it again with this version of hull", state.ID)
+		return fmt.Errorf("instance %s has no control socket, so it can only be stopped: the hvi "+
+			"it runs (%s) predates the socket, or an older hull started it. Run it again with an "+
+			"hvi that takes --control-sock", state.ID, state.CmdLine[0])
 	}
 	return nil
 }

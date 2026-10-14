@@ -252,7 +252,7 @@ func hviCheckpointInstance(s *store.Store, state *store.InstanceState, then, dir
 	root, ok := flagValue(state.CmdLine, "--checkpoint-root")
 	if !ok {
 		return fmt.Errorf("instance %s was started without a checkpoint root, so its hvi may not "+
-			"write a bundle anywhere; run it again with this version of hull", id)
+			"write a bundle anywhere; run it again with an hvi that takes --checkpoint-root", id)
 	}
 	if dir == "" {
 		dir = filepath.Join(root, txid)
