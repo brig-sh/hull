@@ -235,6 +235,37 @@ func hviHasRestore(binary string) (bool, error) {
 	return !strings.Contains(out.String(), `unknown subcommand "restore"`), nil
 }
 
+// hviRestoreTakesStream reports whether the hvi at binary restores from a
+// stream (`restore --from-stream`), which a streamed move hands it on stdin.
+// Asked as the other probes are: hvi's restore parser answers an argument it
+// does not know with `unknown restore arg "--from-stream"` (src/main.rs).
+func hviRestoreTakesStream(binary string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var out bytes.Buffer
+	probe := exec.CommandContext(ctx, binary, "restore", hviFromStreamFlag)
+	probe.Stdout = &out
+	probe.Stderr = &out
+	err := probe.Run()
+	if ctx.Err() != nil {
+		return false, fmt.Errorf("%s restore did not answer a probe within 5s", binary)
+	}
+	var exitErr *exec.ExitError
+	if err != nil && !errors.As(err, &exitErr) {
+		return false, fmt.Errorf("run %s: %w", binary, err)
+	}
+	text := out.String()
+	return !strings.Contains(text, fmt.Sprintf("unknown restore arg %q", hviFromStreamFlag)) &&
+		!strings.Contains(text, `unknown subcommand "restore"`), nil
+}
+
+// hviFromStreamFlag is hvi restore's argument for a checkpoint read from a
+// stream, and hviFromStreamStdin its value for standard input.
+const (
+	hviFromStreamFlag  = "--from-stream"
+	hviFromStreamStdin = "-"
+)
+
 // reconcileLatestCheckpoint compares the record's checkpoint with the one
 // <instance>/checkpoint/latest.json names, and adopts the latter into the
 // record when asked and safe.
