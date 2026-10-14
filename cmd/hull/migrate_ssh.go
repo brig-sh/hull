@@ -23,6 +23,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"syscall"
@@ -158,6 +159,8 @@ type movePeer interface {
 type sshPeer struct {
 	target string
 	remote migrateRemote
+	// warnedMux is set once the move said it runs without the mux.
+	warnedMux bool
 }
 
 // validSSHTarget is [USER@]HOST, nothing ssh could read as an option.
@@ -205,17 +208,69 @@ func (p *sshPeer) remoteCommand(verb string, args []string) string {
 	return strings.Join(quoted, " ")
 }
 
+// migrateSSHMuxEnv set to "off" makes every step of a move its own ssh
+// connection.
+const migrateSSHMuxEnv = "HULL_MIGRATE_SSH_MUX"
+
 // sshArgv is the ssh command line for verb: batch mode (a password prompt
 // would hang a move with the source fenced), keepalives so a dead link ends
 // the step instead of blocking it, no tty, and "--" so the target can never
 // be read as an option.
+//
+// The steps share one connection (ControlMaster), which outlives each step
+// by a minute: the commit, which a streamed move runs while the guest is
+// stopped, then pays for no handshake. The socket is ssh's hash of the
+// connection in a directory only this user can write (sshControlDir):
+// anyone who can create the socket first would get the move's stream,
+// guest RAM and all, or answer its steps. Without such a directory each
+// step makes its own connection.
 func (p *sshPeer) sshArgv(verb string, args []string) []string {
 	ssh := os.Getenv(migrateSSHEnv)
 	if ssh == "" {
 		ssh = "ssh"
 	}
-	return []string{ssh, "-T", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=15",
-		"-o", "ServerAliveCountMax=4", "--", p.target, p.remoteCommand(verb, args)}
+	argv := []string{ssh, "-T", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=15",
+		"-o", "ServerAliveCountMax=4"}
+	if os.Getenv(migrateSSHMuxEnv) != "off" {
+		if dir, err := sshControlDir(); err == nil {
+			argv = append(argv, "-o", "ControlMaster=auto", "-o", "ControlPath="+filepath.Join(dir, "%C"),
+				"-o", "ControlPersist=60")
+		} else if !p.warnedMux {
+			p.warnedMux = true
+			log.Warnf("Each step of the move makes its own ssh connection: %v", err)
+		}
+	}
+	return append(argv, "--", p.target, p.remoteCommand(verb, args))
+}
+
+// sshControlRoot is where sshControlDir makes its directory: short, since
+// a Unix socket path holds at most 104 bytes on macOS, and ssh adds a
+// 17-character suffix to the socket's name while it makes it.
+var sshControlRoot = "/tmp"
+
+// sshControlDir is the directory of this user's ssh mux sockets,
+// <sshControlRoot>/hull-ssh-<uid>, made 0700 if it is not there. One that is
+// there must be a directory, not a link, owned by this user and writable by
+// no one else; another user who made it first gets no socket of ours.
+func sshControlDir() (string, error) {
+	dir := filepath.Join(sshControlRoot, fmt.Sprintf("hull-ssh-%d", os.Getuid()))
+	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return "", err
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return "", err
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	switch {
+	case !info.IsDir():
+		return "", fmt.Errorf("%s is not a directory", dir)
+	case !ok || int(st.Uid) != os.Getuid():
+		return "", fmt.Errorf("%s belongs to another user", dir)
+	case info.Mode().Perm()&0o077 != 0:
+		return "", fmt.Errorf("%s can be written by others (mode %o)", dir, info.Mode().Perm())
+	}
+	return dir, nil
 }
 
 func (p *sshPeer) call(ctx context.Context, verb string, args []string, stdin io.Reader) (*migrateReply, error) {
