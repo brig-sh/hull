@@ -50,7 +50,7 @@ Start with `vz`. Move to another backend only for a reason on this list.
 | `--net shared` | Apple NAT, no extra privilege | **refused**, see below | vmnet, needs root or a signed QEMU | **refused** without `--gateway-sock` |
 | `--gateway-sock` | yes | yes | yes | yes |
 | `exec` | yes | yes | yes | yes |
-| Checkpoint and restore | yes, with a block rootfs | checkpoint with a block rootfs and no shares; restore from a fenced checkpoint | **no** | as on macOS |
+| Checkpoint and restore | yes, with a block rootfs | checkpoint with a block rootfs and no shares, into a [partial bundle](checkpoint-restore.md#what-a-bundle-holds); **no restore yet** | **no** | as on macOS |
 | Pause and resume | **no** | yes | **no** | yes |
 | `--gui`, `--gui-title` | yes | no | no | no |
 | `--rosetta` | yes | no | no | no |
@@ -210,13 +210,15 @@ virtio-vsock to an in-guest agent, and hull wires that up on every run.
 **Pause, checkpoint and restore** go through the control socket hull gives
 every `hvi` run (`--control-sock`, with the machine profile at
 `--profile-out`). `hull pause` and `hull resume` stop and restart the I/O
-threads and every vCPU. `hull checkpoint` writes a bundle of RAM, vCPU,
-interrupt controller, timer and device state, then continues or fences the
-guest. `hull restore` restores a fenced bundle onto the disk the guest stopped
-with. `hull stop` asks over the socket before it signals. The hvi at hull's
-submodule pin predates the socket and refuses the flag; until the pin moves,
-`hvi` runs need a newer `hvi`. See
-[checkpoint-restore.md](checkpoint-restore.md#hvi).
+threads and every vCPU. `hull checkpoint` writes a bundle, then continues or
+fences the guest. Today that bundle is partial: RAM and device state, without
+the vCPU, interrupt controller and timer state a resume needs. `hull restore`
+would restore a fenced bundle onto the disk the guest stopped with, and
+refuses until `hvi` has a `restore` subcommand, which none has yet. `hull
+stop` asks over the socket before it signals. The `hvi` at hull's submodule
+pin predates the socket; hull asks each `hvi` before a run and leaves the
+flags off one that does not take them, so it boots without pause or
+checkpoint. See [checkpoint-restore.md](checkpoint-restore.md#hvi).
 
 **Other limits `hvi` states about itself.** Eight vCPUs on a GICv2 arm64 Linux
 host, which does not apply on macOS because Apple's in-kernel GIC is a GICv3.
@@ -234,7 +236,8 @@ long-running `hvi` guest has no host time source to correct drift against.
 hull also builds for arm64 Linux, where it runs `hvi` on KVM and nothing else:
 `hvi`, a block rootfs, and either no network or a gateway. That is the
 configuration a sandbox needs to be moved between two KVM hosts. `pause`,
-`resume`, `checkpoint` and `restore` work as on macOS (see
+`resume` and `checkpoint` work as on macOS, and `restore` is refused as on
+macOS until `hvi` has one (see
 [checkpoint-restore.md](checkpoint-restore.md#hvi)); moving a sandbox to
 another host is planned and not built yet. brig drives it with the same verbs
 it uses on macOS: `run`, `exec`, `ps`, `inspect`, `logs`, `stop`, `rm`,
