@@ -72,10 +72,11 @@ func checkLinuxHypervisor(name, source string) error {
 // default, which selectHypervisor and checkLinuxHypervisor apply once the
 // image is pulled.
 //
-// Linux hull exists to be the other end of a moved hvi sandbox, so it offers
-// the one configuration that can be moved and refuses the rest by name before
-// anything is pulled -- a refusal after a multi-gigabyte pull and a 15 GiB
-// image build is the same answer, late. What it refuses, and why:
+// Linux hull offers the one configuration hvi on KVM can run, which is also
+// the one a sandbox moved between two KVM hosts will need, and refuses the
+// rest by name before anything is pulled -- a refusal after a multi-gigabyte
+// pull and a 15 GiB image build is the same answer, late. What it refuses,
+// and why:
 //
 //   - any backend but hvi: vz and the macOS qemu builder do not exist here.
 //   - --rootfs-type virtiofs and 9pfs: hvi's KVM backend has no file server,

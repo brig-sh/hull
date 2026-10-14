@@ -24,8 +24,8 @@ import (
 const appUsage = "container CLI for hvi sandboxes on Linux/KVM"
 
 // platformCommands is the Linux verb set: what it takes to run an hvi sandbox
-// that may have started on a Mac, and what brig calls to drive one (run, exec,
-// ps, inspect, logs, stop, rm, assets dir, network-gateway).
+// on KVM, and what brig calls to drive one (run, exec, ps, inspect, logs,
+// stop, rm, assets dir, network-gateway).
 //
 // Left out, because they drive something Linux does not have:
 //   - checkpoint and restore: vz-runner's saved-state files, which are

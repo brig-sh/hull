@@ -225,19 +225,29 @@ long-running `hvi` guest has no host time source to correct drift against.
 
 ## `hvi` on Linux
 
-hull also builds for arm64 Linux, where it runs `hvi` on KVM and nothing else.
-It is there to be the other end of a sandbox that started on a Mac, so it
-offers the one configuration a sandbox can carry between the two: `hvi`, a
-block rootfs, and either no network or a gateway. brig drives it with the same
-verbs it uses on macOS: `run`, `exec`, `ps`, `inspect`, `logs`, `stop`, `rm`,
-`assets dir` and `network-gateway`. `pull`, `images`, `rmi`, `prune`,
-`telemetry` and `version` work too.
+hull also builds for arm64 Linux, where it runs `hvi` on KVM and nothing else:
+`hvi`, a block rootfs, and either no network or a gateway. That is the
+configuration a sandbox needs to be moved between two KVM hosts, which is
+planned and not built yet; no checkpoint, restore or migration exists on
+Linux today. brig drives it with the same verbs it uses on macOS: `run`,
+`exec`, `ps`, `inspect`, `logs`, `stop`, `rm`, `assets dir` and
+`network-gateway`. `pull`, `images`, `rmi`, `prune`, `telemetry` and `version`
+work too.
+
+A sandbox started on a Mac cannot be moved to Linux, and none of the planned
+work changes that. A guest reads its counter frequency once, at boot, and
+KVM cannot change the one a host gives it: 24 MHz on Apple silicon, 54 MHz on
+a Raspberry Pi 5. The interrupt controllers differ too (GICv3 under
+Hypervisor.framework, a GICv2 on the Pi), and so do the CPU ID registers.
 
 What is different from macOS:
 
-- **The backend is always `hvi`.** With no `--hypervisor` flag, hull on Linux
-  picks `hvi`, not `qemu`, because nothing else is offered. Any other backend is
-  refused before the image is pulled.
+- **The backend is always `hvi`.** With no `--hypervisor` flag and no
+  annotation, hull on Linux picks `hvi`, not `qemu`, because nothing else is
+  offered. Any other `--hypervisor` is refused before the image is pulled. An
+  image whose `com.urunc.unikernel.hypervisor` annotation names another
+  backend is refused once it is pulled; `--hypervisor hvi` runs it on `hvi`
+  regardless.
 - **The rootfs is always a block image.** `--rootfs-type` defaults to `block`;
   `virtiofs` and `9pfs` are refused, and so are `--shared-dir` and
   `--shared-dir-fd`. `hvi`'s KVM backend has no virtio-fs server: it accepts
@@ -263,10 +273,19 @@ What is different from macOS:
 - **Image ownership is recorded on unpack.** Run as an ordinary user, hull
   cannot chown the files it unpacks, so it records each file's uid, gid and
   mode in a `user.com.nofire.hvi.linux-attr` xattr, as macOS does in its own
-  namespace, and writes them into the block image. Run as root, the files
-  carry the real owners and nothing is recorded. Symlinks cannot hold a
-  `user.` xattr on Linux, so an unprivileged unpack leaves them owned by the
-  user who ran hull.
+  namespace, and writes them into the block image, then removes the xattr
+  from the image. Symlinks cannot hold a `user.` xattr on Linux, so their
+  owners go in `rootfs.link-owners.json` beside the image's rootfs. On the
+  host, unpacked files keep owner read and directories owner rwx even where
+  the image asks for less (Fedora's `/etc/shadow` is 0000), so mke2fs can
+  read them and `hull rmi` can delete them; the image's own mode is what the
+  guest sees. Run as root, the files carry the real owners and modes and
+  nothing is recorded.
+- **No pull inside a single-id user namespace.** Under `unshare -r`, hull is
+  uid 0, so it chowns as root would and the chown fails with `invalid
+  argument` on the first file owned by an id the namespace does not map
+  (`/etc/shadow`, gid 42, in alpine). The pull stops there. Run hull as an
+  ordinary user or as real root instead.
 - **Not on Linux:** `compose`, `checkpoint`, `restore`, `store`, `--gui` and
   `--rosetta`.
 
