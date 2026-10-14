@@ -201,7 +201,7 @@ func TestHviCheckpointRefusals(t *testing.T) {
 	noSock := *state
 	noSock.ControlSock = ""
 	if err := hviCheckpointInstance(s, &noSock, hviThenContinue, "", time.Minute); err == nil ||
-		!strings.Contains(err.Error(), "without a control socket") {
+		!strings.Contains(err.Error(), "has no control socket") {
 		t.Errorf("no socket: %v", err)
 	}
 	if err := hviCheckpointInstance(s, state, "later", "", time.Minute); err == nil ||

@@ -1423,20 +1423,34 @@ exec %s "$@"
 	// way every Vz instance gets a state dir: pause, checkpoint and a
 	// graceful stop all go through the socket, and a run started without one
 	// can only be signalled. Both live in the 0700 instance directory, since
-	// the socket answers anyone who can connect to it.
+	// the socket answers anyone who can connect to it. An hvi that predates
+	// the flags would refuse to boot with them, so it runs without: it can
+	// still be stopped, and pause and checkpoint say why they cannot.
 	var controlSock, profilePath string
-	if vmmType == hypervisors.HviVmm {
-		controlSock = s.InstanceControlSocket(instanceName)
-		profilePath = s.InstanceProfilePath(instanceName)
-		if err := checkUnixSocketPath("control", controlSock); err != nil {
-			return err
-		}
-		root, err := hviCheckpointRoot(instanceDir)
+	if vmmType == hypervisors.HviVmm && len(cmdArgs) > 0 {
+		takesFlags, err := hviBootTakesControlFlags(cmdArgs[0])
 		if err != nil {
 			return err
 		}
-		cmdArgs = append(cmdArgs, "--control-sock", controlSock, "--profile-out", profilePath,
-			"--checkpoint-root", root)
+		if takesFlags {
+			controlSock = s.InstanceControlSocket(instanceName)
+			profilePath = s.InstanceProfilePath(instanceName)
+			if err := checkUnixSocketPath("control", controlSock); err != nil {
+				return err
+			}
+			root, err := hviCheckpointRoot(instanceDir)
+			if err != nil {
+				return err
+			}
+			cmdArgs = append(cmdArgs, "--control-sock", controlSock, "--profile-out", profilePath,
+				"--checkpoint-root", root)
+		} else {
+			// Debug, not a warning: this is every run on the hvi hull
+			// ships with until that one has the socket, and nobody asked
+			// for a pause yet. requireRunningHvi says it when one does.
+			log.Debugf("%s takes no --control-sock; instance %s will not be pausable",
+				cmdArgs[0], instanceName)
+		}
 	}
 
 	state := &store.InstanceState{
