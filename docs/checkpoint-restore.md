@@ -366,15 +366,15 @@ built from hvi's `feat/teleport` at bf3b1aa:
 - Two `hull checkpoint` runs started together: one wrote its bundle, the
   other was refused as in progress. The sha256 of the bundle's
   `manifest.json` matched the one in `latest.json` and in the record.
-- `hull checkpoint --then continue` wrote a bundle of about 57 MiB for a
-  512 MiB guest in 0.3 s (Mac) and 0.9 s (Pi), `hvi checkpoint-verify`
-  accepted it, and the counter kept going.
+- `hull checkpoint --then continue` stored about 57 MiB of a 512 MiB
+  guest's RAM in 0.3 s (Mac) and 0.6 to 1.0 s (Pi), `hvi checkpoint-verify`
+  accepted the bundle (and called it partial), and the counter kept going.
 - `hull restore` on the running instance was refused.
 - `hull checkpoint --then fence` wrote a second bundle, removed the first,
   froze the counter, and recorded `fenced`. `hull ps` showed VM and
   CHECKPOINT `fenced`, and `hull exec` and `hull resume` were refused.
 - `hull stop` ended the run through the socket (`guest stopped: Requested`)
-  in about 0.15 s with no `hvi` left running, and the record kept `fenced`.
+  with no `hvi` left running, and the record kept `fenced`.
 - `hull restore` was refused, because that `hvi` has no `restore`
   subcommand yet. With the record's txid rewritten to stand in for a failed
   record update, restore pointed at `--adopt-latest`, which adopted the
@@ -383,9 +383,10 @@ built from hvi's `feat/teleport` at bf3b1aa:
 
 With the `hvi` hull pins (890f9e0), on both hosts: the run left the control
 flags off, the guest booted and counted, `pause` and `checkpoint` said the
-`hvi` predates the socket, and `exec` and `stop` worked. The hull before this
-check passed the flags to that `hvi`, which exited with `unknown boot arg
-"--control-sock"`.
+`hvi` predates the socket, and `exec` and `stop` worked. On this Mac,
+`test/hvi-boot-test.py`, the boot check CI runs, passed with that `hvi`; with
+the hull from before this check it failed, because hull passed the flags and
+`hvi` exited with `unknown boot arg "--control-sock"`.
 
 A live restore waits for hvi's `restore`; until then the restore path is
 covered by unit tests against a stub control socket.
