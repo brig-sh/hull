@@ -8,12 +8,13 @@ This page is the protocol: the steps, the states each host records, the
 rules that keep the VM from running on two hosts at once, what you trust,
 what can go wrong, and how to recover.
 
-> **Status, 2026-10-14.** Everything up to and including the restore on the
-> destination is built and tested. No `hvi` has a `restore` subcommand yet,
-> so today a move stops before the commit with the destination's answer
-> "restore refused" (see [Testing a move](#testing-a-move)). Without
-> `--allow-no-restore`, `hull migrate` refuses at preflight on such an `hvi`,
-> before anything is fenced.
+> **Status, 2026-10-14.** On macOS (HVF) a move runs end to end with the
+> `hvi` on `feat/teleport` at 4ea836f, the first with a `restore`
+> subcommand. On Linux (KVM) `hvi` has no restore yet (H5), so a move stops
+> before the commit with the destination's answer "restore refused" (see
+> [Verified](#verified)). Without `--allow-no-restore`, `hull migrate`
+> refuses at preflight on an `hvi` with no restore, before anything is
+> fenced.
 
 ## Usage
 
@@ -47,8 +48,8 @@ must be the same OS and architecture. Everything else about the host is left
 to `hvi restore` on the destination, which by its specification (SPEC H4)
 compares the bundle's machine profile with the host's (CPU, counter
 frequency, interrupt controller, hvi build) and refuses before it creates
-anything. No `hvi` has `restore` yet, so that check has not been seen to
-run.
+anything. The moves below ran between identical hosts, so that refusal has
+not been seen to run.
 
 ## The steps
 
@@ -297,14 +298,32 @@ Live runs are recorded in [Verified](#verified).
 
 ## Verified
 
-2026-10-14, hull at this branch, hvi `feat/teleport` at 263713c (no `restore`
-subcommand yet). Guest: alpine, block rootfs (15 GiB image, about 13 MiB of
-it data), 512 MiB, 2 vCPUs, `--net none`, printing a counter every second.
-Each run used `--allow-no-restore`.
+2026-10-14, hull at this branch. Guest: alpine, block rootfs (15 GiB image,
+about 13 MiB of it data), 512 MiB, 2 vCPUs, `--net none`, printing a counter
+every second. This Mac has no sshd, so the Mac runs used the
+`HULL_MIGRATE_SSH` stand-in with two stores; rp1 to rp2 used real ssh.
+
+**Through the commit, Mac to Mac (HVF), hvi 4ea836f, without
+`--allow-no-restore`**, run twice:
+
+- `hull migrate` took 1.5 s: fence 300 to 308 ms (capture 269 ms, 56.6 of
+  512 MiB RAM stored), stream 69.8 MiB in 0.39 to 0.40 s with 13.0 MiB of
+  the disk, restore paused 352 to 362 ms, commit 59 to 64 ms.
+- The guest went on counting on the destination (TICK 10, 11, 12, ...) and
+  never printed its boot line there again. A file written and synced before
+  the move read back on the destination with `hull exec`.
+- Afterwards: the source stopped its fenced VMM; its record says
+  `committed` and its checkpoint `migrated`; a new move of it and an abort
+  were refused; the destination says `running`, owner epoch 1.
+- Moving it back was refused while the stale copy was there, with the
+  `hull rm` remedy; after `hull rm` the move back committed, the guest
+  counted on at home (TICK 17, 19), the file was still there, owner epoch 2.
+
+**Up to the restore, hvi 263713c (no restore subcommand)**, with
+`--allow-no-restore`:
 
 | | Mac to Mac (HVF) | rp1 to rp2 (KVM, Raspberry Pi 5) |
 |---|---|---|
-| Transport | `HULL_MIGRATE_SSH` stand-in (this Mac has no sshd), two stores | real ssh, rp1 to rp2 |
 | Preflight without `--allow-no-restore` | refused: the source hvi has no restore | |
 | Fence | capture 266 ms, 56.4 of 512 MiB RAM stored | capture 634 ms, 56.8 MiB |
 | Counter after the fence | held (TICK 10 to 10 over 3 s) | held (TICK 11 to 11) |
@@ -317,5 +336,6 @@ Each run used `--allow-no-restore`.
 | Plain `hull restore` of either side | refused by the move | refused by the move |
 | `--abort` | destination removed the instance, kept the tombstone; source stopped its fenced VMM and tried `hull restore`, refused for the same reason | the same |
 
-The commit and the resume on the destination have run only in the unit tests
-so far, with a stand-in for hvi's restore.
+Not run live: a lost commit acknowledgement, an abort answered `running`, a
+transfer cut midway and a disk changed after the fence (the unit tests cover
+each), any gateway case, and a move on KVM past the restore.
