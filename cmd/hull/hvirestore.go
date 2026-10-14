@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -243,6 +244,21 @@ func restorableMigration(m *store.MigrationState) error {
 
 func hviRestoreInstance(ctx context.Context, cmd *cli.Command, s *store.Store, state *store.InstanceState, opt hviRestoreOptions) error {
 	id := state.ID
+	// Held until the wait below ends, not until launchVMM returns: in the
+	// foreground that is the restored guest's whole life, and a checkpoint
+	// of it must not be refused for as long as it runs.
+	unlock, err := lockInstanceMigration(s, id)
+	if err != nil {
+		return err
+	}
+	var unlockOnce sync.Once
+	release := func() { unlockOnce.Do(unlock) }
+	defer release()
+	// Read again under the lock: a checkpoint that finished meanwhile
+	// changed the record.
+	if state, err = s.GetInstance(id); err != nil {
+		return fmt.Errorf("instance not found: %s", id)
+	}
 	if state.Status == "running" && state.PID > 0 && processIsAVMM(state.PID, state) {
 		return fmt.Errorf("instance %s is still running; stop it first (the checkpoint is kept)", id)
 	}
@@ -323,6 +339,7 @@ func hviRestoreInstance(ctx context.Context, cmd *cli.Command, s *store.Store, s
 	since := time.Now()
 	go func() {
 		st, err := awaitRestoredAndResume(s, id, txid, controlSock, opt, since, gone)
+		release()
 		result <- awaited{st, err}
 	}()
 	// The IP the record holds stays the guest's: it resumes with its network
