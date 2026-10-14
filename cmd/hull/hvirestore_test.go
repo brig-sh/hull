@@ -117,6 +117,9 @@ func TestHviRestoreArgv(t *testing.T) {
 	}
 }
 
+// restoring and restored-paused are restorable only because nothing has
+// run the restored guest yet; TestResumeMakesARestoredGuestUnrestorable and
+// the tests after it check that whatever runs it says so first.
 func TestRestorableMigration(t *testing.T) {
 	for state, ok := range map[string]bool{
 		store.MigrationFenced:         true,
@@ -155,9 +158,9 @@ func TestAwaitRestoredAndResume(t *testing.T) {
 	state.Migration = &store.MigrationState{State: store.MigrationRestoring, BundleDir: "/b", TxID: "t"}
 	_ = s.SaveInstance(state)
 
-	got := awaitRestoredAndResume(s, "vm1", stub.path, hviRestoreOptions{timeout: 10 * time.Second}, time.Time{}, nil)
-	if got != store.MigrationRestored {
-		t.Fatalf("result = %q", got)
+	got, err := awaitRestoredAndResume(s, "vm1", "t", stub.path, hviRestoreOptions{timeout: 10 * time.Second}, time.Time{}, nil)
+	if err != nil || got != store.MigrationRestored {
+		t.Fatalf("result = %q, %v", got, err)
 	}
 	var ops []string
 	for _, r := range stub.seen() {
@@ -179,9 +182,12 @@ func TestAwaitRestoredPausedSendsNoResume(t *testing.T) {
 	state, _ := fakeHviInstance(t, s, "vm1", stub.path)
 	state.Migration = &store.MigrationState{State: store.MigrationRestoring, BundleDir: "/b", TxID: "t"}
 	_ = s.SaveInstance(state)
-	got := awaitRestoredAndResume(s, "vm1", stub.path, hviRestoreOptions{paused: true, timeout: 5 * time.Second}, time.Time{}, nil)
-	if got != store.MigrationRestoredPaused {
-		t.Fatalf("result = %q", got)
+	got, err := awaitRestoredAndResume(s, "vm1", "t", stub.path, hviRestoreOptions{paused: true, timeout: 5 * time.Second}, time.Time{}, nil)
+	if err != nil || got != store.MigrationRestoredPaused {
+		t.Fatalf("result = %q, %v", got, err)
+	}
+	if m := mustInstance(t, s, "vm1").Migration; m.State != store.MigrationRestoredPaused {
+		t.Errorf("migration = %+v", m)
 	}
 	for _, r := range stub.seen() {
 		if r["op"] == "resume" {
@@ -200,10 +206,10 @@ func TestAwaitRestoredEndsWhenTheVMMIsGone(t *testing.T) {
 	gone := make(chan struct{})
 	time.AfterFunc(300*time.Millisecond, func() { close(gone) })
 	start := time.Now()
-	got := awaitRestoredAndResume(s, "vm1", filepath.Join(shortSocketDir(t), "none.sock"),
+	got, err := awaitRestoredAndResume(s, "vm1", "t", filepath.Join(shortSocketDir(t), "none.sock"),
 		hviRestoreOptions{timeout: time.Minute}, time.Now(), gone)
-	if !strings.HasPrefix(got, "error: hvi exited") {
-		t.Errorf("result = %q", got)
+	if got != "" || err == nil || !strings.HasPrefix(err.Error(), "hvi exited") {
+		t.Errorf("result = %q, %v", got, err)
 	}
 	if took := time.Since(start); took > 5*time.Second {
 		t.Errorf("waited %s after the VMM was gone", took)
@@ -363,8 +369,17 @@ func TestAwaitRestoredIgnoresTheSourcesStalePid(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	got := awaitRestoredAndResume(s, "vm1", stub.path, hviRestoreOptions{timeout: 10 * time.Second}, time.Now(), nil)
-	if got != store.MigrationRestored {
-		t.Errorf("result = %q, want restored: the source's dead pid ended the wait", got)
+	since := time.Now()
+	// launchVMM's save of the restore's own VMM, a little later.
+	newPid, _ := startProcessAs(t, "hvi", "/bin/sleep", "30")
+	time.AfterFunc(200*time.Millisecond, func() {
+		_ = s.SaveInstance(&store.InstanceState{
+			ID: "vm1", Status: "running", PID: newPid, StartTime: time.Now(),
+			Migration: &store.MigrationState{State: store.MigrationRestoring, BundleDir: "/b", TxID: "t"},
+		})
+	})
+	got, err := awaitRestoredAndResume(s, "vm1", "t", stub.path, hviRestoreOptions{timeout: 10 * time.Second}, since, nil)
+	if err != nil || got != store.MigrationRestored {
+		t.Errorf("result = %q, %v, want restored: the source's dead pid ended the wait", got, err)
 	}
 }
