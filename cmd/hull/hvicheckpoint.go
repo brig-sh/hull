@@ -45,9 +45,10 @@ const (
 )
 
 // hviCheckpoint asks hvi to write a checkpoint bundle into dir, an absolute
-// path, and then either resume the guest or fence it.
-func hviCheckpoint(sock, dir, then string, timeout time.Duration) (*hviReply, error) {
-	return hviControl(sock, map[string]any{"op": "checkpoint", "dir": dir, "then": then}, timeout)
+// path, and then either resume the guest or fence it. txid goes into the
+// bundle's session record, so the bundle names the checkpoint hull recorded.
+func hviCheckpoint(sock, dir, then, txid string, timeout time.Duration) (*hviReply, error) {
+	return hviControl(sock, map[string]any{"op": "checkpoint", "dir": dir, "then": then, "txid": txid}, timeout)
 }
 
 // hviCheckpointable refuses an hvi command line whose guest a checkpoint
@@ -210,9 +211,9 @@ func readHviCheckpointRecord(ckptDir string) (hviCheckpointRecord, error) {
 	return rec, nil
 }
 
-// newTxID names a checkpoint. hvi's checkpoint op takes no id, so hull draws
-// one: it names the default bundle directory and, in a later move, keys each
-// step so a retried step finds its own earlier work.
+// newTxID names a checkpoint. hull draws it and hands it to hvi, which
+// records it in the bundle: it names the default bundle directory and, in a
+// later move, keys each step so a retried step finds its own earlier work.
 func newTxID() (string, error) {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -264,7 +265,7 @@ func hviCheckpointInstance(s *store.Store, state *store.InstanceState, then, dir
 	}
 
 	started := time.Now()
-	reply, err := hviCheckpoint(state.ControlSock, dir, then, timeout)
+	reply, err := hviCheckpoint(state.ControlSock, dir, then, txid, timeout)
 	if err != nil {
 		// hvi resumes the guest after a failed capture (unless the fence was
 		// already applied), and what it wrote is not a bundle: the manifest

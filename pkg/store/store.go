@@ -126,8 +126,8 @@ type MigrationState struct {
 	State string `json:"state"`
 	// BundleDir is the absolute directory hvi wrote the checkpoint bundle to.
 	BundleDir string `json:"bundleDir"`
-	// TxID names the checkpoint. hull draws it; hvi's checkpoint op takes no
-	// id of its own.
+	// TxID names the checkpoint. hull draws it and hvi records it in the
+	// bundle's session record.
 	TxID string `json:"txid"`
 }
 
