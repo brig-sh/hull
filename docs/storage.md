@@ -195,7 +195,10 @@ sets.
     ├── state.json               0600
     ├── bundle/                  config.json plus the rootfs symlink or image
     ├── log                      0600, detached runs only
-    ├── checkpoint/              machine-id, vm.vzstate, rootfs.img, latest.json
+    ├── checkpoint/              vz: machine-id, vm.vzstate, rootfs.img, latest.json
+    │                            hvi: latest.json, <txid>/ (the bundle)
+    ├── control.sock             hvi only: the control socket (pause, checkpoint, stop)
+    ├── profile.json             hvi only: the machine profile hvi writes at boot
     └── (QMP socket, agent socket, staged boot files)
 ```
 
@@ -465,8 +468,20 @@ renamed over `state.json`, so a reader never sees a half-written record.
 
 ## Checkpoints
 
-Checkpoint artifacts live in `<store>/instances/<id>/checkpoint/` as
-`machine-id`, `vm.vzstate`, `rootfs.img`, `latest.json` and a failure marker.
+Checkpoint artifacts live in `<store>/instances/<id>/checkpoint/`. For a `vz`
+instance they are `machine-id`, `vm.vzstate`, `rootfs.img`, `latest.json` and
+a failure marker.
+
+For an `hvi` instance they are `latest.json`, 0600, which names the latest
+bundle (`dir`, `manifestSha256`, `then`, `stats`, `savedAt`, `txid`), and the
+bundle itself in a 0700 directory named by its txid, unless `--dir` put it
+elsewhere. hull writes `latest.json` through a temp file and a rename, and
+keeps one bundle of its own per instance. The record's `migration` field
+(`state`, `bundleDir`, `txid`) says which checkpoint is current and whether it
+was fenced. Every `hvi` instance also has `control.sock` and `profile.json`
+beside `state.json`, recorded as `controlSock` and `profilePath`. The socket
+has no authentication, so the 0700 instance directory is what keeps other
+accounts away from it.
 
 Every `vz` instance is started with a checkpoint state directory, because that
 directory holds the machine identifier a later restore needs. So

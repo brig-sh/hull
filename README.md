@@ -125,7 +125,8 @@ Three backends exist. They are not equivalent, and the gaps are real:
 | `--net shared` | NAT, works with no extra privilege | **no TCP egress**, see below | vmnet, needs root or a QEMU signed for `com.apple.vm.networking` |
 | `--gateway-sock` | yes | yes | yes |
 | `exec` | yes | yes | yes |
-| Checkpoint and restore | yes, with a block rootfs | no | no |
+| Checkpoint and restore | yes, with a block rootfs | with a block rootfs and no shares; restore from a fenced checkpoint | no |
+| Pause and resume | no | yes | no |
 | GUI window, Rosetta | yes | no | no |
 
 **The `hvi` networking gap is the one to know.** With `--net shared`, hvi's
@@ -163,8 +164,8 @@ instance. [docs/architecture.md](docs/architecture.md) explains the seams.
   with a warning on stderr. A clean `compose config` does not mean every key in
   the file is honored at runtime. [docs/compose.md](docs/compose.md) lists what
   works.
-- Checkpoint and restore are `vz` only, need a block rootfs, and make no
-  promise about application-level consistency. They do not move a VM to another
+- Checkpoint and restore work on `vz` and `hvi`, need a block rootfs, and make
+  no promise about application-level consistency. They do not move a VM to another
   host, and they cannot undo an effect the guest already sent to the outside
   world. See [docs/checkpoint-restore.md](docs/checkpoint-restore.md).
 - The `vz` and `hvi` backends need a code-signing entitlement. The Homebrew
