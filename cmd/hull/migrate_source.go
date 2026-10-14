@@ -346,7 +346,13 @@ func probeDestination(ctx context.Context, peer movePeer, rec *migrationRecord, 
 	case !p.HviRestore && !rec.Remote.AllowNoRestore:
 		why = append(why, fmt.Sprintf("its hvi (%s) has no restore subcommand", p.Hvi))
 	}
-	if p.NameTaken && p.NameTxID != rec.TxID {
+	switch {
+	case p.NameTaken && p.NameTxID != rec.TxID && p.NameMove == roleSource+" "+srcCommitted:
+		// Moving an instance back to where it ran before: that host keeps
+		// the stale copy the first move left, under the same name.
+		why = append(why, fmt.Sprintf("it still has the stale copy of %s that move %s left when it moved "+
+			"away; `hull rm %s` there removes it", rec.Name, p.NameTxID, rec.Name))
+	case p.NameTaken && p.NameTxID != rec.TxID:
 		why = append(why, fmt.Sprintf("an instance named %s already exists there", rec.Name))
 	}
 	if rec.Remote.GatewaySock != "" && !p.GatewayOK {

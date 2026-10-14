@@ -144,6 +144,7 @@ func destProbe(s *store.Store, name, hviOverride, gatewaySock string) *migrateRe
 			p.NameTaken = true
 			if rec, err := readMigrationRecord(s.InstanceMigrationRecord(name)); err == nil {
 				p.NameTxID = rec.TxID
+				p.NameMove = rec.Role + " " + rec.State
 			}
 		}
 	}

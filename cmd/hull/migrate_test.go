@@ -531,3 +531,37 @@ func TestMoveOverFakeSSH(t *testing.T) {
 		t.Errorf("destination tombstone %s", rec.State)
 	}
 }
+
+// Moving back is a new move from where the instance runs now, to the host
+// it left, once the stale copy there is removed; the owner epoch goes on
+// counting.
+func TestMoveThereAndBack(t *testing.T) {
+	f := newMoveFixture(t, true)
+	ctx := context.Background()
+	if err := sourceMigrate(ctx, f.src, f.name, f.options(false), newLocalPeer(f.dst)); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustInstance(t, f.dst, f.name).OwnerEpoch; got != 1 {
+		t.Fatalf("epoch after the first move %d", got)
+	}
+	back := f.options(false)
+	back.to, back.remote.Target = "pm@src", "pm@src"
+	err := sourceMigrate(ctx, f.dst, f.name, back, newLocalPeer(f.src))
+	if err == nil || !strings.Contains(err.Error(), "`hull rm vm1` there") {
+		t.Fatalf("moving back over the stale copy: %v", err)
+	}
+	if err := removeInstanceIn(f.src, f.name, false); err != nil {
+		t.Fatalf("rm of the stale copy: %v", err)
+	}
+	if err := sourceMigrate(ctx, f.dst, f.name, back, newLocalPeer(f.src)); err != nil {
+		t.Fatal(err)
+	}
+	home := mustInstance(t, f.src, f.name)
+	if home.OwnerEpoch != 2 || home.Migration.State != store.MigrationRestored {
+		t.Errorf("back home: epoch %d, migration %+v", home.OwnerEpoch, home.Migration)
+	}
+	away, err := readMigrationRecord(f.dst.InstanceMigrationRecord(f.name))
+	if err != nil || away.Role != roleSource || away.State != srcCommitted || away.Epoch != 2 {
+		t.Errorf("the second move's source record: %+v %v", away, err)
+	}
+}

@@ -176,19 +176,30 @@ func newMoveFixture(t *testing.T, hasRestore bool) *moveFixture {
 		}
 		f.restores++
 		var mu sync.Mutex
-		resumed := false
+		resumed, fenced := false, false
 		stub := newStubHvi(t, func(req map[string]any) stubAnswer {
 			mu.Lock()
 			defer mu.Unlock()
 			switch req["op"] {
 			case "resume":
+				if fenced {
+					return stubAnswer{reply: `{"v":1,"ok":false,"code":"fenced","error":"fenced"}`}
+				}
 				resumed = true
 				return stubAnswer{reply: `{"v":1,"ok":true,"state":"running"}`}
 			case "status":
-				if resumed {
+				switch {
+				case fenced:
+					return stubAnswer{reply: `{"v":1,"ok":true,"state":"fenced"}`}
+				case resumed:
 					return stubAnswer{reply: `{"v":1,"ok":true,"state":"running"}`}
 				}
 				return stubAnswer{reply: `{"v":1,"ok":true,"state":"restored-paused"}`}
+			case "checkpoint":
+				// A moved instance can move on: back, for one.
+				sum := writeFakeBundle(t, req["dir"].(string), fixtureDiskSize)
+				fenced = req["then"] == "fence"
+				return stubAnswer{reply: `{"v":1,"ok":true,"state":"fenced","manifest_sha256":"` + sum + `"}`}
 			case "stop":
 				return stubAnswer{reply: `{"v":1,"ok":true,"state":"stopping"}`}
 			}
