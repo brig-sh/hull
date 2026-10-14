@@ -7,16 +7,19 @@ hull picks the path from the instance's record:
 | | `vz` | `hvi` |
 |---|---|---|
 | How | vz-runner, on a signal | hvi's control socket |
-| Captures | Virtualization.framework's machine state, plus an APFS clone of the disk | today a [partial bundle](#what-a-bundle-holds): RAM and device state, not the vCPU, interrupt controller or timer state a resume needs; not the disk |
+| Captures | Virtualization.framework's machine state, plus an APFS clone of the disk | a [bundle](#what-a-bundle-holds) of RAM and device state, and on macOS (HVF, `hvi` from 4ea836f) the vCPU, interrupt controller and timer state a resume needs; on KVM a partial bundle without those; not the disk |
 | After `checkpoint` | the guest keeps running | `--then continue` (the default) or `--then fence` |
-| Restore from | the latest checkpoint, any number of times | **not yet**: needs an `hvi` with a `restore` subcommand, which no `hvi` has. hull's side takes a fenced checkpoint, onto the disk the guest stopped with |
+| Restore from | the latest checkpoint, any number of times | a fenced checkpoint, onto the disk the guest stopped with, with an `hvi` that has a `restore` subcommand: on macOS (HVF) from 4ea836f on `hvi`'s `feat/teleport`, not yet pushed and not the submodule's pin; a KVM bundle cannot be restored yet |
 | Also | | `hull pause` and `hull resume` |
 | Hosts | macOS 14+, Apple silicon | macOS (HVF) and Linux (KVM) |
 
 Both need a block rootfs (`run --rootfs-type block`) and no shared host
-directory. For `hvi`, pause, resume and checkpoint work today; restore is
-built in hull and refuses until `hvi` gains `restore`, because no bundle `hvi`
-writes yet can be resumed.
+directory. For `hvi`, pause, resume and checkpoint work today. Restore works
+on macOS (HVF) with an `hvi` that has `restore` (4ea836f on `hvi`'s
+`feat/teleport`, the one the moves in [migration.md](migration.md#verified)
+ran with). The `hvi` this branch pins (890f9e0) has none, and hull refuses a
+restore with it. On Linux (KVM) `hvi` writes a partial bundle without the
+vCPU, interrupt controller and timer state, which no restore can resume yet.
 
 An `hvi` checkpoint taken with `--then fence` is also what moves an instance
 to another host: `hull migrate` takes one, sends it and the disk over ssh, and
@@ -278,12 +281,13 @@ and `ram.bin` (the guest's RAM, sparse: all-zero pages take no space),
 devices and the UART), `disk.json` and `session.json`, which carries hull's
 txid. `hvi checkpoint-verify DIR` checks one.
 
-**Today the bundle is partial.** The hvi that serves the op today
+**On KVM, and with the pinned hvi, the bundle is partial.** That hvi
 records only part of each vCPU's registers and none of the interrupt
 controller or timer state, and `checkpoint-verify` says so: "vCPU registers,
 interrupt controller and timer not captured, so no restore can resume this
-bundle". The full vCPU, GIC and timer capture comes with hvi's `restore`, and until
-then no bundle can be restored. The disk is not in the
+bundle". On macOS the hvi with `restore` (4ea836f on its `feat/teleport`)
+captures them whole, and its `checkpoint-verify` answers "complete: every
+part a restore needs is captured". The disk is not in the
 bundle: hvi syncs it and records its size and write count, and the restore
 reopens the same file. hvi's own
 [docs/checkpoint.md](../hvi-vmm/docs/checkpoint.md) describes the format and
