@@ -16,11 +16,13 @@ package main
 
 import (
 	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -153,7 +155,7 @@ func TestAwaitRestoredAndResume(t *testing.T) {
 	state.Migration = &store.MigrationState{State: store.MigrationRestoring, BundleDir: "/b", TxID: "t"}
 	_ = s.SaveInstance(state)
 
-	got := awaitRestoredAndResume(s, "vm1", stub.path, hviRestoreOptions{timeout: 10 * time.Second}, nil)
+	got := awaitRestoredAndResume(s, "vm1", stub.path, hviRestoreOptions{timeout: 10 * time.Second}, time.Time{}, nil)
 	if got != store.MigrationRestored {
 		t.Fatalf("result = %q", got)
 	}
@@ -177,7 +179,7 @@ func TestAwaitRestoredPausedSendsNoResume(t *testing.T) {
 	state, _ := fakeHviInstance(t, s, "vm1", stub.path)
 	state.Migration = &store.MigrationState{State: store.MigrationRestoring, BundleDir: "/b", TxID: "t"}
 	_ = s.SaveInstance(state)
-	got := awaitRestoredAndResume(s, "vm1", stub.path, hviRestoreOptions{paused: true, timeout: 5 * time.Second}, nil)
+	got := awaitRestoredAndResume(s, "vm1", stub.path, hviRestoreOptions{paused: true, timeout: 5 * time.Second}, time.Time{}, nil)
 	if got != store.MigrationRestoredPaused {
 		t.Fatalf("result = %q", got)
 	}
@@ -199,7 +201,7 @@ func TestAwaitRestoredEndsWhenTheVMMIsGone(t *testing.T) {
 	time.AfterFunc(300*time.Millisecond, func() { close(gone) })
 	start := time.Now()
 	got := awaitRestoredAndResume(s, "vm1", filepath.Join(shortSocketDir(t), "none.sock"),
-		hviRestoreOptions{timeout: time.Minute}, gone)
+		hviRestoreOptions{timeout: time.Minute}, time.Now(), gone)
 	if !strings.HasPrefix(got, "error: hvi exited") {
 		t.Errorf("result = %q", got)
 	}
@@ -252,6 +254,14 @@ func TestHviRestoreRefusals(t *testing.T) {
 		t.Fatal(err)
 	}
 	bundle := t.TempDir()
+	// A socket file whose listener is gone, as a gateway that died leaves.
+	deadSocket := filepath.Join(shortSocketDir(t), "gw.sock")
+	if ln, err := net.Listen("unix", deadSocket); err == nil {
+		ln.(*net.UnixListener).SetUnlinkOnClose(false)
+		_ = ln.Close()
+	} else {
+		t.Fatal(err)
+	}
 	base := func() *store.InstanceState {
 		return &store.InstanceState{
 			ID: "vm1", Status: "stopped", Backend: "hvi",
@@ -287,7 +297,10 @@ func TestHviRestoreRefusals(t *testing.T) {
 		}, "", "no restore subcommand"},
 		{"a gateway that is not running", func(st *store.InstanceState) {
 			st.CmdLine = append(st.CmdLine, "--net-gateway", filepath.Join(bundle, "gw.sock"))
-		}, "t1", "not running"},
+		}, "t1", "not answering"},
+		{"a gateway that died and left its socket", func(st *store.InstanceState) {
+			st.CmdLine = append(st.CmdLine, "--net-gateway", deadSocket)
+		}, "t1", "not answering"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -320,5 +333,38 @@ func TestHviRestoreRefusals(t *testing.T) {
 	if err := hviRestoreInstance(context.Background(), nil, s, live, hviRestoreOptions{timeout: time.Second}); err == nil ||
 		!strings.Contains(err.Error(), "still running") {
 		t.Errorf("a running source: %v", err)
+	}
+}
+
+// A source that died without `hull stop` leaves "running" and its dead pid in
+// the record. Until the restore's own launch replaces them, that pid must not
+// be read as the new VMM exiting.
+func TestAwaitRestoredIgnoresTheSourcesStalePid(t *testing.T) {
+	ready := time.Now().Add(300 * time.Millisecond)
+	stub := newStubHvi(t, func(req map[string]any) stubAnswer {
+		if req["op"] == "resume" {
+			return stubAnswer{reply: `{"v":1,"ok":true,"state":"running"}`}
+		}
+		if time.Now().Before(ready) {
+			return stubAnswer{reply: `{"v":1,"ok":true,"state":"restoring"}`}
+		}
+		return stubAnswer{reply: `{"v":1,"ok":true,"state":"restored-paused"}`}
+	})
+	s := newCmdTestStore(t)
+	pid, done := startProcess(t, "/bin/sleep", "30")
+	_ = syscall.Kill(pid, syscall.SIGKILL)
+	<-done
+	if _, err := s.CreateInstance("vm1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveInstance(&store.InstanceState{
+		ID: "vm1", Status: "running", PID: pid, StartTime: time.Now().Add(-time.Hour),
+		Migration: &store.MigrationState{State: store.MigrationRestoring, BundleDir: "/b", TxID: "t"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got := awaitRestoredAndResume(s, "vm1", stub.path, hviRestoreOptions{timeout: 10 * time.Second}, time.Now(), nil)
+	if got != store.MigrationRestored {
+		t.Errorf("result = %q, want restored: the source's dead pid ended the wait", got)
 	}
 }

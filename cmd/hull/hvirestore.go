@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -292,12 +293,17 @@ func hviRestoreInstance(ctx context.Context, cmd *cli.Command, s *store.Store, s
 	// hvi relays the guest's NIC to the gateway socket by path, so a restore
 	// on the same host re-joins the gateway the instance left, with the same
 	// MAC and so the same lease. A gateway that is not there would leave the
-	// guest with a NIC that reaches nothing: refuse instead.
+	// guest with a NIC that reaches nothing, since hvi only warns and falls
+	// back to its no-egress stub: refuse instead. Dialled, as run's
+	// pre-flight does, not just looked at: a gateway that died leaves its
+	// socket file behind.
 	if gw, ok := flagValue(argv, "--net-gateway"); ok {
-		if info, err := os.Stat(gw); err != nil || info.Mode()&os.ModeSocket == 0 {
+		conn, err := net.DialTimeout("unix", gw, 2*time.Second)
+		if err != nil {
 			return fmt.Errorf("cannot restore %s: it ran on the network gateway at %s, which is not "+
-				"running; start `hull network-gateway` there first", id, gw)
+				"answering (%w); start `hull network-gateway` there first", id, gw, err)
 		}
+		_ = conn.Close()
 	}
 
 	state.ControlSock = controlSock
@@ -307,8 +313,9 @@ func hviRestoreInstance(ctx context.Context, cmd *cli.Command, s *store.Store, s
 
 	result := make(chan string, 1)
 	gone := make(chan struct{})
+	since := time.Now()
 	go func() {
-		result <- awaitRestoredAndResume(s, id, controlSock, opt, gone)
+		result <- awaitRestoredAndResume(s, id, controlSock, opt, since, gone)
 	}()
 	// The IP the record holds stays the guest's: it resumes with its network
 	// state in memory and the same MAC. So no rediscovery, as for Vz.
@@ -349,8 +356,8 @@ func hviRestoreInstance(ctx context.Context, cmd *cli.Command, s *store.Store, s
 // the VMM exits, so nothing after that call could ever send the resume. Until
 // hvi binds the socket, a dial finds nothing or the source's stale socket and
 // is refused; both mean "not yet". A VMM that died, or gone closing, ends the
-// wait at once rather than at the deadline.
-func awaitRestoredAndResume(s *store.Store, id, sock string, opt hviRestoreOptions, gone <-chan struct{}) string {
+// wait at once rather than at the deadline. since is when the restore began.
+func awaitRestoredAndResume(s *store.Store, id, sock string, opt hviRestoreOptions, since time.Time, gone <-chan struct{}) string {
 	const exited = "error: hvi exited before the guest was restored; its reason is in " +
 		"`hull logs` (detached) or on the terminal"
 	deadline := time.Now().Add(opt.timeout)
@@ -364,7 +371,12 @@ func awaitRestoredAndResume(s *store.Store, id, sock string, opt hviRestoreOptio
 			return exited
 		default:
 		}
-		if rec, err := s.GetInstance(id); err == nil && rec.PID > 0 {
+		// Only a pid recorded by this restore says anything about its VMM.
+		// Until launchVMM's first save the record is the old one, and a
+		// source that died without `hull stop` (a crash, a reboot) left its
+		// dead pid there; reading that as "hvi exited" would fail a restore
+		// that is going fine. launchVMM stamps StartTime on that save.
+		if rec, err := s.GetInstance(id); err == nil && rec.PID > 0 && !rec.StartTime.Before(since) {
 			if syscall.Kill(rec.PID, 0) != nil {
 				return exited
 			}

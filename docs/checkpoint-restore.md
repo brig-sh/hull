@@ -285,7 +285,7 @@ record names. It refuses, with the reason:
 - when `latest.json` names a later checkpoint than the record. That is a
   checkpoint whose record update failed, and hull cannot tell what became of
   its guest.
-- when the gateway the instance ran on is not running.
+- when the gateway the instance ran on does not answer on its socket.
 - when the `hvi` the instance ran has no `restore` subcommand.
 
 `hull rm` removes the instance directory, and the bundles hull placed are
