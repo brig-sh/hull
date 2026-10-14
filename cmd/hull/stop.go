@@ -183,6 +183,20 @@ func stopInstanceIn(s *store.Store, instanceID string, timeoutSecs int) error {
 		return nil
 	}
 
+	// hvi: ask over the control socket first. hvi ends the run itself
+	// (`guest stopped: Requested`), paused or fenced, with its own teardown,
+	// where a signal is a signal. Half the budget, as QMP gets; a socket that
+	// is missing or refuses is an hvi from before the socket and falls
+	// through to the signals below.
+	if state.ControlSock != "" && isHviInstance(state) {
+		if hviStopBySocket(state, time.Until(budgetDeadline)/2) {
+			markStopped(s, state, true)
+			stopped = true
+			fmt.Printf("Instance %s stopped\n", instanceID)
+			return nil
+		}
+	}
+
 	// Try graceful shutdown via QMP first
 	if state.QMPSocket != "" {
 		log.Debugf("Attempting graceful shutdown via QMP")
@@ -236,6 +250,18 @@ func stopInstanceIn(s *store.Store, instanceID string, timeoutSecs int) error {
 	stopped = true
 	fmt.Printf("Instance %s stopped\n", instanceID)
 	return nil
+}
+
+// hviStopBySocket sends hvi's stop op and reports whether the VMM exited
+// within wait. Any failure to deliver it is logged and reported as "not
+// stopped", so the caller goes on to the signals.
+func hviStopBySocket(state *store.InstanceState, wait time.Duration) bool {
+	timeout := min(hviControlTimeout, max(wait, time.Second))
+	if _, err := hviControl(state.ControlSock, map[string]any{"op": "stop"}, timeout); err != nil {
+		log.Debugf("instance %s: stop over the control socket: %v", state.ID, err)
+		return false
+	}
+	return waitForExit(state.PID, wait)
 }
 
 // waitForExit polls until the process is gone or the timeout elapses.
