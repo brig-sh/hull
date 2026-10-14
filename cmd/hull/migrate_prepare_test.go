@@ -237,3 +237,45 @@ func TestMigratePrepareCommandDispatch(t *testing.T) {
 		}
 	}
 }
+
+// A destination that holds another kernel of the profile keeps it: the
+// prepare reports the difference and fails nothing, and the destination's
+// verb refuses to replace it even when asked.
+func TestPrepareKeepsAnotherKernel(t *testing.T) {
+	f, state := prepareFixture(t)
+	dstKernels := filepath.Join(f.dst.RootDir(), "assets", bootassets.PortableArm64V1)
+	seedAssetDir(t, dstKernels, map[string]string{bootassets.ProfileKernelName: "the destination's own kernel"})
+	before, err := os.ReadFile(filepath.Join(dstKernels, bootassets.ProfileKernelName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer := newLocalPeer(f.dst)
+	var out bytes.Buffer
+	res, err := prepareDestination(context.Background(), f.src, state, peer,
+		migrateRemote{Target: "pm@dest", Hvi: f.hvi}, &out)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	var kernel *prepareStep
+	for i, st := range res.Steps {
+		if strings.HasPrefix(st.What, bootassets.PortableArm64V1) {
+			kernel = &res.Steps[i]
+		}
+	}
+	if kernel == nil || kernel.Result != "skipped" || !strings.Contains(kernel.Detail, "not replaced") {
+		t.Fatalf("kernel step %+v", kernel)
+	}
+	if peer.called("migrate-take-kernel") != 0 {
+		t.Error("the prepare sent a kernel to a host that holds another")
+	}
+	sum := installedProfileKernel(f.src.RootDir(), bootassets.PortableArm64V1)
+	kernelBytes := []byte("the portable kernel")
+	if r := destTakeKernel(f.dst, bootassets.PortableArm64V1, sum, int64(len(kernelBytes)),
+		bytes.NewReader(kernelBytes)); r.OK || !strings.Contains(r.Error, "not replaced") {
+		t.Fatalf("take-kernel over another: %+v", r)
+	}
+	after, err := os.ReadFile(filepath.Join(dstKernels, bootassets.ProfileKernelName))
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("the destination's kernel changed: %q %v", after, err)
+	}
+}
