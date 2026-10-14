@@ -19,6 +19,11 @@ what can go wrong, and how to recover.
 > [Verified](#verified)). Without `--allow-no-restore`, `hull migrate`
 > refuses at preflight on an `hvi` with no restore, before anything is
 > fenced.
+>
+> A `--profile portable-arm64-v1` instance runs on both OSes with the `hvi`
+> at f4594f0, but that `hvi` refuses to checkpoint it, so a portable move
+> stops at the fence (see [The portable profile on the Linux
+> pair](#the-portable-profile-on-the-linux-pair)).
 
 ## Usage
 
@@ -415,3 +420,47 @@ Not run live: an abort answered `unknown_txid`, a destination whose cleanup
 fails, a transfer cut midway, a stream whose reply is lost and a disk
 changed after the fence (the unit tests cover each), any gateway case, and
 a move on KVM past the restore.
+
+### The portable profile on the Linux pair
+
+2026-10-14, hull at this branch (f2a7a5c), between two Raspberry Pi 5
+hosts (rp1, rp2: Linux 6.12.25, KVM with a vGICv2) over real ssh with a
+key from each Pi to the other. Each store held the default boot assets
+and the portable kernel (Linux 6.12.95 with `hvi-time`, sha256
+`32725b9b...`) installed by `hull assets pull --profile
+portable-arm64-v1` from `HULL_PORTABLE_KERNEL`. Guest: alpine on a block
+rootfs, 512 MiB, 1 vCPU, `--net none`. Its init only sleeps; `hull exec`
+starts a detached shell that counts in a variable and writes the count
+to `/dev/shm/counter` every second, and writes a 5.5 KiB random file to
+`/root/marker` with `sync`.
+
+- **Run.** With `hvi` at `feat/teleport` f4594f0 (the first with
+  `--profile` and the control flags), `hull run --hypervisor hvi
+  --profile portable-arm64-v1 --rootfs-type block --net none` booted in
+  0.9 s on hvi-time (`Switched to clocksource hvi-time`, the A76 CPU
+  baseline, PSCI 1.1), recorded `"profile": "portable-arm64-v1"` and
+  passed `--control-sock ... --profile portable-arm64-v1`. `hull pause`
+  and `hull resume` worked. The same run on this Mac (HVF, `hvi` from the
+  P1 to P3 series) booted on the software GICv2 with hvi-time at 24 MHz.
+- **Probe.** A dry run to rp2 passed. With `--remote-hvi` naming an
+  `hvi` without profiles (5aafb49), the probe refused before the fence:
+  "its hvi ... has no machine profiles, so it cannot restore a
+  portable-arm64-v1 instance".
+- **Fence.** `hvi` f4594f0 refuses to checkpoint a portable guest ("no
+  backend checkpoints yet"). `hull migrate` stopped at `reserved` in
+  0.6 s with that reason, the guest kept running on rp1, and `--abort`
+  released rp2's reservation.
+- **Native, up to the restore** (`hvi` 5aafb49): fence 655 ms (capture
+  649 ms, 55.5 of 512 MiB RAM stored), 70.8 MiB in 1.44 s (49 MiB/s)
+  with 15.2 MiB of the 15 GiB disk, bundle sha256 identical on both
+  hosts, rp2 `verified`. rp2's `hvi restore` refused ("the KVM restore is
+  not built yet"); the move stopped at `transferred`, and the abort
+  removed rp2's copy and tried the source's restore, refused the same way.
+  Before f2a7a5c each of those two refusals took the full two-minute
+  restore deadline (`hull migrate` 123 s); after it, 3.4 s, with hvi's
+  reason in the error.
+
+Not run yet: a portable move past the fence, on either OS. That needs an
+`hvi` that checkpoints and restores the portable profile (P4b, and H5 for
+KVM); this Mac's same-host move over real ssh was not run either, as
+enabling Remote Login needs a password for sudo.
