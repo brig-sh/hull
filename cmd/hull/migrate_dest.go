@@ -136,6 +136,11 @@ func destProbe(s *store.Store, name, hviOverride, gatewaySock string) *migrateRe
 		} else {
 			p.HviRestore = ok
 		}
+		if ok, err := hviBootTakesProfile(hvi); err != nil {
+			p.HviError = err.Error()
+		} else {
+			p.HviProfile = ok
+		}
 	}
 	if name != "" {
 		if err := store.ValidateInstanceID(name); err != nil {
@@ -527,6 +532,7 @@ func writeIncomingInstance(s *store.Store, rec *migrationRecord, hvi, root strin
 		MAC:         spec.MAC,
 		IP:          spec.IP,
 		Backend:     string(hypervisors.HviVmm),
+		Profile:     spec.Profile,
 		StartTime:   time.Now(),
 		Migration: &store.MigrationState{State: store.MigrationIncoming, BundleDir: rec.BundleDir,
 			TxID: rec.TxID, ManifestSHA256: rec.ManifestSHA256, MoveTxID: rec.TxID, Peer: rec.Peer},
