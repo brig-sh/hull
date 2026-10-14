@@ -67,6 +67,27 @@ func TestMoveTransitions(t *testing.T) {
 			t.Errorf("%s %s -> %s was allowed", c.role, c.from, c.to)
 		}
 	}
+	// A streamed move fences inside its transfer: from reserved it goes
+	// to transferring and nowhere else, and no further back than the
+	// whole-bundle move past it.
+	for _, c := range []struct {
+		from, to string
+		ok       bool
+	}{
+		{srcReserved, srcTransferring, true},
+		{srcReserved, srcFenced, false},
+		{srcReserved, migAborted, true},
+		{srcTransferring, srcReserved, false},
+		{srcTransferring, srcTransferred, true},
+		{srcCommitting, srcTransferred, false},
+		{srcCommitted, migAborted, false},
+	} {
+		rec := &migrationRecord{TxID: strings.Repeat("a", 32), Role: roleSource, State: c.from,
+			Transport: transportStream}
+		if err := rec.advance(path, c.to); (err == nil) != c.ok {
+			t.Errorf("stream %s -> %s: err %v, want allowed=%v", c.from, c.to, err, c.ok)
+		}
+	}
 }
 
 func TestMoveRecordJSON(t *testing.T) {

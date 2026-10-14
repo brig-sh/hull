@@ -105,6 +105,9 @@ const (
 	codeNotReady       = "not_ready"
 	codeVerifyFailed   = "verify_failed"
 	codeFailed         = "failed"
+	// codeNoBase is a streamed receive refused because the destination
+	// does not hold the base the disk blocks apply to.
+	codeNoBase = "no_base"
 )
 
 // errMoveNoAnswer is a remote verb that produced no reply: ssh could not
