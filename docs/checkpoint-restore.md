@@ -244,16 +244,23 @@ and sets the record's `migration` to `{"state": "checkpointed"|"fenced",
 one bundle of its own per instance and removes the previous one after a new
 checkpoint succeeds; a bundle placed with `--dir` is never removed by hull.
 
-An `hvi` without the checkpoint op answers `not_implemented`, and hull reports
-that this `hvi` cannot checkpoint yet.
+An `hvi` from before the checkpoint op answers `not_implemented`, and hull
+reports that this `hvi` cannot checkpoint yet.
 
 ### What a bundle holds
 
-At this stage (checkpoint format 1), a bundle holds the guest's RAM, written
-sparsely so that all-zero pages take no space, every vCPU's registers, the
-interrupt controller and timer state, and the state of the virtio-blk, net and
-vsock devices and the UART. It also holds the machine profile and a manifest
-with the size and sha256 of each part, written last. The disk is not in the
+A bundle (checkpoint format 1) is a directory of `manifest.json`, written
+last with the size and sha256 of every other part, `profile.json`, `ram.map`
+and `ram.bin` (the guest's RAM, sparse: all-zero pages take no space),
+`cpu.json`, `platform.json`, `devices.json` (the virtio-blk, net and vsock
+devices and the UART), `disk.json` and `session.json`, which carries hull's
+txid. `hvi checkpoint-verify DIR` checks one.
+
+**At this stage the bundle is partial.** The hvi that serves the op today
+records only part of each vCPU's registers and none of the interrupt
+controller or timer state, and `checkpoint-verify` says so: "vCPU registers,
+interrupt controller and timer not captured, so no restore can resume this
+bundle". The full vCPU, GIC and timer capture comes with hvi's `restore`. The disk is not in the
 bundle: hvi syncs it and records its size and write count, and the restore
 reopens the same file. hvi's own
 [docs/checkpoint.md](../hvi-vmm/docs/checkpoint.md) describes the format and
@@ -316,12 +323,23 @@ it.
 
 ### Verified
 
-On this Mac (HVF) and on a Raspberry Pi 5 (KVM), with an alpine guest on a
-block rootfs printing a counter every second: `hull pause` held the counter
-for 5 s with every vCPU parked, a second `pause` succeeded, `hull resume`
-restarted it, and `hull stop` ended the run through the socket (`guest
-stopped: Requested`) with no `hvi` left running. `hull checkpoint` against an
-`hvi` without the op answered `not_implemented` and left no directory behind.
-A live checkpoint and restore wait for hvi's checkpoint op and `restore`
-subcommand; until then they are covered by unit tests against a stub control
-socket.
+On this Mac (HVF) and on a Raspberry Pi 5 (KVM, seccomp on), with an alpine
+guest on a block rootfs printing a counter every second:
+
+- `hull pause` held the counter for 5 s with every vCPU parked, a second
+  `pause` succeeded, and `hull resume` restarted it. `hull exec` did not
+  answer while paused and worked after resume.
+- `hull checkpoint --then continue` wrote a bundle of about 57 MiB for a
+  512 MiB guest in 0.3 s (Mac) and 0.9 s (Pi), `hvi checkpoint-verify`
+  accepted it, and the counter kept going.
+- `hull restore` on the running instance was refused.
+- `hull checkpoint --then fence` wrote a second bundle, removed the first,
+  froze the counter, and recorded `fenced`. `hull resume` was then refused
+  as fenced.
+- `hull stop` ended the run through the socket (`guest stopped: Requested`)
+  in about 0.15 s with no `hvi` left running, and the record kept `fenced`.
+- `hull restore` was refused, because that `hvi` has no `restore`
+  subcommand yet.
+
+A live restore waits for hvi's `restore`; until then the restore path is
+covered by unit tests against a stub control socket.
