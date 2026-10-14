@@ -92,6 +92,43 @@ type InstanceState struct {
 	// TelemetryEndSent guards the telemetry `end` event to exactly once
 	// across the foreground exit path and `stop`.
 	TelemetryEndSent bool `json:"telemetryEndSent,omitempty"`
+	// ControlSock is the hvi control socket (--control-sock) that pauses,
+	// resumes, checkpoints and stops the VM. Empty for other backends and for
+	// hvi instances started before hull passed it: those cannot be paused or
+	// checkpointed, only signalled.
+	ControlSock string `json:"controlSock,omitempty"`
+	// ProfilePath is where hvi wrote its machine profile (--profile-out): the
+	// facts a destination host compares before it accepts a checkpoint.
+	ProfilePath string `json:"profilePath,omitempty"`
+	// Migration is where this instance stands in a checkpoint, restore or
+	// move. Nil until the first `hull checkpoint`. Stopping the instance
+	// leaves it alone: a fenced instance that was stopped is exactly the one
+	// a restore needs to find.
+	Migration *MigrationState `json:"migration,omitempty"`
+}
+
+// Migration states. A checkpointed instance kept running after the capture,
+// so its disk has moved on since; a fenced one never ran again, so its disk
+// still matches the bundle. Restoring records restoring, then restored-paused
+// once hvi has rebuilt the VM, then restored once it runs.
+const (
+	MigrationCheckpointed   = "checkpointed"
+	MigrationFenced         = "fenced"
+	MigrationRestoring      = "restoring"
+	MigrationRestoredPaused = "restored-paused"
+	MigrationRestored       = "restored"
+)
+
+// MigrationState is the record of the last checkpoint taken of an instance
+// and of what became of it.
+type MigrationState struct {
+	// State is one of the Migration* constants.
+	State string `json:"state"`
+	// BundleDir is the absolute directory hvi wrote the checkpoint bundle to.
+	BundleDir string `json:"bundleDir"`
+	// TxID names the checkpoint. hull draws it; hvi's checkpoint op takes no
+	// id of its own.
+	TxID string `json:"txid"`
 }
 
 // StatusStarting marks the one moment an instance has no pid to record: the
@@ -609,6 +646,19 @@ func (s *Store) InstanceQMPSocket(id string) string {
 // (virtio-serial on QEMU, vsock on Vz).
 func (s *Store) InstanceAgentSocket(id string) string {
 	return filepath.Join(s.rootDir, "instances", id, "agent.sock")
+}
+
+// InstanceControlSocket returns the path hvi binds its control socket at.
+// It sits in the 0700 instance directory because the socket has no
+// authentication: whoever can connect to it can pause or stop the VM.
+func (s *Store) InstanceControlSocket(id string) string {
+	return s.instancePath(id, "control.sock")
+}
+
+// InstanceProfilePath returns where hvi writes the instance's machine
+// profile.
+func (s *Store) InstanceProfilePath(id string) string {
+	return s.instancePath(id, "profile.json")
 }
 
 // DeleteInstance removes an instance directory
