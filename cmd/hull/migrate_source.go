@@ -181,15 +181,17 @@ func sourceMigrate(ctx context.Context, s *store.Store, name string, opt migrate
 		return fmt.Errorf("move %s goes to %s, not %s", rec.TxID, rec.Remote.Target, opt.to)
 	}
 
+	probed := false
 	if rec == nil {
 		if rec, err = startMove(ctx, s, state, opt, peer); err != nil || rec == nil {
 			return err
 		}
+		probed = true
 	} else {
 		_, _ = fmt.Fprintf(opt.out, "Resuming move %s of %s to %s at %s\n", rec.TxID, name, rec.Peer, rec.State)
 	}
 	m := &moveSource{s: s, name: name, path: path, rec: rec, peer: peerFor(rec, peer), out: opt.out,
-		fenceTimeout: opt.fenceTimout}
+		fenceTimeout: opt.fenceTimout, probed: probed}
 	return m.run(ctx)
 }
 
@@ -230,11 +232,13 @@ func startMove(ctx context.Context, s *store.Store, state *store.InstanceState, 
 		TxID: txid, Role: roleSource, Name: state.ID, Epoch: state.OwnerEpoch + 1, State: srcPreflight,
 		Peer: opt.to, Remote: &opt.remote, Spec: spec,
 	}
+	// Probed before the record is written: a destination that cannot take
+	// the instance leaves nothing behind on either host to resume or abort.
+	probe, err := probeDestination(ctx, peerFor(rec, peer), rec, s, state)
+	if err != nil {
+		return nil, fmt.Errorf("cannot move %s: %w", state.ID, err)
+	}
 	if opt.dryRun {
-		probe, err := probeDestination(ctx, peerFor(rec, peer), rec, s, state)
-		if err != nil {
-			return nil, err
-		}
 		printMovePlan(opt.out, rec, state, probe)
 		return nil, nil
 	}
@@ -424,6 +428,8 @@ type moveSource struct {
 	peer         movePeer
 	out          io.Writer
 	fenceTimeout time.Duration
+	// probed is set when this run has already probed the destination.
+	probed bool
 }
 
 func (m *moveSource) logf(format string, args ...any) {
@@ -493,8 +499,10 @@ func (m *moveSource) reserve(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if _, err := probeDestination(ctx, m.peer, m.rec, m.s, state); err != nil {
-		return err
+	if !m.probed {
+		if _, err := probeDestination(ctx, m.peer, m.rec, m.s, state); err != nil {
+			return err
+		}
 	}
 	req, err := json.Marshal(migrateReserveRequest{Epoch: m.rec.Epoch, Spec: *m.rec.Spec})
 	if err != nil {
