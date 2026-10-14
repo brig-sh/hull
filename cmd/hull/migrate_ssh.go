@@ -204,17 +204,31 @@ func (p *sshPeer) remoteCommand(verb string, args []string) string {
 	return strings.Join(quoted, " ")
 }
 
+// migrateSSHMuxEnv set to "off" makes every step of a move its own ssh
+// connection.
+const migrateSSHMuxEnv = "HULL_MIGRATE_SSH_MUX"
+
 // sshArgv is the ssh command line for verb: batch mode (a password prompt
 // would hang a move with the source fenced), keepalives so a dead link ends
 // the step instead of blocking it, no tty, and "--" so the target can never
 // be read as an option.
+//
+// The steps share one connection (ControlMaster), which outlives each step
+// by a minute: the commit, which a streamed move runs while the guest is
+// stopped, then pays for no handshake. The socket's name is ssh's hash of
+// the connection, short enough for a Unix socket path on every host.
 func (p *sshPeer) sshArgv(verb string, args []string) []string {
 	ssh := os.Getenv(migrateSSHEnv)
 	if ssh == "" {
 		ssh = "ssh"
 	}
-	return []string{ssh, "-T", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=15",
-		"-o", "ServerAliveCountMax=4", "--", p.target, p.remoteCommand(verb, args)}
+	argv := []string{ssh, "-T", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=15",
+		"-o", "ServerAliveCountMax=4"}
+	if os.Getenv(migrateSSHMuxEnv) != "off" {
+		argv = append(argv, "-o", "ControlMaster=auto", "-o", "ControlPath=/tmp/hull-ssh-%C",
+			"-o", "ControlPersist=60")
+	}
+	return append(argv, "--", p.target, p.remoteCommand(verb, args))
 }
 
 func (p *sshPeer) call(ctx context.Context, verb string, args []string, stdin io.Reader) (*migrateReply, error) {
