@@ -110,6 +110,12 @@ func execInstance(_ context.Context, cmd *cli.Command) error {
 	if state.Status != "running" {
 		return fmt.Errorf("instance %s is not running (status: %s)", instanceID, state.Status)
 	}
+	// The agent socket of a paused or fenced hvi guest accepts and then
+	// waits for a guest that never answers: exec hung there, deaf to
+	// SIGTERM, until it was killed.
+	if err := refuseIfGuestHalted(state); err != nil {
+		return err
+	}
 
 	sockPath := s.InstanceAgentSocket(instanceID)
 	conn, err := net.Dial("unix", sockPath)
