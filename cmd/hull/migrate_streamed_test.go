@@ -1348,6 +1348,88 @@ func TestStreamedMoveTakesTheSpareBase(t *testing.T) {
 	}
 }
 
+// Once a streamed move commits, the source makes a spare of the base for
+// the way back in a process of its own (hull, here this test binary as
+// hull), which writes to the instance's log, and keeps the base: the `hull
+// rm` of the stale copy that a move back needs leaves both. Run again it
+// finds the spare; with the base gone it says so.
+func TestStreamedMoveLeavesASpareForTheWayBack(t *testing.T) {
+	f := newStreamFixture(t)
+	sum := mustInstance(t, f.src, f.name).Base.SHA256
+	// The source's store is used as it is: on macOS hull would otherwise
+	// mount a case-sensitive image over a temporary directory.
+	if err := os.WriteFile(filepath.Join(f.src.RootDir(), ".case-sensitive-apfs"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(runHullEnv, "1")
+	t.Setenv("DO_NOT_TRACK", "1")
+	started := 0
+	startSpareBase = func(s *store.Store, name, sum string) error {
+		started++
+		return spawnSpareBase(s, name, sum)
+	}
+	t.Cleanup(func() { startSpareBase = func(*store.Store, string, string) error { return nil } })
+	var out bytes.Buffer
+	opt := f.options(false)
+	opt.out = &out
+	if err := sourceMigrate(t.Context(), f.src, f.name, opt, f.peer); err != nil {
+		t.Fatal(err)
+	}
+	if started != 1 || !strings.Contains(out.String(), "making a spare copy of base "+digestHead(sum)) {
+		t.Fatalf("started %d; the move said:\n%s", started, out.String())
+	}
+	logPath := f.src.InstanceLogFile(f.name)
+	var logged string
+	for deadline := time.Now().Add(30 * time.Second); ; {
+		b, _ := os.ReadFile(logPath)
+		logged = string(b)
+		if strings.Contains(logged, "made a spare copy") || strings.Contains(logged, "no spare copy") ||
+			time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !strings.Contains(logged, "making a spare copy of base "+digestHead(sum)+" for a move back of "+f.name) ||
+		!strings.Contains(logged, "made a spare copy of base "+digestHead(sum)) {
+		t.Fatalf("the instance's log:\n%s", logged)
+	}
+	if !spareHeld(f.src, sum) {
+		t.Fatal("no spare on the source")
+	}
+	assertSameContent(t, f.src.BasePath(sum), spareBasePath(f.src, sum))
+
+	// A re-run of the committed move finds the spare and starts nothing.
+	out.Reset()
+	opt.txid = f.srcRecord(t).TxID
+	if err := sourceMigrate(t.Context(), f.src, f.name, opt, f.peer); err != nil {
+		t.Fatal(err)
+	}
+	if started != 1 || !strings.Contains(out.String(), "has a spare copy here for a move back") {
+		t.Fatalf("started %d; the re-run said:\n%s", started, out.String())
+	}
+	var w bytes.Buffer
+	if reply := spareAfterMove(f.src, f.name, sum, &w); !reply.OK || reply.Detail != "held" ||
+		!strings.Contains(w.String(), "already has a spare copy") {
+		t.Errorf("again: %+v %q", reply, w.String())
+	}
+
+	// The stale copy goes; the base and its spare stay for the way back.
+	if err := removeInstanceIn(f.src, f.name, true); err != nil {
+		t.Fatal(err)
+	}
+	if !baseHeld(f.src, sum) || !spareHeld(f.src, sum) {
+		t.Fatalf("after rm: base %v, spare %v", baseHeld(f.src, sum), spareHeld(f.src, sum))
+	}
+	if err := removeBase(f.src, sum); err != nil {
+		t.Fatal(err)
+	}
+	w.Reset()
+	if reply := spareAfterMove(f.src, f.name, sum, &w); !reply.OK || reply.Detail != "gone" ||
+		!strings.Contains(w.String(), "the base is gone") || spareHeld(f.src, sum) {
+		t.Errorf("with the base gone: %+v %q", reply, w.String())
+	}
+}
+
 // Two makers of one spare take turns: the second finds it made.
 func TestEnsureSpareBaseTakesTurns(t *testing.T) {
 	f := newStreamFixture(t)

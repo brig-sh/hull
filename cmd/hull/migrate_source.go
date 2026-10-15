@@ -1148,6 +1148,8 @@ func (m *moveSource) finish() error {
 			m.logf("move: %s", line)
 		}
 	}
+	// Last, so what a reader of the move's lines parses comes first.
+	m.spareForTheWayBack()
 	return nil
 }
 
