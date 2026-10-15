@@ -294,7 +294,11 @@ blocks hull read itself, beside hvi's RAM rounds) gets the whole bundle,
 and so does this hull from one of them: neither reads the other's stream.
 An instance started by an older hull, whose `hvi` was not given its base,
 moves as a whole bundle until it runs again under this hull; the
-`Transport:` line says so.
+`Transport:` line says so. So does one whose `hull run` could not boot
+`hvi` against the base (an `hvi` without `--disk-written`, or a failed
+comparison of the disk with the base): `hull run` warns, records the
+reason on the instance's base (`hviWhy`), and the `Transport:` line
+gives it.
 
 ### Bases
 
@@ -480,6 +484,18 @@ copy to restore from. So:
   move's error and its record say "hvi's stream ended before its manifest,
   so the guest runs on here", `--abort` leaves it running, and running the
   move again streams it from the start;
+- a stream hull stops reading before the manifest on a failure of its own
+  (a spool write on a full disk, a document too large to keep, a frame
+  that does not match its sha256) may still have fenced the guest: hvi
+  fences once its manifest is in the socket's buffer, and with a small last
+  round the rest of the stream can be there before hull reads it. hull
+  closes the connection, so an hvi still writing stops and resumes the
+  guest, and then asks hvi's `status`, which hvi answers once its op has
+  ended. Only hvi's refusal is taken as "runs on" without asking. Running
+  on, the move says so as above; fenced, it says "hvi fenced the guest,
+  though hull did not take its whole stream", and a re-run or `--abort`
+  has hvi stream it again (below); with no answer, the error says hvi did
+  not say whether it fenced the guest, and not to stop the instance;
 - one that fails after the manifest leaves the guest fenced with its spool
   recorded as the instance's checkpoint (`migrating`). Running the move
   again sends the spool (`"replay": true`) to a fresh copy of the base
@@ -510,10 +526,17 @@ reading is the guest. In that window:
   written since boot, the documents as first sent, and a manifest of its
   own, whose sha256 is never the first one's. Its reply names the first
   manifest (`stats.first_manifest_sha256`); hull holds that to the one on
-  record, when the instance's record or the move's has it, and refuses a
-  second stream of another fence, emptying the spool so no later check
-  seals it. The instance's record and the move's then name the new
-  manifest, and the move's keeps the first as `firstManifestSha256`.
+  record, when the instance's record or the move's has it. It also checks
+  the sha256 the new manifest lists for `profile.json`, `cpu.json`,
+  `platform.json`, `devices.json` and `session.json` against the first
+  manifest, which the instance's record of the fence (`latest.json`)
+  keeps, or, for a hull killed before that record, against those of them
+  the cut spool holds whole; with neither, it warns that it takes hvi's
+  word. It refuses a second stream of another fence, or of other
+  documents, emptying the spool so no later check seals it. A second
+  stream that fails leaves the guest fenced, and the error says so. The
+  instance's record and the move's then name the new manifest, and the
+  move's keeps the first as `firstManifestSha256`.
 - An abort stops the fenced `hvi` only once the spool is whole. If the
   spool is not whole and that `hvi` is gone, this host has no copy of the
   guest; the error says so, and does not suggest an abort that cannot
@@ -532,7 +555,9 @@ move's record without an account of the stream. Running the move again
 then adopts the fence from the spool (whole, or streamed again as above)
 and commits the destination's copy, without sending the guest again, when
 the manifest the destination verified is the one the guest was fenced
-with; any other manifest is refused and the source stays fenced.
+with; any other manifest is refused and the source stays fenced. That
+check compares the manifest's sha256 with the one hvi's second stream
+names as the first; the destination's manifest itself stays there.
 
 On a busy disk every synced write is a wait the stopped guest sits
 through, so from hvi's seal to the commit the source makes one:
@@ -568,10 +593,10 @@ refusal is the move's error, with code `restore_refused`.
 | `mode` | `live`; `replay` for a spool sent again; `adopted` for a destination's copy verified in an earlier attempt and committed without sending |
 | `rounds` | each of hvi's rounds and documents as relayed: `kind` (`disk`, `ram` or `state`), `name` (hvi's component name), `bytes`, `wireBytes`, `seconds`, and from hvi's reply `final` (taken paused) and, for a disk round, `blocks` and `bytes` as raw block bytes |
 | `diskBytes`, `diskWireBytes`, `ramBytes`, `stateBytes`, `wireBytes`, `seconds` | totals: the disk rounds' raw bytes (hvi's `disk_raw_bytes`) and their bytes on the wire, RAM as hvi framed it, documents, the whole stream |
-| `roundsEndAt`, `pausedAt`, `sealedMs` | when hvi's last round with the guest running ended (`rounds_end_unix_ms`), when it paused the guest after the sync that follows (`precopy_end_unix_ms`), and how long from the pause to its seal |
+| `roundsEndAt`, `pausedAt`, `sealedMs` | when hvi's last round with the guest running ended (`rounds_end_unix_ms`), when it paused the guest after the sync that follows (`precopy_end_unix_ms`), and how long from the pause to its seal. A replay takes the pause of the attempt that fenced the guest: from the spool's reply when that is hvi's reply to the first stream, else from `latest.json` or the earlier attempt's record; with none of them `pausedAt` and `downtimeMs` are left out |
 | `finalDiskMs`, `finalDiskBytes` | `disk-round-final`: hvi's time for it and its raw bytes |
 | `stopReason`, `hviPausedMs`, `diskSyncMs`, `pauseSyncMs` | from hvi's reply: why the running rounds stopped, the source's part of the downtime, the disk's sync before the pause and the one in it |
-| `downtimeMs` | from `pausedAt` to the destination's resume, on two hosts' clocks; it counts the destination's commit writes twice, so it reads high |
+| `downtimeMs` | from `pausedAt` to the destination's resume, on two hosts' clocks: to its record of running, plus the resume's own time (the destination's `timingsMs.resume`) |
 | `chain` | the trailer's hash, which the destination's record must match |
 | `hviReply` | hvi's reply to `migrate`, as hvi wrote it |
 | `steps` | when this host reached each step from hvi's seal to the commit, by its own clock; the destination's record has its own (`trailer read`, `hvi restored the guest paused`, `base checked`) |
@@ -587,12 +612,15 @@ rounds of 5426, 487, 0, 0, 0 blocks (369.6 MiB, 128.5 MiB on the wire);
 paused 8 ms, disk sync 0 ms before the pause and 0 ms in it` from hvi's
 reply, `hvi sealed the stream and fenced NAME (5 ms after the pause)`, and
 the summary after the commit (`...; sealed 5 ms after the pause, last disk
-round 0 bytes in 0 ms; downtime about 102 ms`). A stream that ends before
-the manifest prints `hvi did not fence NAME: ... the guest runs on here`.
+round 0 bytes in 0 ms; downtime about 102 ms`). A replay whose pause is on
+no record ends its summary `the guest was paused in an earlier attempt, at
+a time not on record`, with no seal and no downtime. A stream that ends
+before the manifest with the guest not fenced prints `hvi did not fence
+NAME: ... the guest runs on here`.
 
 ### Measured
 
-2026-10-15. hull at c04acb6 (the stream-v3 move), `hvi` c4131f5, the
+2026-10-15. hull at ef78fb6 (the stream-v3 move), `hvi` c4131f5, the
 `hvi-vmm` pin, built on each host. The guest's downtime is the rise in the
 `downtime total` its `hvi-time` driver logs across the move, which counts
 the time its clock was stopped. After every move the guest's counter had no
@@ -649,7 +677,7 @@ on rp1 and 2.0 to 8.2 s on rp2 during these runs.
 |---|---|---|
 | 331bf8c (stream-v1) | 91.3 s down, 338.6 s total | 38.9 s down, 84.4 s total |
 | d4ae775 (stream-v2) | 7.39 s down, 50.1 s total | |
-| c04acb6 (stream-v3) | 10.98 s down, 96.8 s total (after the failed attempt below) | 0.66 s down, 19.9 s total |
+| ef78fb6 (stream-v3) | 10.98 s down, 96.8 s total (after the failed attempt below) | 0.66 s down, 19.9 s total |
 
 - rp1 to rp2: hvi's pause took 3.35 s of it (`paused_ms`; 2.25 s of that
   the sync in the pause, and 13.8 s the sync before it, with the guest
@@ -715,7 +743,7 @@ Both hosts keep `<store>/instances/<name>/migration.json`, 0600:
 | `transfer` | `bytes`, `seconds`, `bytesPerSec`, `startedAt` |
 | `spec` | destination only: what the source asked it to build (MAC, IP, sandbox id, network) |
 | `verify` | destination only: `hvi checkpoint-verify`'s verdict |
-| `timingsMs` | milliseconds per step: `fence`, `transfer`, `prepare`, `commit`, `restore`, `resume` |
+| `timingsMs` | milliseconds per step: `fence`, `transfer`, `prepare`, `commit`, `restore`, `resume`; on a streamed destination `resume` is the resume alone and `commit` its whole commit, synced records included |
 | `transport` | `stream` for a streamed move, absent for the whole bundle; chosen at preflight and kept for retries |
 | `transportWhy` | why the move took the whole bundle |
 | `baseSha256` | the base a streamed move's disk rounds apply to |
@@ -749,6 +777,7 @@ destination before the commit), and two fields, `moveTxid` and `peer`.
 | restore refused | fenced, `transferred` | `verified` with the error | fix the destination and run it again, or `--abort` |
 | the commit's reply is lost | fenced, `committing` | `restored-paused` or `running` | run it again: it learns the commit |
 | streamed: hvi's stream ends before its manifest (a refusal, a failed capture or park, a reader hvi cut for stalling) | running, unfenced, `transferring`; the error says the guest runs on here | `receiving` with the error | run it again: it streams from the start; or `--abort`, which leaves the guest running |
+| streamed: hull fails on one of hvi's frames before the manifest (a full spool disk, a document too large, a frame whose sha256 is wrong) | as hvi's `status` says: running and unfenced (the error says the guest runs on here), or fenced with the spool cut short (the error says hvi fenced the guest); `transferring` | `receiving` with the error | running: as above. Fenced: run it again or `--abort`: hvi streams the fenced guest again first |
 | streamed: the stream fails after hvi's manifest | fenced, with the whole stream in its spool, `transferring` | `receiving` with the error | run it again: it sends the spool, disk rounds and all; or `--abort`, which restores the guest here from the spool |
 | streamed: hull is killed after hvi's manifest, before its own seal | fenced, `transferring`, the spool without `sealed` | `receiving` | run it again or `--abort`: each checks the spool frame by frame and seals it, or has hvi stream the fenced guest again for the move's txid and epoch; with neither possible the error says no copy is left here |
 | streamed: hull is killed after the destination verified the stream | fenced, `transferring`, no account of the stream on record | `restored-paused` | run it again: it adopts the fence from the spool and commits the destination's copy when its manifest is the fence's; or `--abort` |
