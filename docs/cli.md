@@ -59,7 +59,7 @@ which only a move's own restore passes.
 | `telemetry` | control usage and crash telemetry |
 | `version` | print the version and the build behind this binary |
 | `network-gateway` | run the user-mode network gateway daemon (hidden) |
-| `migrate-probe`, `migrate-receive`, `migrate-commit`, `migrate-status`, `migrate-abort`, `migrate-take-base`, `migrate-take-kernel`, `migrate-take-image` | the destination's half of a move and of a prepare (hidden); `migrate-prepare --txid` is the destination's step too |
+| `migrate-probe`, `migrate-receive`, `migrate-commit`, `migrate-status`, `migrate-abort`, `migrate-take-base`, `migrate-spare-base`, `migrate-take-kernel`, `migrate-take-image` | the destination's half of a move and of a prepare (hidden); `migrate-prepare --txid` is the destination's step too |
 
 ## `hull run`
 

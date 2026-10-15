@@ -345,7 +345,23 @@ func destTakeBase(s *store.Store, sum string, in io.Reader) *migrateReply {
 	if err := markBaseReceived(s, sum); err != nil {
 		return refuse(codeFailed, err)
 	}
+	if _, err := ensureSpareBase(s, sum); err != nil {
+		log.Warnf("No spare copy of base %s: %v; a move's receive copies it", digestHead(sum), err)
+	}
 	return reply()
+}
+
+// destSpareBase is migrate-spare-base: a ready copy of the held base sum
+// for the next streamed receive to take.
+func destSpareBase(s *store.Store, sum string) *migrateReply {
+	if err := checkDiskDigest(sum); err != nil {
+		return refuse(codeFailed, err)
+	}
+	how, err := ensureSpareBase(s, sum)
+	if err != nil {
+		return refuse(codeFailed, err)
+	}
+	return &migrateReply{OK: true, Detail: how}
 }
 
 // receivedKernelDir is where a destination keeps the profile kernels a
@@ -593,7 +609,15 @@ func prepareDestination(ctx context.Context, s *store.Store, state *store.Instan
 		res.Why = "its base is gone from this store"
 		step(prepareStep{What: baseWhat, Result: "skipped", Detail: res.Why})
 	case probe.holdsBase(b.SHA256):
-		step(prepareStep{What: "base " + digestHead(b.SHA256), Result: "held"})
+		// A spare copy for the move's receive to take, so it need not copy
+		// the base while the source waits.
+		detail := ""
+		if reply, err := p.call(ctx, "migrate-spare-base", []string{"--sha256", b.SHA256}, nil); err != nil {
+			detail = "no spare copy for the move: " + refusalDetail(err)
+		} else if reply.Detail != "held" {
+			detail = "a spare copy made for the move (" + reply.Detail + ")"
+		}
+		step(prepareStep{What: "base " + digestHead(b.SHA256), Result: "held", Detail: detail})
 	default:
 		baseWhat = "base " + digestHead(b.SHA256)
 		st, err := sendBase(ctx, s, p, b.SHA256)
@@ -768,6 +792,11 @@ func migratePrepareRemoteCommands() []*cli.Command {
 			[]cli.Flag{&cli.StringFlag{Name: "sha256", Required: true}},
 			func(cmd *cli.Command, s *store.Store) *migrateReply {
 				return destTakeBase(s, cmd.String("sha256"), os.Stdin)
+			}),
+		migrateRemoteVerb("migrate-spare-base", "make a spare copy of a held base for a move to take",
+			[]cli.Flag{&cli.StringFlag{Name: "sha256", Required: true}},
+			func(cmd *cli.Command, s *store.Store) *migrateReply {
+				return destSpareBase(s, cmd.String("sha256"))
 			}),
 		migrateRemoteVerb("migrate-take-kernel", "install the profile kernel on stdin",
 			[]cli.Flag{&cli.StringFlag{Name: "profile", Required: true}, &cli.StringFlag{Name: "sha256", Required: true},

@@ -271,8 +271,10 @@ func (r *streamReceiver) header(h moveStreamHeader) error {
 		return err
 	}
 	_ = os.Remove(r.diskPath)
-	if _, err := copyDisk(r.s.BasePath(h.BaseSHA256), r.diskPath); err != nil {
-		return fmt.Errorf("copy the base: %w", err)
+	if !takeSpareBase(r.s, h.BaseSHA256, r.diskPath) {
+		if _, err := copyDisk(r.s.BasePath(h.BaseSHA256), r.diskPath); err != nil {
+			return fmt.Errorf("copy the base: %w", err)
+		}
 	}
 	if err := os.Chmod(r.diskPath, 0o600); err != nil {
 		return err

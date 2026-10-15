@@ -224,3 +224,50 @@ func diskFromImageBase(s *store.Store, imageDigest, diskPath, rootfsDir string, 
 		time.Since(started))
 	return sum, nil
 }
+
+// A destination's spare of a base is a ready copy of it, made ahead of a
+// move (by `migrate-prepare`, or when a prepare sends the base), which a
+// streamed receive takes as the instance's disk by renaming it. Where the
+// filesystem has no clones a copy of a 1.6 GB base took the destination
+// 22 s, all of it before the source could start the disk rounds.
+
+// spareBasePath is where the spare of the base sum is kept.
+func spareBasePath(s *store.Store, sum string) string {
+	return filepath.Join(s.BasesDir(), "spare", filepath.Base(sum)+".ext4")
+}
+
+// ensureSpareBase makes the spare of the held base sum unless there is one,
+// and reports how ("held", "clone" or "copy").
+func ensureSpareBase(s *store.Store, sum string) (string, error) {
+	if !baseHeld(s, sum) {
+		return "", fmt.Errorf("base %s is not held here", digestHead(sum))
+	}
+	dst := spareBasePath(s, sum)
+	if _, err := os.Stat(dst); err == nil {
+		return "held", nil
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+		return "", err
+	}
+	var rnd [8]byte
+	_, _ = rand.Read(rnd[:])
+	tmp := filepath.Join(filepath.Dir(dst), ".new-"+hex.EncodeToString(rnd[:]))
+	how, err := copyDisk(s.BasePath(sum), tmp)
+	if err == nil {
+		err = os.Chmod(tmp, 0o600)
+	}
+	if err == nil {
+		err = os.Rename(tmp, dst)
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	return how, nil
+}
+
+// takeSpareBase moves the spare of base sum to dst, a path on the same
+// filesystem, and reports whether there was one.
+func takeSpareBase(s *store.Store, sum, dst string) bool {
+	return checkDiskDigest(sum) == nil && os.Rename(spareBasePath(s, sum), dst) == nil
+}
