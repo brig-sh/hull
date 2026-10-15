@@ -713,6 +713,58 @@ func TestStreamedMove(t *testing.T) {
 	}
 }
 
+// Both hosts' steps from hvi's seal to the resume are on the source's
+// record, in order, and the move prints them as one line, so the time
+// between the seal and the resume can be read step by step.
+func TestStreamedMoveRecordsBothHostsSteps(t *testing.T) {
+	f := newStreamFixture(t)
+	opt := f.options(false)
+	var out bytes.Buffer
+	opt.out = &out
+	if err := sourceMigrate(context.Background(), f.src, f.name, opt, f.peer); err != nil {
+		t.Fatal(err)
+	}
+	st := f.srcRecord(t).Stream
+	order := func(steps []streamStep, want ...string) {
+		t.Helper()
+		at := map[string]time.Time{}
+		for _, s := range steps {
+			at[s.Step] = s.At
+		}
+		for i, name := range want {
+			if at[name].IsZero() {
+				t.Errorf("no step %q in %+v", name, steps)
+			} else if i > 0 && at[name].Before(at[want[i-1]]) {
+				t.Errorf("step %q comes before %q", name, want[i-1])
+			}
+		}
+	}
+	order(st.Steps, "hvi sealed the stream", "trailer sent", "destination answered", "commit point recorded",
+		"commit sent", "commit answered")
+	order(st.DestSteps, "manifest read", "trailer read", "hvi restored the guest paused", "verified recorded",
+		"commit received", "epoch saved", "ledger written", "running recorded", "resumed")
+	if !strings.Contains(out.String(), "move: from the seal, ms (there: the destination's clock): trailer sent ") ||
+		!strings.Contains(out.String(), "there resumed ") {
+		t.Errorf("no line of the steps from the seal:\n%s", out.String())
+	}
+}
+
+func TestSealTimeline(t *testing.T) {
+	t0 := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	ms := func(n int) time.Time { return t0.Add(time.Duration(n) * time.Millisecond) }
+	src := []streamStep{{"destination accepted", ms(-900)}, {"hvi sealed the stream", ms(0)},
+		{"trailer sent", ms(2)}, {"destination answered", ms(120)}}
+	dst := []streamStep{{"trailer read", ms(15)}, {"resumed", ms(160)}}
+	want := "from the seal, ms (there: the destination's clock): trailer sent 2, there trailer read 15, " +
+		"destination answered 120, there resumed 160"
+	if got := sealTimeline(src, dst); got != want {
+		t.Errorf("got  %s\nwant %s", got, want)
+	}
+	if got := sealTimeline(src[:1], dst); got != "" {
+		t.Errorf("a record with no seal: %q", got)
+	}
+}
+
 // The destination's resume is timed on its own: the downtime runs to the
 // record of running, written before the resume, plus the resume, so a
 // resume timed from before the commit's synced records counted them

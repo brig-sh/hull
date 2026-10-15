@@ -368,6 +368,7 @@ func (r *streamReceiver) componentVerified(hdr hviComponentHeader) error {
 	switch name {
 	case "manifest.json":
 		r.manifest = r.pending.b
+		r.rec.Stream.step("manifest read")
 	case "profile.json":
 		if err := checkStreamProfile(r.pending.b, r.rec.Spec.Profile); err != nil {
 			return err
@@ -576,6 +577,8 @@ func destReceiveStream(s *store.Store, txid, name string, in io.Reader) *migrate
 	if err := rec.advanceThrough(path, dstReceived, dstVerified, dstRestoredPaused); err != nil {
 		return refuseWith(codeFailed, err, rec)
 	}
+	// On the record with the commit's write; the reply carries it now.
+	rec.Stream.step("verified recorded")
 	return &migrateReply{OK: true, Record: rec, VM: store.MigrationRestoredPaused}
 }
 

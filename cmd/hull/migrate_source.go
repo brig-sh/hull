@@ -1026,6 +1026,12 @@ func (m *moveSource) commit(ctx context.Context) error {
 		m.logf("warning: %s took the move over, but: %v", m.rec.Peer, err)
 	}
 	m.timing("commit", started)
+	if st := m.rec.Stream; st != nil && m.rec.Transport == transportStream {
+		st.step("commit answered")
+		if d := reply.Record.Stream; d != nil {
+			st.DestSteps = mergeSteps(st.DestSteps, d.Steps)
+		}
+	}
 	if st := m.rec.Stream; st != nil && !st.PausedAt.IsZero() {
 		for _, h := range reply.Record.History {
 			if h.State == dstRunning {
@@ -1103,7 +1109,74 @@ func (m *moveSource) finish() error {
 			humanBytes(st.DiskWireBytes), humanBytes(st.RAMBytes), humanBytes(st.StateBytes), st.SealedMs,
 			humanBytes(st.FinalDiskBytes), st.FinalDiskMs, st.DowntimeMs)
 	}
+	if st := m.rec.Stream; st != nil {
+		if line := sealTimeline(st.Steps, st.DestSteps); line != "" {
+			m.logf("move: %s", line)
+		}
+	}
 	return nil
+}
+
+// mergeSteps adds to steps those of more it does not hold, in time order.
+// The destination's reply to the receive names a step its record takes in
+// only with the commit's write, so the two replies' steps are merged.
+func mergeSteps(steps, more []streamStep) []streamStep {
+	type key struct {
+		step string
+		at   int64
+	}
+	seen := map[key]bool{}
+	for _, s := range steps {
+		seen[key{s.Step, s.At.UnixNano()}] = true
+	}
+	for _, s := range more {
+		if !seen[key{s.Step, s.At.UnixNano()}] {
+			steps = append(steps, s)
+		}
+	}
+	sort.SliceStable(steps, func(i, j int) bool { return steps[i].At.Before(steps[j].At) })
+	return steps
+}
+
+// sealTimeline lists the steps both hosts took from hvi's seal to the
+// commit's answer, in milliseconds after the seal; "there" marks the
+// destination's, which are by its own clock. It is "" when the source's
+// steps hold no seal.
+func sealTimeline(src, dst []streamStep) string {
+	var sealed time.Time
+	for _, s := range src {
+		if s.Step == "hvi sealed the stream" {
+			sealed = s.At
+		}
+	}
+	if sealed.IsZero() {
+		return ""
+	}
+	type hostStep struct {
+		streamStep
+		there bool
+	}
+	var all []hostStep
+	for _, s := range src {
+		if !s.At.Before(sealed) && s.Step != "hvi sealed the stream" {
+			all = append(all, hostStep{s, false})
+		}
+	}
+	for _, s := range dst {
+		if !s.At.Before(sealed) {
+			all = append(all, hostStep{s, true})
+		}
+	}
+	sort.SliceStable(all, func(i, j int) bool { return all[i].At.Before(all[j].At) })
+	parts := make([]string, 0, len(all))
+	for _, s := range all {
+		where := ""
+		if s.there {
+			where = "there "
+		}
+		parts = append(parts, fmt.Sprintf("%s%s %d", where, s.Step, s.At.Sub(sealed).Milliseconds()))
+	}
+	return "from the seal, ms (there: the destination's clock): " + strings.Join(parts, ", ")
 }
 
 // sourceAbort is `hull migrate --abort`: before the commit, and only once

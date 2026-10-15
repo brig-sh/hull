@@ -317,6 +317,10 @@ type migrateStreamStats struct {
 	// Steps are when this host reached each step from the pause on, by
 	// its own clock, so the downtime can be read step by step.
 	Steps []streamStep `json:"steps,omitempty"`
+	// DestSteps are the destination's steps, by its clock, as its reply
+	// to the commit gave them: the source's record holds both hosts' part
+	// of the time from hvi's seal to the resume.
+	DestSteps []streamStep `json:"destSteps,omitempty"`
 }
 
 // streamStep is when a host reached one step of a streamed move.
