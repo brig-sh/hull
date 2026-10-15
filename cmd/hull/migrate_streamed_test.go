@@ -93,6 +93,9 @@ type fakeStreamHvi struct {
 	// pausedAtMs is when its reply says the pause came.
 	fencedNow  chan struct{}
 	pausedAtMs int64
+	// gateMs is the wait for the I/O threads its reply gives, which the
+	// guest runs through, before pausedAtMs.
+	gateMs int64
 	// restreamDocs replaces documents in a second stream, as an hvi
 	// that did not keep them would.
 	restreamDocs map[string][]byte
@@ -373,11 +376,11 @@ func (h *fakeStreamHvi) migrate(req map[string]any, w *bufio.Writer, reply func(
 	h.fenceEpoch, _ = req["epoch"].(float64)
 	h.firstManifest = hex.EncodeToString(sum[:])
 	h.pausedAtMs = now - 7
-	reply(`{"v":1,"ok":true,"state":"fenced","manifest_sha256":"%s","stats":{"pause_ms":4,"paused_ms":6,`+
+	reply(`{"v":1,"ok":true,"state":"fenced","manifest_sha256":"%s","stats":{"pause_ms":4,"gate_ms":%d,"paused_ms":6,`+
 		`"stop_reason":"converged","rounds":[{"round":0,"in_pause":false},{"round":1,"in_pause":false},`+
 		`{"round":2,"in_pause":true}],"disk_rounds":[%s],"disk_raw_bytes":%d,"disk_sync_ms":1,"pause_sync_ms":1,`+
 		`"rounds_end_unix_ms":%d,"precopy_end_unix_ms":%d,"sealed_at_unix_ms":%d}}`, hex.EncodeToString(sum[:]),
-		strings.Join(statsRounds, ","), diskRaw, now-9, now-7, now)
+		h.gateMs, strings.Join(statsRounds, ","), diskRaw, now-9-h.gateMs, now-7-h.gateMs, now)
 }
 
 // fakeDestRestore stands in for `hvi restore --from-stream` on the
@@ -710,6 +713,109 @@ func TestStreamedMove(t *testing.T) {
 	}
 	if _, err := hviRestoreArgv(state.CmdLine, "/b", "/c", "/p"); err != nil {
 		t.Errorf("the moved instance cannot be checkpointed and moved on: %v", err)
+	}
+}
+
+// The guest runs through hvi's wait for its I/O threads at the pause, so
+// the downtime is counted from the end of that wait, not from
+// precopy_end_unix_ms.
+func TestStreamedMoveCountsThePauseFromTheGatesEnd(t *testing.T) {
+	f := newStreamFixture(t)
+	f.hvi.gateMs = 400
+	if err := f.migrate(t, ""); err != nil {
+		t.Fatal(err)
+	}
+	st := f.srcRecord(t).Stream
+	if !st.PausedAt.Equal(time.UnixMilli(f.hvi.pausedAtMs)) || st.SealedMs != 7 || st.HviGateMs != 400 ||
+		st.DowntimeMs >= 400 {
+		t.Errorf("pause %v (the guest stopped at %d), sealed %d ms, gate %d ms, downtime %d ms", st.PausedAt,
+			f.hvi.pausedAtMs, st.SealedMs, st.HviGateMs, st.DowntimeMs)
+	}
+}
+
+// Both hosts' steps from hvi's seal to the resume are on the source's
+// record, in order, and the move prints them as one line, so the time
+// between the seal and the resume can be read step by step.
+func TestStreamedMoveRecordsBothHostsSteps(t *testing.T) {
+	f := newStreamFixture(t)
+	opt := f.options(false)
+	var out bytes.Buffer
+	opt.out = &out
+	if err := sourceMigrate(context.Background(), f.src, f.name, opt, f.peer); err != nil {
+		t.Fatal(err)
+	}
+	st := f.srcRecord(t).Stream
+	order := func(steps []streamStep, want ...string) {
+		t.Helper()
+		at := map[string]time.Time{}
+		for _, s := range steps {
+			at[s.Step] = s.At
+		}
+		for i, name := range want {
+			if at[name].IsZero() {
+				t.Errorf("no step %q in %+v", name, steps)
+			} else if i > 0 && at[name].Before(at[want[i-1]]) {
+				t.Errorf("step %q comes before %q", name, want[i-1])
+			}
+		}
+	}
+	order(st.Steps, "hvi sealed the stream", "trailer sent", "destination answered", "commit point recorded",
+		"commit sent", "commit answered")
+	order(st.DestSteps, "manifest read", "trailer read", "hvi restored the guest paused", "verified recorded",
+		"commit received", "epoch saved", "ledger written", "running recorded", "resumed")
+	if !strings.Contains(out.String(), "move: from the seal, ms (there: the destination's clock): trailer sent ") ||
+		!strings.Contains(out.String(), "there resumed ") {
+		t.Errorf("no line of the steps from the seal:\n%s", out.String())
+	}
+}
+
+func TestSealTimeline(t *testing.T) {
+	t0 := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	ms := func(n int) time.Time { return t0.Add(time.Duration(n) * time.Millisecond) }
+	src := []streamStep{{"destination accepted", ms(-900)}, {"hvi sealed the stream", ms(0)},
+		{"trailer sent", ms(2)}, {"destination answered", ms(120)}}
+	dst := []streamStep{{"trailer read", ms(15)}, {"resumed", ms(160)}}
+	want := "from the seal, ms (there: the destination's clock): trailer sent 2, there trailer read 15, " +
+		"destination answered 120, there resumed 160"
+	if got := sealTimeline(src, dst); got != want {
+		t.Errorf("got  %s\nwant %s", got, want)
+	}
+	if got := sealTimeline(src[:1], dst); got != "" {
+		t.Errorf("a record with no seal: %q", got)
+	}
+}
+
+// The destination's resume is timed on its own: the downtime runs to the
+// record of running, written before the resume, plus the resume, so a
+// resume timed from before the commit's synced records counted them
+// twice.
+func TestStreamedMoveTimesTheResumeAlone(t *testing.T) {
+	f := newStreamFixture(t)
+	var took time.Duration
+	prev := destResume
+	destResume = func(s *store.Store, name string) error {
+		started := time.Now()
+		err := prev(s, name)
+		took = time.Since(started)
+		return err
+	}
+	if err := f.migrate(t, ""); err != nil {
+		t.Fatal(err)
+	}
+	rec := f.srcRecord(t)
+	dst := f.dstRecord(t, rec.TxID)
+	resume, commit := dst.Timings["resume"], dst.Timings["commit"]
+	if resume > took.Milliseconds()+1 || commit < resume {
+		t.Errorf("resume %d ms, commit %d ms; the resume itself took %s", resume, commit, took)
+	}
+	var resumed time.Time
+	for _, s := range rec.Stream.DestSteps {
+		if s.Step == "resumed" {
+			resumed = s.At
+		}
+	}
+	if want := resumed.Sub(rec.Stream.PausedAt).Milliseconds(); resumed.IsZero() || rec.Stream.DowntimeMs != want {
+		t.Errorf("downtime %d ms, want %d", rec.Stream.DowntimeMs, want)
 	}
 }
 

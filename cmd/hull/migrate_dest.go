@@ -719,6 +719,14 @@ func destCommit(s *store.Store, txid string, epoch uint64) *migrateReply {
 		return no
 	}
 	started := time.Now()
+	// A streamed move's steps from the commit to the resume, by this host's
+	// clock, go on the record with its last write and in the reply.
+	step := func(name string) {
+		if rec.Stream != nil {
+			rec.Stream.step(name)
+		}
+	}
+	step("commit received")
 	state, err := s.GetInstance(rec.Name)
 	if err != nil {
 		return refuseWith(codeFailed, rec.fail(path, err), rec)
@@ -727,26 +735,35 @@ func destCommit(s *store.Store, txid string, epoch uint64) *migrateReply {
 	if err := s.SaveInstance(state); err != nil {
 		return refuseWith(codeFailed, rec.fail(path, err), rec)
 	}
+	step("epoch saved")
 	// The ledger first: once the instance record says running, the store
 	// must answer for this txid whatever later happens to the instance.
 	if err := writeMoveLedger(s, rec, dstRunning); err != nil {
 		return refuseWith(codeFailed, rec.fail(path, fmt.Errorf("record the commit in the ledger: %w", err)), rec)
 	}
+	step("ledger written")
 	// The destination's commit point: from here the guest may run, and
 	// nothing may abort the move.
 	if err := rec.advance(path, dstRunning); err != nil {
 		return refuseWith(codeFailed, err, rec)
 	}
+	step("running recorded")
+	// The record of running, which the source counts the downtime to,
+	// is written: the resume's own time is counted from here.
+	resumeStarted := time.Now()
 	if err := destResume(s, rec.Name); err != nil {
 		// The move committed, whatever the resume did: the record says
 		// running, and the source, reading that, records the commit too.
 		return refuseWith(codeFailed, rec.fail(path, fmt.Errorf("committed, but the resume failed: %w; "+
 			"`hull resume %s` here", err, rec.Name)), rec)
 	}
+	step("resumed")
 	if rec.Timings == nil {
 		rec.Timings = map[string]int64{}
 	}
-	rec.Timings["resume"] = time.Since(started).Milliseconds()
+	rec.Timings["resume"] = time.Since(resumeStarted).Milliseconds()
+	// The whole commit here, its synced records and the resume.
+	rec.Timings["commit"] = time.Since(started).Milliseconds()
 	_ = writeMigrationRecord(path, rec)
 	return &migrateReply{OK: true, Record: rec, VM: "running"}
 }
