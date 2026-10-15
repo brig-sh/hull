@@ -25,6 +25,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 	"unicode"
 )
@@ -238,6 +239,10 @@ func (p *sshPeer) call(ctx context.Context, verb string, args []string, stdin io
 	c.Stdout = &stdout
 	c.Stderr = &stderr
 	c.Stdin = stdin
+	// In a process group of its own, so a Ctrl-C at the terminal reaches
+	// hull alone, which holds it while hvi's stream is not on record
+	// (moveSignals) and otherwise ends ssh through ctx.
+	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	// A destination that dies mid-stream must not leave the copy blocked
 	// on a pipe nobody reads.
 	c.WaitDelay = 5 * time.Second
