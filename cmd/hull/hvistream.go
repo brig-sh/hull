@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync/atomic"
 	"time"
 )
 
@@ -35,23 +36,34 @@ import (
 // hviStreamIdle is how long a streaming op may go without a byte from hvi
 // before hull gives up on it. hvi cuts a reader that takes nothing for 30 s
 // itself, and a final round that runs past its bound, so this only catches
-// an hvi that stopped writing.
+// an hvi that stopped writing. A move's relay waits less once the paused
+// part of the stream has begun (hviPausedBound).
 const hviStreamIdle = 2 * time.Minute
 
 // idleConn extends the connection's deadline before every read and write,
 // so a stream that keeps moving is never cut, and one that stalls is.
 type idleConn struct {
 	net.Conn
-	idle time.Duration
+	idle atomic.Int64
 }
 
+// newIdleConn wraps conn with an idle bound of idle.
+func newIdleConn(conn net.Conn, idle time.Duration) *idleConn {
+	c := &idleConn{Conn: conn}
+	c.idle.Store(int64(idle))
+	return c
+}
+
+// setIdle changes the bound from the next read or write on.
+func (c *idleConn) setIdle(idle time.Duration) { c.idle.Store(int64(idle)) }
+
 func (c *idleConn) Read(p []byte) (int, error) {
-	_ = c.SetDeadline(time.Now().Add(c.idle))
+	_ = c.SetDeadline(time.Now().Add(time.Duration(c.idle.Load())))
 	return c.Conn.Read(p)
 }
 
 func (c *idleConn) Write(p []byte) (int, error) {
-	_ = c.SetDeadline(time.Now().Add(c.idle))
+	_ = c.SetDeadline(time.Now().Add(time.Duration(c.idle.Load())))
 	return c.Conn.Write(p)
 }
 
@@ -75,7 +87,7 @@ func hviStreamOpSize(sock string, req map[string]any, idle time.Duration, size i
 	if err != nil {
 		return nil, nil, fmt.Errorf("connect to hvi's control socket %s: %w", sock, err)
 	}
-	conn := &idleConn{Conn: raw, idle: idle}
+	conn := newIdleConn(raw, idle)
 	if _, err := conn.Write(append(line, '\n')); err != nil {
 		_ = raw.Close()
 		return nil, nil, fmt.Errorf("send %v to hvi: %w", req["op"], err)
