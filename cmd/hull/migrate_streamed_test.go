@@ -925,3 +925,36 @@ func TestStreamedMoveDiskRoundsFollowTheGuestsWrites(t *testing.T) {
 	}
 	f.checkArrived(t, rec)
 }
+
+// A destination that refuses the stream's header (here: it lost the base
+// after the source checked) refuses it while the guest still runs: hvi's
+// migrate never starts, the source sends the base, and the move goes on
+// live, by itself.
+func TestStreamedMoveSendsTheBaseOnNoBase(t *testing.T) {
+	f := newStreamFixture(t, true, true)
+	st := mustInstance(t, f.src, f.name)
+	removed := 0
+	f.peer.mangle = func(verb string, args []string, in io.Reader) io.Reader {
+		if verb == "migrate-receive" && slices.Contains(args, "--stream") && removed == 0 {
+			removed++
+			if err := os.Remove(f.dst.BasePath(st.Base.SHA256)); err != nil {
+				t.Error(err)
+			}
+		}
+		return in
+	}
+	if err := f.migrate(t, ""); err != nil {
+		t.Fatal(err)
+	}
+	rec := f.srcRecord(t)
+	if rec.State != srcCommitted || rec.Stream.Mode != "live" {
+		t.Fatalf("source %s, stream %+v", rec.State, rec.Stream)
+	}
+	if f.hvi.migrations != 1 || removed != 1 {
+		t.Errorf("hvi streamed %d times, the base was removed %d times", f.hvi.migrations, removed)
+	}
+	if n := f.peer.called("migrate-take-base"); n != 2 {
+		t.Errorf("the base was sent %d times, want 2: %v", n, f.peer.calls)
+	}
+	f.checkArrived(t, rec)
+}

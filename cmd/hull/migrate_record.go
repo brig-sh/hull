@@ -178,6 +178,10 @@ type migrationRecord struct {
 	// Stream is what a streamed move carried, round by round, and how
 	// long the guest was stopped.
 	Stream *migrateStreamStats `json:"stream,omitempty"`
+	// StreamAccepted is, on the destination, the attempt of a streamed
+	// move whose header it took and whose base it copied: the source
+	// waits for it before hvi's migrate fences the guest.
+	StreamAccepted string `json:"streamAccepted,omitempty"`
 
 	// Error is the last step's failure, kept for `hull migrate --status`.
 	Error   string           `json:"error,omitempty"`

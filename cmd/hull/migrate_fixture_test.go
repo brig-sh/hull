@@ -326,7 +326,9 @@ func (p *localPeer) call(_ context.Context, verb string, args []string, stdin io
 	case "migrate-receive":
 		if flags["--stream"] == "true" {
 			reply = destReceiveStream(p.s, flags["--txid"], flags["--name"], stdin)
-			_, _ = io.Copy(io.Discard, stdin)
+			// As ssh: the call ends with the remote command, and what the
+			// source still writes goes nowhere.
+			go func() { _, _ = io.Copy(io.Discard, stdin) }()
 		} else if flags["--reserve"] == "true" {
 			var req migrateReserveRequest
 			if err := json.NewDecoder(stdin).Decode(&req); err != nil {
