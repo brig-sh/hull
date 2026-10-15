@@ -24,10 +24,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/brig-sh/hull/pkg/store"
@@ -221,6 +219,8 @@ type streamSender struct {
 	sealDone   chan error
 	recorded   chan error
 	recordedAt time.Time
+	// sealGate opens when the spool's seal may sync it.
+	sealGate chan struct{}
 	// ctx is the move's; attempt names this attempt, and callDone is
 	// closed once the receive's ssh session has ended.
 	ctx      context.Context
@@ -474,22 +474,18 @@ func (ss *streamSender) diskFinal() error {
 }
 
 // spoolWriter keeps hvi's stream on this host as hvi wrote it, and the
-// small components beside it as files.
+// small components beside it as files. Nothing syncs it while the stream
+// runs: on a busy disk a sync of the spool held up the synced records the
+// stopped guest waits for. The seal syncs it, behind the move.
 type spoolWriter struct {
 	dir string
 	f   *os.File
 	cw  *countingWriter
 	bw  *bufio.Writer
-	// synced is how far the background syncs have been asked to reach;
-	// inflight waits for the one running.
-	synced   int64
-	inflight sync.WaitGroup
-	busy     atomic.Bool
 }
 
-// spoolSyncEvery is how much of the spool is written between the syncs
-// that run in the background while the stream goes on, so the sync at the
-// seal has only the tail left to write.
+// spoolSyncEvery is how much a destination writes to the incoming disk
+// between the syncs it runs in the background while the stream goes on.
 const spoolSyncEvery = 32 << 20
 
 func newSpool(dir string) (*spoolWriter, error) {
@@ -505,33 +501,12 @@ func newSpool(dir string) (*spoolWriter, error) {
 	return &spoolWriter{dir: dir, f: f, cw: cw, bw: bufio.NewWriterSize(cw, 1<<20)}, nil
 }
 
-// maybeSync starts a sync of what is written, in the background, once
-// spoolSyncEvery more bytes have been written since the last, unless one
-// is still running.
-func (sp *spoolWriter) maybeSync() {
-	if sp.cw.n+int64(sp.bw.Buffered())-sp.synced < spoolSyncEvery || sp.busy.Load() {
-		return
-	}
-	if sp.bw.Flush() != nil {
-		return // the seal reports it
-	}
-	sp.synced = sp.cw.n
-	sp.busy.Store(true)
-	sp.inflight.Add(1)
-	go func() {
-		defer sp.inflight.Done()
-		_ = syncFile(sp.f)
-		sp.busy.Store(false)
-	}()
-}
-
 // seal flushes and syncs the stream, writes the small components and the
 // reply, and syncs the directory: from here an abort can restore from it.
 func (sp *spoolWriter) seal(files map[string][]byte, reply []byte) error {
 	if err := sp.bw.Flush(); err != nil {
 		return err
 	}
-	sp.inflight.Wait()
 	if err := syncFile(sp.f); err != nil {
 		return err
 	}
@@ -550,7 +525,6 @@ func (sp *spoolWriter) seal(files map[string][]byte, reply []byte) error {
 }
 
 func (sp *spoolWriter) close() {
-	sp.inflight.Wait()
 	if sp.f != nil {
 		_ = sp.f.Close()
 	}
@@ -682,7 +656,6 @@ func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][
 		if err := ss.relayFrame(folder, line, hdr, body, also); err != nil {
 			return err
 		}
-		sp.maybeSync()
 		if keep != nil {
 			files[hdr.Component] = append(files[hdr.Component], keep.b...)
 			if hdr.Component == "manifest.json" {
@@ -788,7 +761,7 @@ func (ss *streamSender) replayHvi(dir string) (json.RawMessage, error) {
 // verified the move already is not sent it again. A guest that hvi has not
 // fenced yet is sent live; one whose stream hvi sealed in an earlier
 // attempt is sent from the spool, with the disk compared against the base.
-func (m *moveSource) streamTransfer(ctx context.Context) error {
+func (m *moveSource) streamTransfer(ctx context.Context) (retErr error) {
 	if reply, err := m.peer.call(ctx, "migrate-status", []string{"--txid", m.rec.TxID}, nil); err == nil &&
 		reply.Record != nil &&
 		migrateStateOrder(roleDestination, reply.Record.State) >= migrateStateOrder(roleDestination, dstVerified) {
@@ -872,8 +845,9 @@ func (m *moveSource) streamTransfer(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	m.sealGate, m.sealGateOnce = make(chan struct{}), sync.Once{}
 	ss := &streamSender{m: m, state: state, sw: sw, link: link, disk: f, size: info.Size(), stats: stats,
-		spoolDir: spoolDir, ctx: ctx, attempt: attempt, callDone: make(chan struct{})}
+		spoolDir: spoolDir, ctx: ctx, attempt: attempt, callDone: make(chan struct{}), sealGate: m.sealGate}
 	type sendResult struct {
 		hviReply json.RawMessage
 		err      error
@@ -890,13 +864,17 @@ func (m *moveSource) streamTransfer(ctx context.Context) error {
 	res := <-sent
 	m.spoolSealing = ss.sealDone
 	if ss.recorded != nil {
-		// Nothing goes on, and nothing reads the move's record, until the
-		// fence hvi made is on it.
-		if rerr := <-ss.recorded; rerr != nil {
-			return fmt.Errorf("hvi fenced %s, but recording it failed: %w", m.name, rerr)
-		}
-		stats.Steps = append(stats.Steps, streamStep{Step: "fence recorded", At: ss.recordedAt})
-		sort.Slice(stats.Steps, func(i, j int) bool { return stats.Steps[i].At.Before(stats.Steps[j].At) })
+		m.fenceRecord, m.fenceRecordedAt = ss.recorded, &ss.recordedAt
+		defer func() {
+			// A move that stops here leaves the instance's record of the
+			// fence, and its sealed spool, for the abort and the re-run.
+			if retErr != nil {
+				m.releaseSeal()
+				if err := m.waitFenceRecord(); err != nil {
+					retErr = errors.Join(retErr, err)
+				}
+			}
+		}()
 	}
 	if res.err == nil {
 		stats.Chain = sw.chain.sum()
@@ -1051,19 +1029,26 @@ func (ss *streamSender) send(replay bool) (json.RawMessage, error) {
 	ss.stats.HviReply = reply
 	ss.stats.step("hvi sealed the stream")
 	// hvi has fenced the guest, and every byte of its stream is in the
-	// spool's file. The fence is recorded while the last disk round and the
-	// trailer go out and the destination checks them; the commit waits for
-	// that record (streamTransfer), the stream does not. The spool's sync,
-	// which only an abort or a re-run needs, runs on behind the move and
-	// is not part of the downtime. A hull that dies before either is done
-	// leaves a spool that a re-run or an abort checks whole before using it
-	// (verifySpool), and a destination that verified a stream the source
-	// never recorded is answered by the abort, which restores the guest
-	// here from that spool.
+	// spool's file. The move's record takes the fence in memory, and
+	// writes it with the commit point, the one synced write the commit
+	// waits for. The instance's records of the fence are written beside
+	// the last disk round, the trailer and the destination's checks, and
+	// the spool is synced behind the move: on a busy disk every synced
+	// write is a wait the stopped guest would otherwise sit through. A hull
+	// that dies before they are done leaves a spool that a re-run or an
+	// abort checks whole before using it (verifySpool).
+	if err := ss.noteFence(); err != nil {
+		m.signals.release()
+		sp.close()
+		unlock()
+		return nil, err
+	}
+	ss.progress("hvi sealed the stream and fenced %s (%d ms after the last RAM round began)", m.name,
+		ss.stats.SealedMs)
 	ss.recorded = make(chan error, 1)
 	fenceDone := make(chan struct{})
 	go func() {
-		err := ss.recordFence()
+		err := ss.recordInstanceFence()
 		ss.recordedAt = time.Now().UTC()
 		m.signals.release()
 		close(fenceDone)
@@ -1082,6 +1067,11 @@ func (ss *streamSender) send(replay bool) (json.RawMessage, error) {
 	}
 	ss.sealDone = make(chan error, 1)
 	go func() {
+		// The seal's sync of the whole spool waits until the commit is
+		// answered or the move stops (moveSource.releaseSeal): run beside
+		// the commit point's synced record, it held that record up for
+		// seconds, the guest stopped all the while.
+		<-ss.sealGate
 		err := sp.seal(files, reply)
 		sp.close()
 		<-fenceDone
@@ -1153,44 +1143,47 @@ func (l *softLink) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// recordFence records, once hvi has sealed the stream and fenced the guest,
-// the spool as the instance's checkpoint, taken over by this move, and the
-// disk as fenced.
-func (ss *streamSender) recordFence() error {
+// noteFence puts the fence hvi made on the move's record, in memory: the
+// spool, the manifest it ends with, the disk as fenced. The record carries
+// them to disk with its next write, which before the commit is the one
+// that records the commit point; until then the move's record, synced
+// before the stream began, already keeps the instance from running here
+// (moveRefusal), and a spool a re-run or an abort finds without its record
+// is checked whole before it is used.
+func (ss *streamSender) noteFence() error {
 	m := ss.m
-	state, err := m.s.GetInstance(m.name)
+	disk, _ := flagValue(ss.state.CmdLine, "--disk")
+	size, mod, err := fileModNs(disk)
 	if err != nil {
 		return err
 	}
+	m.rec.BundleDir = ss.spoolDir
+	m.rec.ManifestSHA256 = sha256Hex(ss.manifest)
+	m.rec.Disk = &migrateDisk{Path: disk, Size: size, ModNs: mod}
+	return nil
+}
+
+// recordInstanceFence records the fence on the instance: the spool as its
+// checkpoint, taken over by this move. latest.json goes first, as a
+// checkpoint writes it: a restore that finds it naming a checkpoint the
+// record never took in refuses rather than rewinding past it. It runs
+// beside the end of the move; the commit does not wait for it.
+func (ss *streamSender) recordInstanceFence() error {
+	m := ss.m
 	sum := sha256Hex(ss.manifest)
-	// latest.json first, as a checkpoint writes it: a restore that finds
-	// it naming a checkpoint the record never took in refuses rather than
-	// rewinding past it.
 	if err := writeHviCheckpointRecord(instanceCheckpointDir(m.s, m.name), hviCheckpointRecord{
 		Dir: ss.spoolDir, ManifestSHA256: sum, Then: hviThenFence, Stats: ss.stats.HviReply,
 		SavedAt: time.Now().UTC(), TxID: m.rec.TxID,
 	}); err != nil {
 		return fmt.Errorf("the stream is sealed in %s but recording it failed: %w", ss.spoolDir, err)
 	}
-	state.Migration = &store.MigrationState{State: store.MigrationMigrating, BundleDir: ss.spoolDir,
-		TxID: m.rec.TxID, ManifestSHA256: sum, MoveTxID: m.rec.TxID, Peer: m.rec.Peer}
-	if err := m.s.SaveInstance(state); err != nil {
-		return err
-	}
-	disk, _ := flagValue(state.CmdLine, "--disk")
-	size, mod, err := fileModNs(disk)
+	state, err := m.s.GetInstance(m.name)
 	if err != nil {
 		return err
 	}
-	m.rec.BundleDir = ss.spoolDir
-	m.rec.ManifestSHA256 = sum
-	m.rec.Disk = &migrateDisk{Path: disk, Size: size, ModNs: mod}
-	if err := writeMigrationRecord(m.path, m.rec); err != nil {
-		return err
-	}
-	ss.progress("hvi sealed the stream and fenced %s (%d ms after the last RAM round began)", m.name,
-		ss.stats.SealedMs)
-	return nil
+	state.Migration = &store.MigrationState{State: store.MigrationMigrating, BundleDir: ss.spoolDir,
+		TxID: m.rec.TxID, ManifestSHA256: sum, MoveTxID: m.rec.TxID, Peer: m.rec.Peer}
+	return m.s.SaveInstance(state)
 }
 
 // adoptStreamFence records a stream hvi sealed for this move when hull did

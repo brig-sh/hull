@@ -26,8 +26,10 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/urfave/cli/v3"
@@ -503,13 +505,50 @@ type moveSource struct {
 	// signals are held while hvi's stream is not on record.
 	signals *moveSignals
 	// spoolSealing reports the seal of a streamed move's spool, which
-	// runs on behind the move.
-	spoolSealing chan error
+	// runs on behind the move; fenceRecord the instance's record of the
+	// fence, written beside the end of the move, and fenceRecordedAt when.
+	spoolSealing    chan error
+	fenceRecord     chan error
+	fenceRecordedAt *time.Time
+	// sealGate holds the spool's sync until releaseSeal.
+	sealGate     chan struct{}
+	sealGateOnce sync.Once
+}
+
+// releaseSeal lets the spool's seal sync it: once the commit is answered,
+// or the move stops, or hull exits.
+func (m *moveSource) releaseSeal() {
+	if m.sealGate != nil {
+		m.sealGateOnce.Do(func() { close(m.sealGate) })
+	}
+}
+
+// waitFenceRecord waits for the instance's record of a streamed move's
+// fence, when one is being written, and puts when it was made among the
+// move's steps.
+func (m *moveSource) waitFenceRecord() error {
+	if m.fenceRecord == nil {
+		return nil
+	}
+	err := <-m.fenceRecord
+	m.fenceRecord = nil
+	if err != nil {
+		return fmt.Errorf("hvi fenced %s, but recording it on the instance failed: %w", m.name, err)
+	}
+	if st := m.rec.Stream; st != nil && m.fenceRecordedAt != nil {
+		st.Steps = append(st.Steps, streamStep{Step: "instance's fence recorded", At: *m.fenceRecordedAt})
+		sort.Slice(st.Steps, func(i, j int) bool { return st.Steps[i].At.Before(st.Steps[j].At) })
+	}
+	return nil
 }
 
 // waitSpool waits for the seal of the spool a streamed move left running
 // behind it, so the process does not end before its writes are synced.
 func (m *moveSource) waitSpool() {
+	m.releaseSeal()
+	if err := m.waitFenceRecord(); err != nil {
+		m.logf("warning: %v", err)
+	}
 	if m.spoolSealing == nil {
 		return
 	}
@@ -577,6 +616,7 @@ func (m *moveSource) run(ctx context.Context) error {
 
 // stopped records why the move stopped and says what the operator can do.
 func (m *moveSource) stopped(err error) error {
+	m.releaseSeal()
 	err = m.rec.fail(m.path, err)
 	fenced := migrateStateOrder(roleSource, m.rec.State) >= migrateStateOrder(roleSource, srcFenced)
 	if m.rec.Transport == transportStream && m.rec.State == srcTransferring {
@@ -962,6 +1002,7 @@ func (m *moveSource) commit(ctx context.Context) error {
 	}
 	reply, err := m.peer.call(ctx, "migrate-commit",
 		[]string{"--txid", m.rec.TxID, "--epoch", strconv.FormatUint(m.rec.Epoch, 10)}, nil)
+	m.releaseSeal()
 	if reply == nil || reply.Record == nil || reply.Record.State != dstRunning ||
 		reply.Record.TxID != m.rec.TxID || reply.Record.Epoch != m.rec.Epoch {
 		if err == nil {
@@ -982,6 +1023,19 @@ func (m *moveSource) commit(ctx context.Context) error {
 			}
 		}
 	}
+	// The instance's record of the fence is most often done by now; its
+	// time goes on the record with the commit.
+	if m.fenceRecord != nil {
+		select {
+		case err := <-m.fenceRecord:
+			m.fenceRecord = make(chan error, 1)
+			m.fenceRecord <- err
+			if err == nil {
+				_ = m.waitFenceRecord()
+			}
+		default:
+		}
+	}
 	return m.rec.advance(m.path, srcCommitted)
 }
 
@@ -989,9 +1043,20 @@ func (m *moveSource) commit(ctx context.Context) error {
 // again: the instance record marks the checkpoint stale, and the fenced hvi,
 // which nothing will run again, is stopped.
 func (m *moveSource) finish() error {
+	// A streamed move's instance record of the fence may still be on its
+	// way to disk; it is the record finish turns into "migrated".
+	if err := m.waitFenceRecord(); err != nil {
+		m.logf("warning: %v", err)
+	}
 	state, err := m.s.GetInstance(m.name)
 	if err != nil {
 		return err
+	}
+	if state.Migration == nil && m.rec.Transport == transportStream {
+		// Its record of the fence was lost (a hull that died after the
+		// commit): the move's record has what it needs.
+		state.Migration = &store.MigrationState{BundleDir: m.rec.BundleDir, TxID: m.rec.TxID,
+			ManifestSHA256: m.rec.ManifestSHA256}
 	}
 	if state.Migration != nil && state.Migration.State != store.MigrationMigrated {
 		state.Migration.State = store.MigrationMigrated
@@ -1071,6 +1136,20 @@ func sourceAbort(ctx context.Context, s *store.Store, name string, w io.Writer, 
 		// stream: before that the guest still runs here.
 		fenced = fencedFor(state, rec.TxID) ||
 			migrateStateOrder(roleSource, rec.State) >= migrateStateOrder(roleSource, srcTransferred)
+	}
+	if vm := hviVMState(state); !fenced && streamed && (vm == "" || vm == "?") {
+		// hvi does not answer (gone with a host that went down, say) and
+		// nothing recorded a fence; a whole spool of this move says hvi
+		// did fence it.
+		if root, ok := flagValue(state.CmdLine, "--checkpoint-root"); ok {
+			if _, err := verifySpool(filepath.Join(root, rec.TxID)); err == nil {
+				m := &moveSource{s: s, name: name, path: path, rec: rec, out: w}
+				if err := m.adoptStreamFence(state); err != nil {
+					return fmt.Errorf("cannot abort move %s: %w. Nothing was changed", rec.TxID, err)
+				}
+				fenced = true
+			}
+		}
 	}
 	if !fenced && hviVMState(state) == store.MigrationFenced {
 		// Adopted before anything changes: the abort must have the bundle
