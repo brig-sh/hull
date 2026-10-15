@@ -880,6 +880,13 @@ func TestStreamedMoveCaptureFailsBeforeTheSeal(t *testing.T) {
 		t.Fatalf("the retry: %s %s", rec.State, rec.Stream.Mode)
 	}
 	f.checkArrived(t, rec)
+	// The first attempt took the spare the base's arrival made, so the
+	// retry copied the base, and its record says so.
+	if steps := stepNames(f.dstRecord(t, rec.TxID).Stream.Steps); !slices.ContainsFunc(steps, func(s string) bool {
+		return strings.HasPrefix(s, "disk made from the base by ") && strings.HasSuffix(s, ", with no spare")
+	}) {
+		t.Errorf("the retry's steps do not say it copied the base: %v", steps)
+	}
 }
 
 // hull failing on one of hvi's frames, as a full disk under the spool
@@ -1334,6 +1341,10 @@ func TestStreamedMoveTakesTheSpareBase(t *testing.T) {
 		t.Errorf("the receive left the spare: %v", err)
 	}
 	f.checkArrived(t, f.srcRecord(t))
+	if steps := stepNames(f.dstRecord(t, f.srcRecord(t).TxID).Stream.Steps); !slices.Contains(steps,
+		"disk made from the base's spare") {
+		t.Errorf("the destination's steps do not say it took the spare: %v", steps)
+	}
 	if reply := destSpareBase(f.dst, sum); !reply.OK || reply.Detail == "held" {
 		t.Errorf("prepare's spare: %+v", reply)
 	}
@@ -1346,6 +1357,15 @@ func TestStreamedMoveTakesTheSpareBase(t *testing.T) {
 	if _, err := os.Stat(spare); !os.IsNotExist(err) {
 		t.Errorf("the spare outlived its base: %v", err)
 	}
+}
+
+// stepNames are the names of steps, in order.
+func stepNames(steps []streamStep) []string {
+	var names []string
+	for _, s := range steps {
+		names = append(names, s.Step)
+	}
+	return names
 }
 
 // Once a streamed move commits, the source makes a spare of the base for
