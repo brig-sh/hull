@@ -1460,7 +1460,7 @@ func sourceStatus(ctx context.Context, s *store.Store, name string, w io.Writer,
 	if t := rec.Transfer; t != nil {
 		_, _ = fmt.Fprintf(w, "  transfer: %s in %.1f s (%s/s)\n", humanBytes(t.Bytes), t.Seconds, humanBytes(t.BytesPerSec))
 	}
-	_, _ = fmt.Fprintf(w, "  %s\n", explainMoveState(rec))
+	_, _ = fmt.Fprintf(w, "  %s\n", explainMoveState(rec, streamFence(s, rec)))
 	if rec.Role != roleSource || rec.Remote == nil {
 		return nil
 	}
@@ -1483,8 +1483,48 @@ func sourceStatus(ctx context.Context, s *store.Store, name string, w io.Writer,
 	return nil
 }
 
-// explainMoveState says what a record's state means for the instance.
-func explainMoveState(rec *migrationRecord) string {
+// What hvi says of the guest of a streamed move that is transferring,
+// which hvi fences only once it has sealed its stream.
+const (
+	streamFenced    = "fenced"
+	streamRuns      = "runs"
+	streamStreaming = "streaming"
+	streamUnknown   = "unknown"
+	streamNoHvi     = "no-hvi"
+)
+
+// streamFence is, for the source of a streamed move in transferring, which
+// of those holds: the fence on the instance's record, or what hvi says. hvi
+// serves one connection at a time, so while its migrate op streams the
+// guest it answers no status (hviVMState's "?"). It is "" for any other
+// record, whose state says whether the guest is fenced.
+func streamFence(s *store.Store, rec *migrationRecord) string {
+	if rec.Role != roleSource || rec.Transport != transportStream || rec.State != srcTransferring {
+		return ""
+	}
+	state, err := s.GetInstance(rec.Name)
+	if err != nil {
+		return streamUnknown
+	}
+	if fencedFor(state, rec.TxID) {
+		return streamFenced
+	}
+	switch hviVMState(state) {
+	case store.MigrationFenced:
+		return streamFenced
+	case "running", "paused":
+		return streamRuns
+	case "?":
+		return streamStreaming
+	case "":
+		return streamNoHvi
+	}
+	return streamUnknown
+}
+
+// explainMoveState says what a record's state means for the instance; fence
+// is streamFence's answer for it.
+func explainMoveState(rec *migrationRecord, fence string) string {
 	if rec.Role == roleDestination {
 		switch rec.State {
 		case dstRunning:
@@ -1505,6 +1545,19 @@ func explainMoveState(rec *migrationRecord) string {
 			"here may run it; moving it back is a new move from %s.", rec.Peer, rec.Epoch, rec.Peer)
 	case migAborted:
 		return "The move was aborted; the instance was handed back to this host."
+	}
+	switch fence {
+	case streamRuns:
+		return "The guest still runs here; hvi fences it only once it has sealed its stream, and has not."
+	case streamStreaming:
+		return "The guest still runs here; hvi is streaming it, and fences it once it seals the stream " +
+			"(it answers nothing else meanwhile)."
+	case streamUnknown:
+		return "hvi did not say whether it fenced the guest. Do not stop the instance: a fenced guest's " +
+			"hvi holds the only copy of it. Run the move again, or abort it."
+	case streamNoHvi:
+		return "hvi is not running, and no fence is recorded here. Abort the move: if hvi sealed its " +
+			"stream, the abort brings the guest back from the move's spool."
 	}
 	return "The source is fenced and stays so until the move commits or is aborted."
 }
