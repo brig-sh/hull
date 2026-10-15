@@ -113,6 +113,9 @@ type hviMigrateStats struct {
 	} `json:"rounds"`
 	StopReason string `json:"stop_reason"`
 	PausedMs   int64  `json:"paused_ms"`
+	// GateMs is the wait for the I/O threads at the pause, which hvi
+	// since ba9b2d2 runs the vCPUs through: the guest stops after it.
+	GateMs int64 `json:"gate_ms"`
 	DiskRounds []struct {
 		Name     string `json:"name"`
 		Round    int    `json:"round"`
@@ -174,10 +177,13 @@ func (ss *streamSender) takeHviStats(reply *hviReply) {
 	}
 	if st.PrecopyEnd > 0 {
 		// The pause: hvi takes it after the sync that follows the
-		// rounds, with the guest running through that sync.
-		ss.stats.PausedAt = time.UnixMilli(st.PrecopyEnd).UTC()
-		if st.SealedAt >= st.PrecopyEnd {
-			ss.stats.SealedMs = st.SealedAt - st.PrecopyEnd
+		// rounds, with the guest running through that sync, and the
+		// guest stops once the I/O threads are held.
+		stop := st.PrecopyEnd + max(st.GateMs, 0)
+		ss.stats.PausedAt = time.UnixMilli(stop).UTC()
+		ss.stats.HviGateMs = st.GateMs
+		if st.SealedAt >= stop {
+			ss.stats.SealedMs = st.SealedAt - stop
 		}
 	} else if !ss.stats.PausedAt.IsZero() {
 		ss.stats.SealedMs = time.Since(ss.stats.PausedAt).Milliseconds()
@@ -630,16 +636,18 @@ func firstPause(line []byte) (time.Time, int64, bool) {
 	var st struct {
 		First      *string `json:"first_manifest_sha256"`
 		PrecopyEnd int64   `json:"precopy_end_unix_ms"`
+		GateMs     int64   `json:"gate_ms"`
 		SealedAt   int64   `json:"sealed_at_unix_ms"`
 	}
 	if json.Unmarshal(r.Stats, &st) != nil || st.First != nil || st.PrecopyEnd <= 0 {
 		return time.Time{}, 0, false
 	}
+	stop := st.PrecopyEnd + max(st.GateMs, 0)
 	var sealed int64
-	if st.SealedAt >= st.PrecopyEnd {
-		sealed = st.SealedAt - st.PrecopyEnd
+	if st.SealedAt >= stop {
+		sealed = st.SealedAt - stop
 	}
-	return time.UnixMilli(st.PrecopyEnd).UTC(), sealed, true
+	return time.UnixMilli(stop).UTC(), sealed, true
 }
 
 // streamTransfer is transfer for a streamed move. A destination that has

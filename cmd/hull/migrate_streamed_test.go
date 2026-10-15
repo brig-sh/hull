@@ -93,6 +93,9 @@ type fakeStreamHvi struct {
 	// pausedAtMs is when its reply says the pause came.
 	fencedNow  chan struct{}
 	pausedAtMs int64
+	// gateMs is the wait for the I/O threads its reply gives, which the
+	// guest runs through, before pausedAtMs.
+	gateMs int64
 	// restreamDocs replaces documents in a second stream, as an hvi
 	// that did not keep them would.
 	restreamDocs map[string][]byte
@@ -373,11 +376,11 @@ func (h *fakeStreamHvi) migrate(req map[string]any, w *bufio.Writer, reply func(
 	h.fenceEpoch, _ = req["epoch"].(float64)
 	h.firstManifest = hex.EncodeToString(sum[:])
 	h.pausedAtMs = now - 7
-	reply(`{"v":1,"ok":true,"state":"fenced","manifest_sha256":"%s","stats":{"pause_ms":4,"paused_ms":6,`+
+	reply(`{"v":1,"ok":true,"state":"fenced","manifest_sha256":"%s","stats":{"pause_ms":4,"gate_ms":%d,"paused_ms":6,`+
 		`"stop_reason":"converged","rounds":[{"round":0,"in_pause":false},{"round":1,"in_pause":false},`+
 		`{"round":2,"in_pause":true}],"disk_rounds":[%s],"disk_raw_bytes":%d,"disk_sync_ms":1,"pause_sync_ms":1,`+
 		`"rounds_end_unix_ms":%d,"precopy_end_unix_ms":%d,"sealed_at_unix_ms":%d}}`, hex.EncodeToString(sum[:]),
-		strings.Join(statsRounds, ","), diskRaw, now-9, now-7, now)
+		h.gateMs, strings.Join(statsRounds, ","), diskRaw, now-9-h.gateMs, now-7-h.gateMs, now)
 }
 
 // fakeDestRestore stands in for `hvi restore --from-stream` on the
@@ -710,6 +713,23 @@ func TestStreamedMove(t *testing.T) {
 	}
 	if _, err := hviRestoreArgv(state.CmdLine, "/b", "/c", "/p"); err != nil {
 		t.Errorf("the moved instance cannot be checkpointed and moved on: %v", err)
+	}
+}
+
+// The guest runs through hvi's wait for its I/O threads at the pause, so
+// the downtime is counted from the end of that wait, not from
+// precopy_end_unix_ms.
+func TestStreamedMoveCountsThePauseFromTheGatesEnd(t *testing.T) {
+	f := newStreamFixture(t)
+	f.hvi.gateMs = 400
+	if err := f.migrate(t, ""); err != nil {
+		t.Fatal(err)
+	}
+	st := f.srcRecord(t).Stream
+	if !st.PausedAt.Equal(time.UnixMilli(f.hvi.pausedAtMs)) || st.SealedMs != 7 || st.HviGateMs != 400 ||
+		st.DowntimeMs >= 400 {
+		t.Errorf("pause %v (the guest stopped at %d), sealed %d ms, gate %d ms, downtime %d ms", st.PausedAt,
+			f.hvi.pausedAtMs, st.SealedMs, st.HviGateMs, st.DowntimeMs)
 	}
 }
 
