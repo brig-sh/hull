@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"net"
 	"os"
@@ -53,17 +54,20 @@ type fakeStreamHvi struct {
 
 	mu sync.Mutex
 	// state is running, fenced or stopped.
-	state      string
-	diskOps    bool
-	sinceBoot  map[int64]bool
-	sinceRead  map[int64]bool
-	round      int
-	last       []int64
-	sealFail   bool
-	writesAt   map[string][]int64
-	emitted    []byte
-	ops        []string
-	migrations int
+	state     string
+	diskOps   bool
+	sinceBoot map[int64]bool
+	sinceRead map[int64]bool
+	round     int
+	last      []int64
+	sealFail  bool
+	// refuseFenced makes migrate refuse a fenced guest, as no hvi does
+	// today; hvi streams one again.
+	refuseFenced bool
+	writesAt     map[string][]int64
+	emitted      []byte
+	ops          []string
+	migrations   int
 	// pid is the process standing in for this hvi, which stop ends.
 	pid int
 }
@@ -190,13 +194,24 @@ func (h *fakeStreamHvi) serve(conn net.Conn) {
 		}
 		reply(`{"v":1,"ok":true,"blocks":%d,"bytes":0,"batches":%d,"generation":7,"max_lock_us":3}`, len(h.last), batch)
 	case "migrate":
-		if h.state == "fenced" {
+		// hvi streams a fenced guest again, unchanged: it has not run since
+		// the stream that fenced it. refuseFenced stands for an hvi that
+		// would not.
+		if h.state == "fenced" && h.refuseFenced {
 			reply(`{"v":1,"ok":false,"code":"fenced","error":"the VM was fenced after a checkpoint"}`)
 			return
 		}
 		h.migrations++
 		h.emitted = nil
-		var listed []string
+		// The manifest lists each component once, as hvi's does: its
+		// frames' bytes, their sha256 in order, and how many.
+		type listing struct {
+			name   string
+			size   int
+			frames int
+			h      hash.Hash
+		}
+		var comps []*listing
 		// As hvi: a stream the client stops reading before the seal is a
 		// failed capture, and the guest runs on.
 		lost := false
@@ -210,7 +225,15 @@ func (h *fakeStreamHvi) serve(conn net.Conn) {
 			_, _ = w.Write(body)
 			h.emitted = append(h.emitted, frame...)
 			h.emitted = append(h.emitted, body...)
-			listed = append(listed, fmt.Sprintf(`{"name":%q,"size":%d,"sha256":"%s"}`, name, len(body), hex.EncodeToString(sum[:])))
+			if name != "manifest.json" {
+				if n := len(comps); n == 0 || comps[n-1].name != name {
+					comps = append(comps, &listing{name: name, h: sha256.New()})
+				}
+				c := comps[len(comps)-1]
+				c.size += len(body)
+				c.frames++
+				c.h.Write(body)
+			}
 			if w.Flush() != nil {
 				lost = true
 				return
@@ -232,6 +255,11 @@ func (h *fakeStreamHvi) serve(conn net.Conn) {
 		emit("ram-round-2", bytes.Repeat([]byte("last"), 1<<10))
 		for _, name := range []string{"cpu.json", "platform.json", "devices.json", "disk.json", "session.json"} {
 			emit(name, []byte(`{"version":1,"of":"`+name+`"}`))
+		}
+		var listed []string
+		for _, c := range comps {
+			listed = append(listed, fmt.Sprintf(`{"name":%q,"size":%d,"sha256":"%s","frames":%d}`, c.name, c.size,
+				hex.EncodeToString(c.h.Sum(nil)), c.frames))
 		}
 		man := []byte(`{"checkpoint_format":2,"components":[` + strings.Join(listed, ",") + `]}`)
 		emit("manifest.json", man)
