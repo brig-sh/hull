@@ -1519,18 +1519,20 @@ exec %s "$@"
 				knows, err := hviBootKnowsFlag(cmdArgs[0], hviDiskWrittenFlag)
 				switch {
 				case err != nil:
-					log.Warnf("Could not ask %s about %s (%v); a move of %s will send its whole disk",
-						cmdArgs[0], hviDiskWrittenFlag, err, instanceName)
+					instanceBase.HviWhy = fmt.Sprintf("hull could not ask %s about %s (%v)", cmdArgs[0],
+						hviDiskWrittenFlag, err)
 				case !knows:
-					log.Debugf("%s takes no %s; a move of %s will send its whole disk", cmdArgs[0],
-						hviDiskWrittenFlag, instanceName)
+					instanceBase.HviWhy = fmt.Sprintf("%s takes no %s", cmdArgs[0], hviDiskWrittenFlag)
 				default:
 					args, err := hviBaseArgs(s, instanceDir, rootfsBase, rootfsDiskImage)
 					if err != nil {
-						log.Warnf("%v; a move of %s will send its whole disk", err, instanceName)
+						instanceBase.HviWhy = err.Error()
 					} else {
 						cmdArgs = append(cmdArgs, args...)
 					}
+				}
+				if instanceBase.HviWhy != "" {
+					log.Warnf("%s; a move of %s will send its whole disk", instanceBase.HviWhy, instanceName)
 				}
 			}
 		} else if profile != "" {

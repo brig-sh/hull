@@ -131,6 +131,10 @@ type BaseState struct {
 	// SHA256 is the base's disk digest (docs/migration.md, "Bases"), which
 	// is also its file name under <store>/bases.
 	SHA256 string `json:"sha256"`
+	// HviWhy says why the hvi running the instance was not booted against
+	// the base, when hull could not hand it over; a move then sends the
+	// whole bundle, and says this.
+	HviWhy string `json:"hviWhy,omitempty"`
 }
 
 // Migration states. A checkpointed instance kept running after the capture,

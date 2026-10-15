@@ -40,6 +40,12 @@ type transportFacts struct {
 	HasBase    bool
 	HviBase    bool
 	BaseReason string
+	// Base is the instance's base; HviDiskBase the base the running hvi
+	// says it was booted against, and HviWhy why hull did not boot it
+	// against the instance's (store.BaseState.HviWhy).
+	Base        string
+	HviDiskBase string
+	HviWhy      string
 	// DestStream is the destination hull taking a streamed move, and
 	// DestHviStream its hvi restoring from a stream with its disk rounds
 	// onto a copy of the base.
@@ -70,9 +76,15 @@ func decideTransport(f transportFacts) (string, string) {
 			"move needs %d, whose stream carries the disk", f.SourceFormat, streamCheckpointFormat)
 	case !f.HasBase:
 		return transportBundle, f.BaseReason
+	case !f.HviBase && f.HviWhy != "":
+		return transportBundle, fmt.Sprintf("the hvi running the instance was not given its base, because %s, "+
+			"so its stream would not carry the disk", f.HviWhy)
+	case !f.HviBase && f.HviDiskBase != "":
+		return transportBundle, fmt.Sprintf("the hvi running the instance was booted against base %s, not the "+
+			"instance's %s, so its stream would not carry the disk", digestHead(f.HviDiskBase), digestHead(f.Base))
 	case !f.HviBase:
 		return transportBundle, "the hvi running the instance was not given its base (it was started by " +
-			"an older hull), so its stream would not carry the disk"
+			"an older hull, or restored by one), so its stream would not carry the disk"
 	}
 	return transportStream, ""
 }
@@ -123,6 +135,7 @@ func moveTransportFacts(s *store.Store, state *store.InstanceState, probe *migra
 	default:
 		f.HasBase = true
 		f.HviBase = prof.DiskBase == b.SHA256
+		f.Base, f.HviDiskBase, f.HviWhy = b.SHA256, prof.DiskBase, b.HviWhy
 	}
 	return f
 }

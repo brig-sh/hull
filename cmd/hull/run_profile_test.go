@@ -362,6 +362,9 @@ func TestRunKeepsTheBase(t *testing.T) {
 		slices.Contains(argv, hviDiskWrittenFlag) {
 		t.Fatalf("an hvi without %s was given the base: %v", hviDiskWrittenFlag, argv)
 	}
+	if b := instanceState(t, storeDir, "b0").Base; b == nil || !strings.Contains(b.HviWhy, "takes no --disk-written") {
+		t.Fatalf("the record does not say why hvi was not given the base: %+v", b)
+	}
 	if err := os.Remove(argvFile); err != nil {
 		t.Fatal(err)
 	}
@@ -373,7 +376,7 @@ func TestRunKeepsTheBase(t *testing.T) {
 	}
 	argv := recordedArgv(t, argvFile)
 	state := instanceState(t, storeDir, "b1")
-	if state.Base == nil {
+	if state.Base == nil || state.Base.HviWhy != "" {
 		t.Fatalf("state.json's base: %+v", state.Base)
 	}
 	if got, _ := flagValue(argv, hviDiskBaseFlag); got != state.Base.SHA256 {
