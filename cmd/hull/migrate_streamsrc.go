@@ -800,6 +800,9 @@ func (m *moveSource) streamTransfer(ctx context.Context) (retErr error) {
 		BytesPerSec: perSec(stats.WireBytes, stats.Seconds)}
 	m.timing("transfer", started)
 	m.destPaused = reply.Record.State == dstRestoredPaused
+	if reply.Record.Stream != nil {
+		stats.DestSteps = mergeSteps(stats.DestSteps, reply.Record.Stream.Steps)
+	}
 	m.logf("Sent %s in %.1f s (%s/s): disk %s as %s, RAM %s, state %s; destination: %s",
 		humanBytes(stats.WireBytes), stats.Seconds, humanBytes(perSec(stats.WireBytes, stats.Seconds)),
 		humanBytes(stats.DiskBytes), humanBytes(stats.DiskWireBytes), humanBytes(stats.RAMBytes),
@@ -808,7 +811,11 @@ func (m *moveSource) streamTransfer(ctx context.Context) (retErr error) {
 		// The destination holds the guest restored paused: the source's
 		// commit point, recorded with the transfer in one write, as the
 		// prepare step would record it.
-		return m.rec.advanceThrough(m.path, srcTransferred, srcCommitting)
+		if err := m.rec.advanceThrough(m.path, srcTransferred, srcCommitting); err != nil {
+			return err
+		}
+		stats.step("commit point recorded")
+		return nil
 	}
 	return m.rec.advance(m.path, srcTransferred)
 }
