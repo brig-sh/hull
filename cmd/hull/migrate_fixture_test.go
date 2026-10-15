@@ -488,4 +488,7 @@ func testBinaryAsHull() {
 		main()
 		os.Exit(0)
 	}
+	// This binary is not hull: a committed move's spare for the way back
+	// runs it only in the test that sets runHullEnv for it.
+	startSpareBase = func(*store.Store, string, string) error { return nil }
 }
