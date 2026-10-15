@@ -265,6 +265,120 @@ func TestAckWindow(t *testing.T) {
 	}
 }
 
+// windowLink is a link a test drives a window over with a fake clock: the
+// destination reads what was handed on at rate bytes per second, in order,
+// so what the window lets on beyond the link's round trip queues, and
+// says so rtt later. The writer always has the next 64 KiB to hand on.
+type windowLink struct {
+	w        *ackWindow
+	clock    *fakeClock
+	rate     float64
+	rtt      time.Duration
+	queue    []int64 // ends of the writes not yet wholly read
+	read     int64
+	acks     []windowAck
+	credit   float64
+	maxQueue int64 // the most on its way at once
+}
+
+type windowAck struct {
+	n  int64
+	at time.Time
+}
+
+func newWindowLink(rate float64, rtt time.Duration) *windowLink {
+	clock := &fakeClock{t: time.Unix(1000, 0)}
+	w := newAckWindow()
+	w.now = clock.now
+	return &windowLink{w: w, clock: clock, rate: rate, rtt: rtt}
+}
+
+// run drives the link for d in steps of 100 µs and returns the bytes read
+// in that time.
+func (l *windowLink) run(d time.Duration) int64 {
+	const step = 100 * time.Microsecond
+	from := l.read
+	for end := l.clock.t.Add(d); l.clock.t.Before(end); l.clock.t = l.clock.t.Add(step) {
+		for !l.w.full(64 << 10) {
+			l.w.take(64 << 10)
+			l.queue = append(l.queue, l.w.sent)
+		}
+		l.maxQueue = max(l.maxQueue, l.w.sent-l.w.acked)
+		l.credit += l.rate * step.Seconds()
+		for len(l.queue) > 0 && l.credit >= 1 {
+			n := min(int64(l.credit), l.queue[0]-l.read)
+			l.read += n
+			l.credit -= float64(n)
+			if l.read == l.queue[0] {
+				l.queue = l.queue[1:]
+				at := l.clock.t.Add(l.rtt)
+				if k := len(l.acks); k > 0 && at.Before(l.acks[k-1].at) {
+					at = l.acks[k-1].at
+				}
+				l.acks = append(l.acks, windowAck{n: l.read, at: at})
+			}
+		}
+		if len(l.queue) == 0 {
+			l.credit = 0
+		}
+		for len(l.acks) > 0 && !l.acks[0].at.After(l.clock.t) {
+			l.w.ack(l.acks[0].n)
+			l.acks = l.acks[1:]
+		}
+	}
+	return l.read - from
+}
+
+// The window keeps a link busy and its queue short whatever the link's
+// round trip. When the round trip grows during the stream the window grows
+// with it within a second and a half, rather than holding the rate to the
+// window over the new round trip, which shrank it with each sample down to
+// windowMin; and when the destination reads more slowly it shrinks.
+func TestAckWindowOverALink(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		rate     float64
+		rtt      time.Duration
+		then     time.Duration
+		thenRate float64
+	}{
+		{name: "LAN", rate: 60e6, rtt: 500 * time.Microsecond},
+		{name: "WAN", rate: 1.25e6, rtt: 100 * time.Millisecond},
+		{name: "40 ms", rate: 60e6, rtt: 40 * time.Millisecond},
+		{name: "LAN, then 40 ms", rate: 60e6, rtt: 500 * time.Microsecond, then: 40 * time.Millisecond},
+		{name: "LAN, then 200 ms", rate: 60e6, rtt: 500 * time.Microsecond, then: 200 * time.Millisecond},
+		{name: "40 ms, then slower", rate: 60e6, rtt: 40 * time.Millisecond, thenRate: 5e6},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			l := newWindowLink(c.rate, c.rtt)
+			l.run(2 * time.Second)
+			if c.then != 0 || c.thenRate != 0 {
+				if c.then != 0 {
+					l.rtt = c.then
+				}
+				if c.thenRate != 0 {
+					l.rate = c.thenRate
+				}
+				l.run(1500 * time.Millisecond)
+			}
+			l.maxQueue = 0
+			got := float64(l.run(10*time.Second)) / 10
+			t.Logf("read %.2f MB/s, most on its way %d, window %d, round trip %s", got/1e6, l.maxQueue,
+				l.w.size(), l.w.minRTT)
+			if got < 0.85*l.rate {
+				t.Errorf("read %.2f MB/s of a %.2f MB/s link", got/1e6, l.rate/1e6)
+			}
+			// What is on its way stays within twice what the window
+			// allows for: twice the link's round trip, or windowSlack,
+			// at the link's rate.
+			allow := int64(l.rate * max(2*l.rtt.Seconds(), windowSlack.Seconds()))
+			if limit := 2*max(allow, windowMin) + 64<<10; l.maxQueue > limit {
+				t.Errorf("%d bytes on their way, over %d", l.maxQueue, limit)
+			}
+		})
+	}
+}
+
 // Over a real ssh stand-in, a session's lines reach the source as the
 // destination writes them, before its stdin ends: the source answers the
 // first line, and only then does the destination print the last.
