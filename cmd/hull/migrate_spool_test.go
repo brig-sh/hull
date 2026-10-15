@@ -276,6 +276,18 @@ func TestStreamedMoveRerunRestreamsACutSpool(t *testing.T) {
 			if dst := f.dstRecord(t, rec.TxID); dst.ManifestSHA256 != rec.ManifestSHA256 {
 				t.Errorf("the destination took manifest %s, the source sent %s", dst.ManifestSHA256, rec.ManifestSHA256)
 			}
+			// The second stream's reply stamps its own seal as the pause.
+			// The pause is the first stream's, which the instance's
+			// record of the fence kept; killed before that record, no
+			// record has it, and the downtime is left unknown.
+			st := rec.Stream
+			if stage == "recorded" && (!st.PausedAt.Equal(time.UnixMilli(f.hvi.pausedAtMs)) ||
+				st.DowntimeMs <= 0) {
+				t.Errorf("pause %v (hvi's %d), downtime %d ms", st.PausedAt, f.hvi.pausedAtMs, st.DowntimeMs)
+			}
+			if stage == "relayed" && (!st.PausedAt.IsZero() || st.DowntimeMs != 0) {
+				t.Errorf("an unknown pause recorded as %v, downtime %d ms", st.PausedAt, st.DowntimeMs)
+			}
 			f.checkArrived(t, rec)
 		})
 	}

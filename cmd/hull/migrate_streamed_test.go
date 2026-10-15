@@ -89,8 +89,10 @@ type fakeStreamHvi struct {
 	bigDiskRound int64
 	// pid is the process standing in for this hvi, which stop ends.
 	pid int
-	// fencedNow is closed once the guest is fenced, before the reply.
-	fencedNow chan struct{}
+	// fencedNow is closed once the guest is fenced, before the reply;
+	// pausedAtMs is when its reply says the pause came.
+	fencedNow  chan struct{}
+	pausedAtMs int64
 }
 
 func newFakeStreamHvi(t *testing.T, disk, base string) *fakeStreamHvi {
@@ -348,10 +350,12 @@ func (h *fakeStreamHvi) migrate(req map[string]any, w *bufio.Writer, reply func(
 	now := time.Now().UnixMilli()
 	if again {
 		// As hvi's: the first manifest and what equals the first stream's
-		// are in the stats.
+		// are in the stats, and the rounds' end and the pause are this
+		// stream's seal.
 		reply(`{"v":1,"ok":true,"state":"fenced","manifest_sha256":"%s","stats":{"first_manifest_sha256":"%s",`+
 			`"same_as_first":["profile.json","cpu.json","platform.json","devices.json","session.json"],`+
-			`"disk_rounds":[%s]}}`, hex.EncodeToString(sum[:]), h.firstManifest, strings.Join(statsRounds, ","))
+			`"disk_rounds":[%s],"rounds_end_unix_ms":%d,"precopy_end_unix_ms":%d,"sealed_at_unix_ms":%d}}`,
+			hex.EncodeToString(sum[:]), h.firstManifest, strings.Join(statsRounds, ","), now, now, now)
 		return
 	}
 	h.state = "fenced"
@@ -359,6 +363,7 @@ func (h *fakeStreamHvi) migrate(req map[string]any, w *bufio.Writer, reply func(
 	h.fenceTxID, _ = req["txid"].(string)
 	h.fenceEpoch, _ = req["epoch"].(float64)
 	h.firstManifest = hex.EncodeToString(sum[:])
+	h.pausedAtMs = now - 7
 	reply(`{"v":1,"ok":true,"state":"fenced","manifest_sha256":"%s","stats":{"pause_ms":4,"paused_ms":6,`+
 		`"stop_reason":"converged","rounds":[{"round":0,"in_pause":false},{"round":1,"in_pause":false},`+
 		`{"round":2,"in_pause":true}],"disk_rounds":[%s],"disk_raw_bytes":%d,"disk_sync_ms":1,"pause_sync_ms":1,`+
@@ -884,12 +889,20 @@ func TestStreamedMoveRefusedInTransitThenReplayed(t *testing.T) {
 			if dst.State != dstReceiving || f.dest.restores != 0 {
 				t.Fatalf("destination %s, restores %d", dst.State, f.dest.restores)
 			}
+			// The guest stays paused until the replay's commit, and the
+			// downtime counts from the first attempt's pause.
+			time.Sleep(300 * time.Millisecond)
 			if err := f.migrate(t, rec.TxID); err != nil {
 				t.Fatal(err)
 			}
 			rec = f.srcRecord(t)
 			if rec.State != srcCommitted || rec.Stream.Mode != "replay" {
 				t.Fatalf("the replay: %s %+v", rec.State, rec.Stream)
+			}
+			if st := rec.Stream; !st.PausedAt.Equal(time.UnixMilli(f.hvi.pausedAtMs)) || st.DowntimeMs < 300 ||
+				st.SealedMs != 7 {
+				t.Errorf("the replay's pause %v (hvi's %d), sealed %d ms, downtime %d ms", st.PausedAt,
+					f.hvi.pausedAtMs, st.SealedMs, st.DowntimeMs)
 			}
 			f.checkArrived(t, rec)
 			if f.hvi.migrations != 1 {
