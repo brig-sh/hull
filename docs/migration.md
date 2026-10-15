@@ -365,7 +365,22 @@ its stdin carries, in this order:
 
 hvi serves one control connection at a time, so hull cannot read disk
 rounds while `migrate` holds the socket: the last disk round is read after
-the seal, not inside the pause. The guest never runs again after the
+the seal, not inside the pause, and it holds every block the guest wrote
+while hvi's RAM rounds ran. That is the guest's disk write rate times the
+time those rounds take, capped by how many distinct blocks the guest
+rewrites, and it is part of the downtime. hull sets the spool and the lock
+up before the disk rounds, so the last one runs right before `migrate`, and
+records the fastest rate the guest wrote at during the disk rounds
+(`diskWriteRate`) and the last round's size (`finalDiskBytes`).
+
+Nothing else bounds it. Limiting hvi's RAM rounds by that rate (`max_secs`)
+was tried and made the downtime worse: hvi checks the limit between rounds,
+so it stopped after RAM round 0 and took round 1 (30 MiB) with the guest
+paused, while the last disk round stayed at the same 484 blocks (the guest
+rewrote one 30 MiB region, however long the rounds ran). The fix is hvi's:
+disk rounds beside the RAM rounds, either as `disk-blocks` components inside
+the `migrate` stream with the last one taken inside the pause, or the disk
+ops served on a second connection while `migrate` runs. The guest never runs again after the
 pause, so that round and the RAM still describe one machine. It also means
 the `disk.json` hvi writes inside the pause does not list the last round,
 and the destination's restore cannot be given `--disk-generation`, whose
@@ -499,7 +514,8 @@ refusal is the move's error, with code `restore_refused`.
 | `rounds` | each disk round, RAM round and document: `kind`, `name`, `blocks`, `bytes`, `wireBytes`, `seconds`, and for a disk round after the first `dirtyPerSec`, the blocks the guest wrote per second during the round before |
 | `diskBytes`, `diskWireBytes`, `ramBytes`, `stateBytes`, `wireBytes`, `seconds` | totals |
 | `pausedAt`, `sealedMs` | when hvi's pre-copy rounds ended and how long until it sealed, from hvi's reply |
-| `finalDiskMs` | the last disk round |
+| `finalDiskMs`, `finalDiskBytes` | the last disk round's time and data |
+| `diskWriteRate` | the fastest the guest wrote to its disk during the disk rounds, in bytes a second |
 | `downtimeMs` | from `pausedAt` to the destination's resume, on two hosts' clocks |
 | `chain` | the trailer's hash, which the destination's record must match |
 | `hviReply` | hvi's reply to `migrate`, with its own rounds, dirty rates and pause |

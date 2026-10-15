@@ -282,6 +282,11 @@ type migrateStreamStats struct {
 	PausedAt    time.Time `json:"pausedAt,omitempty"`
 	SealedMs    int64     `json:"sealedMs,omitempty"`
 	FinalDiskMs int64     `json:"finalDiskMs,omitempty"`
+	// FinalDiskBytes is the last disk round's data, and DiskWriteRate the
+	// fastest the guest wrote to its disk during the disk rounds before
+	// it, in bytes a second.
+	FinalDiskBytes int64   `json:"finalDiskBytes,omitempty"`
+	DiskWriteRate  float64 `json:"diskWriteRate,omitempty"`
 	// DowntimeMs is from PausedAt to the destination's resume, on two
 	// hosts' clocks.
 	DowntimeMs int64 `json:"downtimeMs,omitempty"`
