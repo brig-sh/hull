@@ -361,6 +361,7 @@ func (ss *streamSender) diskPreCopy(basePath string) error {
 		}
 		ss.endRound(r, started)
 		prev = time.Since(started).Seconds()
+		ss.stats.DiskWriteRate = max(ss.stats.DiskWriteRate, r.DirtyPerSec*diskBlockSize)
 		if read.Dirty <= streamDiskSettle {
 			break
 		}
@@ -459,6 +460,7 @@ func (ss *streamSender) diskFinal() error {
 	}
 	ss.endRound(r, started)
 	ss.stats.FinalDiskMs = time.Since(started).Milliseconds()
+	ss.stats.FinalDiskBytes = r.Bytes
 	return nil
 }
 
@@ -960,18 +962,25 @@ func (ss *streamSender) send(replay bool) (json.RawMessage, error) {
 		return reply, ss.link.err
 	}
 
-	if err := ss.diskPreCopy(basePath); err != nil {
-		return nil, err
-	}
-	if err := ss.link.err; err != nil {
-		return nil, err
-	}
+	// Everything the migrate op needs is set up first, so the last disk
+	// round runs right before it: the guest's writes from then on are all
+	// the final round holds.
 	unlock, err := lockInstanceMigration(m.s, m.name)
 	if err != nil {
 		return nil, err
 	}
 	sp, err := newSpool(ss.spoolDir)
 	if err != nil {
+		unlock()
+		return nil, err
+	}
+	if err := ss.diskPreCopy(basePath); err != nil {
+		sp.close()
+		unlock()
+		return nil, err
+	}
+	if err := ss.link.err; err != nil {
+		sp.close()
 		unlock()
 		return nil, err
 	}

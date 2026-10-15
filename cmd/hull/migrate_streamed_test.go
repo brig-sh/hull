@@ -68,6 +68,11 @@ type fakeStreamHvi struct {
 	// reads since the last since-boot one, as disk.json lists them.
 	generation uint64
 	rounds     []fakeDiskRound
+	// diskWritesAt are blocks the guest writes while hvi sends the disk
+	// blocks of a round, by round: they land in the next round.
+	diskWritesAt map[int][]int64
+	// migrateReq is the last migrate request.
+	migrateReq map[string]any
 	writesAt   map[string][]int64
 	emitted    []byte
 	ops        []string
@@ -84,7 +89,7 @@ func newFakeStreamHvi(t *testing.T, disk string, diskOps bool) *fakeStreamHvi {
 	}
 	h := &fakeStreamHvi{t: t, path: filepath.Join(shortSocketDir(t), "c.sock"), disk: disk, size: info.Size(),
 		state: "running", diskOps: diskOps, sinceBoot: map[int64]bool{}, sinceRead: map[int64]bool{}, round: -1,
-		writesAt: map[string][]int64{}}
+		writesAt: map[string][]int64{}, diskWritesAt: map[int][]int64{}}
 	ln, err := net.Listen("unix", h.path)
 	if err != nil {
 		t.Fatal(err)
@@ -216,6 +221,9 @@ func (h *fakeStreamHvi) serve(conn net.Conn) {
 			sent += len(data)
 			i += int(count)
 		}
+		for _, b := range h.diskWritesAt[h.round] {
+			h.guestWrite(b, byte(0xd0+h.round))
+		}
 		chain := sha256.Sum256([]byte(digests.String()))
 		sentSum := hex.EncodeToString(chain[:])
 		if n := len(h.rounds); n > 0 && h.rounds[n-1].Round == h.round {
@@ -232,6 +240,7 @@ func (h *fakeStreamHvi) serve(conn net.Conn) {
 			return
 		}
 		h.migrations++
+		h.migrateReq = req
 		h.emitted = nil
 		// The manifest lists each component once, as hvi's does: its
 		// frames' bytes, their sha256 in order, and how many.
@@ -876,4 +885,43 @@ func checkHviFramingFile(path string) error {
 		return err
 	}
 	return checkHviFraming(data)
+}
+
+// A guest that writes to its disk while the disk rounds run: each round
+// carries what was written during the one before, the rounds go on until
+// one is small, and the last, read after the fence, holds only what the
+// guest wrote during hvi's RAM rounds.
+func TestStreamedMoveDiskRoundsFollowTheGuestsWrites(t *testing.T) {
+	f := newStreamFixture(t, true, true)
+	// 40 blocks during round 0 (more than a round may settle at), then
+	// 3 during round 1, then none.
+	for b := int64(100); b < 140; b++ {
+		f.hvi.diskWritesAt[0] = append(f.hvi.diskWritesAt[0], b)
+	}
+	f.hvi.diskWritesAt[1] = []int64{200, 201, 202}
+	f.hvi.writesAt["ram-round-1"] = []int64{300}
+	if err := f.migrate(t, ""); err != nil {
+		t.Fatal(err)
+	}
+	rec := f.srcRecord(t)
+	st := rec.Stream
+	var blocks []int64
+	for _, r := range st.Rounds {
+		if r.Kind == "disk" {
+			blocks = append(blocks, r.Blocks)
+		}
+	}
+	if fmt.Sprint(blocks) != "[3 40 3 1]" {
+		t.Errorf("disk rounds of %v blocks", blocks)
+	}
+	if st.DiskWriteRate <= 0 {
+		t.Errorf("no disk write rate on record: %+v", st)
+	}
+	if _, ok := f.hvi.migrateReq["max_secs"]; ok {
+		t.Errorf("hvi's pre-copy was limited: %v", f.hvi.migrateReq)
+	}
+	if st.FinalDiskBytes != diskBlockSize {
+		t.Errorf("final disk round %d bytes", st.FinalDiskBytes)
+	}
+	f.checkArrived(t, rec)
 }
