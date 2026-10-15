@@ -201,10 +201,15 @@ func (r *streamReceiver) header(h moveStreamHeader) error {
 		return err
 	}
 	_ = os.Remove(r.diskPath)
+	// On the record, so a move can be seen to have had the spare: a copy
+	// here took 22 s on a Pi.
+	made := "disk made from the base's spare"
 	if !takeSpareBase(r.s, h.BaseSHA256, r.diskPath) {
-		if _, err := copyDisk(r.s.BasePath(h.BaseSHA256), r.diskPath); err != nil {
+		how, err := copyDisk(r.s.BasePath(h.BaseSHA256), r.diskPath)
+		if err != nil {
 			return fmt.Errorf("copy the base: %w", err)
 		}
+		made = "disk made from the base by " + how + ", with no spare"
 	}
 	if err := os.Chmod(r.diskPath, 0o600); err != nil {
 		return err
@@ -230,6 +235,7 @@ func (r *streamReceiver) header(h moveStreamHeader) error {
 	if err != nil {
 		return err
 	}
+	r.rec.Stream.step(made)
 	// The source waits for this before hvi's migrate fences the guest: a
 	// refusal from here on cannot be one the header would have told.
 	if h.Attempt != "" {
