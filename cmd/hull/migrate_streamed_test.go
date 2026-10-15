@@ -1033,7 +1033,11 @@ func TestDecideTransport(t *testing.T) {
 		{func(f *transportFacts) { f.SourceFormat = 2 }, "checkpoint format 2"},
 		{func(f *transportFacts) { f.SourceFormat = 0 }, "checkpoint format 0"},
 		{func(f *transportFacts) { f.HasBase = false; f.BaseReason = "no base kept" }, "no base kept"},
-		{func(f *transportFacts) { f.HviBase = false }, "was not given its base"},
+		{func(f *transportFacts) { f.HviBase = false }, "started by an older hull"},
+		{func(f *transportFacts) { f.HviBase = false; f.HviWhy = "/bin/hvi takes no --disk-written" },
+			"not given its base, because /bin/hvi takes no --disk-written"},
+		{func(f *transportFacts) { f.HviBase = false; f.HviDiskBase = strings.Repeat("e", 64) },
+			"booted against base eeeeeeeeeeee"},
 	} {
 		f := all
 		tc.mut(&f)
@@ -1061,9 +1065,9 @@ func TestMoveTransportFacts(t *testing.T) {
 		want          string
 	}{
 		{"format 2", `{"checkpoint_format":2,"disk_base_sha256":"%s"}`, nil, "checkpoint format 2"},
-		{"no base at boot", `{"checkpoint_format":3}`, nil, "was not given its base"},
+		{"no base at boot", `{"checkpoint_format":3}`, nil, "started by an older hull"},
 		{"another base", `{"checkpoint_format":3,"disk_base_sha256":"` + strings.Repeat("e", 64) + `"}`, nil,
-			"was not given its base"},
+			"booted against base eeeeeeeeeeee"},
 		{"a stream-v2 hull", `{"checkpoint_format":3,"disk_base_sha256":"%s"}`,
 			func(p *migrateProbe) { p.Capabilities = []string{"stream-v2"} }, "does not take a stream-v3"},
 		{"an hvi without the disk rounds", `{"checkpoint_format":3,"disk_base_sha256":"%s"}`,
@@ -1086,6 +1090,16 @@ func TestMoveTransportFacts(t *testing.T) {
 				t.Errorf("%q %q, want the bundle because %q", got, why, tc.want)
 			}
 		})
+	}
+	// hull run records why it could not boot hvi against the base, and
+	// the move says that rather than blame an older hull.
+	if err := os.WriteFile(state.ProfilePath, []byte(`{"checkpoint_format":3}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state.Base.HviWhy = "/opt/hvi takes no --disk-written"
+	if got, why := decideTransport(moveTransportFacts(f.src, state, probe, false)); got != transportBundle ||
+		!strings.Contains(why, "because /opt/hvi takes no --disk-written") {
+		t.Errorf("%q %q", got, why)
 	}
 }
 
