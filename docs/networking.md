@@ -24,6 +24,41 @@ connected at all.
 | an egress policy | the gateway. A policy is a gateway flag |
 | no network at all | `--net none`, the default |
 
+## Recording a caller's network choice
+
+An orchestrator can give each sandbox its own gateway or attach several to
+one. Both use `--net shared --gateway-sock` in hull. The socket name and
+subnet do not tell hull which arrangement the caller intended.
+
+Use explicit instance labels to record that choice. For example, a caller
+that has provisioned a private gateway can distinguish the user's request
+from the narrower configuration its policy selected:
+
+```bash
+hull run --detach --name sandbox --hypervisor hvi --net shared \
+  --gateway-sock /tmp/private-gateway.sock --gateway-cidr 10.87.0.10/24 \
+  --label sh.brig.network.requested=shared \
+  --label sh.brig.network.effective=isolated \
+  ubuntu:latest
+hull inspect sandbox
+```
+
+`inspect` includes the labels and a `creationId` identifying this particular
+instance, even while it is stopped. They are saved atomically with its state
+before the VMM starts, independently of the caller's current environment.
+The keys above are an example convention, not built-in hull network modes.
+A missing label means the caller did not record a choice; it does not mean
+shared.
+
+These labels record what the caller says it configured. They do not make a
+gateway private, restrict its membership, or verify connectivity. The caller
+still owns that configuration. Labels survive checkpoint/restore unchanged,
+including a restore through a different gateway, so consumers must account
+for such changes before relying on them. `creationId` distinguishes name
+reuse; it is not a network configuration revision. Older hull versions may
+drop these fields when rewriting an instance record; consumers must handle
+missing metadata after a downgrade too.
+
 ## Backend-native networking
 
 `--net shared` is the flag. What serves it differs:
