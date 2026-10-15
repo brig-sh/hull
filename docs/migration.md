@@ -35,8 +35,10 @@ what can go wrong, and how to recover.
 > pause, `hull migrate` relays that stream and the destination hands it
 > whole to `hvi restore --from-stream`. Between the Pis an ubuntu guest
 > moved in 2.3 to 5.1 s with 79 to 124 ms of downtime, idle or writing
-> 10 MiB/s to its disk, against 7.43 s for the whole bundle. See
-> [Measured](#measured).
+> 10 MiB/s to its disk, against 7.43 s for the whole bundle. A claude-code
+> guest moved from this Mac to rp2 through `brig teleport` with 6.8 to
+> 8.0 s of downtime on a 1.0 MiB/s link, sending 71 to 76 MiB where the
+> whole bundle had sent 1.8 GB. See [Measured](#measured).
 
 ## Usage
 
@@ -645,6 +647,8 @@ writer. Every destination was prepared (`hull migrate-prepare`) first.
 | rp1 to rp2 | ubuntu, 256 MiB dirtier | 65.0 s | 3.49 s | 1.7 GiB: disk 449.8 MiB as 208.6 MiB, RAM 1.5 GiB | 5419, 487, 324, 483, 484 | 5 (time_cap), the last 294 MiB |
 | rp2 to rp1 | ubuntu, 256 MiB dirtier | 43.2 s | 3.40 s | 2.1 GiB: disk 500.2 MiB as 258.6 MiB, RAM 1.8 GiB | 5425, 804, 324, 483, 484, 484 | 6 (round_cap), the last 293 MiB |
 | this Mac to rp1, a 1 MB/s link | claude-code, light | 129 s | 6.45 s | 122.7 MiB: disk 284.5 MiB as 34.7 MiB, RAM 87.9 MiB | 4523, 29 | 2 (time_cap) |
+| this Mac to rp2, a 1 MB/s link, through `brig teleport` | claude-code, brig's demo | 70.1 s | 7.96 s | 70.9 MiB: disk 245.9 MiB as 2.6 MiB, RAM 68.2 MiB | 3834, 101 | 2 (time_cap) |
+| the same, again | claude-code, brig's demo | 73.1 s | 6.82 s | 75.9 MiB: disk 246.8 MiB as 2.6 MiB, RAM 73.2 MiB | 3839, 102, 7 | 3 (time_cap) |
 
 - The writer's final disk round was empty, and the dirtier's 484 blocks
   (30.2 MiB) took 0.29 to 0.33 s to read and send inside the pause: the
@@ -668,6 +672,40 @@ writer. Every destination was prepared (`hull migrate-prepare`) first.
   claude-code on this Mac compared its disk with the base in 0.63 s.
 - hull's own part of the downtime, from hvi's seal to the destination's
   resume, was 55 to 90 ms in the idle and writer moves on the Pis.
+- The two moves to rp2 ran on 2026-10-15 through brig's
+  `script/teleport-demo-claude.sh --prepare` (brig 06340ae, the script
+  as of 2b39954), with hull d2bb5e9 and `hvi` c4131f5 built with
+  `HVI_GIT_SHA` on each host. The Mac reached rp2 from another network
+  at 1.0 to 1.1 MiB/s. RAM round 0 (63 MiB) took about 60 s and hit the
+  time cap. The RAM round taken paused, 5.4 and 4.4 MiB, took 5.05 and
+  3.66 s to send, so hvi sealed 5087 and 3677 ms after the pause. From
+  the seal to the destination's resume took 2.9 and 3.1 s, against 55 to
+  90 ms between the Pis; that was not explained. The guest's counter,
+  `boot_id`, sum and deleted file held on fd 3 checked out after each
+  move, and every exec into the moved guest worked.
+- On the Mac, four sessions of claude-code booted against one base,
+  9890a88a4845. The first `migrate-prepare` of rp2 sent it, 1.5 GiB as
+  742.8 MiB in 733.8 s; the prepares after it found it held, in 12.1 and
+  47.1 s, each making the spare copy for the next move. A move that
+  found no spare copied the base first, and the destination took the
+  stream 23.5 s late.
+
+The source's controller killed during RAM round 0 of a claude-code move
+from this Mac to rp2, through `brig teleport`:
+
+- `kill -KILL` of brig alone, 10 s into the move: hull, its child,
+  outlived it, went on and committed 55 s after the move began. An abort
+  then was refused: the move had committed.
+- `kill -KILL` of brig's process group, hull and its ssh with it, 33 s
+  into the move: rp2's record said `receiving`, "receive: the stream ended
+  in hvi's ram-round-0: unexpected EOF". The guest ran on here, never
+  fenced: its counter went on with no gap over 0.5 s and its kernel logged
+  no restore. `hull migrate --abort`, through `brig teleport --abort`,
+  took 0.90 s; rp2 removed its copy.
+- Until that abort, `hull migrate --status` printed `transferring` with
+  "The source is fenced and stays so until the move commits or is
+  aborted", although the guest was running: a streamed move's source is
+  fenced only from hvi's seal.
 
 Under a busy disk, an O_DIRECT writer (`dd oflag=direct`, 4 MiB blocks)
 on both Pis, with the ubuntu writer. A 4 KiB `fsync` took 0.25 to 0.95 s
