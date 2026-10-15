@@ -260,6 +260,12 @@ const (
 	// windowRateSpan is how many rate samples the window keeps the
 	// fastest of; a sample spans at least the shortest round trip seen.
 	windowRateSpan = 8
+	// windowSlack is the round trip the window allows for at least: on a
+	// LAN the shortest one seen is a fraction of a millisecond, and ssh,
+	// the acks and the scheduling of both hosts make the round trip
+	// under load several times that, so a window of twice the shortest
+	// held the stream below the link's rate.
+	windowSlack = 20 * time.Millisecond
 )
 
 // ackWindow is the source's window over a session's acks.
@@ -294,18 +300,19 @@ func newAckWindow() *ackWindow {
 	return w
 }
 
-// size is the window now: twice the fastest recent delivery rate times
-// the shortest round trip, held between windowMin and windowMax. Until
-// both are measured it is windowMin. A window that holds the rate back
-// grows with each sample, since the rate it lets through is about the
-// window over the round trip; once the link holds it back the rate stops
-// rising and the window settles at twice what the link holds in flight.
+// size is the window now: the fastest recent delivery rate times twice
+// the shortest round trip, or times windowSlack if that is longer, held
+// between windowMin and windowMax. Until both are measured it is
+// windowMin. A window that holds the rate back grows with each sample,
+// since the rate it lets through is about the window over the round trip;
+// once the link holds it back the rate stops rising and the window
+// settles at twice what the link holds in flight.
 func (w *ackWindow) size() int64 {
 	var rate float64
 	for _, r := range w.rates {
 		rate = max(rate, r)
 	}
-	size := int64(2 * rate * w.minRTT.Seconds())
+	size := int64(rate * max(2*w.minRTT.Seconds(), windowSlack.Seconds()))
 	return min(max(size, windowMin), windowMax)
 }
 
