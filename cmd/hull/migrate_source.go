@@ -562,6 +562,12 @@ func (m *moveSource) stopped(err error) error {
 			"have committed; %s and records the commit, or `hull migrate --abort %s` ends the move "+
 			"if the destination confirms it is not running", m.rec.TxID, m.rec.State, err, next, m.rec.TxID)
 	}
+	var lost *lostStreamError
+	if errors.As(err, &lost) {
+		// Neither a re-run's replay nor an abort can use a spool that is
+		// not whole, so neither is offered as if it could.
+		return fmt.Errorf("move %s stopped at %s: %w", m.rec.TxID, m.rec.State, err)
+	}
 	if fenced {
 		return fmt.Errorf("move %s stopped at %s: %w\nThe source stays fenced and will not run "+
 			"until the move commits or is aborted. %s; `hull migrate --abort %s` brings the instance "+
@@ -1038,6 +1044,7 @@ func sourceAbort(ctx context.Context, s *store.Store, name string, w io.Writer, 
 			m := &moveSource{s: s, name: name, path: path, rec: rec, out: w}
 			if err = m.adoptStreamFence(state); err != nil {
 				err = fmt.Errorf("cannot abort move %s: %w. Nothing was changed", rec.TxID, err)
+				_ = rec.fail(path, err)
 			}
 		} else {
 			err = adoptFenceForAbort(s, name, state, rec, w)
@@ -1159,6 +1166,14 @@ func abortLocally(s *store.Store, name string, rec *migrationRecord, w io.Writer
 		if err := s.SaveInstance(state); err != nil {
 			return fmt.Errorf("aborted move %s, but recording its checkpoint as %s's again failed: %w; "+
 				"`hull migrate --abort %s` run again finishes", rec.TxID, name, err, rec.TxID)
+		}
+	}
+	if rec.Transport == transportStream && state.Migration != nil && state.Migration.TxID == rec.TxID {
+		// The fenced hvi is stopped only once the spool is known whole: a
+		// spool that is not, while hvi lives, is taken from hvi again.
+		m := &moveSource{s: s, name: name, rec: rec, out: w}
+		if _, err := m.ensureStreamSpool(state, state.Migration.BundleDir); err != nil {
+			return fmt.Errorf("aborted move %s, but %s cannot be restored here yet: %w", rec.TxID, name, err)
 		}
 	}
 	if state.Status == "running" && state.PID > 0 && processIsAVMM(state.PID, state) {

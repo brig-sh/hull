@@ -642,6 +642,14 @@ func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][
 			files[hdr.Component] = append(files[hdr.Component], keep.b...)
 			if hdr.Component == "manifest.json" {
 				ss.manifest = keep.b
+				// hvi fences the guest once the manifest is in the
+				// socket's buffer. From here the spool is the guest: every
+				// byte goes to the file now, so a hull that dies before the
+				// seal leaves a stream a re-run or an abort can check whole
+				// (verifySpool).
+				if err := sp.bw.Flush(); err != nil {
+					return fmt.Errorf("spool the stream: %w", err)
+				}
 			}
 		}
 		return nil
@@ -776,6 +784,13 @@ func (m *moveSource) streamTransfer(ctx context.Context) error {
 		}
 	} else if err := m.checkDiskUnchanged(); err != nil {
 		return err
+	}
+	if replay && m.rec.BundleDir != "" {
+		// A hull that died after recording the fence may not have lived
+		// to seal the spool.
+		if _, err := m.ensureStreamSpool(state, m.rec.BundleDir); err != nil {
+			return err
+		}
 	}
 	disk, ok := flagValue(state.CmdLine, "--disk")
 	if !ok {
@@ -934,6 +949,9 @@ func (ss *streamSender) send(replay bool) (json.RawMessage, error) {
 		unlock()
 		return nil, err
 	}
+	if streamTestHook != nil {
+		streamTestHook("relayed")
+	}
 	ss.stats.HviReply = reply
 	// hvi has fenced the guest, and its whole stream is in the spool, which
 	// is synced and recorded as the instance's checkpoint while the last
@@ -966,6 +984,11 @@ func (ss *streamSender) send(replay bool) (json.RawMessage, error) {
 	}
 	return reply, ss.link.err
 }
+
+// streamTestHook, when set, is called at points of a streamed move a test
+// stops it at: "relayed" is once hvi has sealed its stream and fenced the
+// guest, and hull has read it all, before anything is recorded.
+var streamTestHook func(stage string)
 
 // softLink is the writer between the stream and the destination. Once a
 // write to the destination fails it keeps the error and takes every later
@@ -1032,20 +1055,17 @@ func (ss *streamSender) recordFence() error {
 }
 
 // adoptStreamFence records a stream hvi sealed for this move when hull did
-// not live to record it: its spool must have been sealed too.
+// not live to record it. The spool must be whole: sealed, or checked frame
+// by frame, or taken again from the hvi that still holds the fenced guest.
 func (m *moveSource) adoptStreamFence(state *store.InstanceState) error {
 	root, ok := flagValue(state.CmdLine, "--checkpoint-root")
 	if !ok {
 		return errors.New("the instance has no checkpoint root")
 	}
 	dir := filepath.Join(root, m.rec.TxID)
-	man, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
-	if err == nil {
-		_, err = os.Stat(filepath.Join(dir, spoolSealed))
-	}
+	man, err := m.ensureStreamSpool(state, dir)
 	if err != nil {
-		return fmt.Errorf("the VM is fenced, but no sealed stream of this move is at %s: `hull migrate --abort %s`",
-			dir, m.rec.TxID)
+		return err
 	}
 	state.Migration = &store.MigrationState{State: store.MigrationMigrating, BundleDir: dir, TxID: m.rec.TxID,
 		ManifestSHA256: sha256Hex(man), MoveTxID: m.rec.TxID, Peer: m.rec.Peer}
@@ -1059,7 +1079,7 @@ func (m *moveSource) adoptStreamFence(state *store.InstanceState) error {
 	}
 	m.rec.BundleDir, m.rec.ManifestSHA256 = dir, state.Migration.ManifestSHA256
 	m.rec.Disk = &migrateDisk{Path: disk, Size: size, ModNs: mod}
-	m.logf("Adopted the sealed stream %s", dir)
+	m.logf("Adopted the stream hvi fenced the guest with, spooled in %s", dir)
 	return writeMigrationRecord(m.path, m.rec)
 }
 
