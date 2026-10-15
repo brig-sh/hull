@@ -1473,7 +1473,7 @@ func sourceStatus(ctx context.Context, s *store.Store, name string, w io.Writer,
 	if t := rec.Transfer; t != nil {
 		_, _ = fmt.Fprintf(w, "  transfer: %s in %.1f s (%s/s)\n", humanBytes(t.Bytes), t.Seconds, humanBytes(t.BytesPerSec))
 	}
-	_, _ = fmt.Fprintf(w, "  %s\n", explainMoveState(rec))
+	_, _ = fmt.Fprintf(w, "  %s\n", explainMoveState(rec, streamFence(s, rec)))
 	if rec.Role != roleSource || rec.Remote == nil {
 		return nil
 	}
@@ -1496,8 +1496,90 @@ func sourceStatus(ctx context.Context, s *store.Store, name string, w io.Writer,
 	return nil
 }
 
-// explainMoveState says what a record's state means for the instance.
-func explainMoveState(rec *migrationRecord) string {
+// What hvi says of the guest of a streamed move that is transferring,
+// which hvi fences only once it has sealed its stream.
+const (
+	streamFenced  = "fenced"
+	streamRuns    = "runs"
+	streamPaused  = "paused"
+	streamBusy    = "busy"
+	streamUnknown = "unknown"
+	streamNoHvi   = "no-hvi"
+)
+
+// streamFence is, for the source of a streamed move in transferring, which
+// of those holds: the fence on the instance's record, or what hvi says. hvi
+// serves one connection at a time, so while its migrate op streams the
+// guest it answers no status (hviVMState's "?"), from before the pause of
+// the last round to after the seal; then a manifest in the move's spool
+// says hvi sealed the stream, and so fenced the guest. It is "" for any
+// other record, whose state says whether the guest is fenced.
+func streamFence(s *store.Store, rec *migrationRecord) string {
+	if rec.Role != roleSource || rec.Transport != transportStream || rec.State != srcTransferring {
+		return ""
+	}
+	state, err := s.GetInstance(rec.Name)
+	if err != nil {
+		return streamUnknown
+	}
+	if fencedFor(state, rec.TxID) {
+		return streamFenced
+	}
+	switch hviVMState(state) {
+	case store.MigrationFenced:
+		return streamFenced
+	case "running":
+		return streamRuns
+	case "paused":
+		return streamPaused
+	case "?":
+		if spoolHasManifest(state, rec.TxID) {
+			return streamFenced
+		}
+		return streamBusy
+	case "":
+		return streamNoHvi
+	}
+	return streamUnknown
+}
+
+// spoolHasManifest says whether the move's spool holds hvi's manifest, the
+// last frame of its stream, which hvi wrote only as it sealed the stream:
+// the spool is sealed, or its last spoolTail bytes hold the manifest's
+// frame header.
+func spoolHasManifest(state *store.InstanceState, txid string) bool {
+	root, ok := flagValue(state.CmdLine, "--checkpoint-root")
+	if !ok {
+		return false
+	}
+	dir := filepath.Join(root, txid)
+	if spoolIsSealed(dir) {
+		return true
+	}
+	f, err := os.Open(filepath.Join(dir, spoolStream))
+	if err != nil {
+		return false
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	at := max(info.Size()-spoolTail, 0)
+	tail := make([]byte, info.Size()-at)
+	if _, err := f.ReadAt(tail, at); err != nil && !errors.Is(err, io.EOF) {
+		return false
+	}
+	return bytes.Contains(tail, []byte(`{"component":"manifest.json",`))
+}
+
+// spoolTail is how much of the end of a spool spoolHasManifest reads: the
+// manifest and its header are a few KiB.
+const spoolTail = 1 << 20
+
+// explainMoveState says what a record's state means for the instance; fence
+// is streamFence's answer for it.
+func explainMoveState(rec *migrationRecord, fence string) string {
 	if rec.Role == roleDestination {
 		switch rec.State {
 		case dstRunning:
@@ -1518,6 +1600,23 @@ func explainMoveState(rec *migrationRecord) string {
 			"here may run it; moving it back is a new move from %s.", rec.Peer, rec.Epoch, rec.Peer)
 	case migAborted:
 		return "The move was aborted; the instance was handed back to this host."
+	}
+	switch fence {
+	case streamRuns:
+		return "The guest still runs here; hvi fences it only once it has sealed its stream, and has not."
+	case streamPaused:
+		return "The guest is paused here and not fenced; hvi fences it only once it has sealed its stream, " +
+			"and has not."
+	case streamBusy:
+		return "hvi is busy with the move's migrate op and answers nothing else: the guest runs until hvi " +
+			"pauses it for the last round, and is fenced from hvi's seal on. hull has not yet read the " +
+			"seal. Do not stop the instance: once fenced, its hvi holds the only copy of the guest."
+	case streamUnknown:
+		return "hvi did not say whether it fenced the guest. Do not stop the instance: a fenced guest's " +
+			"hvi holds the only copy of it. Run the move again, or abort it."
+	case streamNoHvi:
+		return "hvi is not running, and no fence is recorded here. Abort the move: if hvi sealed its " +
+			"stream, the abort brings the guest back from the move's spool."
 	}
 	return "The source is fenced and stays so until the move commits or is aborted."
 }

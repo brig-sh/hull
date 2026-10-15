@@ -1387,3 +1387,124 @@ func TestMoveRestoreBase(t *testing.T) {
 		t.Errorf("the boot's base carried into a restore: %v", out)
 	}
 }
+
+// `hull migrate --status` of a streamed move in transferring says what hvi
+// says of the guest: a guest still runs until hvi seals its stream, and
+// hvi, which answers nothing while it streams, is streaming it then; a
+// fence on the instance's record or from hvi is a fence. A whole-bundle
+// move in transferring was fenced before it.
+func TestStreamedMoveStatusSaysWhetherTheGuestRuns(t *testing.T) {
+	f := newMoveFixture(t, true)
+	peer := newLocalPeer(f.dst)
+	rec := &migrationRecord{TxID: "0123456789abcdef0123456789abcdef", Role: roleSource, Name: f.name, Epoch: 1,
+		State: srcTransferring, Peer: "pm@dest", Remote: &migrateRemote{Target: "pm@dest"},
+		Transport: transportStream}
+	write := func() {
+		t.Helper()
+		if err := writeMigrationRecord(f.src.InstanceMigrationRecord(f.name), rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	status := func() string {
+		t.Helper()
+		var out bytes.Buffer
+		if err := sourceStatus(context.Background(), f.src, f.name, &out, peer); err != nil {
+			t.Fatal(err)
+		}
+		return out.String()
+	}
+	const (
+		runs   = "The guest still runs here; hvi fences it only once it has sealed its stream, and has not."
+		paused = "The guest is paused here and not fenced"
+		busy   = "hvi is busy with the move's migrate op and answers nothing else: the guest runs until hvi " +
+			"pauses it for the last round, and is fenced from hvi's seal on."
+		fenced = "The source is fenced and stays so until the move commits or is aborted."
+		noHvi  = "hvi is not running, and no fence is recorded here."
+		still  = "still runs"
+	)
+	write()
+	if out := status(); !strings.Contains(out, runs) {
+		t.Errorf("hvi says running:\n%s", out)
+	}
+
+	// hvi in its migrate op answers no status within the wait.
+	busyHvi := newStubHvi(t, func(map[string]any) stubAnswer {
+		return stubAnswer{reply: `{"v":1,"ok":true,"state":"running"}`, delay: 2 * hviVMStateTimeout}
+	})
+	state := mustInstance(t, f.src, f.name)
+	sock := state.ControlSock
+	state.ControlSock = busyHvi.path
+	if err := f.src.SaveInstance(state); err != nil {
+		t.Fatal(err)
+	}
+	if out := status(); !strings.Contains(out, busy) || strings.Contains(out, fenced) || strings.Contains(out, still) {
+		t.Errorf("hvi busy streaming:\n%s", out)
+	}
+	// hull has read hvi's manifest into the move's spool: hvi sealed the
+	// stream, and fenced the guest, before it wrote it.
+	root, _ := flagValue(state.CmdLine, "--checkpoint-root")
+	spool := filepath.Join(root, rec.TxID)
+	if err := os.MkdirAll(spool, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	frames := "{\"component\":\"ram-round-0\",\"size\":3,\"sha256\":\"00\"}\nabc" +
+		"{\"component\":\"manifest.json\",\"size\":2,\"sha256\":\"00\"}\n{}"
+	if err := os.WriteFile(filepath.Join(spool, spoolStream), []byte(frames), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out := status(); !strings.Contains(out, fenced) || strings.Contains(out, still) {
+		t.Errorf("hvi busy, its manifest in the spool:\n%s", out)
+	}
+	if err := os.RemoveAll(spool); err != nil {
+		t.Fatal(err)
+	}
+	// hvi answers paused: a guest paused before the move, or by hvi
+	// after a migrate that failed; not fenced, and not running.
+	pausedHvi := newStubHvi(t, func(map[string]any) stubAnswer {
+		return stubAnswer{reply: `{"v":1,"ok":true,"state":"paused"}`}
+	})
+	state.ControlSock = pausedHvi.path
+	if err := f.src.SaveInstance(state); err != nil {
+		t.Fatal(err)
+	}
+	if out := status(); !strings.Contains(out, paused) || strings.Contains(out, still) {
+		t.Errorf("hvi says paused:\n%s", out)
+	}
+	state.ControlSock = sock
+	if err := f.src.SaveInstance(state); err != nil {
+		t.Fatal(err)
+	}
+
+	f.vm.mu.Lock()
+	f.vm.fenced = true
+	f.vm.mu.Unlock()
+	if out := status(); !strings.Contains(out, fenced) {
+		t.Errorf("hvi says fenced:\n%s", out)
+	}
+	f.vm.mu.Lock()
+	f.vm.fenced = false
+	f.vm.mu.Unlock()
+
+	state = mustInstance(t, f.src, f.name)
+	state.Migration = &store.MigrationState{State: store.MigrationMigrating, TxID: rec.TxID, MoveTxID: rec.TxID}
+	if err := f.src.SaveInstance(state); err != nil {
+		t.Fatal(err)
+	}
+	if out := status(); !strings.Contains(out, fenced) {
+		t.Errorf("the fence on the instance's record:\n%s", out)
+	}
+	state.Migration = nil
+	state.Status = "stopped"
+	if err := f.src.SaveInstance(state); err != nil {
+		t.Fatal(err)
+	}
+	if out := status(); !strings.Contains(out, noHvi) {
+		t.Errorf("no hvi:\n%s", out)
+	}
+
+	rec.Transport = transportBundle
+	write()
+	if out := status(); !strings.Contains(out, fenced) {
+		t.Errorf("a whole-bundle move in transferring:\n%s", out)
+	}
+}
