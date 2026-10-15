@@ -227,8 +227,9 @@ func diskFromImageBase(ctx context.Context, s *store.Store, imageDigest, diskPat
 }
 
 // A destination's spare of a base is a ready copy of it, made ahead of a
-// move (by `migrate-prepare`, or when a prepare sends the base), which a
-// streamed receive takes as the instance's disk by renaming it. Where the
+// move (by `migrate-prepare`, when a prepare sends the base, or by the
+// source of a move once it commits, for the way back), which a streamed
+// receive takes as the instance's disk by renaming it. Where the
 // filesystem has no clones a copy of a 1.6 GB base took the destination
 // 22 s, all of it before the source could start the disk rounds.
 
@@ -237,8 +238,18 @@ func spareBasePath(s *store.Store, sum string) string {
 	return filepath.Join(s.BasesDir(), "spare", filepath.Base(sum)+".ext4")
 }
 
+// spareLockPath is the lock one maker of the spare of base sum holds.
+func spareLockPath(s *store.Store, sum string) string {
+	return filepath.Join(s.BasesDir(), "spare", filepath.Base(sum)+".lock")
+}
+
 // ensureSpareBase makes the spare of the held base sum unless there is one,
-// and reports how ("held", "clone" or "copy").
+// and reports how ("held", "clone" or "copy"). Two makers of the same
+// spare, a prepare and the background one after a move, take turns, so
+// the second finds it made rather than copying the base again. The copy
+// is synced before it is put in place: the receive that takes it syncs
+// the disk before the source's guest may stop, and a copy still in
+// writeback would make that sync seconds long on a Pi.
 func ensureSpareBase(s *store.Store, sum string) (string, error) {
 	if !baseHeld(s, sum) {
 		return "", fmt.Errorf("base %s is not held here", digestHead(sum))
@@ -250,6 +261,17 @@ func ensureSpareBase(s *store.Store, sum string) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 		return "", err
 	}
+	lock, err := os.OpenFile(spareLockPath(s, sum), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = lock.Close() }()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return "", fmt.Errorf("lock the spare of base %s: %w", digestHead(sum), err)
+	}
+	if _, err := os.Stat(dst); err == nil {
+		return "held", nil
+	}
 	var rnd [8]byte
 	_, _ = rand.Read(rnd[:])
 	tmp := filepath.Join(filepath.Dir(dst), ".new-"+hex.EncodeToString(rnd[:]))
@@ -258,13 +280,35 @@ func ensureSpareBase(s *store.Store, sum string) (string, error) {
 		err = os.Chmod(tmp, 0o600)
 	}
 	if err == nil {
+		err = syncPath(tmp)
+	}
+	if err == nil {
 		err = os.Rename(tmp, dst)
 	}
 	if err != nil {
 		_ = os.Remove(tmp)
 		return "", err
 	}
+	if !baseHeld(s, sum) {
+		// The base was removed while it was copied: a spare of a base
+		// that is gone would never be taken.
+		_ = os.Remove(dst)
+		return "", fmt.Errorf("base %s was removed while its spare was made", digestHead(sum))
+	}
 	return how, nil
+}
+
+// syncPath syncs the file at path.
+func syncPath(path string) error {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	err = syncFile(f)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }
 
 // takeSpareBase moves the spare of base sum to dst, a path on the same

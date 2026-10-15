@@ -1348,6 +1348,40 @@ func TestStreamedMoveTakesTheSpareBase(t *testing.T) {
 	}
 }
 
+// Two makers of one spare take turns: the second finds it made.
+func TestEnsureSpareBaseTakesTurns(t *testing.T) {
+	f := newStreamFixture(t)
+	sum := mustInstance(t, f.src, f.name).Base.SHA256
+	hows := make(chan string, 4)
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Go(func() {
+			how, err := ensureSpareBase(f.src, sum)
+			if err != nil {
+				t.Error(err)
+			}
+			hows <- how
+		})
+	}
+	wg.Wait()
+	close(hows)
+	made := 0
+	for how := range hows {
+		if how != "held" {
+			made++
+		}
+	}
+	if made != 1 {
+		t.Errorf("the spare was made %d times", made)
+	}
+	entries, _ := os.ReadDir(filepath.Dir(spareBasePath(f.src, sum)))
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".new-") {
+			t.Errorf("left %s", e.Name())
+		}
+	}
+}
+
 // A streamed move's restore on the destination names the base its disk is
 // a copy of; a restore from the spool on the source, or of a directory,
 // names none, and the base and the written blocks of the boot never carry
