@@ -115,7 +115,7 @@ type hviMigrateStats struct {
 	PausedMs   int64  `json:"paused_ms"`
 	// GateMs is the wait for the I/O threads at the pause, which hvi
 	// since ba9b2d2 runs the vCPUs through: the guest stops after it.
-	GateMs int64 `json:"gate_ms"`
+	GateMs     int64 `json:"gate_ms"`
 	DiskRounds []struct {
 		Name     string `json:"name"`
 		Round    int    `json:"round"`

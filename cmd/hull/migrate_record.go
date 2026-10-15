@@ -313,9 +313,9 @@ type migrateStreamStats struct {
 	HviPausedMs int64  `json:"hviPausedMs,omitempty"`
 	// HviGateMs is hvi's wait for its I/O threads at the pause, which the
 	// guest runs through: PausedAt is after it.
-	HviGateMs int64 `json:"hviGateMs,omitempty"`
-	DiskSyncMs  int64  `json:"diskSyncMs,omitempty"`
-	PauseSyncMs int64  `json:"pauseSyncMs,omitempty"`
+	HviGateMs   int64 `json:"hviGateMs,omitempty"`
+	DiskSyncMs  int64 `json:"diskSyncMs,omitempty"`
+	PauseSyncMs int64 `json:"pauseSyncMs,omitempty"`
 	// DowntimeMs is from PausedAt to the destination's resume, on two
 	// hosts' clocks.
 	DowntimeMs int64 `json:"downtimeMs,omitempty"`
