@@ -579,7 +579,7 @@ func checkStreamProfile(data []byte, want string) error {
 // guest restored paused. hvi reads the disk through the page cache, so
 // the sync that makes the last round durable runs while hvi rebuilds the
 // machine rather than before it; finish returns once both are done. The
-// documents kept beside the record are written meanwhile too.
+// documents kept beside the record are written meanwhile too, unsynced.
 func (r *streamReceiver) finish() error {
 	if r.restore == nil || r.manifest == nil {
 		return errors.New("the stream carried no hvi checkpoint")
@@ -588,8 +588,11 @@ func (r *streamReceiver) finish() error {
 	r.syncDisk()
 	r.filesDone = make(chan error, 1)
 	go func() {
+		// Kept for the record only: hvi has the machine from the stream,
+		// so they are not synced, which on a busy disk would cost the
+		// stopped guest a sync each.
 		for name, data := range r.files {
-			if err := writeFileSynced(filepath.Join(r.rec.BundleDir, name), data); err != nil {
+			if err := os.WriteFile(filepath.Join(r.rec.BundleDir, name), data, 0o600); err != nil {
 				r.filesDone <- err
 				return
 			}

@@ -515,15 +515,20 @@ reading is the guest. In that window:
   that cannot work. If the destination verified the stream, running the
   move again commits it there.
 
-The fence is recorded while the last disk round goes out, and the trailer
-waits for that record, so a destination never verifies a move whose source
-has no record of its fence. The spool's sync is not part of the downtime:
+The fence is recorded while the last disk round and the trailer go out and
+the destination checks them; the commit, not the stream, waits for that
+record. A source that dies before it leaves a destination that may have
+verified the stream and a fence this host never recorded: a re-run then
+refuses to commit without a record of what it sent, and `--abort` brings
+the guest back here from the spool. The spool's sync is not part of the
+downtime:
 it runs behind the move, and `hull migrate` waits for it only before it
 exits. The destination syncs its disk in the background every 32 MiB and
 once the disk rounds that ran with the guest running are in, so the sync
 after the stream has only the last round to write, and that sync overlaps
-hvi's restore. The record writes the stopped guest waits for are one per
-host: the source records the transfer and its commit point (`committing`)
+hvi's restore. hvi's documents kept beside the destination's record are
+written without a sync: hvi has the machine from the stream. The record
+writes the stopped guest waits for are one per host: the source records the transfer and its commit point (`committing`)
 together, and the destination `received`, `verified` and `restored-paused`
 together. The source pays for the spool with a write of the guest's touched
 RAM to its own disk.
