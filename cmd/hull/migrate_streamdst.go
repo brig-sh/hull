@@ -582,6 +582,11 @@ func destReceiveStream(s *store.Store, txid, name string, in io.Reader, out *ses
 		"wrote the disk rounds onto base %s and restored the guest paused", len(res.Components), digestHead(r.base))
 	if state, err := s.GetInstance(name); err == nil && state.Migration != nil {
 		state.Migration.ManifestSHA256 = rec.ManifestSHA256
+		// The move's epoch too, which the commit would otherwise save in a
+		// synced write of its own with the guest stopped. Nothing runs the
+		// instance before the commit: its record says incoming, which only
+		// this move's commit turns into running, and an abort removes it.
+		state.OwnerEpoch = rec.Epoch
 		if err := s.SaveInstance(state); err != nil {
 			return refuseWith(codeFailed, rec.fail(path, err), rec)
 		}

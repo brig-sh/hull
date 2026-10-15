@@ -739,11 +739,14 @@ func destCommitLocked(s *store.Store, rec *migrationRecord, path string, epoch u
 	if err != nil {
 		return refuseWith(codeFailed, rec.fail(path, err), rec)
 	}
-	state.OwnerEpoch = epoch
-	if err := s.SaveInstance(state); err != nil {
-		return refuseWith(codeFailed, rec.fail(path, err), rec)
+	if state.OwnerEpoch != epoch {
+		// A streamed receive saved it with the manifest already.
+		state.OwnerEpoch = epoch
+		if err := s.SaveInstance(state); err != nil {
+			return refuseWith(codeFailed, rec.fail(path, err), rec)
+		}
+		step("epoch saved")
 	}
-	step("epoch saved")
 	// The ledger first: once the instance record says running, the store
 	// must answer for this txid whatever later happens to the instance.
 	if err := writeMoveLedger(s, rec, dstRunning); err != nil {

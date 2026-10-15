@@ -742,7 +742,17 @@ func TestStreamedMoveRecordsBothHostsSteps(t *testing.T) {
 	order(st.Steps, "hvi sealed the stream", "trailer sent", "destination answered", "commit point recorded",
 		"commit sent", "commit answered")
 	order(st.DestSteps, "manifest read", "trailer read", "hvi restored the guest paused", "verified recorded",
-		"commit received", "epoch saved", "ledger written", "running recorded", "resumed")
+		"commit received", "ledger written", "running recorded", "resumed")
+	// The receive saved the epoch with the manifest, so the commit, with
+	// the guest stopped, does not save it again.
+	for _, s := range st.DestSteps {
+		if s.Step == "epoch saved" {
+			t.Errorf("the commit saved the epoch again: %+v", st.DestSteps)
+		}
+	}
+	if got := mustInstance(t, f.dst, f.name).OwnerEpoch; got != f.srcRecord(t).Epoch {
+		t.Errorf("destination owner epoch %d", got)
+	}
 	if !strings.Contains(out.String(), "move: from the seal, ms (there: the destination's clock): trailer sent ") ||
 		!strings.Contains(out.String(), "there resumed ") {
 		t.Errorf("no line of the steps from the seal:\n%s", out.String())
