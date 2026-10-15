@@ -802,10 +802,23 @@ func TestStreamedMoveRecordsBothHostsSteps(t *testing.T) {
 	if got := mustInstance(t, f.dst, f.name).OwnerEpoch; got != f.srcRecord(t).Epoch {
 		t.Errorf("destination owner epoch %d", got)
 	}
-	if !strings.Contains(out.String(), "move: from the seal, ms (there: the destination's clock): trailer sent ") ||
-		!strings.Contains(out.String(), "there resumed ") {
+	// Both hosts share a clock here, and the destination may read the
+	// manifest before the source records the trailer sent: the line is
+	// in time order, so neither comes first for sure.
+	if line, ok := lineWith(out.String(), "move: from the seal, ms (there: the destination's clock): "); !ok ||
+		!strings.Contains(line, "trailer sent ") || !strings.Contains(line, "there resumed ") {
 		t.Errorf("no line of the steps from the seal:\n%s", out.String())
 	}
+}
+
+// lineWith is the first line of out that holds want.
+func lineWith(out, want string) (string, bool) {
+	for line := range strings.SplitSeq(out, "\n") {
+		if strings.Contains(line, want) {
+			return line, true
+		}
+	}
+	return "", false
 }
 
 func TestSealTimeline(t *testing.T) {
