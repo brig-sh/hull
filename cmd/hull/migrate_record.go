@@ -290,11 +290,11 @@ type migrateStreamStats struct {
 	WireBytes     int64   `json:"wireBytes"`
 	Seconds       float64 `json:"seconds"`
 	// RoundsEndAt is when hvi's last round with the guest running ended,
-	// and PausedAt when hvi paused the guest, after the sync of its disk
-	// that follows those rounds (hvi's rounds_end_unix_ms and
-	// precopy_end_unix_ms), or, from an hvi that gives neither, when the
-	// last RAM round began to arrive. SealedMs is from the pause to hvi's
-	// seal.
+	// and PausedAt when hvi stopped the guest, after the sync of its disk
+	// that follows those rounds and its wait for the I/O threads (hvi's
+	// rounds_end_unix_ms, and precopy_end_unix_ms plus gate_ms), or, from
+	// an hvi that gives neither, when the last RAM round began to arrive.
+	// SealedMs is from the pause to hvi's seal.
 	RoundsEndAt time.Time `json:"roundsEndAt,omitempty"`
 	PausedAt    time.Time `json:"pausedAt,omitempty"`
 	SealedMs    int64     `json:"sealedMs,omitempty"`
@@ -311,6 +311,9 @@ type migrateStreamStats struct {
 	// (paused_ms), and the disk's syncs before the pause and in it.
 	StopReason  string `json:"stopReason,omitempty"`
 	HviPausedMs int64  `json:"hviPausedMs,omitempty"`
+	// HviGateMs is hvi's wait for its I/O threads at the pause, which the
+	// guest runs through: PausedAt is after it.
+	HviGateMs int64 `json:"hviGateMs,omitempty"`
 	DiskSyncMs  int64  `json:"diskSyncMs,omitempty"`
 	PauseSyncMs int64  `json:"pauseSyncMs,omitempty"`
 	// DowntimeMs is from PausedAt to the destination's resume, on two
