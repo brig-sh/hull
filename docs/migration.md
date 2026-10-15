@@ -679,8 +679,25 @@ hull killed with SIGKILL as hvi's seal line appeared (rp1 to rp2):
   manifest equal to the fence's and the destination's, adopted the fence
   and committed the destination's copy without sending it again.
 
-Both times the guest went on with no gap in its counter and the same
+- In a third run (rp2 to rp1), the kill also landed after rp1 had
+  verified the stream, and the spool was cut to 1 MB. `--abort` had rp1
+  release its copy, had the fenced hvi stream the guest again (one disk
+  round of 5751 blocks, 98.9 MiB on the wire, and one RAM round of
+  138.4 MiB, in 1.4 s), checked its reply's first manifest against the
+  instance's record, recorded the new manifest on the instance and the
+  move, and restored the guest here from that second stream, 3.3 s after
+  the abort began.
+
+Each time the guest went on with no gap in its counter and the same
 `boot_id`, blob and open file.
+
+A guest whose run wrote an `/etc/hosts` entry over the base (`--add-host`)
+booted with 4 blocks set in its `--disk-written` bitmap (compared in 53 ms
+on rp1) and moved from rp1 to rp2 in 4.5 s with 127 ms of downtime. On
+rp2, with the guest stopped, a copy of its disk replayed its journal
+(`e2fsck -E journal_only`), passed `e2fsck -fn` (only the free block and
+inode counts differ, as on any disk of a running guest) and held the
+entry.
 
 ## Records
 
