@@ -198,9 +198,10 @@ signals as for any VMM.
 the guest here, streams the checkpoint and the disk over ssh, has the
 destination restore it paused, and only then commits, after which the
 destination resumes it and the copy here is stale. When both hosts can, it
-sends the guest's RAM in rounds while the guest runs and only the disk
-blocks that differ from the instance's base, and the guest stops only for
-the last round (see [migration.md](migration.md#the-streamed-move)). While a move holds an
+relays hvi's migrate stream, which sends the guest's RAM and the disk
+blocks that differ from the instance's base in rounds while the guest
+runs, and the guest stops only for the last round (see
+[migration.md](migration.md#the-streamed-move)). While a move holds an
 instance, `checkpoint`, `resume`, `restore` and `rm` of it are refused on
 both hosts, and what an aborted move left on the destination can only be
 removed. The protocol, its states and its recovery are in
@@ -211,8 +212,8 @@ The destination's verbs each print one JSON object on stdout:
 
 | Verb | Flags | What it does |
 |---|---|---|
-| `migrate-probe` | `--name`, `--hvi`, `--gateway-sock` | reports hull and hvi versions, whether hvi takes the control flags and `--profile` (a stand-in for "can restore a portable bundle"; see [migration.md](migration.md#usage)), has `restore` and restores from a stream, the hypervisor, free space, whether the name is taken, whether the gateway answers, the bases and profile kernels the store holds, and the capability `stream-v2` |
-| `migrate-receive` | `--txid`, `--name`, `--reserve`, `--stream` | with `--reserve`, claims the name (a JSON request on stdin); with `--stream`, reads a streamed move on stdin, restores it paused as it arrives and ends `restored-paused`; with neither, reads the whole-bundle stream and ends `verified` |
+| `migrate-probe` | `--name`, `--hvi`, `--gateway-sock` | reports hull and hvi versions, whether hvi takes the control flags and `--profile` (a stand-in for "can restore a portable bundle"; see [migration.md](migration.md#usage)), has `restore`, restores from a stream (`hviStream`) and writes a stream's disk rounds onto a copy of a base (`hviStreamDisk`, `restore --disk-base-sha256`), the hypervisor, free space, whether the name is taken, whether the gateway answers, the bases and profile kernels the store holds, and the capability `stream-v3` |
+| `migrate-receive` | `--txid`, `--name`, `--reserve`, `--stream` | with `--reserve`, claims the name (a JSON request on stdin); with `--stream`, reads a streamed move (`HULLMIG3`) on stdin, makes a synced copy of the base the instance's disk, hands hvi's stream as it arrives to `hvi restore --from-stream - --disk <the copy> --disk-base-sha256 <base>` and ends `restored-paused`; with neither, reads the whole-bundle stream and ends `verified` |
 | `migrate-prepare` | `--txid` | restores the received checkpoint paused |
 | `migrate-commit` | `--txid`, `--epoch` | records `running`, then resumes the guest |
 | `migrate-status` | `--txid` | prints the move's record and the VM's state |
