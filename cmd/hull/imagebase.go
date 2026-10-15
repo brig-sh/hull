@@ -370,7 +370,7 @@ func flockWait(f *os.File, wait time.Duration, busy func()) (bool, time.Duration
 // waitSpareMaker waits, up to wait, for a maker of the spare of base sum
 // at work here, such as the background step of a move that left this
 // host, and returns the release of the spare's lock, how long it waited
-// and whether it gave up. A store where no maker ever ran has no lock to
+// and whether it gave up, at the bound or on an error of the lock. A store where no maker ever ran has no lock to
 // wait for, and none is made: the receive takes no part in the makers'
 // turns but this.
 func waitSpareMaker(s *store.Store, sum string, wait time.Duration) (func(), time.Duration, bool) {
@@ -380,8 +380,9 @@ func waitSpareMaker(s *store.Store, sum string, wait time.Duration) (func(), tim
 	}
 	got, waited, err := flockWait(lock, wait, spareMakerBusy)
 	if err != nil || !got {
+		// A lock that cannot be taken is not waited for either.
 		_ = lock.Close()
-		return func() {}, waited, err == nil
+		return func() {}, waited, true
 	}
 	return sync.OnceFunc(func() {
 		_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
