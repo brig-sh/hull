@@ -164,7 +164,8 @@ func crashMoveAt(t *testing.T, f *streamFixture, stage string) string {
 	}
 	rec := f.srcRecord(t)
 	st := mustInstance(t, f.src, f.name)
-	if recorded := fencedFor(st, rec.TxID); rec.State != srcTransferring || recorded != (stage == "recorded") {
+	if recorded := fencedFor(st, rec.TxID); rec.State != srcTransferring ||
+		(stage != "answered" && recorded != (stage == "recorded")) {
 		t.Fatalf("the child died at %s with the move %s, the instance's migration %+v", stage, rec.State, st.Migration)
 	}
 	root, _ := flagValue(mustInstance(t, f.src, f.name).CmdLine, "--checkpoint-root")
@@ -465,5 +466,76 @@ func TestStreamedMoveAbortAfterHviIsGone(t *testing.T) {
 	}
 	if restoredFrom != filepath.Join(dir, spoolStream) {
 		t.Fatalf("restored from %q\n%s", restoredFrom, out.String())
+	}
+}
+
+// A hull killed once the destination has checked the stream, before the
+// move's record took what was sent: run again, the move finds the
+// destination's verified copy, adopts the fence from the spool (whole, or
+// streamed again by the fenced hvi), holds the destination's manifest to
+// the one the guest was fenced with, and commits that copy without sending
+// the guest again.
+func TestStreamedMoveRerunAdoptsAVerifiedDestination(t *testing.T) {
+	for _, cut := range []bool{false, true} {
+		t.Run(map[bool]string{false: "whole", true: "cut"}[cut], func(t *testing.T) {
+			f := newStreamFixture(t)
+			dir := crashMoveAt(t, f, "answered")
+			if cut {
+				if err := os.Truncate(filepath.Join(dir, spoolStream), 1000); err != nil {
+					t.Fatal(err)
+				}
+			}
+			rec := f.srcRecord(t)
+			if rec.Stream != nil {
+				t.Fatalf("the killed move recorded its stream: %+v", rec.Stream)
+			}
+			first := f.hvi.firstManifest
+			if dst := f.dstRecord(t, rec.TxID); dst.State != dstRestoredPaused || dst.ManifestSHA256 != first {
+				t.Fatalf("destination %s %s", dst.State, dst.ManifestSHA256)
+			}
+			restores := f.dest.restores
+			if err := f.migrate(t, rec.TxID); err != nil {
+				t.Fatal(err)
+			}
+			rec = f.srcRecord(t)
+			if rec.State != srcCommitted || rec.Stream == nil || rec.Stream.Mode != "adopted" {
+				t.Fatalf("source %s %+v", rec.State, rec.Stream)
+			}
+			if want := map[bool]int{false: 1, true: 2}[cut]; f.hvi.migrations != want || f.dest.restores != restores {
+				t.Errorf("hvi streamed %d times (want %d), the destination restored %d more times",
+					f.hvi.migrations, want, f.dest.restores-restores)
+			}
+			if dst := f.dstRecord(t, rec.TxID); dst.State != dstRunning {
+				t.Errorf("destination %s", dst.State)
+			}
+			assertSameContent(t, f.disk, filepath.Join(f.dst.InstanceDir(f.name), "bundle", "rootfs.ext4"))
+		})
+	}
+}
+
+// A destination whose verified copy is not the stream the guest was fenced
+// with is not committed: the re-run stops, the source stays fenced, and
+// nothing resumes there.
+func TestStreamedMoveRerunRefusesAnotherVerifiedCopy(t *testing.T) {
+	f := newStreamFixture(t)
+	crashMoveAt(t, f, "answered")
+	rec := f.srcRecord(t)
+	dst, path, err := findMigrationByTxID(f.dst, rec.TxID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst.ManifestSHA256 = strings.Repeat("1", 64)
+	if err := writeMigrationRecord(path, dst); err != nil {
+		t.Fatal(err)
+	}
+	err = f.migrate(t, rec.TxID)
+	if err == nil || !strings.Contains(err.Error(), "the guest here was fenced with") {
+		t.Fatalf("err = %v", err)
+	}
+	if got := f.dstRecord(t, rec.TxID); got.State != dstRestoredPaused {
+		t.Errorf("destination %s", got.State)
+	}
+	if rec := f.srcRecord(t); rec.State != srcTransferring {
+		t.Errorf("source %s", rec.State)
 	}
 }
