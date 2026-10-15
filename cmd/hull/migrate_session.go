@@ -266,9 +266,33 @@ const (
 	// under load several times that, so a window of twice the shortest
 	// held the stream below the link's rate.
 	windowSlack = 20 * time.Millisecond
+	// windowRTTSpan is how long the shortest round trip stands, or ten
+	// of it if that is longer. Once it is older the window drains to
+	// half of what the link holds at the latest rate over that round
+	// trip, or windowMin if that is more, until a write sent into the
+	// drained window is read, and that write's round trip replaces it,
+	// whether shorter or longer. Half of what the link holds queues
+	// nothing, and a drain costs the link about half a round trip.
+	windowRTTSpan = time.Second
 )
 
 // ackWindow is the source's window over a session's acks.
+//
+// The window is the fastest recent delivery rate times twice the round
+// trip, so the round trip it counts must be the link's, not one the window
+// itself made longer. While the window is full each write's round trip
+// includes the bytes queued ahead of it, about the window over the rate:
+// taken as the link's, it would double the window with each sample, which
+// would queue more, without end. The shortest round trip seen excludes
+// that queue, but if it stands for the whole move a link whose round trip
+// grows (a route that changes, a destination that slows) gets a window
+// shorter than the link holds, which lets through the window over the
+// round trip, a lower rate, which makes the window shorter again, down to
+// windowMin. So the shortest one stands for windowRTTSpan, and then the
+// window drains, much as BBR's ProbeRTT does, to measure the round trip
+// with nothing queued. A link whose round trip grew then gets a window that
+// lets the rate through again, and with the rate the window doubles with
+// each sample until the link holds it back.
 type ackWindow struct {
 	mu   sync.Mutex
 	cond *sync.Cond
@@ -277,9 +301,13 @@ type ackWindow struct {
 	sent, acked int64
 	closed      bool
 	// writes are when each write still unacked was handed on, by the
-	// offset it ended at, for the round trip; minRTT is the shortest.
+	// offset it ended at, for the round trip.
 	writes []windowWrite
-	minRTT time.Duration
+	// minRTT is the shortest round trip since minRTTAt, and drain,
+	// when not 0, the window held while it is measured again.
+	minRTT   time.Duration
+	minRTTAt time.Time
+	drain    int64
 	// rates are the latest delivery rates in bytes per second, and
 	// sampleAt and sampleAcked where the sample in progress began.
 	rates       []float64
@@ -292,6 +320,8 @@ type ackWindow struct {
 type windowWrite struct {
 	end int64
 	at  time.Time
+	// drained says it was handed on while the window drained.
+	drained bool
 }
 
 func newAckWindow() *ackWindow {
@@ -301,13 +331,12 @@ func newAckWindow() *ackWindow {
 }
 
 // size is the window now: the fastest recent delivery rate times twice
-// the shortest round trip, or times windowSlack if that is longer, held
-// between windowMin and windowMax. Until both are measured it is
-// windowMin. A window that holds the rate back grows with each sample,
-// since the rate it lets through is about the window over the round trip;
-// once the link holds it back the rate stops rising and the window
-// settles at twice what the link holds in flight.
+// the round trip, or times windowSlack if that is longer, held between
+// windowMin and windowMax. Until both are measured it is windowMin.
 func (w *ackWindow) size() int64 {
+	if w.drain != 0 {
+		return w.drain
+	}
 	var rate float64
 	for _, r := range w.rates {
 		rate = max(rate, r)
@@ -316,17 +345,27 @@ func (w *ackWindow) size() int64 {
 	return min(max(size, windowMin), windowMax)
 }
 
+// full says a write of n bytes must wait. A write larger than the window
+// goes once nothing is on its way.
+func (w *ackWindow) full(n int64) bool {
+	return !w.closed && w.sent-w.acked > 0 && w.sent-w.acked+n > w.size()
+}
+
+// take counts n bytes as handed on.
+func (w *ackWindow) take(n int64) {
+	w.sent += n
+	w.writes = append(w.writes, windowWrite{end: w.sent, at: w.now(), drained: w.drain != 0})
+}
+
 // wait blocks until n more bytes fit in the window, or it is closed, and
 // counts them as handed on.
 func (w *ackWindow) wait(n int64) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	// A write larger than the window goes once nothing is on its way.
-	for !w.closed && w.sent-w.acked > 0 && w.sent-w.acked+n > w.size() {
+	for w.full(n) {
 		w.cond.Wait()
 	}
-	w.sent += n
-	w.writes = append(w.writes, windowWrite{end: w.sent, at: w.now()})
+	w.take(n)
 }
 
 // ack takes an acked line: the destination has read n bytes.
@@ -343,10 +382,24 @@ func (w *ackWindow) ack(n int64) {
 		i++
 	}
 	if i > 0 {
-		if rtt := now.Sub(w.writes[i-1].at); w.minRTT == 0 || rtt < w.minRTT {
-			w.minRTT = max(rtt, time.Millisecond)
+		last := w.writes[i-1]
+		rtt := max(now.Sub(last.at), time.Millisecond)
+		switch {
+		case w.drain != 0 && last.drained:
+			// Nothing was queued ahead of it: the link's round trip
+			// now, longer or shorter than the one it replaces.
+			w.minRTT, w.minRTTAt, w.drain = rtt, now, 0
+		case w.minRTT == 0 || rtt < w.minRTT:
+			w.minRTT, w.minRTTAt = rtt, now
 		}
 		w.writes = w.writes[i:]
+	}
+	if w.drain == 0 && !w.minRTTAt.IsZero() && now.Sub(w.minRTTAt) > max(windowRTTSpan, 10*w.minRTT) {
+		var rate float64
+		if len(w.rates) > 0 {
+			rate = w.rates[len(w.rates)-1]
+		}
+		w.drain = max(int64(rate*w.minRTT.Seconds()/2), windowMin)
 	}
 	w.acked = n
 	if w.sampleAt.IsZero() {
