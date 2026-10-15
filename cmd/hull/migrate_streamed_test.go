@@ -612,9 +612,34 @@ func TestStreamedMoveComparesWithoutHviRounds(t *testing.T) {
 		{"no disk ops", false, true, false, "compare"},
 		{"restored hvi", true, false, false, "compare"},
 		{"restored hvi carrying the base", true, false, true, "hvi"},
+		{"files written before boot", true, false, false, "compare"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newStreamFixture(t, tc.diskOps, tc.fromBoot)
+			switch tc.name {
+			case "restored hvi":
+				// hvi restored the guest and, its profile naming no
+				// base, started its since-boot blocks afresh: the
+				// writes before the restore are only on the disk.
+				f.hvi.mu.Lock()
+				f.hvi.sinceBoot = map[int64]bool{}
+				f.hvi.mu.Unlock()
+			case "files written before boot":
+				// As `hull run` writes an instance's own files over its
+				// image's base before hvi boots: on the disk, in no
+				// bitmap of hvi's.
+				f.hvi.mu.Lock()
+				f.hvi.sinceBoot = map[int64]bool{}
+				f.hvi.mu.Unlock()
+				fh, err := os.OpenFile(f.disk, os.O_WRONLY, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := fh.WriteAt(bytes.Repeat([]byte{0x5e}, 4096), 9*diskBlockSize); err != nil {
+					t.Fatal(err)
+				}
+				_ = fh.Close()
+			}
 			if tc.carries {
 				st := mustInstance(t, f.src, f.name)
 				prof := fmt.Sprintf(`{"profile_version":1,"checkpoint_format":2,"disk_base_sha256":%q}`, st.Base.SHA256)
