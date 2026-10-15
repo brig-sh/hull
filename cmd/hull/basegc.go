@@ -169,8 +169,8 @@ type baseSweep struct {
 // baseSweepTargets is what a prune of the bases removes: bases nothing
 // needs, the entries of images gone from the store (and, with all, every
 // image's entry and received mark whose base is otherwise unused),
-// half-written bases of runs and prepares that died, and bases set aside
-// as corrupt.
+// half-written bases of runs and prepares that died, bases set aside as
+// corrupt, and what spareSweepTargets lists.
 func baseSweepTargets(s *store.Store, all bool, now time.Time) ([]baseSweep, error) {
 	names, err := os.ReadDir(s.BasesDir())
 	if errors.Is(err, os.ErrNotExist) {
@@ -212,6 +212,11 @@ func baseSweepTargets(s *store.Store, all bool, now time.Time) ([]baseSweep, err
 				bytes: fileBlocks(info)})
 		}
 	}
+	spares, err := spareSweepTargets(s, now)
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, spares...)
 	entries, err := imageBaseEntries(s)
 	if err != nil {
 		return nil, err
@@ -229,6 +234,53 @@ func baseSweepTargets(s *store.Store, all bool, now time.Time) ([]baseSweep, err
 			what: "the base entry of " + e.Image, reason: reason})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].path < out[j].path })
+	return out, nil
+}
+
+// spareSweepTargets is what a prune removes from bases/spare: the
+// half-written copy of a spare's maker that died (one that runs after a
+// move runs unwatched, and a reboot or a kill ends it like any other), and
+// the spare and lock of a base no longer held. The lock of a held base
+// stays: it is empty, and removed with its base; a lock removed while a
+// maker holds it would let a second maker copy the base beside the first.
+func spareSweepTargets(s *store.Store, now time.Time) ([]baseSweep, error) {
+	dir := spareBasesDir(s)
+	names, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []baseSweep
+	for _, n := range names {
+		name := n.Name()
+		info, err := n.Info()
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		age := now.Sub(info.ModTime())
+		if strings.HasPrefix(name, ".new-") {
+			if age > time.Hour {
+				out = append(out, baseSweep{path: path, what: "spare/" + name,
+					reason: "left by a spare's maker that died", bytes: fileBlocks(info)})
+			}
+			continue
+		}
+		sum, isSpare := strings.CutSuffix(name, ".ext4")
+		if !isSpare {
+			sum, _ = strings.CutSuffix(name, ".lock")
+		}
+		if sum == name || checkDiskDigest(sum) != nil || baseHeld(s, sum) || age <= baseGrace {
+			continue
+		}
+		what := "the spare lock of base " + digestHead(sum)
+		if isSpare {
+			what = "the spare of base " + digestHead(sum)
+		}
+		out = append(out, baseSweep{path: path, what: what, reason: "its base is gone", bytes: fileBlocks(info)})
+	}
 	return out, nil
 }
 
