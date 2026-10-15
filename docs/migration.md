@@ -45,12 +45,15 @@ what can go wrong, and how to recover.
 > from the stream's header to the resume and keeps two round trips of the
 > stream on its way. On rp1 to rp2 with 100 ms and 10 Mbit/s of netem,
 > the time from hvi's seal, as hull read it, to the resume went from 2.9
-> to 3.0 s to 0.43 to 0.48 s, and the downtime from 4.6 to 4.8 s to 2.2
-> to 2.4 s; on the LAN the idle guest's downtime went from 103 to 164 ms
-> to 47 to 57 ms. Under the O_DIRECT hog the source's pause no longer
-> waits for a vCPU to park; the downtime there is now the disk syncs on
-> both hosts, and one move of three in the last set failed with the
-> guest running on. See [From the seal to the
+> to 3.0 s to 0.43 to 0.48 s (and 0.79 s in one run, in which the
+> source's synced commit point took 348 ms), and the downtime from 4.6 to
+> 4.8 s to 2.2 to 2.7 s. Counted from hvi's own seal, which comes about
+> 0.3 s before hull reads it with the stream's tail still in hvi's
+> socket, it is 0.65 to 1.12 s. On the LAN the idle guest's downtime
+> went from 103 to 164 ms to 47 to 57 ms. Under the O_DIRECT hog the
+> source's pause no longer waits for a vCPU to park; the downtime there
+> is now the disk syncs on both hosts, and one move of three in the last
+> set failed with the guest running on. See [From the seal to the
 > resume](#from-the-seal-to-the-resume).
 
 ## Usage
@@ -976,7 +979,10 @@ on, rp1 also ran another project's guest.
   `--abort` released rp2.
 - On the emulated WAN the 793 ms run spent 348 ms on the source's synced
   commit point; in the other run it took 4 ms, and seal to resume was
-  472 ms, under the 501 ms of 300 ms plus two round trips. Both runs
+  472 ms, under the 501 ms of 300 ms plus two round trips. From hvi's
+  own seal, `pausedAt` plus `sealedMs`, the two runs took 1119 and
+  801 ms: hull read the seal 325 and 328 ms after hvi wrote it, the tail
+  of the stream still in hvi's socket behind the window. Both runs
   stopped the RAM rounds at the time cap, as the earlier ones did.
 - SIGKILL of hull at "hvi sealed the stream" (writer, no hog): `--status`
   said the source is fenced, and rp2 had the guest restored paused. The
