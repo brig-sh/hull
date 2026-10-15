@@ -49,10 +49,12 @@ func requireRunningHvi(state *store.InstanceState, verb string) error {
 	return nil
 }
 
-// hviVMStateTimeout bounds the status ask that ps, inspect and exec make.
-// Short: brig runs `hull ps` often, hvi serves one connection at a time, and
-// an hvi busy writing a checkpoint should cost a listing half a second, not
-// hviControlTimeout per instance.
+// hviVMStateTimeout bounds the status ask that ps, inspect, exec and a
+// move's checks make. Short: brig runs `hull ps` often, hvi serves one
+// connection at a time, and an hvi busy with a pause or a checkpoint should
+// cost a listing half a second, not hviControlTimeout per instance. Such an
+// hvi reads as "?": ps shows it, exec goes on as with no socket, and a move
+// refuses a VM it cannot see running.
 const hviVMStateTimeout = 500 * time.Millisecond
 
 // hviVMState asks a running hvi instance what its VM is doing, as hvi names

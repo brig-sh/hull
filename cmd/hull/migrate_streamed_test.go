@@ -100,6 +100,26 @@ type fakeStreamHvi struct {
 	// restreamDocs replaces documents in a second stream, as an hvi
 	// that did not keep them would.
 	restreamDocs map[string][]byte
+	// stallIn makes hvi stop partway through the first frame of that
+	// component, as hvi does once the paused part of the stream runs past
+	// its budget: the rest of the frame never comes, the connection stays
+	// open until hull closes it, and the guest runs on, or is in
+	// stallState when that is set. With stallRefusal hvi writes its
+	// refusal into the frame first. conn is the connection being served.
+	stallIn      string
+	stallState   string
+	stallRefusal bool
+	// cutIn makes hvi fail partway through the first frame of that
+	// component and close the connection, as hvi does since 2e7fb90
+	// once a stream has begun; the guest runs on. cutWith is what it
+	// writes before the close: "" nothing more, "refusal" its refusal
+	// among the frame's bytes, "short" the start of it there, "header"
+	// the start of it in place of the frame's header line. cutState,
+	// when set, is the guest's state after the close in place of running.
+	cutIn    string
+	cutWith  string
+	cutState string
+	conn     net.Conn
 }
 
 func newFakeStreamHvi(t *testing.T, disk, base string) *fakeStreamHvi {
@@ -195,6 +215,7 @@ func (h *fakeStreamHvi) serve(conn net.Conn) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.conn = conn
 	op, _ := req["op"].(string)
 	h.ops = append(h.ops, op)
 	w := bufio.NewWriter(conn)
@@ -248,6 +269,48 @@ func (h *fakeStreamHvi) migrate(req map[string]any, w *bufio.Writer, reply func(
 		}
 		sum := sha256.Sum256(body)
 		frame := fmt.Sprintf(`{"component":%q,"size":%d,"sha256":"%s"}`+"\n", name, len(body), hex.EncodeToString(sum[:]))
+		if name == h.cutIn && !again {
+			h.cutIn = ""
+			refusal := `{"v":1,"ok":false,"code":"capture_failed","error":"the reader did not take the ` +
+				`stream within the time the guest may stay paused"}` + "\n"
+			switch h.cutWith {
+			case "header":
+				_, _ = w.WriteString(refusal[:40])
+			default:
+				_, _ = w.WriteString(frame)
+				_, _ = w.Write(body[:len(body)/2])
+			}
+			switch h.cutWith {
+			case "refusal":
+				_, _ = w.WriteString(refusal)
+			case "short":
+				_, _ = w.WriteString(refusal[:40])
+			}
+			_ = w.Flush()
+			_ = h.conn.Close()
+			if h.cutState != "" {
+				h.state = h.cutState
+			}
+			lost = true
+			return
+		}
+		if name == h.stallIn && !again {
+			h.stallIn = ""
+			_, _ = w.WriteString(frame)
+			_, _ = w.Write(body[:len(body)/2])
+			if h.stallRefusal {
+				_, _ = w.WriteString(`{"v":1,"ok":false,"code":"capture_failed","error":"the reader did not ` +
+					`take the stream within the time the guest may stay paused"}` + "\n")
+			}
+			_ = w.Flush()
+			_ = h.conn.SetReadDeadline(time.Now().Add(time.Minute))
+			_, _ = io.Copy(io.Discard, h.conn)
+			if h.stallState != "" {
+				h.state = h.stallState
+			}
+			lost = true
+			return
+		}
 		_, _ = w.WriteString(frame)
 		_, _ = w.Write(body)
 		h.emitted = append(h.emitted, frame...)
@@ -973,6 +1036,236 @@ func TestStreamedMoveHullFailsOnAFrame(t *testing.T) {
 			}
 			assertSameContent(t, f.disk, filepath.Join(f.dst.InstanceDir(f.name), "bundle", "rootfs.ext4"))
 		})
+	}
+}
+
+// hvi past its budget for the paused part of the stream stops partway
+// through a frame and leaves the connection open. hull waits for a byte
+// then only as long as that budget, from the rounds it relayed, and not
+// its 2-minute idle bound; then hvi's status says whether the guest runs
+// on or is fenced, and hull reports that.
+func TestStreamedMoveStallInThePausedPart(t *testing.T) {
+	floor, margin := hviPausedFloor, hviPausedMargin
+	hviPausedFloor, hviPausedMargin = 300*time.Millisecond, 200*time.Millisecond
+	t.Cleanup(func() { hviPausedFloor, hviPausedMargin = floor, margin })
+	for _, tc := range []struct {
+		name, in, state string
+		refusal         bool
+	}{
+		{"ram-round-2", "ram-round-2", "", false},
+		{"refused in disk-round-final", "disk-round-final", "", true},
+		{"fenced", "ram-round-2", "fenced", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newStreamFixture(t)
+			f.hvi.writesAt["ram-round-1"] = []int64{5}
+			f.hvi.stallIn, f.hvi.stallState, f.hvi.stallRefusal = tc.in, tc.state, tc.refusal
+			started := time.Now()
+			err := f.migrate(t, "")
+			took := time.Since(started)
+			if err == nil || !strings.Contains(err.Error(), "hvi sent nothing for") ||
+				!strings.Contains(err.Error(), "longer than it gives that part") {
+				t.Fatalf("err = %v", err)
+			}
+			if took > 10*time.Second {
+				t.Errorf("the stall took %s to report", took)
+			}
+			rec := f.srcRecord(t)
+			if rec.State != srcTransferring {
+				t.Fatalf("the move is %s", rec.State)
+			}
+			if tc.state == "fenced" {
+				if !strings.Contains(err.Error(), "The source stays fenced") ||
+					strings.Contains(err.Error(), "runs on here") {
+					t.Fatalf("a fenced guest reported as %v", err)
+				}
+				return
+			}
+			if !strings.Contains(err.Error(), "runs on here") || !strings.Contains(rec.Error, "runs on here") {
+				t.Fatalf("a guest that runs on reported as %v; record %q", err, rec.Error)
+			}
+			if err := f.migrate(t, rec.TxID); err != nil {
+				t.Fatal(err)
+			}
+			if rec := f.srcRecord(t); rec.State != srcCommitted || rec.Stream.Mode != "live" {
+				t.Fatalf("the re-run: %s %s", rec.State, rec.Stream.Mode)
+			}
+			f.checkArrived(t, f.srcRecord(t))
+		})
+	}
+}
+
+// hvi fails a stream that has begun by closing the connection, its refusal
+// first when the socket has room for it, among a frame's bytes or where a
+// header was due, whole or cut short. hull takes the end as hvi's failure
+// at once, says what hvi said, and asks hvi's status, which says whether
+// the guest runs on or is fenced, whatever the end of the stream says: a
+// refusal among a frame's bytes may be bytes the guest wrote. It does not
+// wait out the paused part's bound.
+func TestStreamedMoveHviClosesTheStream(t *testing.T) {
+	for _, tc := range []struct {
+		name, in, with, want string
+	}{
+		{"in a running round", "ram-round-1", "", "hvi closed its migrate stream, as it does when the stream fails"},
+		{"in the paused part", "ram-round-2", "", "hvi closed its migrate stream, as it does when the stream fails"},
+		{"with its refusal", "disk-round-final", "refusal",
+			"hvi failed its migrate stream and closed it (hvi's disk-round-final ended at "},
+		{"with its refusal cut short", "ram-round-2", "short",
+			`its refusal, cut short: "{\"v\":1,\"ok\":false`},
+		{"with its refusal cut short at a header", "cpu.json", "header",
+			`its refusal, cut short: "{\"v\":1,\"ok\":false`},
+	} {
+		for _, state := range []string{"running", "fenced"} {
+			t.Run(tc.name+", "+state, func(t *testing.T) {
+				f := newStreamFixture(t)
+				f.hvi.writesAt["ram-round-1"] = []int64{5}
+				f.hvi.cutIn, f.hvi.cutWith = tc.in, tc.with
+				if state == "fenced" {
+					f.hvi.cutState = state
+				}
+				started := time.Now()
+				err := f.migrate(t, "")
+				took := time.Since(started)
+				if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("err = %v, want %q", err, tc.want)
+				}
+				if strings.Contains(err.Error(), "hvi sent nothing for") {
+					t.Errorf("hvi's close taken for a stall: %v", err)
+				}
+				if took > hviPausedFloor/2 {
+					t.Errorf("the close took %s to report", took)
+				}
+				if tc.with == "refusal" && !strings.Contains(err.Error(), "hvi refused migrate: the reader did "+
+					"not take the stream within the time the guest may stay paused (capture_failed)") {
+					t.Errorf("hvi's refusal is not in the error: %v", err)
+				}
+				rec := f.srcRecord(t)
+				if rec.State != srcTransferring {
+					t.Fatalf("the move is %s", rec.State)
+				}
+				if state == "fenced" {
+					if !strings.Contains(err.Error(), "hvi fenced the guest, though hull did not take its whole "+
+						"stream") || strings.Contains(err.Error(), "runs on here") {
+						t.Fatalf("a guest hvi fenced reported as %v", err)
+					}
+					return
+				}
+				if !strings.Contains(err.Error(), "runs on here") || !strings.Contains(rec.Error, "runs on here") {
+					t.Fatalf("err %v; record %q", err, rec.Error)
+				}
+				if err := f.migrate(t, rec.TxID); err != nil {
+					t.Fatal(err)
+				}
+				if rec := f.srcRecord(t); rec.State != srcCommitted || rec.Stream.Mode != "live" {
+					t.Fatalf("the re-run: %s %s", rec.State, rec.Stream.Mode)
+				}
+				f.checkArrived(t, f.srcRecord(t))
+			})
+		}
+	}
+}
+
+// readsThenConn gives data in reads of at most 1000 bytes, then fails every
+// read with end.
+type readsThenConn struct {
+	net.Conn
+	data []byte
+	end  error
+}
+
+func (c *readsThenConn) Read(p []byte) (int, error) {
+	if len(c.data) == 0 {
+		return 0, c.end
+	}
+	n := copy(p[:min(len(p), 1000)], c.data)
+	c.data = c.data[n:]
+	return n, nil
+}
+
+func (c *readsThenConn) SetDeadline(time.Time) error { return nil }
+
+// The reads of hvi's stream end in its close: the end of the stream, or on
+// Linux a reset, when hvi closes with bytes of hull's unread. Either is
+// hvi's failure, with the refusal at the end of the stream when it came;
+// any other end, a deadline here, is not.
+func TestHviEndedTakesTheEndOrAResetAsHvisClose(t *testing.T) {
+	refusal := `{"v":1,"ok":false,"code":"capture_failed","error":"the capture failed"}` + "\n"
+	frame := bytes.Repeat([]byte{0xab, 0}, 5000)
+	reset := &net.OpError{Op: "read", Net: "unix", Err: os.NewSyscallError("read", syscall.ECONNRESET)}
+	cat := func(a []byte, b string) []byte { return append(slices.Clone(a), b...) }
+	for _, tc := range []struct {
+		name, want, code string
+		data             []byte
+		end              error
+	}{
+		{"a reset after a refusal among a frame's bytes", "(cause): hvi refused migrate: the capture failed " +
+			"(capture_failed)", "capture_failed", cat(frame, refusal), reset},
+		{"the end after a refusal cut short", `its refusal, cut short: "{\"v\":1,\"ok\":false,\"code\":\"capt"`, "",
+			cat(frame, refusal[:30]), io.EOF},
+		{"a reset after a frame's bytes", "and hull read no refusal (cause)", "", frame, reset},
+		{"a refusal with bytes after it", "and hull read no refusal", "", cat([]byte(refusal), "\x01\x02"), io.EOF},
+		{"a refusal-like line of a frame's bytes", "and hull read no refusal", "", cat(frame, `{"v":1,`+"\x00\x01"),
+			io.EOF},
+		{"a deadline", "", "", cat(frame, refusal), os.ErrDeadlineExceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newIdleConn(&readsThenConn{data: tc.data, end: tc.end}, time.Minute)
+			if n, _ := io.Copy(io.Discard, struct{ io.Reader }{c}); n != int64(len(tc.data)) {
+				t.Fatalf("read %d of %d bytes", n, len(tc.data))
+			}
+			cause := errors.New("cause")
+			got := c.hviEnded("migrate", cause)
+			if tc.want == "" {
+				if got != cause {
+					t.Errorf("a read that ended in %v taken for hvi's close: %v", tc.end, got)
+				}
+				return
+			}
+			if !strings.Contains(got.Error(), tc.want) || !errors.Is(got, cause) {
+				t.Errorf("got %v, want %q around the cause", got, tc.want)
+			}
+			if code := hviRefusalCode(got); code != tc.code {
+				t.Errorf("code %q, want %q", code, tc.code)
+			}
+		})
+	}
+}
+
+// The relay's bound for the paused part is hvi's budget from the last
+// round with the guest running, as hull timed it, and the margin.
+func TestHviPausedBound(t *testing.T) {
+	rounds := []streamRound{
+		{Kind: "state", Name: "profile.json", Seconds: 9},
+		{Kind: "disk", Name: "disk-round-0", Seconds: 4},
+		{Kind: "ram", Name: "ram-round-0", Seconds: 3},
+		{Kind: "disk", Name: "disk-round-1", Seconds: 0.5},
+		{Kind: "ram", Name: "ram-round-1", Seconds: 1.25},
+	}
+	if got := lastRunningRound(rounds, false); got != 1750*time.Millisecond {
+		t.Errorf("at disk-round-final: %s", got)
+	}
+	if got := hviPausedBound(1750 * time.Millisecond); got != hviPausedFloor+3500*time.Millisecond+hviPausedMargin {
+		t.Errorf("bound %s", got)
+	}
+	// With no disk rounds the paused part is seen at the first document,
+	// and the last RAM round was the paused one.
+	ram := []streamRound{{Kind: "ram", Name: "ram-round-0", Seconds: 3}, {Kind: "ram", Name: "ram-round-1", Seconds: 1},
+		{Kind: "ram", Name: "ram-round-2", Seconds: 0.25}}
+	if got := lastRunningRound(ram, true); got != time.Second {
+		t.Errorf("at the first document: %s", got)
+	}
+	f := &roundFolder{}
+	for _, c := range []struct {
+		name string
+		want bool
+	}{{"profile.json", false}, {"disk-round-0", false}, {"disk-round-final", true}} {
+		if got := pausedPartBegins(f, c.name); got != c.want {
+			t.Errorf("%s: %v", c.name, got)
+		}
+	}
+	f.ramSeen = true
+	if !pausedPartBegins(f, "cpu.json") || pausedPartBegins(f, "ram-round-1") || pausedPartBegins(f, "disk-round-1") {
+		t.Error("after the RAM rounds")
 	}
 }
 

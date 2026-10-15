@@ -391,8 +391,11 @@ func (ss *streamSender) relayFrame(f *roundFolder, line []byte, hdr hviComponent
 // relayHvi runs hvi's migrate op and relays its frames into the stream and
 // the spool. It returns hvi's reply line once hvi has sealed the stream and
 // fenced the guest. A stream that ends before its manifest without a fence
-// is an *hviRanOnError: hvi refused it, or it broke and hvi says the guest
-// is not fenced (fenceAfterBreak).
+// is an *hviRanOnError: hvi refused it where a frame header was due, or it
+// broke and hvi says the guest is not fenced (fenceAfterBreak). hvi closing
+// the connection is it failing the stream (an *hviStreamEndError, with its
+// refusal when hull found it); hvi's status says how it left the guest,
+// whatever the end of the stream says.
 func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][]byte, error) {
 	m := ss.m
 	// In a session the window holds back what hull relays, and what hull
@@ -424,6 +427,10 @@ func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][
 	files := map[string][]byte{}
 	var kept int64
 	folder := &roundFolder{ss: ss}
+	// The wait for hvi drops to its own bound once the paused part begins
+	// (hviPausedBound); 0 until then.
+	var pausedBound, lastRun time.Duration
+	ic, _ := conn.(*idleConn)
 	reply, line, err := readHviComponents("migrate", br, func(line []byte, hdr hviComponentHeader, body io.Reader) error {
 		if relayFrameTestHook != nil {
 			if err := relayFrameTestHook(hdr.Component); err != nil {
@@ -432,6 +439,15 @@ func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][
 		}
 		if ss.manifest != nil {
 			return fmt.Errorf("hvi's %s comes after its manifest", hdr.Component)
+		}
+		// A second stream of a fenced guest has no paused part: hvi gives
+		// it only the 30 s it gives any reader that takes nothing.
+		if pausedBound == 0 && ic != nil && !ss.restream && pausedPartBegins(folder, hdr.Component) {
+			// The round before is flushed, so it is among those timed.
+			folder.begin(hdr.Component)
+			lastRun = lastRunningRound(ss.stats.Rounds, !isRound(hdr.Component))
+			pausedBound = hviPausedBound(lastRun)
+			ic.setIdle(pausedBound)
 		}
 		if _, err := sp.bw.Write(append(append([]byte{}, line...), '\n')); err != nil {
 			return err
@@ -467,13 +483,32 @@ func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][
 		return nil
 	})
 	folder.flush()
+	if pausedBound > 0 && errors.Is(err, os.ErrDeadlineExceeded) {
+		err = fmt.Errorf("hvi sent nothing for %.1f s in the part of its stream it writes with the guest "+
+			"paused, longer than it gives that part (%.1f s: %g s and twice the last round with the guest "+
+			"running, %.2f s): %w", pausedBound.Seconds(), (pausedBound - hviPausedMargin).Seconds(),
+			hviPausedFloor.Seconds(), lastRun.Seconds(), err)
+	}
 	var refused *hviRefusal
+	if err != nil && ss.manifest == nil && ic != nil && !errors.As(err, &refused) {
+		// hvi closes a stream that failed once it began, its refusal
+		// first when the socket has room for it, wherever it lands.
+		err = ic.hviEnded("migrate", err)
+	}
+	var ended *hviStreamEndError
 	switch {
 	case err != nil && ss.manifest == nil && ss.restream:
 		// The guest was fenced before this stream began, and stays so.
 		return nil, nil, fmt.Errorf("hvi's second stream of the fenced guest ended before its manifest: %w", err)
+	case err != nil && ss.manifest == nil && errors.As(err, &ended):
+		// hvi closed the stream. A refusal found at its end may be a
+		// frame's bytes, which the guest wrote, so it says nothing of the
+		// fence: only hvi's status does.
+		closeConn()
+		return nil, nil, ss.fenceAfterBreak(err)
 	case err != nil && ss.manifest == nil && errors.As(err, &refused):
-		// hvi's own answer, in place of a frame: nothing was fenced.
+		// hvi's own answer, in place of a frame header: nothing was
+		// fenced.
 		return nil, nil, &hviRanOnError{err: err}
 	case err != nil && ss.manifest == nil:
 		closeConn()
@@ -488,6 +523,69 @@ func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][
 	}
 	ss.takeHviStats(reply)
 	return line, files, nil
+}
+
+// hvi gives the part of a move's stream it writes with the guest paused,
+// from disk-round-final to the manifest, a budget: hviPausedFloor plus
+// twice the last round taken with the guest running, its RAM round and the
+// disk round before it (hvi src/checkpoint/server.rs, paused_budget). Past
+// it every write fails, and the guest runs on. hvi cannot say so in the
+// middle of a frame. Before 2e7fb90 it left the connection open, so hull,
+// waiting for the rest of the frame, waited out the whole hviStreamIdle of
+// 2 minutes before it asked hvi whether the guest runs. hvi now closes the
+// connection, and hull sees the end once it has read what was sent. Once
+// the paused part begins hull still waits for a byte only as long as that
+// budget, with a margin, for an hvi that stops writing and does not close.
+
+// hviPausedFloor is hvi's STREAM_PAUSED_FLOOR. A variable so a test need
+// not wait it out.
+var hviPausedFloor = 10 * time.Second
+
+// hviPausedMargin is what hull adds to hvi's budget for the paused part.
+// hull times a round from its first frame to the next round's, as the
+// frames reach it, which is longer than hvi's time for it by the sync and
+// the pause before disk-round-final, and shorter by at most what sat in
+// the socket's buffers when the round began.
+var hviPausedMargin = 5 * time.Second
+
+// pausedPartBegins reports whether the frame of component, about to be
+// relayed, is the first of the paused part: disk-round-final, or, in a
+// stream with no disk rounds, the first document after the RAM rounds
+// (whose last round was the paused one).
+func pausedPartBegins(f *roundFolder, component string) bool {
+	return component == "disk-round-final" || (f.ramSeen && !isRound(component))
+}
+
+// lastRunningRound is how long hull took to relay the last round taken
+// with the guest running: the last RAM round of rounds, or the one before
+// it when the last was taken paused, and the last disk round but
+// disk-round-final.
+func lastRunningRound(rounds []streamRound, lastRAMPaused bool) time.Duration {
+	var ram []float64
+	disk := 0.0
+	for _, r := range rounds {
+		switch {
+		case r.Kind == "ram":
+			ram = append(ram, r.Seconds)
+		case r.Kind == "disk" && r.Name != "disk-round-final":
+			disk = r.Seconds
+		}
+	}
+	if lastRAMPaused && len(ram) > 0 {
+		ram = ram[:len(ram)-1]
+	}
+	last := disk
+	if len(ram) > 0 {
+		last += ram[len(ram)-1]
+	}
+	return time.Duration(last * float64(time.Second))
+}
+
+// hviPausedBound is how long the relay waits for a byte of hvi's stream
+// once its paused part has begun: hvi's budget for that part, given the
+// last running round as hull timed it, and the margin.
+func hviPausedBound(lastRunning time.Duration) time.Duration {
+	return hviPausedFloor + 2*lastRunning + hviPausedMargin
 }
 
 // hviUnwindWait is how long hull waits for hvi to answer whether it fenced
@@ -505,11 +603,14 @@ var relayFrameTestHook func(component string) error
 // fenceAfterBreak asks hvi whether it fenced the guest after hull stopped
 // reading its migrate stream before the manifest, on a failure of its own
 // (a spool write, a document too large to keep, a frame that does not
-// match its sha256) or of the connection. hvi fences once the manifest is
-// in the socket's buffer, which can be before hull has read the frames in
-// front of it: with a small last round, what is left of the stream can sit
-// there whole when hull fails. Only hvi knows which it was, and it has
-// ended the op by the time it answers (hviUnwindWait).
+// match its sha256), of the connection, or of hvi, which closed the
+// stream. hvi fences once the manifest is in the socket's buffer, which
+// can be before hull has read the frames in front of it: with a small last
+// round, what is left of the stream can sit there whole when hull fails.
+// Only hvi knows which it was, and it has ended the op by the time it
+// answers (hviUnwindWait). When hvi closed the stream, an end before the
+// manifest means a first stream did not fence the guest (hvi docs/cli.md);
+// hull asks all the same, and reports what hvi says.
 func (ss *streamSender) fenceAfterBreak(err error) error {
 	reply, qerr := hviControl(ss.state.ControlSock, map[string]any{"op": "status"}, hviUnwindWait)
 	switch {

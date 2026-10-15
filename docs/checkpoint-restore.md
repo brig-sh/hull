@@ -219,10 +219,17 @@ hull restore --paused --detach demo # from the bundle, left paused for `hull res
 `pause` and `resume` are idempotent. A paused guest's counter does not move,
 and neither does anything else in it. `hull ps` shows such an instance as
 STATUS `running` (its VMM is alive) and VM `paused` or `fenced`, and `hull
-exec` refuses it with the command that gets it running. hull waits 5 s for each reply. hvi gives a pause 2 s in
-all and asks clients for at least 3 s; a client that gives up sooner reports
-"not paused" for a VM that then pauses. If a pause times out anyway, hull says
-the VM may now be paused, and `hull resume` is harmless when it is not.
+exec` refuses it with the command that gets it running. hvi waits up to 10 s
+for its I/O threads at a pause and then 2 s for the vCPUs, and serves one
+connection at a time, so a request from another client waits behind a pause
+as long. It asks clients for at least 13 s; one that gives up sooner reports
+"not paused" for a VM that then pauses. hull waits 15 s for the reply to
+`pause`, `resume`, `status` and `profile`, and 5 s for each status a
+restore polls. `hull ps`, `hull exec` and a move's
+checks ask `status` with 0.5 s, and read an hvi busy with a pause as `?`; `hull
+stop` waits 5 s for its reply before the signals. If a pause times out anyway,
+hull says the VM may now be paused, and `hull resume` is harmless when it is
+not.
 
 `hull stop` on an `hvi` instance sends `stop` on the socket first and waits up
 to half of `--timeout` for hvi to end the run (it logs `guest stopped:
