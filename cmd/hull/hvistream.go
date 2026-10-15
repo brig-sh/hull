@@ -58,6 +58,11 @@ func (c *idleConn) Write(p []byte) (int, error) {
 // hviStreamOp sends one request on sock and returns the connection and a
 // reader for what hvi streams back. The caller closes the connection.
 func hviStreamOp(sock string, req map[string]any, idle time.Duration) (net.Conn, *bufio.Reader, error) {
+	return hviStreamOpSize(sock, req, idle, 1<<20)
+}
+
+// hviStreamOpSize is hviStreamOp with a reader of size bytes.
+func hviStreamOpSize(sock string, req map[string]any, idle time.Duration, size int) (net.Conn, *bufio.Reader, error) {
 	msg := map[string]any{"v": hviControlVersion}
 	for k, v := range req {
 		msg[k] = v
@@ -75,7 +80,7 @@ func hviStreamOp(sock string, req map[string]any, idle time.Duration) (net.Conn,
 		_ = raw.Close()
 		return nil, nil, fmt.Errorf("send %v to hvi: %w", req["op"], err)
 	}
-	return conn, bufio.NewReaderSize(conn, 1<<20), nil
+	return conn, bufio.NewReaderSize(conn, size), nil
 }
 
 // readHviLine reads one line of at most max bytes, without its newline.
