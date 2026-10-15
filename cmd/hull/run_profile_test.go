@@ -98,9 +98,9 @@ func runProfileEnv(t *testing.T, controlFlags bool) (storeDir, bundle, argvFile 
 		"case \"$1 $2\" in\n" +
 		"\"boot --checkpoint-root\") " + checkpointRoot + " ;;\n" +
 		"\"boot --profile\") echo 'error: --profile needs a name' >&2; exit 2 ;;\n" +
-		"\"boot --disk-base-sha256\") if [ -f '" + filepath.Join(bin, "knows-base") + "' ]; then " +
-		"echo 'error: --disk-base-sha256 needs a digest' >&2; else " +
-		"echo 'error: unknown boot arg \"--disk-base-sha256\"' >&2; fi; exit 2 ;;\n" +
+		"\"boot --disk-written\") if [ -f '" + filepath.Join(bin, "knows-base") + "' ]; then " +
+		"echo 'error: --disk-written needs a file' >&2; else " +
+		"echo 'error: unknown boot arg \"--disk-written\"' >&2; fi; exit 2 ;;\n" +
 		"esac\n" +
 		"printf '%s\\n' \"$@\" > '" + argvFile + ".tmp' && mv '" + argvFile + ".tmp' '" + argvFile + "'\n"
 	if err := os.WriteFile(filepath.Join(bin, "hvi"), []byte(script), 0o755); err != nil {
@@ -348,12 +348,26 @@ func TestAssetsPullProfileReportsATamperedKernel(t *testing.T) {
 }
 
 // A run on a block rootfs starts its disk from the image's base, kept under
-// the store's bases by its digest, and records it. hvi is not told the
-// base's digest, even an hvi that takes --disk-base-sha256: that names the
-// disk as hvi boots from it, and the instance's own files are written over
-// the base before then.
+// the store's bases by its digest, and records it. An hvi that takes
+// --disk-written is booted against the base: its digest, and the bitmap of
+// the blocks the run wrote over it, so hvi's blocks written since boot are
+// every block that differs from the base. One that does not is given
+// neither.
 func TestRunKeepsTheBase(t *testing.T) {
 	storeDir, bundle, argvFile := runProfileEnv(t, true)
+	if err := hullRun(t, storeDir, "--name", "b0", bundle); err != nil {
+		t.Fatal(err)
+	}
+	if argv := recordedArgv(t, argvFile); slices.Contains(argv, hviDiskBaseFlag) ||
+		slices.Contains(argv, hviDiskWrittenFlag) {
+		t.Fatalf("an hvi without %s was given the base: %v", hviDiskWrittenFlag, argv)
+	}
+	if b := instanceState(t, storeDir, "b0").Base; b == nil || !strings.Contains(b.HviWhy, "takes no --disk-written") {
+		t.Fatalf("the record does not say why hvi was not given the base: %+v", b)
+	}
+	if err := os.Remove(argvFile); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(filepath.Dir(argvFile), "knows-base"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -361,12 +375,25 @@ func TestRunKeepsTheBase(t *testing.T) {
 		t.Fatal(err)
 	}
 	argv := recordedArgv(t, argvFile)
-	if slices.Contains(argv, hviDiskBaseFlag) {
-		t.Fatalf("hvi was given %s: %v", hviDiskBaseFlag, argv)
-	}
 	state := instanceState(t, storeDir, "b1")
-	if state.Base == nil || state.Base.FromBoot {
+	if state.Base == nil || state.Base.HviWhy != "" {
 		t.Fatalf("state.json's base: %+v", state.Base)
+	}
+	if got, _ := flagValue(argv, hviDiskBaseFlag); got != state.Base.SHA256 {
+		t.Fatalf("hvi was given base %q, the record says %s: %v", got, state.Base.SHA256, argv)
+	}
+	written, ok := flagValue(argv, hviDiskWrittenFlag)
+	if !ok {
+		t.Fatalf("hvi was not given %s: %v", hviDiskWrittenFlag, argv)
+	}
+	disk0 := filepath.Join(storeDir, "instances", "b1", "bundle", "rootfs.ext4")
+	info, err := os.Stat(disk0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bits, err := os.ReadFile(written)
+	if err != nil || int64(len(bits)) != (diskBlocks(info.Size())+7)/8 {
+		t.Fatalf("the written bitmap: %d bytes for %d blocks, %v", len(bits), diskBlocks(info.Size()), err)
 	}
 	s, err := store.New(storeDir)
 	if err != nil {
@@ -381,19 +408,21 @@ func TestRunKeepsTheBase(t *testing.T) {
 	if sum != state.Base.SHA256 || !baseHeld(s, sum) {
 		t.Fatalf("base %s recorded, the disk hashes %s, held %v", state.Base.SHA256, sum, baseHeld(s, sum))
 	}
+	if !isZero(bits) {
+		t.Errorf("the written bitmap sets blocks of a disk that is its base")
+	}
 
-	// The restore command line drops the flag an older hull recorded: a
-	// restored disk has moved on from the base.
+	// The restore command line drops both: a restored disk has moved on
+	// from the base, and disk.json carries what hvi recorded.
 	if _, err := hviRestoreArgv(argv[:0:0], "", "", ""); err == nil {
 		t.Fatal("an empty command line mapped")
 	}
 	full := append([]string{"hvi"}, argv...)
-	full = append(full, hviDiskBaseFlag, sum)
 	restore, err := hviRestoreArgv(full, "/b", "/c", "/p")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if slices.Contains(restore, hviDiskBaseFlag) {
+	if slices.Contains(restore, hviDiskBaseFlag) || slices.Contains(restore, hviDiskWrittenFlag) {
 		t.Fatalf("the restore argv carries the base: %v", restore)
 	}
 }

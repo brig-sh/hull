@@ -1078,14 +1078,10 @@ func (m *moveSource) finish() error {
 			t["prepare"], t["commit"])
 	}
 	if st := m.rec.Stream; st != nil {
-		m.logf("move: %s in %.1f s; disk %s, RAM %s, state %s; sealed %d ms after the last RAM round "+
-			"began, last disk round %s in %d ms; downtime about %d ms", humanBytes(st.WireBytes), st.Seconds,
+		m.logf("move: %s in %.1f s; disk %s, RAM %s, state %s; sealed %d ms after the pause, "+
+			"last disk round %s in %d ms; downtime about %d ms", humanBytes(st.WireBytes), st.Seconds,
 			humanBytes(st.DiskWireBytes), humanBytes(st.RAMBytes), humanBytes(st.StateBytes), st.SealedMs,
 			humanBytes(st.FinalDiskBytes), st.FinalDiskMs, st.DowntimeMs)
-		if st.DiskWriteRate > 0 {
-			m.logf("move: the guest wrote up to %s/s to its disk during the disk rounds",
-				humanBytes(int64(st.DiskWriteRate)))
-		}
 	}
 	return nil
 }

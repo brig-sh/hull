@@ -20,9 +20,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// canStartWriteback says startWriteback does something here.
-const canStartWriteback = true
-
 // startWriteback asks the kernel to start writing n bytes of f from off to
 // disk, and returns at once: no wait, no sync of the metadata or of the
 // journal; n 0 means to the end of the file. A long stream written through the page cache then never piles

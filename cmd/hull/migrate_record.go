@@ -261,13 +261,13 @@ const (
 
 // migrateStreamStats are a streamed move's numbers.
 type migrateStreamStats struct {
-	// Mode is "live" (hvi's migrate op) or "replay" (the source's copy of
-	// a stream hvi sealed in an earlier attempt).
+	// Mode is "live" (hvi's migrate op), "replay" (the source's copy of a
+	// stream hvi sealed in an earlier attempt) or "restream" (hvi's
+	// fenced guest streamed again for its fence's owner).
 	Mode string `json:"mode"`
-	// DiskEngine is how the changed disk blocks were found: "hvi" (hvi's
-	// dirty-block rounds) or "compare" (hull compared the disk with the
-	// base).
-	DiskEngine string        `json:"diskEngine"`
+	// DiskEngine was how a stream-v2 move found the changed disk blocks;
+	// hvi's migrate stream carries them now, and it is left empty.
+	DiskEngine string        `json:"diskEngine,omitempty"`
 	Rounds     []streamRound `json:"rounds"`
 	// Chain is the stream's trailer hash, which the destination's record
 	// of what it received must match.
@@ -280,17 +280,30 @@ type migrateStreamStats struct {
 	StateBytes    int64   `json:"stateBytes"`
 	WireBytes     int64   `json:"wireBytes"`
 	Seconds       float64 `json:"seconds"`
-	// PausedAt is when the last RAM round began to arrive, the nearest
-	// this host sees to hvi pausing the guest; SealedMs is from then to
-	// hvi's reply, FinalDiskMs the disk round taken after it.
+	// RoundsEndAt is when hvi's last round with the guest running ended,
+	// and PausedAt when hvi paused the guest, after the sync of its disk
+	// that follows those rounds (hvi's rounds_end_unix_ms and
+	// precopy_end_unix_ms), or, from an hvi that gives neither, when the
+	// last RAM round began to arrive. SealedMs is from the pause to hvi's
+	// seal.
+	RoundsEndAt time.Time `json:"roundsEndAt,omitempty"`
 	PausedAt    time.Time `json:"pausedAt,omitempty"`
 	SealedMs    int64     `json:"sealedMs,omitempty"`
-	FinalDiskMs int64     `json:"finalDiskMs,omitempty"`
-	// FinalDiskBytes is the last disk round's data, and DiskWriteRate the
-	// fastest the guest wrote to its disk during the disk rounds before
-	// it, in bytes a second.
-	FinalDiskBytes int64   `json:"finalDiskBytes,omitempty"`
-	DiskWriteRate  float64 `json:"diskWriteRate,omitempty"`
+	// FinalDiskBytes and FinalDiskMs are the disk round hvi took paused,
+	// disk-round-final: its blocks' bytes and the time hvi took to read and
+	// send it.
+	FinalDiskMs    int64 `json:"finalDiskMs,omitempty"`
+	FinalDiskBytes int64 `json:"finalDiskBytes,omitempty"`
+	// DiskWriteRate was the fastest a stream-v2 move saw the guest write
+	// its disk; left empty now.
+	DiskWriteRate float64 `json:"diskWriteRate,omitempty"`
+	// From hvi's reply: why the rounds with the guest running stopped
+	// (converged, round_cap, time_cap), the source's part of the downtime
+	// (paused_ms), and the disk's syncs before the pause and in it.
+	StopReason  string `json:"stopReason,omitempty"`
+	HviPausedMs int64  `json:"hviPausedMs,omitempty"`
+	DiskSyncMs  int64  `json:"diskSyncMs,omitempty"`
+	PauseSyncMs int64  `json:"pauseSyncMs,omitempty"`
 	// DowntimeMs is from PausedAt to the destination's resume, on two
 	// hosts' clocks.
 	DowntimeMs int64 `json:"downtimeMs,omitempty"`

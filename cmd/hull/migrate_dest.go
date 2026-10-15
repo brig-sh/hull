@@ -147,6 +147,11 @@ func destProbe(s *store.Store, name, hviOverride, gatewaySock string) *migrateRe
 		} else {
 			p.HviStream = ok
 		}
+		if ok, err := hviRestoreTakesStreamBase(hvi); err != nil {
+			p.HviError = err.Error()
+		} else {
+			p.HviStreamDisk = ok
+		}
 	}
 	destHolds(s, p)
 	if name != "" {

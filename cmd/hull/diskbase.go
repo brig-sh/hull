@@ -15,6 +15,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -294,7 +295,108 @@ func baseHeld(s *store.Store, sum string) bool {
 	return err == nil && info.Mode().IsRegular()
 }
 
-// hviDiskBaseFlag hands hvi the digest of the disk as it boots from it. hull
-// no longer passes it (see imageBase); a restore still drops it from a
-// command line an older hull recorded.
-const hviDiskBaseFlag = "--disk-base-sha256"
+// hviDiskBaseFlag hands hvi the digest of the base its disk was made from,
+// and hviDiskWrittenFlag the bitmap of the blocks hull wrote over the base
+// before the boot (the instance's own files): with both, hvi's blocks
+// written since boot are every block that differs from the base, and its
+// migrate stream carries them as disk rounds.
+const (
+	hviDiskBaseFlag    = "--disk-base-sha256"
+	hviDiskWrittenFlag = "--disk-written"
+)
+
+// diskWrittenBitmap is the bitmap of the 64 KiB blocks where the disk at
+// diskPath differs from the base at basePath, as hvi's --disk-written takes
+// it: bit i of byte i/8 for block i, ceil(blocks/8) bytes. It also returns
+// how many blocks are set. Each block of data on the disk is read once and
+// compared with the base's, and then only the base's data blocks the disk
+// holds as a hole are read, which a copy of the base has few of.
+func diskWrittenBitmap(basePath, diskPath string) ([]byte, int64, error) {
+	base, err := os.Open(basePath)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer func() { _ = base.Close() }()
+	disk, err := os.Open(diskPath)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer func() { _ = disk.Close() }()
+	di, err := disk.Stat()
+	if err != nil {
+		return nil, 0, err
+	}
+	bi, err := base.Stat()
+	if err != nil {
+		return nil, 0, err
+	}
+	size := di.Size()
+	if bi.Size() != size {
+		return nil, 0, fmt.Errorf("the base is %d bytes and the disk %d", bi.Size(), size)
+	}
+	bits := make([]byte, (diskBlocks(size)+7)/8)
+	seen := make([]byte, len(bits))
+	var n int64
+	set := func(i int64) {
+		if bits[i/8]&(1<<(i%8)) == 0 {
+			bits[i/8] |= 1 << (i % 8)
+			n++
+		}
+	}
+	buf := make([]byte, diskBlockSize)
+	err = forEachDataBlock(disk, size, func(i int64, data []byte) error {
+		seen[i/8] |= 1 << (i % 8)
+		b := buf[:len(data)]
+		if _, err := base.ReadAt(b, i*diskBlockSize); err != nil && !errors.Is(err, io.EOF) {
+			return fmt.Errorf("read %s at block %d: %w", basePath, i, err)
+		}
+		if !bytes.Equal(b, data) {
+			set(i)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	// A block that holds data in the base and none on the disk.
+	extents, err := dataExtents(base, size)
+	if err != nil {
+		return nil, 0, err
+	}
+	for _, ext := range extents {
+		for i := ext.off / diskBlockSize; i < diskBlocks(ext.end); i++ {
+			if seen[i/8]&(1<<(i%8)) != 0 {
+				continue
+			}
+			seen[i/8] |= 1 << (i % 8)
+			b := buf[:blockLen(size, i)]
+			if _, err := base.ReadAt(b, i*diskBlockSize); err != nil && !errors.Is(err, io.EOF) {
+				return nil, 0, fmt.Errorf("read %s at block %d: %w", basePath, i, err)
+			}
+			if !isZero(b) {
+				set(i)
+			}
+		}
+	}
+	return bits, n, nil
+}
+
+// hviBaseArgs are the arguments that boot hvi against the base sum its disk
+// at disk was made from: the base's digest and, written to a file in dir,
+// the bitmap of the blocks hull wrote over it (the instance's own files).
+// hvi's blocks written since boot then start as those, so its migrate
+// stream carries every block that differs from the base.
+func hviBaseArgs(s *store.Store, dir, sum, disk string) ([]string, error) {
+	started := time.Now()
+	bits, n, err := diskWrittenBitmap(s.BasePath(sum), disk)
+	if err != nil {
+		return nil, fmt.Errorf("compare the disk with base %s: %w", digestHead(sum), err)
+	}
+	path := filepath.Join(dir, "disk-written.bitmap")
+	if err := os.WriteFile(path, bits, 0o600); err != nil {
+		return nil, err
+	}
+	log.Debugf("Disk %s differs from base %s in %d blocks (compared in %s)", disk, digestHead(sum), n,
+		time.Since(started))
+	return []string{hviDiskBaseFlag, sum, hviDiskWrittenFlag, path}, nil
+}

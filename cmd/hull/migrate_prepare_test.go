@@ -130,7 +130,7 @@ func prepareFixture(t *testing.T) (*moveFixture, *store.InstanceState) {
 	seedAssetDir(t, filepath.Join(f.src.RootDir(), "assets", bootassets.PortableArm64V1),
 		map[string]string{bootassets.ProfileKernelName: "the portable kernel"})
 	state := mustInstance(t, f.src, f.name)
-	state.Base = &store.BaseState{SHA256: sum, FromBoot: true}
+	state.Base = &store.BaseState{SHA256: sum}
 	state.Profile = bootassets.PortableArm64V1
 	if err := f.src.SaveInstance(state); err != nil {
 		t.Fatal(err)

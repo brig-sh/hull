@@ -16,9 +16,6 @@ package main
 
 import "os"
 
-// canStartWriteback says startWriteback does something here.
-const canStartWriteback = false
-
 // startWriteback starts nothing on macOS, which has no call that starts a
 // file's writeback without waiting for it.
 func startWriteback(*os.File, int64, int64) {}

@@ -131,11 +131,10 @@ type BaseState struct {
 	// SHA256 is the base's disk digest (docs/migration.md, "Bases"), which
 	// is also its file name under <store>/bases.
 	SHA256 string `json:"sha256"`
-	// FromBoot is set while the VMM that runs the instance is the one that
-	// booted from the fresh copy of the base. Only then do hvi's blocks
-	// dirtied since boot cover every difference from the base; a restore
-	// clears it, and a move then finds the difference by comparing.
-	FromBoot bool `json:"fromBoot,omitempty"`
+	// HviWhy says why the hvi running the instance was not booted against
+	// the base, when hull could not hand it over; a move then sends the
+	// whole bundle, and says this.
+	HviWhy string `json:"hviWhy,omitempty"`
 }
 
 // Migration states. A checkpointed instance kept running after the capture,

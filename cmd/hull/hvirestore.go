@@ -164,9 +164,11 @@ func hviRestoreArgv(cmdLine []string, from, controlSock, profilePath string) ([]
 		"--kernel": true, "--initramfs": true, "--cmdline": true, "--mem-mib": true,
 		"--cpus": true, "--fs-uid": true, "--fs-gid": true, "--from": true, hviFromStreamFlag: true,
 		"--control-sock": true, "--profile-out": true,
-		// The base digest describes the boot; a restored disk has moved on
-		// from it, and the bundle's disk.json carries what hvi recorded.
-		hviDiskBaseFlag: true,
+		// The base digest and the blocks written over it describe the
+		// boot; a restored disk has moved on from it, and the bundle's
+		// disk.json carries what hvi recorded. A move's restore names its
+		// base again itself (hviRestoreInstance).
+		hviDiskBaseFlag: true, hviDiskWrittenFlag: true,
 		// The machine profile is in the bundle's own profile.json, which
 		// hvi restore checks against the host; it takes no --profile.
 		"--profile": true,
@@ -294,6 +296,21 @@ func streamRestoreArgv(argv []string) []string {
 	return out
 }
 
+// moveRestoreBase adds the base to the restore argv of a streamed move's
+// destination (incoming, reading the stream on stdin): its --disk is a copy
+// of the base the stream's disk rounds go onto, and told the base, hvi
+// refuses a stream from another base, or one without disk rounds, either of
+// which would leave the bare base as the guest's disk. Every other restore
+// is left as it is: a directory restore takes no base, and an abort's
+// restore from the spool writes the disk rounds back onto the source's own
+// disk, which already holds them.
+func moveRestoreBase(argv []string, state *store.InstanceState, incoming bool) []string {
+	if !incoming || state.Base == nil || checkDiskDigest(state.Base.SHA256) != nil {
+		return argv
+	}
+	return append(argv, hviDiskBaseFlag, state.Base.SHA256)
+}
+
 // hviRestoreTakesStream reports whether the hvi at binary restores from a
 // stream (`restore --from-stream`), which a streamed move hands it on stdin.
 // Asked as the other probes are: hvi's restore parser answers an argument it
@@ -315,6 +332,31 @@ func hviRestoreTakesStream(binary string) (bool, error) {
 	}
 	text := out.String()
 	return !strings.Contains(text, fmt.Sprintf("unknown restore arg %q", hviFromStreamFlag)) &&
+		!strings.Contains(text, `unknown subcommand "restore"`), nil
+}
+
+// hviRestoreTakesStreamBase reports whether the hvi at binary restores a
+// stream's disk rounds onto a copy of the base it names (`restore
+// --disk-base-sha256`), as a stream-v3 move has it. An hvi from before
+// the disk rounds in its migrate stream answers `unknown restore arg
+// "--disk-base-sha256"`; one that knows it says the flag needs a value.
+func hviRestoreTakesStreamBase(binary string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var out bytes.Buffer
+	probe := exec.CommandContext(ctx, binary, "restore", hviDiskBaseFlag)
+	probe.Stdout = &out
+	probe.Stderr = &out
+	err := probe.Run()
+	if ctx.Err() != nil {
+		return false, fmt.Errorf("%s restore did not answer a probe within 5s", binary)
+	}
+	var exitErr *exec.ExitError
+	if err != nil && !errors.As(err, &exitErr) {
+		return false, fmt.Errorf("run %s: %w", binary, err)
+	}
+	text := out.String()
+	return !strings.Contains(text, fmt.Sprintf("unknown restore arg %q", hviDiskBaseFlag)) &&
 		!strings.Contains(text, `unknown subcommand "restore"`), nil
 }
 
@@ -537,6 +579,7 @@ func hviRestoreInstance(ctx context.Context, cmd *cli.Command, s *store.Store, s
 	if stream != nil {
 		argv = streamRestoreArgv(argv)
 	}
+	argv = moveRestoreBase(argv, state, stream == os.Stdin)
 	// hvi relays the guest's NIC to the gateway socket by path, so a restore
 	// on the same host re-joins the gateway the instance left, with the same
 	// MAC and so the same lease. A gateway that is not there would leave the
@@ -556,11 +599,6 @@ func hviRestoreInstance(ctx context.Context, cmd *cli.Command, s *store.Store, s
 	state.ControlSock = controlSock
 	state.ProfilePath = profilePath
 	state.Migration.State = store.MigrationRestoring
-	if state.Base != nil {
-		// The restored hvi's own record of dirty blocks starts here, not
-		// at the boot from the base.
-		state.Base.FromBoot = false
-	}
 	txid := state.Migration.TxID
 
 	type awaited struct {

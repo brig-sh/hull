@@ -41,7 +41,7 @@ import (
 
 // spoolContents is what a spooled stream holds, once every frame checked.
 type spoolContents struct {
-	// files are the components that are not RAM rounds, by name.
+	// files are the components that are not rounds, by name.
 	files    map[string][]byte
 	manifest []byte
 }
@@ -104,7 +104,7 @@ func verifySpool(dir string) (*spoolContents, error) {
 		frame := sha256.New()
 		dst := []io.Writer{frame}
 		var keep *bytesBuffer
-		if !isRAMRound(hdr.Component) {
+		if !isRound(hdr.Component) {
 			if kept+hdr.Size > spooledStateMax {
 				return nil, fmt.Errorf("the spooled stream's %s of %d bytes is too large to be a document",
 					hdr.Component, hdr.Size)

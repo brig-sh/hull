@@ -30,15 +30,13 @@ what can go wrong, and how to recover.
 > pair](#the-portable-profile-on-the-linux-pair)). A portable move between
 > this Mac and a Pi has not run.
 
-> **Streamed moves, 2026-10-15.** With an `hvi` that streams its
-> checkpoint and serves the disk rounds (`feat/teleport-fast` ef8d0ad and
-> `feat/teleport-fast-disk` 71d0253 merged, with `feat/teleport`'s malloc
-> arena fix, as d01daab on the branch `int/teleport-u5fix`; not pushed),
-> `hull migrate` sends the guest's RAM in pre-copy rounds while it runs and
-> only the disk blocks that differ from its image's base. A claude-code
-> guest moved from this Mac to a Pi with the guest stopped 0.33 to 0.56 s
-> when it wrote little to its disk and 1.76 s when it rewrote 10 MiB/s,
-> most of that the last disk round. See [Measured](#measured).
+> **Streamed moves, 2026-10-15.** With the pinned `hvi` (c4131f5), whose
+> `migrate` stream carries the disk rounds and takes the last one in the
+> pause, `hull migrate` relays that stream and the destination hands it
+> whole to `hvi restore --from-stream`. Between the Pis an ubuntu guest
+> moved in 2.3 to 5.1 s with 79 to 124 ms of downtime, idle or writing
+> 10 MiB/s to its disk, against 7.43 s for the whole bundle. See
+> [Measured](#measured).
 
 ## Usage
 
@@ -278,18 +276,25 @@ each bundle file against the manifest as it reads it.
 A move streams when both hosts can, and otherwise takes the whole-bundle
 path above and says why on its second line (`Transport: ...`). It needs:
 
-- an `hvi` here of checkpoint format 2 (the `checkpoint_format` in the
-  instance's machine profile), which has the `migrate` op;
-- a hull there whose probe lists the capability `stream-v2`, and an `hvi`
-  there that takes `restore --from-stream`;
-- a base of the instance's disk in this store (below). The destination
-  need not hold it yet: the move sends it before the guest stops.
+- an `hvi` here of checkpoint format 3 (the `checkpoint_format` in the
+  instance's machine profile), whose `migrate` stream carries the disk
+  rounds, and that was booted against the instance's base: its profile's
+  `disk_base_sha256` is the base `state.json` records (see
+  [Bases](#bases));
+- a hull there whose probe lists the capability `stream-v3`, and an `hvi`
+  there that takes `restore --from-stream` and `restore
+  --disk-base-sha256`;
+- the instance's base in this store. The destination need not hold it
+  yet: the move sends it before the guest stops.
 
 `--whole-bundle` asks for the old path. A hull from before streamed moves
 lists no capabilities, so the two still move instances the old way. A hull
-that lists only `stream-v1` (the first streamed moves, whose trailer had no
-account of the disk rounds and whose destination did not accept the header
-before the fence) gets the whole bundle too.
+that lists only `stream-v1` or `stream-v2` (whose streams carried disk
+blocks hull read itself, beside hvi's RAM rounds) gets the whole bundle,
+and so does this hull from one of them: neither reads the other's stream.
+An instance started by an older hull, whose `hvi` was not given its base,
+moves as a whole bundle until it runs again under this hull; the
+`Transport:` line says so.
 
 ### Bases
 
@@ -313,13 +318,19 @@ so two hosts build two bases of one image: a base goes to another host
 once per image, host it was built on and destination, and moves back of
 instances born on the source need no base at all.
 
-hull does not give `hvi` the base's digest (`--disk-base-sha256`): hvi
-defines it as the digest of the disk as it boots from it, and the
-instance's own files are written over the base before then, which hvi's
-blocks written since boot would not cover. A move finds every block that
-differs from the base by comparing the disk with it (round 0), then takes
-hvi's rounds. An instance recorded by an older hull, whose base was its
-own boot disk (`fromBoot`), still moves with hvi's blocks since boot.
+`hull run` boots `hvi` against the base: `--disk-base-sha256 <digest>`,
+and `--disk-written <instance>/disk-written.bitmap`, the bitmap of the
+64 KiB blocks where the instance's disk differs from the base once its own
+files are written in. hvi starts its blocks written since boot from that
+bitmap, so they are every block that differs from the base, and its
+`migrate` stream sends them as its disk rounds. hull finds them by reading
+each data block of the disk once and comparing it with the base's, then
+the base's data blocks that the disk holds as holes: 0.63 s for the
+1.6 GB claude-code disk on this Mac. A restore drops both flags; the
+restored hvi carries the blocks written since boot on from `disk.json`, so
+a second move from the destination still sends every block that differs
+from the base. An `hvi` that does not know `--disk-written` runs without
+either flag, and a move of the instance sends the whole bundle.
 
 A base is kept while something on the host needs it: an instance or a
 move record that names it, an image still in the store whose base it is,
@@ -339,9 +350,10 @@ an absolute boundary that holds a byte that is not zero, the block's index
 (u64) and its bytes; the last block may be short. A hole and a block of
 written zeros hash alike, so a clone, a sparse copy and a received copy of
 one image have one digest. It is not the image's plain sha256, which would
-have to read every hole. hvi's own docs call the value of
-`--disk-base-sha256` the disk's SHA-256; hvi does not read the disk to
-check it, and from hull it is this digest.
+have to read every hole. hvi does not read the disk to check the value of
+`--disk-base-sha256`; it records it in the machine profile, and a restore
+given `--disk-base-sha256` refuses a stream whose profile names another.
+From hull it is this digest.
 
 ### Preparing a destination
 
@@ -356,7 +368,7 @@ move then does not carry:
 |---|---|
 | image | `hull pull REF` there by the reference this store pulled it by, unless that store has the digest. The move does not need it; a later `hull run` there does. A failure is reported and fails nothing |
 | profile kernel | for a `--profile` instance, this store's kernel of that profile, when the destination has none. It is checked against the sha256 and installed through the same import as `HULL_PORTABLE_KERNEL`, from a copy kept under `bases/kernels/`. A destination that holds another kernel of the profile keeps it, and the step says so: a profile run there boots only its installed kernel, and whoever installed it expects those bytes. The move does not need the kernel |
-| base | the base, as lz4-compressed non-zero blocks (`HULLBAS1`); the destination writes it to a temporary file, keeps it only if what arrived has the base's digest, and makes it read-only. It also keeps a spare copy (`bases/spare/<digest>.ext4`), made again by every prepare after a move took it, which a streamed receive takes as the instance's disk: on the Pis, without clones, copying the 1.6 GB claude-code base took 22 s, all of it before the disk rounds could start |
+| base | the base, as lz4-compressed non-zero blocks (`HULLBAS1`); the destination writes it to a temporary file, keeps it only if what arrived has the base's digest, and makes it read-only. It also keeps a spare copy (`bases/spare/<digest>.ext4`), made again by every prepare after a move took it, which a streamed receive takes as the instance's disk: on the Pis, without clones, copying the 1.6 GB claude-code base took 22 s, all of it before the stream could start. A copy that is not a clone is synced before it is kept |
 | gateway | with `--remote-gateway-sock`, whether it answers. hull does not start one: brig starts the gateway with the session's policy |
 
 Each step finds its effect already there and sends nothing, so the command
@@ -373,128 +385,109 @@ it runs there are hidden: `migrate-take-image`, `migrate-take-kernel` and
 ### The order on the wire
 
 One ssh session runs `hull migrate-receive --stream --txid T --name N`, and
-its stdin carries, in this order:
+its stdin carries hull's header, then hvi's `migrate` stream relayed frame
+by frame as hvi writes it, then hull's trailer. hull drives no disk round
+of its own: hvi's stream holds them (hvi
+[checkpoint.md](../hvi-vmm/docs/checkpoint.md), "Live moves"):
 
-1. The disk rounds while the guest runs. Round 0 is every block that
-   differs from the base: every block of the disk compared with the base,
-   or, for an instance whose base was its own boot disk and whose `hvi`
-   booted from it or names it in its profile, hvi's blocks written since
-   boot. Rounds 1 to 4 are hvi's blocks written
-   since the round before, read with `disk-dirty` and `disk-blocks`, until
-   a round finds at most 32 blocks (2 MiB). Without hvi's rounds there is
-   only round 0.
-2. hvi's `migrate` stream, relayed frame by frame as hvi writes it: RAM
-   rounds while the guest runs, then the pause, the last RAM round, the
-   machine's documents and the manifest. hvi fences the guest once the
-   manifest is written to its socket.
-3. The last disk round: hvi's blocks written since the last round, read
-   once hvi has fenced the guest and synced its disk; or, without hvi's
-   rounds, the whole disk compared with what the destination holds.
-4. The trailer.
+1. `profile.json`.
+2. While the guest runs, for each round `k`: `disk-round-k`, the blocks
+   written since the disk round before (round 0: since boot, which with
+   `--disk-written` is every block that differs from the base), then
+   `ram-round-k`. The rounds stop when the RAM written during the last one
+   is small (`converged`), after 5 rounds (`round_cap`) or 60 s
+   (`time_cap`).
+3. hvi syncs the guest's disk with the guest still running, then pauses it.
+4. With the guest paused: `disk-round-final`, the blocks written since the
+   last disk round, then the last RAM round, the machine's documents
+   (`cpu.json`, `platform.json`, `devices.json`, `disk.json`,
+   `session.json`) and `manifest.json`, which lists every component with
+   its size and sha256, disk rounds included. hvi fences the guest once the
+   manifest is written to its socket, and its reply line follows.
 
-hvi serves one control connection at a time, so hull cannot read disk
-rounds while `migrate` holds the socket: the last disk round is read after
-the seal, not inside the pause, and it holds every block the guest wrote
-while hvi's RAM rounds ran. That is the guest's disk write rate times the
-time those rounds take, capped by how many distinct blocks the guest
-rewrites, and it is part of the downtime. hull sets the spool and the lock
-up before the disk rounds, so the last one runs right before `migrate`, and
-records the fastest rate the guest wrote at during the disk rounds
-(`diskWriteRate`) and the last round's size (`finalDiskBytes`).
-
-Nothing else bounds it. Limiting hvi's RAM rounds by that rate (`max_secs`)
-was tried and made the downtime worse: hvi checks the limit between rounds,
-so it stopped after RAM round 0 and took round 1 (30 MiB) with the guest
-paused, while the last disk round stayed at the same 484 blocks (the guest
-rewrote one 30 MiB region, however long the rounds ran). The fix is hvi's:
-disk rounds beside the RAM rounds, either as `disk-blocks` components inside
-the `migrate` stream with the last one taken inside the pause, or the disk
-ops served on a second connection while `migrate` runs. The guest never runs again after the
-pause, so that round and the RAM still describe one machine. It also means
-the `disk.json` hvi writes inside the pause does not list the last round,
-and the destination's restore cannot be given `--disk-generation`, whose
-value comes from that round. hull makes the same check itself (below).
+So the last disk round is taken inside the pause, after the sync, and holds
+only what the guest wrote during the last running round, and its bytes are
+covered by hvi's manifest like everything else. A stream-v2 move read its
+last disk round after hvi's seal, with every block written during the RAM
+rounds in it: 30 to 64 MiB, and up to 1.41 s of the downtime, for a guest
+rewriting 10 MiB/s.
 
 ### The format
 
 ```
-"HULLMIG2"
-'H' u32 len  {"txid", "name", "epoch", "baseSha256", "diskSize", "blockSize": 65536, "replay"?}
-'D' u32 len  {"round", "final"?, "first", "count", "codec": "lz4"|"raw", "rawSize", "size", "sha256"}
-             then size bytes: count adjacent blocks from first, lz4 when smaller
+"HULLMIG3"
+'H' u32 len  {"txid", "name", "epoch", "baseSha256", "diskSize", "replay"?, "attempt"?}
 'C' u32 len  hvi's frame header line, as hvi wrote it, then its bytes
-'T' u32 len  {"records", "chain", "hviReply", "disk"}
+'T' u32 len  {"records", "chain", "hviReply"}
 ```
 
-A disk batch's sha256 is of its raw bytes and is checked before a byte is
-written. An hvi frame is relayed with hvi's own header line, checked by the
-source as it reads it from hvi and by the destination as it passes it on;
-hvi checks it a third time. `chain` is a running sha256 over every record's
-kind and header, and `records` their number, so a record lost, added,
-moved or altered fails the move even when each payload is intact. The
-reader holds every length, index and name to limits before it allocates,
-and refuses a stream without its trailer or with bytes after it.
+Integers are big-endian. An hvi frame is relayed with hvi's own header
+line, checked by the source as it reads it from hvi and by the destination
+as it passes it on; hvi checks it a third time, and its manifest over all
+of them. `chain` is a running sha256 over every record's kind and header,
+and `records` their number, so a record lost, added, moved or altered
+fails the move even when each payload is intact. The reader holds every
+length and name to limits before it allocates, and refuses a stream
+without its trailer or with bytes after it. `hviReply` is hvi's reply to
+`migrate`, with its numbers.
 
-The trailer's `disk` is the source's account of the disk rounds:
-`{"engine", "rounds": [{"round", "final"?, "from": "hvi"|"compare",
-"blocks", "batches", "sentSha256", "generation"?, "bitmapSha256"?}]}`.
-`sentSha256` is the sha256 of the round's batch digests (the hex `sha256`
-of each `D` record) in order, with nothing between them. For a round from
-hvi it is hvi's own `sent_sha256`, which the source checks against the
-batches it read before it sends them; the source also checks each
-`disk-dirty` bitmap against its `bitmap_sha256`, and every `disk-blocks`
-reply's counts. The destination counts the batches of each round as it
-applies them and refuses, before hvi gets the machine:
-
-- a round whose blocks, batches or digest differ from the trailer's, or
-  one the trailer does not list;
-- for a live move with hvi's rounds, a round `disk.json` lists that the
-  stream does not carry, or whose `sent_sha256`, generation, block count
-  or bitmap digest there differ from the trailer's; `disk.json` is covered
-  by hvi's manifest;
-- a live move with hvi's rounds whose final round is missing, is not the
-  round after the last one `disk.json` lists, or was read at a generation
-  other than the one hvi captured the disk at: a write of the guest would
-  be missing. This is the check `hvi restore --disk-generation` makes.
-
-A replay sends the disk by comparison, which `disk.json` does not
-describe, so only the trailer's own account is checked there.
+hull treats a frame named `ram-round-*` or `disk-round-*` as a round: bulk
+data it relays and spools but never holds whole. Every other frame is a
+document, and the documents of one stream are held to 64 MiB together.
 
 ### The destination
 
-`migrate-receive --stream` copies the base to the instance's disk, applies
-each disk batch to it, and starts `hull restore --detach --paused --move T`
-with a pipe as its stdin once `profile.json` has arrived and matched the
-move's machine profile; that restore runs `hvi restore --from-stream -`,
-which reads the pipe. While the stream arrives it reads the base and
-checks that its blocks hash to the digest it is named by; one that does
-not is set aside as `<digest>.ext4.bad-<time>` and the move refused with
-`no_base`, so the source sends the base again and goes on from its spool.
-RAM frames go to hvi as they arrive, so no RAM reaches the destination's
-disk. The machine's documents and the manifest
-are held until the trailer has checked out and the last disk round is
-written; only then does hvi get them, check its manifest and build the
-machine over the disk, which is complete by then. hvi reads the disk
-through the page cache, so the sync that makes the last round durable runs
-while hvi builds the machine rather than before. The move is `verified`,
-and the guest `restored-paused`, once hull, hvi and that sync are done. The
-documents are kept in the move's checkpoint directory for the record.
+`migrate-receive --stream` takes the base's spare copy as the instance's
+disk (or copies the base when there is none), syncs it, and records that
+it took this attempt's header (`streamAccepted`); the source waits for
+that before it asks hvi to `migrate`, so a refusal of the header comes
+while the guest still runs. A copy whose writeback is still under way
+would cost the downtime: hvi syncs the disk after the rounds it writes and
+waits for that before the guest may run, and on rp2 an unsynced 64 MiB
+copy made that 4 to 20 s.
+
+Once `profile.json` has arrived and matched the move's machine profile, it
+starts `hull restore --detach --paused --move T`, which runs `hvi restore
+--from-stream - --disk <the copy> --disk-base-sha256 <base>` with a pipe as
+its stdin, and from then on hands every frame to that pipe as it arrives.
+hvi writes the disk rounds into the copy and the RAM rounds into guest RAM
+as they come, so no RAM reaches the destination's disk. Once it has the
+manifest it checks it against every frame, checks the disk rounds against
+`disk.json` (each round's bitmap and digest, the last one taken paused, at
+the generation the disk was captured at), syncs the disk and builds the
+machine; told the base, it refuses a stream from another base or one with
+no disk rounds, either of which would leave the bare base as the guest's
+disk. While the stream arrives hull reads the base and checks that its
+blocks hash to the digest it is named by; one that does not is set aside
+as `<digest>.ext4.bad-<time>` and the move refused with `no_base`, so the
+source sends the base again and goes on from its spool. The move is
+`verified`, and the guest `restored-paused`, once hull has checked the
+trailer, hvi has restored and the base has checked out. The documents are
+kept in the move's checkpoint directory for the record.
 
 ### Failures and the spool
 
-The source keeps hvi's stream as hvi wrote it in
+The source keeps hvi's stream as hvi wrote it, disk rounds included, in
 `<instance>/checkpoint/<txid>/stream`, with the documents beside it and a
 `sealed` file once it is complete and synced. It reads hvi's stream to its
 end whatever the destination does: hvi fences the guest as soon as its
-last bytes are in the socket's buffer, and a fenced source must hold a
-whole copy to restore from. So:
+manifest is in the socket's buffer, and a fenced source must hold a whole
+copy to restore from. So:
 
-- a stream that fails before hvi seals it leaves the guest running here,
-  and running the move again streams it from the start;
-- one that fails after leaves the guest fenced with its spool recorded as
-  the instance's checkpoint (`migrating`). Running the move again sends the
-  spool (`"replay": true`) and the disk compared with the base; `--abort`
-  restores the guest here from the spool with `hvi restore --from-stream`.
+- a stream that ends before hvi's manifest (a refusal, a failed capture,
+  a pause whose vCPUs did not park in time, a reader hvi cut for stalling,
+  a lost connection) means hvi did not fence: the guest runs on here. The
+  move's error and its record say "hvi's stream ended before its manifest,
+  so the guest runs on here", `--abort` leaves it running, and running the
+  move again streams it from the start;
+- one that fails after the manifest leaves the guest fenced with its spool
+  recorded as the instance's checkpoint (`migrating`). Running the move
+  again sends the spool (`"replay": true`) to a fresh copy of the base
+  there; `--abort` restores the guest here from the spool with `hvi
+  restore --from-stream`, which writes the spool's disk rounds back onto
+  the guest's own disk, in order, and so leaves it as it was at the fence
+  (every block they hold, the disk already holds; doing it again after a
+  crash ends the same way).
 
 From hvi's `migrate` op until the fence is recorded, the stream hull is
 reading is the guest. In that window:
@@ -509,15 +502,40 @@ reading is the guest. In that window:
   spool frame by frame against the manifest it ends with, and seal it when
   it is whole.
 - A spool that is not whole (cut short, or never written) is taken again
-  from hvi, which streams a fenced guest again, unchanged, since it has not
-  run since the fence. An abort stops the fenced `hvi` only once the spool
-  is whole. If the spool is not whole and that `hvi` is gone, this host has
-  no copy of the guest; the error says so, and no longer suggests an abort
-  that cannot work. If the destination verified the stream, running the
-  move again commits it there.
+  from hvi while it holds the fenced guest. hvi streams a fenced guest
+  again only for the `txid` and `epoch` that fenced it, which hull sends
+  from the move's record; any other is refused with `fenced`. That second
+  stream is the same machine, the RAM and disk of the fence, in other
+  bytes: one RAM round, one disk round (`disk-round-final`) of every block
+  written since boot, the documents as first sent, and a manifest of its
+  own, whose sha256 is never the first one's. Its reply names the first
+  manifest (`stats.first_manifest_sha256`); hull holds that to the one on
+  record, when the instance's record or the move's has it, and refuses a
+  second stream of another fence, emptying the spool so no later check
+  seals it. The instance's record and the move's then name the new
+  manifest, and the move's keeps the first as `firstManifestSha256`.
+- An abort stops the fenced `hvi` only once the spool is whole. If the
+  spool is not whole and that `hvi` is gone, this host has no copy of the
+  guest; the error says so, and does not suggest an abort that cannot
+  work.
+
+The second stream is restored only where the first never ran: on this host
+by an abort, which first has the destination's word that it keeps nothing
+of the move, or on the destination by a re-run, whose receive stops any hvi
+an earlier attempt started there before it reads the new stream. A
+destination never resumes a guest before the source's commit, and the
+source commits only after its record holds what the destination verified.
+
+A source killed after the destination verified the stream, before its own
+record took what it sent, leaves the destination `restored-paused` and the
+move's record without an account of the stream. Running the move again
+then adopts the fence from the spool (whole, or streamed again as above)
+and commits the destination's copy, without sending the guest again, when
+the manifest the destination verified is the one the guest was fenced
+with; any other manifest is refused and the source stays fenced.
 
 On a busy disk every synced write is a wait the stopped guest sits
-through, so from hvi's seal to the commit each host makes one:
+through, so from hvi's seal to the commit the source makes one:
 
 - The source puts the fence (the spool, its manifest, the disk as fenced)
   on the move's record in memory, and writes it with the commit point
@@ -525,27 +543,18 @@ through, so from hvi's seal to the commit each host makes one:
   commit waits for. The move's record, synced at `transferring` before the
   stream began, already keeps the instance from running here meanwhile.
   The instance's own records of the fence (`latest.json`, `state.json`)
-  are written beside the last disk round, the trailer and the
-  destination's checks, and the commit does not wait for them.
-- The spool is not synced while the stream runs, and its seal syncs it
-  only once the commit is answered or the move stops: on the Pis a sync of
-  the spool beside the commit point's record held that record up for
-  13 s. `hull migrate` waits for the seal before it exits.
-- The destination syncs its disk in the background every 32 MiB and once
-  the disk rounds that ran with the guest running are in, so the sync after
-  the stream has only the last round to write, and that sync overlaps
-  hvi's restore. hvi's documents kept beside its record are written
-  without a sync (hvi has the machine from the stream), and it records
-  `received`, `verified` and `restored-paused` in one write.
-
-A source that dies after hvi's seal leaves a destination that may have
-verified the stream and a fence this host may not have recorded: a re-run
-then refuses to commit without a record of what it sent, and `--abort`
-brings the guest back here from the spool (or from hvi, streaming the
-fenced guest again). An abort finds the spool of a move whose hvi no
-longer answers (a source host that went down) and restores from it when it
-checks out whole. The source pays for the spool with a write of the
-guest's touched RAM to its own disk.
+  are written beside the trailer and the destination's checks, and the
+  commit does not wait for them.
+- The spool is not synced while the stream runs (its writeback is started
+  every 32 MiB), and its seal syncs it only once the commit is answered or
+  the move stops. `hull migrate` waits for the seal before it exits.
+- The destination writes hvi's documents beside its record without a sync
+  (hvi has the machine from the stream) and records `received`,
+  `verified` and `restored-paused` in one write. Its commit still makes
+  four synced writes before the resume (the instance's epoch, the ledger,
+  the record, and the instance's record of the running guest); on a disk
+  whose 4 KiB `fsync` takes 2 s they cost seconds of downtime (see
+  [Measured](#measured)).
 
 A destination whose `hvi` refuses the machine stops reading, and the
 refusal is the move's error, with code `restore_refused`.
@@ -556,103 +565,122 @@ refusal is the move's error, with code `restore_refused`.
 
 | Field | Meaning |
 |---|---|
-| `mode` | `live`, or `replay` for a spool sent again |
-| `diskEngine` | `hvi` (hvi's rounds) or `compare` (hull compared the disk with the base) |
-| `rounds` | each disk round, RAM round and document: `kind`, `name`, `blocks`, `bytes`, `wireBytes`, `seconds`, and for a disk round after the first `dirtyPerSec`, the blocks the guest wrote per second during the round before |
-| `diskBytes`, `diskWireBytes`, `ramBytes`, `stateBytes`, `wireBytes`, `seconds` | totals |
-| `pausedAt`, `sealedMs` | when hvi's pre-copy rounds ended and how long until it sealed, from hvi's reply |
-| `finalDiskMs`, `finalDiskBytes` | the last disk round's time and data |
-| `diskWriteRate` | the fastest the guest wrote to its disk during the disk rounds, in bytes a second |
-| `downtimeMs` | from `pausedAt` to the destination's resume, on two hosts' clocks |
+| `mode` | `live`; `replay` for a spool sent again; `adopted` for a destination's copy verified in an earlier attempt and committed without sending |
+| `rounds` | each of hvi's rounds and documents as relayed: `kind` (`disk`, `ram` or `state`), `name` (hvi's component name), `bytes`, `wireBytes`, `seconds`, and from hvi's reply `final` (taken paused) and, for a disk round, `blocks` and `bytes` as raw block bytes |
+| `diskBytes`, `diskWireBytes`, `ramBytes`, `stateBytes`, `wireBytes`, `seconds` | totals: the disk rounds' raw bytes (hvi's `disk_raw_bytes`) and their bytes on the wire, RAM as hvi framed it, documents, the whole stream |
+| `roundsEndAt`, `pausedAt`, `sealedMs` | when hvi's last round with the guest running ended (`rounds_end_unix_ms`), when it paused the guest after the sync that follows (`precopy_end_unix_ms`), and how long from the pause to its seal |
+| `finalDiskMs`, `finalDiskBytes` | `disk-round-final`: hvi's time for it and its raw bytes |
+| `stopReason`, `hviPausedMs`, `diskSyncMs`, `pauseSyncMs` | from hvi's reply: why the running rounds stopped, the source's part of the downtime, the disk's sync before the pause and the one in it |
+| `downtimeMs` | from `pausedAt` to the destination's resume, on two hosts' clocks; it counts the destination's commit writes twice, so it reads high |
 | `chain` | the trailer's hash, which the destination's record must match |
-| `hviReply` | hvi's reply to `migrate`, with its own rounds, dirty rates and pause |
-| `steps` | when this host reached each step from hvi's seal to the commit, by its own clock; the destination's record has its own (`trailer read`, `hvi restored the guest paused`, `disk synced`) |
+| `hviReply` | hvi's reply to `migrate`, as hvi wrote it |
+| `steps` | when this host reached each step from hvi's seal to the commit, by its own clock; the destination's record has its own (`trailer read`, `hvi restored the guest paused`, `base checked`) |
 
-Progress goes to stderr, one line per round prefixed `move: `, and every
-two seconds of a long round.
+A source that took the spool from hvi again also records
+`firstManifestSha256` beside `manifestSha256`.
+
+Progress goes to stderr prefixed `move: `: one line per round as it ends,
+named as hvi names it (`disk-round-0: 98.5 MiB in 1.73 s, 56.8 MiB/s`,
+`ram-round-0: ...`, `disk-round-final: ...`), a line every two seconds of a
+long round (`... so far ...`), then `hvi: 5 RAM rounds (converged), disk
+rounds of 5426, 487, 0, 0, 0 blocks (369.6 MiB, 128.5 MiB on the wire);
+paused 8 ms, disk sync 0 ms before the pause and 0 ms in it` from hvi's
+reply, `hvi sealed the stream and fenced NAME (5 ms after the pause)`, and
+the summary after the commit (`...; sealed 5 ms after the pause, last disk
+round 0 bytes in 0 ms; downtime about 102 ms`). A stream that ends before
+the manifest prints `hvi did not fence NAME: ... the guest runs on here`.
 
 ### Measured
 
-2026-10-15. `hvi` d01daab (above), built on each host from that commit
-(the two Pis' binaries are identical, sha256 e156dcc0f723...). hull at the
-commit named per row. The guest's downtime is the rise in the `downtime
-total` its `hvi-time` driver logs, which counts the time its clock was
-stopped; "wall clock moved" also counts any lag the guest's clock had
-before the move (one move logged 1947 ms of it against 571 ms of
-downtime). hull's `downtimeMs` reads a few ms to 120 ms above it. After
-every move the guest's counter had no gap, and its `boot_id`, the blob's
-sha256 and the deleted file still open on fd 4 were unchanged.
+2026-10-15. hull at c04acb6 (the stream-v3 move), `hvi` c4131f5, the
+`hvi-vmm` pin, built on each host. The guest's downtime is the rise in the
+`downtime total` its `hvi-time` driver logs across the move, which counts
+the time its clock was stopped. After every move the guest's counter had no
+gap, and its `boot_id`, the blob's sha256 and the deleted file still open on
+fd 4 were unchanged.
 
 Guests: `docker.io/library/ubuntu:latest` (1 GiB, 1 vCPU) on the Pis and
 `ghcr.io/brig-sh/claude-code-stock:root` (4 GiB, 4 vCPUs) from the Mac,
-both `--profile portable-arm64-v1`, block rootfs, `--net none`. "Writer"
-appends a counter ten times a second, syncs every tenth, and rewrites
-1 MiB of a 64 MiB file every 0.1 s (about 10 MiB/s); "light" is the same
-without the rewrites.
+both `--profile portable-arm64-v1`, block rootfs, `--net none`. "Idle" and
+"light" append a counter ten times a second and sync every tenth; "writer"
+also rewrites 1 MiB of a 64 MiB file every 0.1 s (about 10 MiB/s); "256 MiB
+dirtier" adds a loop rewriting 256 MiB of tmpfs with random bytes to the
+writer. Every destination was prepared (`hull migrate-prepare`) first.
 
-| Move | hull | Guest | Total | Stopped | Of which the last disk round |
-|---|---|---|---|---|---|
-| this Mac to itself, through `HULL_MIGRATE_SSH` | ac5dbc6 | claude-code, writer | 3.8 s | 305 ms | 20.2 MiB in 74 ms |
-| this Mac to rp1 | ac5dbc6 | claude-code, light | 12.4 s | 559 ms | 0.5 MiB in 14 ms |
-| this Mac to rp1 | ebd638f | claude-code, light | 28.1 s | 332 ms | 0.25 MiB in 17 ms |
-| this Mac to rp1 | ac5dbc6 | claude-code, writer | 15.8 s | 1.76 s | 60.2 MiB in 1.41 s |
-| rp2 to rp1 | 3bdad7a | ubuntu, writer | 6.1 s | 514 ms | 20.2 MiB in 239 ms |
-| rp1 to rp2 | 7d50ddf | ubuntu, writer | 73.8 s | 1.79 s | 64.6 MiB in 1.52 s |
-| rp1 to rp2 | d4ae775 | ubuntu, 256 MiB dirtier and writer | 35.2 s | 4.51 s | 64.4 MiB in 0.79 s |
+| Move | Guest | Total | Downtime | Sent | Disk rounds (blocks) | RAM rounds |
+|---|---|---|---|---|---|---|
+| rp1 to rp2, before: hull 331bf8c, `--whole-bundle` | ubuntu, writer | 8.2 s | 7.43 s | 288.2 MiB | the whole disk | the whole RAM, paused |
+| rp1 to rp2 | ubuntu, idle | 2.29 s | 78.6 ms | 109.5 MiB: disk 275.0 MiB as 34.5 MiB, RAM 74.9 MiB | 4393, 7, 0 | 3 (converged) |
+| rp2 to rp1 | ubuntu, idle | 2.29 s | 84.0 ms | 109.6 MiB: disk 274.9 MiB as 34.5 MiB, RAM 75.0 MiB | 4396, 3, 0 | 3 (converged) |
+| rp1 to rp2 | ubuntu, writer | 5.13 s | 94.7 ms | 310.4 MiB: disk 369.6 MiB as 128.5 MiB, RAM 181.8 MiB | 5426, 487, 0, 0, 0 | 5 (converged) |
+| rp2 to rp1 | ubuntu, writer | 4.55 s | 123.7 ms | 305.9 MiB: disk 369.8 MiB as 128.5 MiB, RAM 177.3 MiB | 5430, 486, 0, 0, 0 | 5 (converged) |
+| rp1 to rp2 | ubuntu, 256 MiB dirtier | 65.0 s | 3.49 s | 1.7 GiB: disk 449.8 MiB as 208.6 MiB, RAM 1.5 GiB | 5419, 487, 324, 483, 484 | 5 (time_cap), the last 294 MiB |
+| rp2 to rp1 | ubuntu, 256 MiB dirtier | 43.2 s | 3.40 s | 2.1 GiB: disk 500.2 MiB as 258.6 MiB, RAM 1.8 GiB | 5425, 804, 324, 483, 484, 484 | 6 (round_cap), the last 293 MiB |
+| this Mac to rp1, a 1 MB/s link | claude-code, light | 129 s | 6.45 s | 122.7 MiB: disk 284.5 MiB as 34.7 MiB, RAM 87.9 MiB | 4523, 29 | 2 (time_cap) |
 
-The 28.1 s move spent 21.9 s waiting for rp1 to copy the 1.6 GB base (ext4,
-no clones); the spare copy a prepare now makes took that to 0.25 s. The
-12.4 s move ran when the link gave 10 MiB/s, a third of the others. The
-73.8 s move streamed at 6.4 MiB/s while rp2 ran another project's builds. The first prepare of rp1 for claude-code took
-54 s (image pull, kernel, the base's 1.5 GiB of data as 740.8 MiB in
-21.4 s); a second instance of the image found the base there (1 s), and a
-second `hull run` of an image took 1.5 s on a Pi (ubuntu) and under 1 s on
-this Mac. On rp1 a `hull run` of claude-code took 8.9 s and 7.3 s once its
-base was built (a copy of the base's data, ext4 having no clones); the
-first, which built the base, took 69 s with rp1 at load 8 from other work.
-On HVF hvi served 7088 write faults at 4.75 us each for the writer and 1166
-at 7.5 us for the light guest.
+- The writer's final disk round was empty, and the dirtier's 484 blocks
+  (30.2 MiB) took 0.29 to 0.33 s to read and send inside the pause: the
+  last running round is a few seconds long, so the round taken paused
+  holds what the guest wrote in those seconds. With stream-v2 the same
+  writer's last disk round, read after the seal, was 20 to 64 MiB.
+- Disk round 0 of the ubuntu guest is 4393 to 5509 blocks (275 to
+  360 MiB) though it wrote little: ext4's lazy init zeroes the inode
+  tables after the first boot, and those blocks compress to 34 MiB.
+  Moved back, round 0 sends them again: the restored hvi carries the
+  blocks written since boot, so every move sends every block that
+  differs from the base.
+- The dirtier never converges: the downtime is its last RAM round
+  (293 MiB) and the last disk round at the link's rate, as with
+  stream-v2's 4.51 s for the same guest.
+- The Mac's link to rp1 gave 1.0 MB/s that day (16 to 53 ms round trip),
+  against 10 to 46 MB/s on earlier days, so that row measures the link:
+  RAM round 0 took 90 s and hit the time cap, and the RAM round taken
+  paused (3.1 MiB) took 3.05 s to send. The prepare that sent the 1.5 GiB
+  base as 740.8 MiB took 935 s on the same link. `hull run` of
+  claude-code on this Mac compared its disk with the base in 0.63 s.
+- hull's own part of the downtime, from hvi's seal to the destination's
+  resume, was 55 to 90 ms in the idle and writer moves on the Pis.
 
-Under a busy disk, an O_DIRECT writer on both Pis (a 4 KiB fsync then took
-0.73 s; rp2 also logged NVMe aborts), with the ubuntu writer:
+Under a busy disk, an O_DIRECT writer (`dd oflag=direct`, 4 MiB blocks)
+on both Pis, with the ubuntu writer. A 4 KiB `fsync` took 0.25 to 0.95 s
+on rp1 and 2.0 to 8.2 s on rp2 during these runs.
 
 | hull | rp1 to rp2 | rp2 to rp1 |
 |---|---|---|
-| 331bf8c (before these fixes) | 91.3 s | 38.9 s |
-| 3bdad7a (spool sync off the trailer) | 1.40 s | 28.5 s |
-| 76baf68 (trailer no longer waits for the fence record) | 16.8 s | |
-| between 76baf68 and 7d50ddf: the fence records side by side, no spool sync mid-stream | | 23.0 s |
-| between 76baf68 and 7d50ddf: the fence on the move's record, the spool's sync still beside the commit | 13.9 s | |
-| d4ae775 (a 4 KiB fsync took 1.4 s) | 7.39 s | |
+| 331bf8c (stream-v1) | 91.3 s down, 338.6 s total | 38.9 s down, 84.4 s total |
+| d4ae775 (stream-v2) | 7.39 s down, 50.1 s total | |
+| c04acb6 (stream-v3) | 10.98 s down, 96.8 s total (after the failed attempt below) | 0.66 s down, 19.9 s total |
 
-The steps on record placed what was left. In the d4ae775 move, hvi's own
-pause took 4.9 s from the end of its pre-copy rounds to its seal (its
-`fdatasync` of the guest's disk is inside it), the last disk round 0.9 s,
-the destination's checks and restore 0.14 s, the source's commit point
-1.4 s (one synced write) and the destination's commit 0.1 s. In the
-intermediate builds the destination's `hull restore --move` and its
-records took up to 4.9 s and its commit's three synced writes 1.3 to 2.6 s. With that writer hvi's pause failed in 5 of 12
-attempts ("0 of 1 vCPUs parked in time"), and in the d4ae775 run once more;
-the guest ran on each time and a re-run moved it. Without the writer it
-happened 5 more times: three moving the 256 MiB dirtier off rp2 while
-another project's builds kept rp2 at load 7 to 8 with swap in use, and two
-off a quiet rp1.
+- rp1 to rp2: hvi's pause took 3.35 s of it (`paused_ms`; 2.25 s of that
+  the sync in the pause, and 13.8 s the sync before it, with the guest
+  running); the destination's record and its answer took 1.6 s, the
+  source's commit point 2.4 s and the destination's commit, four synced writes and the
+  resume, 3.8 s. rp2's disk was slower than in the d4ae775 run (a 4 KiB
+  `fsync` 2.0 s, against 1.4 s), and the synced writes the commit makes
+  on both hosts are now most of the downtime.
+- The first attempt of that move failed with the guest running on: rp2
+  had no spare base, so the receive copied it (83.6 s), and the
+  destination's hvi, writing the disk rounds into its copy, stalled
+  reading for over 30 s; the source's hvi cut the stream in its second
+  RAM round, before the manifest, and hull reported "hvi's stream ended
+  before its manifest, so the guest runs on here". A prepare made the
+  spare and the move run again with the same txid went through.
 
-A guest dirtying 256 MiB in a loop reached hvi's round cap: with d4ae775,
-RAM rounds of 394, 301, 287, 287, 289 MiB with the guest running and 288 MiB
-with it stopped, at 67 to 84 MiB/s, and its counter and files came through
-whole. Before the writeback fix the same guest was stopped 51.5 s: the
-source throttled its own writes on 1.9 GiB of dirty spool, and the last
-RAM and disk rounds crawled at 22 and 3.5 MiB/s.
+hull killed with SIGKILL as hvi's seal line appeared (rp1 to rp2):
 
-hull killed with SIGKILL as hvi's seal line appeared (d4ae775, rp1 to rp2):
-the move's record had no fence and the spool no `sealed`. `hull migrate
---abort` found the spool whole, sealed it, stopped the fenced hvi and
-restored the guest from the spool with `hvi restore --from-stream`, in 1 s.
-With the spool cut in half before the abort, the abort had the fenced hvi
-stream the guest again (138.7 MiB, the round after it empty) and restored
-from that, in 2 s. Both times the counter went on with no gap and
-`boot_id`, the blob and the deleted file were unchanged.
+- The move's record had no fence and the spool no `sealed`. `hull migrate
+  --abort` found the spool whole, sealed it, stopped the fenced hvi and
+  restored the guest from the spool with `hvi restore --from-stream`,
+  which wrote the spool's disk rounds back onto the guest's own disk.
+- In a second run the kill landed after the destination had verified the
+  stream (`restored-paused` on rp2). With the spool then cut to 1 MB by
+  hand, the re-run had the fenced hvi stream the guest again (one RAM
+  round, one disk round of 5515 blocks, in 1.4 s), found its reply's first
+  manifest equal to the fence's and the destination's, adopted the fence
+  and committed the destination's copy without sending it again.
+
+Both times the guest went on with no gap in its counter and the same
+`boot_id`, blob and open file.
 
 ## Records
 
@@ -665,6 +693,7 @@ Both hosts keep `<store>/instances/<name>/migration.json`, 0600:
 | `remote` | source only: `target`, `store`, `hull`, `hvi`, `gatewaySock`, `allowNoRestore` |
 | `destReleased` | source only, once aborted: the destination confirmed it keeps nothing of the move |
 | `bundleDir`, `manifestSha256` | the fenced checkpoint, on either host |
+| `firstManifestSha256` | source of a streamed move only, once hvi streamed the fenced guest again: the manifest the fence came with |
 | `disk` | `path`, `size`, `modNs` (at the fence), `sha256`, `dataBytes` |
 | `transfer` | `bytes`, `seconds`, `bytesPerSec`, `startedAt` |
 | `spec` | destination only: what the source asked it to build (MAC, IP, sandbox id, network) |
@@ -672,7 +701,7 @@ Both hosts keep `<store>/instances/<name>/migration.json`, 0600:
 | `timingsMs` | milliseconds per step: `fence`, `transfer`, `prepare`, `commit`, `restore`, `resume` |
 | `transport` | `stream` for a streamed move, absent for the whole bundle; chosen at preflight and kept for retries |
 | `transportWhy` | why the move took the whole bundle |
-| `baseSha256` | the base a streamed move's disk blocks apply to |
+| `baseSha256` | the base a streamed move's disk rounds apply to |
 | `stream` | a streamed move's numbers, below |
 | `error` | why the last step stopped |
 | `history` | every state, with its time |
@@ -702,9 +731,10 @@ destination before the commit), and two fields, `moveTxid` and `peer`.
 | `hvi checkpoint-verify` fails | fenced, `transferring` | `received` with the error | `--abort` |
 | restore refused | fenced, `transferred` | `verified` with the error | fix the destination and run it again, or `--abort` |
 | the commit's reply is lost | fenced, `committing` | `restored-paused` or `running` | run it again: it learns the commit |
-| streamed: the stream fails before hvi seals it | running (hvi resumes it), `transferring` | `receiving` with the error | run it again: it streams from the start; or `--abort` |
-| streamed: the stream fails after hvi sealed it | fenced, with the whole stream in its spool, `transferring` | `receiving` with the error | run it again: it sends the spool and the disk compared with the base; or `--abort`, which restores the guest here from the spool |
-| streamed: hull is killed after hvi sealed the stream, before its own seal | fenced, `transferring`, the spool without `sealed` | `receiving` | run it again or `--abort`: each checks the spool frame by frame and seals it, or has hvi stream the fenced guest again; with neither possible the error says no copy is left here |
+| streamed: hvi's stream ends before its manifest (a refusal, a failed capture or park, a reader hvi cut for stalling) | running, unfenced, `transferring`; the error says the guest runs on here | `receiving` with the error | run it again: it streams from the start; or `--abort`, which leaves the guest running |
+| streamed: the stream fails after hvi's manifest | fenced, with the whole stream in its spool, `transferring` | `receiving` with the error | run it again: it sends the spool, disk rounds and all; or `--abort`, which restores the guest here from the spool |
+| streamed: hull is killed after hvi's manifest, before its own seal | fenced, `transferring`, the spool without `sealed` | `receiving` | run it again or `--abort`: each checks the spool frame by frame and seals it, or has hvi stream the fenced guest again for the move's txid and epoch; with neither possible the error says no copy is left here |
+| streamed: hull is killed after the destination verified the stream | fenced, `transferring`, no account of the stream on record | `restored-paused` | run it again: it adopts the fence from the spool and commits the destination's copy when its manifest is the fence's; or `--abort` |
 | streamed: the destination lacks the base, or refuses the header | running, `transferring` | `receiving`, code `no_base` (or why) | before hvi's `migrate` starts the source waits until the destination's record says it took this attempt's header and copied the base (`streamAccepted`), so a refusal there comes while the guest runs. On `no_base` the source sends the base and tries once more by itself |
 | commit refused (wrong epoch, aborted) | fenced, `committing` | `aborted` or other | `--abort` |
 | the resume fails after the commit | `committed` (the destination owns it) | `running` with the error | `hull resume NAME` on the destination |

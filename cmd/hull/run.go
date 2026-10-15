@@ -29,6 +29,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -1564,13 +1565,32 @@ exec %s "$@"
 				"--checkpoint-root", root)
 			// A checkpointable guest on a block rootfs can be moved, and a
 			// move sends only what differs from its image's base when the
-			// destination holds that base. hvi is not given the base's
-			// digest (--disk-base-sha256): that names the disk as hvi
-			// opens it, and this disk has the instance's own files written
-			// over the base, which hvi's since-boot blocks do not cover. A
-			// move finds those by comparing the disk with the base.
-			if rootfsDiskImage != "" && rootfsBase != "" {
+			// destination holds that base. hvi is given the base's digest
+			// and the blocks this run wrote over it (the instance's own
+			// files), so its blocks written since boot are every block that
+			// differs from the base, and its migrate stream carries them. An
+			// hvi without --disk-written runs without both, and a move of
+			// this instance sends the whole bundle.
+			if rootfsDiskImage != "" && rootfsBase != "" && slices.Contains(cmdArgs, "--disk") {
 				instanceBase = &store.BaseState{SHA256: rootfsBase}
+				knows, err := hviBootKnowsFlag(cmdArgs[0], hviDiskWrittenFlag)
+				switch {
+				case err != nil:
+					instanceBase.HviWhy = fmt.Sprintf("hull could not ask %s about %s (%v)", cmdArgs[0],
+						hviDiskWrittenFlag, err)
+				case !knows:
+					instanceBase.HviWhy = fmt.Sprintf("%s takes no %s", cmdArgs[0], hviDiskWrittenFlag)
+				default:
+					args, err := hviBaseArgs(s, instanceDir, rootfsBase, rootfsDiskImage)
+					if err != nil {
+						instanceBase.HviWhy = err.Error()
+					} else {
+						cmdArgs = append(cmdArgs, args...)
+					}
+				}
+				if instanceBase.HviWhy != "" {
+					log.Warnf("%s; a move of %s will send its whole disk", instanceBase.HviWhy, instanceName)
+				}
 			}
 		} else if profile != "" {
 			// A profile exists to be checkpointed and moved, and without
