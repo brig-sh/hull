@@ -372,21 +372,34 @@ func (ss *streamSender) relayFrame(f *roundFolder, line []byte, hdr hviComponent
 
 // relayHvi runs hvi's migrate op and relays its frames into the stream and
 // the spool. It returns hvi's reply line once hvi has sealed the stream and
-// fenced the guest. A stream that ends before its manifest is an
-// *hviRanOnError: hvi fences only once the manifest is written, so the
-// guest runs on.
+// fenced the guest. A stream that ends before its manifest without a fence
+// is an *hviRanOnError: hvi refused it, or it broke and hvi says the guest
+// is not fenced (fenceAfterBreak).
 func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][]byte, error) {
 	m := ss.m
 	conn, br, err := hviStreamOp(ss.state.ControlSock, map[string]any{"op": "migrate", "then": hviThenFence,
 		"txid": m.rec.TxID, "epoch": m.rec.Epoch}, hviStreamIdle)
 	if err != nil {
+		// hvi never had the request, so the guest is as it was.
 		return nil, nil, &hviRanOnError{err: err}
 	}
-	defer func() { _ = conn.Close() }()
+	closed := false
+	closeConn := func() {
+		if !closed {
+			closed = true
+			_ = conn.Close()
+		}
+	}
+	defer closeConn()
 	files := map[string][]byte{}
 	var kept int64
 	folder := &roundFolder{ss: ss}
 	reply, line, err := readHviComponents("migrate", br, func(line []byte, hdr hviComponentHeader, body io.Reader) error {
+		if relayFrameTestHook != nil {
+			if err := relayFrameTestHook(hdr.Component); err != nil {
+				return err
+			}
+		}
 		if ss.manifest != nil {
 			return fmt.Errorf("hvi's %s comes after its manifest", hdr.Component)
 		}
@@ -424,9 +437,14 @@ func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][
 		return nil
 	})
 	folder.flush()
+	var refused *hviRefusal
 	switch {
-	case err != nil && ss.manifest == nil:
+	case err != nil && ss.manifest == nil && errors.As(err, &refused):
+		// hvi's own answer, in place of a frame: nothing was fenced.
 		return nil, nil, &hviRanOnError{err: err}
+	case err != nil && ss.manifest == nil:
+		closeConn()
+		return nil, nil, ss.fenceAfterBreak(err)
 	case err != nil:
 		// The manifest came whole, so hvi has fenced the guest: what is
 		// lost is its reply, or the stream broke after it. A re-run or an
@@ -439,11 +457,54 @@ func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][
 	return line, files, nil
 }
 
-// hviRanOnError is a migrate stream that ended before its manifest: a
-// refusal, a capture that failed, a reader hvi cut for stalling, or the
-// connection lost. hvi fences the guest only once its manifest is written,
-// so the guest runs on, unfenced, and the move can be run again or aborted
-// with nothing to restore.
+// hviUnwindWait is how long hull waits for hvi to answer whether it fenced
+// the guest after a migrate stream broke before its manifest. hvi serves
+// one connection at a time, so the answer comes once its migrate op has
+// ended, and it sees the closed connection only at its next write: after
+// a disk sync or a vCPU park that can take seconds on a busy host, and
+// within the 30 s it waits for a stalled reader.
+const hviUnwindWait = time.Minute
+
+// relayFrameTestHook, when set, is called with each component hvi sends
+// before hull relays it; an error it returns is hull failing on that frame.
+var relayFrameTestHook func(component string) error
+
+// fenceAfterBreak asks hvi whether it fenced the guest after hull stopped
+// reading its migrate stream before the manifest, on a failure of its own
+// (a spool write, a document too large to keep, a frame that does not
+// match its sha256) or of the connection. hvi fences once the manifest is
+// in the socket's buffer, which can be before hull has read the frames in
+// front of it: with a small last round, what is left of the stream can sit
+// there whole when hull fails. Only hvi knows which it was, and it has
+// ended the op by the time it answers (hviUnwindWait).
+func (ss *streamSender) fenceAfterBreak(err error) error {
+	reply, qerr := hviControl(ss.state.ControlSock, map[string]any{"op": "status"}, hviUnwindWait)
+	switch {
+	case qerr != nil:
+		return &hviFenceUnknownError{err: err, why: qerr}
+	case reply.State == store.MigrationFenced:
+		return fmt.Errorf("hvi fenced the guest, though hull did not take its whole stream: %w", err)
+	}
+	return &hviRanOnError{err: err}
+}
+
+// hviFenceUnknownError is a migrate stream that broke before its manifest
+// when hvi then did not say whether it had fenced the guest.
+type hviFenceUnknownError struct{ err, why error }
+
+func (e *hviFenceUnknownError) Error() string {
+	return fmt.Sprintf("hvi's stream broke before its manifest (%v), and hvi did not say whether it "+
+		"fenced the guest (%v)", e.err, e.why)
+}
+
+func (e *hviFenceUnknownError) Unwrap() error { return e.err }
+
+// hviRanOnError is a migrate stream that ended before its manifest with
+// the guest not fenced: hvi refused the op, or said, after the stream
+// broke, that the guest is not fenced (a capture that failed, a reader hvi
+// cut for stalling, the connection lost, or hull failing on a frame before
+// hvi had written its manifest). The guest runs on, and the move can be
+// run again or aborted with nothing to restore.
 type hviRanOnError struct{ err error }
 
 func (e *hviRanOnError) Error() string {

@@ -89,6 +89,8 @@ type fakeStreamHvi struct {
 	bigDiskRound int64
 	// pid is the process standing in for this hvi, which stop ends.
 	pid int
+	// fencedNow is closed once the guest is fenced, before the reply.
+	fencedNow chan struct{}
 }
 
 func newFakeStreamHvi(t *testing.T, disk, base string) *fakeStreamHvi {
@@ -99,7 +101,7 @@ func newFakeStreamHvi(t *testing.T, disk, base string) *fakeStreamHvi {
 	}
 	h := &fakeStreamHvi{t: t, path: filepath.Join(shortSocketDir(t), "c.sock"), disk: disk, size: info.Size(),
 		base: base, state: "running", sinceBoot: map[int64]bool{}, sinceRound: map[int64]bool{},
-		writesAt: map[string][]int64{}}
+		writesAt: map[string][]int64{}, fencedNow: make(chan struct{})}
 	ln, err := net.Listen("unix", h.path)
 	if err != nil {
 		t.Fatal(err)
@@ -353,6 +355,7 @@ func (h *fakeStreamHvi) migrate(req map[string]any, w *bufio.Writer, reply func(
 		return
 	}
 	h.state = "fenced"
+	close(h.fencedNow)
 	h.fenceTxID, _ = req["txid"].(string)
 	h.fenceEpoch, _ = req["epoch"].(float64)
 	h.firstManifest = hex.EncodeToString(sum[:])
@@ -747,6 +750,79 @@ func TestStreamedMoveCaptureFailsBeforeTheSeal(t *testing.T) {
 		t.Fatalf("the retry: %s %s", rec.State, rec.Stream.Mode)
 	}
 	f.checkArrived(t, rec)
+}
+
+// hull failing on one of hvi's frames, as a full disk under the spool
+// would, stops reading hvi's stream. Whether the guest then runs on is
+// hvi's to say, and hull says what hvi says: early in the stream hvi finds
+// the connection closed and resumes the guest; at a late document the
+// rest of the stream, its manifest included, is already in the socket's
+// buffer, hvi has fenced the guest, and the move is left for a re-run,
+// which has hvi stream it again.
+func TestStreamedMoveHullFailsOnAFrame(t *testing.T) {
+	for _, tc := range []struct {
+		at     string
+		fenced bool
+	}{{"disk-round-0", false}, {"cpu.json", true}} {
+		t.Run(tc.at, func(t *testing.T) {
+			f := newStreamFixture(t)
+			// A stream longer than any socket's buffer, so hvi is still
+			// writing it when hull fails early.
+			f.hvi.bigDiskRound = 8
+			failed := false
+			relayFrameTestHook = func(component string) error {
+				if component != tc.at || failed {
+					return nil
+				}
+				failed = true
+				if tc.fenced {
+					// The tail is small: hvi writes all of it, and
+					// fences, while hull is still on this frame.
+					select {
+					case <-f.hvi.fencedNow:
+					case <-time.After(10 * time.Second):
+						t.Error("hvi never fenced the guest")
+					}
+				}
+				return syscall.ENOSPC
+			}
+			t.Cleanup(func() { relayFrameTestHook = nil })
+			err := f.migrate(t, "")
+			if err == nil || !strings.Contains(err.Error(), syscall.ENOSPC.Error()) {
+				t.Fatalf("err = %v", err)
+			}
+			rec := f.srcRecord(t)
+			f.hvi.mu.Lock()
+			state := f.hvi.state
+			f.hvi.mu.Unlock()
+			if rec.State != srcTransferring || (state == "fenced") != tc.fenced {
+				t.Fatalf("the move is %s and hvi %s", rec.State, state)
+			}
+			saysRanOn := strings.Contains(err.Error(), "runs on here") ||
+				strings.Contains(err.Error(), "still runs here")
+			if tc.fenced {
+				if saysRanOn || !strings.Contains(err.Error(), "The source stays fenced") ||
+					!strings.Contains(rec.Error, "hvi fenced the guest") || strings.Contains(rec.Error, "runs on") {
+					t.Fatalf("a fenced guest reported as %v; record %q", err, rec.Error)
+				}
+			} else if !saysRanOn || !strings.Contains(rec.Error, "runs on here") {
+				t.Fatalf("a guest that runs on reported as %v; record %q", err, rec.Error)
+			}
+			relayFrameTestHook = nil
+			if err := f.migrate(t, rec.TxID); err != nil {
+				t.Fatal(err)
+			}
+			rec = f.srcRecord(t)
+			want := "live"
+			if tc.fenced {
+				want = "replay"
+			}
+			if rec.State != srcCommitted || rec.Stream.Mode != want {
+				t.Fatalf("the re-run: %s %s", rec.State, rec.Stream.Mode)
+			}
+			assertSameContent(t, f.disk, filepath.Join(f.dst.InstanceDir(f.name), "bundle", "rootfs.ext4"))
+		})
+	}
 }
 
 // damageAt returns a mangle that flips one byte at offset off of a verb's
