@@ -56,6 +56,8 @@ type migrateReply struct {
 	Probe    *migrateProbe    `json:"probe,omitempty"`
 	// VM is what the destination's hvi says its VM is doing, when asked.
 	VM string `json:"vm,omitempty"`
+	// Detail says what a verb did, when it says more than ok.
+	Detail string `json:"detail,omitempty"`
 }
 
 // migrateProbe is what migrate-probe reports about the destination.

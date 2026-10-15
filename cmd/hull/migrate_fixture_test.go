@@ -344,6 +344,8 @@ func (p *localPeer) call(_ context.Context, verb string, args []string, stdin io
 	case "migrate-take-base":
 		reply = destTakeBase(p.s, flags["--sha256"], stdin)
 		_, _ = io.Copy(io.Discard, stdin)
+	case "migrate-spare-base":
+		reply = destSpareBase(p.s, flags["--sha256"])
 	case "migrate-take-kernel":
 		size, _ := strconv.ParseInt(flags["--size"], 10, 64)
 		reply = destTakeKernel(p.s, flags["--profile"], flags["--sha256"], size, stdin)
