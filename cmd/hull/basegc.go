@@ -132,6 +132,8 @@ func removeBase(s *store.Store, sum string) error {
 		return err
 	}
 	_ = os.Remove(filepath.Join(receivedBasesDir(s), sum))
+	_ = os.Remove(spareBasePath(s, sum))
+	_ = os.Remove(s.BasePath(sum) + ".checked")
 	return syncDir(s.BasesDir())
 }
 

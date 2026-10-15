@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // diskRoundsCase builds what a destination holds after a live move with
@@ -161,4 +162,42 @@ func TestStreamedMoveResendsACorruptBase(t *testing.T) {
 		t.Errorf("the base sent again hashes to %s, %v", got, err)
 	}
 	f.checkArrived(t, rec)
+}
+
+// A base's check is recorded beside it and stands while the base is the
+// same file, unchanged; a write to it, which changes its change time, has
+// it hashed again.
+func TestCheckBaseDigestRecordsAPassedCheck(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "base.ext4")
+	writeSparseDisk(t, path, 4<<20)
+	sum, _, err := diskDigestFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkBaseDigest(path, sum); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path + ".checked"); err != nil {
+		t.Fatalf("no record of the check: %v", err)
+	}
+	// The record is of that digest only.
+	if err := checkBaseDigest(path, strings.Repeat("0", 64)); err == nil {
+		t.Error("the record of one digest passed another")
+	}
+	if err := checkBaseDigest(path, sum); err != nil {
+		t.Errorf("the recorded check: %v", err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	fh, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fh.WriteAt([]byte("rot"), 8192); err != nil {
+		t.Fatal(err)
+	}
+	_ = fh.Close()
+	if err := checkBaseDigest(path, sum); err == nil {
+		t.Error("a changed base passed its old check")
+	}
 }

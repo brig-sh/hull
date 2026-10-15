@@ -983,3 +983,38 @@ func TestStreamedMoveSendsTheBaseOnNoBase(t *testing.T) {
 	}
 	f.checkArrived(t, rec)
 }
+
+// A destination that takes a base keeps a spare copy of it, which the
+// move's receive takes as the instance's disk rather than copying the base
+// while the source waits; a prepare makes the next one.
+func TestStreamedMoveTakesTheSpareBase(t *testing.T) {
+	f := newStreamFixture(t, true, true)
+	st := mustInstance(t, f.src, f.name)
+	sum := st.Base.SHA256
+	if _, err := sendBase(t.Context(), f.src, f.peer, sum); err != nil {
+		t.Fatal(err)
+	}
+	spare := spareBasePath(f.dst, sum)
+	if _, err := os.Stat(spare); err != nil {
+		t.Fatalf("no spare after the base came: %v", err)
+	}
+	if err := f.migrate(t, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(spare); !os.IsNotExist(err) {
+		t.Errorf("the receive left the spare: %v", err)
+	}
+	f.checkArrived(t, f.srcRecord(t))
+	if reply := destSpareBase(f.dst, sum); !reply.OK || reply.Detail == "held" {
+		t.Errorf("prepare's spare: %+v", reply)
+	}
+	if reply := destSpareBase(f.dst, sum); !reply.OK || reply.Detail != "held" {
+		t.Errorf("prepare's spare again: %+v", reply)
+	}
+	if err := removeBase(f.dst, sum); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(spare); !os.IsNotExist(err) {
+		t.Errorf("the spare outlived its base: %v", err)
+	}
+}
