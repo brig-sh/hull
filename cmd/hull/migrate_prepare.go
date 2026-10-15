@@ -340,6 +340,11 @@ func destTakeBase(s *store.Store, sum string, in io.Reader) *migrateReply {
 		_ = os.Remove(tmp)
 		return refuse(codeVerifyFailed, fmt.Errorf("take base %s: %w", sum, err))
 	}
+	// Kept until a prune with --bases: the move it was sent ahead of
+	// needs it, and no instance here names it yet.
+	if err := markBaseReceived(s, sum); err != nil {
+		return refuse(codeFailed, err)
+	}
 	return reply()
 }
 

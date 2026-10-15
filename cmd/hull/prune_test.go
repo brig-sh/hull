@@ -74,8 +74,8 @@ func TestPruneRemovesASupersededDigest(t *testing.T) {
 	seedMetadata(t, s, &store.ImageMetadata{Ref: cacheTestRef, Digest: otherTestDigest}, true)
 
 	var out bytes.Buffer
-	if err := pruneStoreIn(&out, s, false, false, ""); err != nil {
-		t.Fatalf("pruneStoreIn: %v", err)
+	if err := pruneStoreWith(&out, s, false, false, false, ""); err != nil {
+		t.Fatalf("prune: %v", err)
 	}
 	if !strings.Contains(out.String(), "superseded") {
 		t.Errorf("output does not say why: %q", out.String())
@@ -141,8 +141,8 @@ func TestPruneRemovesAnUnreadableRecord(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	if err := pruneStoreIn(&out, s, false, false, ""); err != nil {
-		t.Fatalf("pruneStoreIn: %v", err)
+	if err := pruneStoreWith(&out, s, false, false, false, ""); err != nil {
+		t.Fatalf("prune: %v", err)
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Errorf("the unreadable entry survived: %v", err)
@@ -209,8 +209,8 @@ func TestPruneSweepsStagingLeftovers(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	if err := pruneStoreIn(&out, s, false, false, ""); err != nil {
-		t.Fatalf("pruneStoreIn: %v", err)
+	if err := pruneStoreWith(&out, s, false, false, false, ""); err != nil {
+		t.Fatalf("prune: %v", err)
 	}
 	staging, err := s.StagingDirs()
 	if err != nil {
@@ -251,8 +251,8 @@ func TestPruneLeavesAPullInFlightAlone(t *testing.T) {
 	// And a removal decided before the pull started is refused, not
 	// carried out: the lock is taken again at the delete.
 	var out bytes.Buffer
-	if err := pruneStoreIn(&out, s, false, false, ""); err != nil {
-		t.Fatalf("pruneStoreIn: %v", err)
+	if err := pruneStoreWith(&out, s, false, false, false, ""); err != nil {
+		t.Fatalf("pruneStoreWith: %v", err)
 	}
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("prune removed a locked staging directory: %v", err)
@@ -309,8 +309,8 @@ func TestPruneDryRunRemovesNothing(t *testing.T) {
 	seedImage(t, s, false)
 
 	var out bytes.Buffer
-	if err := pruneStoreIn(&out, s, false, true, "compact hint"); err != nil {
-		t.Fatalf("pruneStoreIn: %v", err)
+	if err := pruneStoreWith(&out, s, false, false, true, "compact hint"); err != nil {
+		t.Fatalf("prune: %v", err)
 	}
 	if !strings.Contains(out.String(), "Would remove") {
 		t.Errorf("dry run does not say what it would do: %q", out.String())
@@ -326,8 +326,8 @@ func TestPruneDryRunRemovesNothing(t *testing.T) {
 func TestPruneEmptyStore(t *testing.T) {
 	s := newCacheTestStore(t)
 	var out bytes.Buffer
-	if err := pruneStoreIn(&out, s, true, false, "compact hint"); err != nil {
-		t.Fatalf("pruneStoreIn: %v", err)
+	if err := pruneStoreWith(&out, s, true, false, false, "compact hint"); err != nil {
+		t.Fatalf("prune: %v", err)
 	}
 	if !strings.Contains(out.String(), "Nothing to prune") {
 		t.Errorf("output = %q", out.String())
@@ -351,8 +351,8 @@ func TestPruneKeepsTheLastCompleteEntryOfATag(t *testing.T) {
 	}, false) // newer, and unusable
 
 	var out bytes.Buffer
-	if err := pruneStoreIn(&out, s, false, false, ""); err != nil {
-		t.Fatalf("pruneStoreIn: %v", err)
+	if err := pruneStoreWith(&out, s, false, false, false, ""); err != nil {
+		t.Fatalf("prune: %v", err)
 	}
 	if _, err := os.Stat(s.ImageDir(otherTestDigest)); !os.IsNotExist(err) {
 		t.Errorf("the unusable newer entry survived: %v", err)

@@ -31,13 +31,14 @@ what can go wrong, and how to recover.
 > this Mac and a Pi has not run.
 
 > **Streamed moves, 2026-10-15.** With an `hvi` that streams its
-> checkpoint (`feat/teleport-fast` merged with `feat/teleport-fast-disk`,
-> built as ef8833a in a scratch clone), `hull migrate` sends the guest's
-> RAM in pre-copy rounds while it runs and only the disk blocks that differ
-> from its base. Between rp1 and rp2 the 1 GiB ubuntu guest moved in 5.4 s
-> and 5.7 s, and was stopped for 279 ms and 340 ms as the guest's own clock
-> counts it; the whole-bundle move of the same guest on the same hosts and
-> binaries stopped it for 7.43 s. See [The streamed move](#the-streamed-move).
+> checkpoint and serves the disk rounds (`feat/teleport-fast` ef8d0ad and
+> `feat/teleport-fast-disk` 71d0253 merged, with `feat/teleport`'s malloc
+> arena fix, as d01daab on the branch `int/teleport-u5fix`; not pushed),
+> `hull migrate` sends the guest's RAM in pre-copy rounds while it runs and
+> only the disk blocks that differ from its image's base. A claude-code
+> guest moved from this Mac to a Pi with the guest stopped 0.33 to 0.56 s
+> when it wrote little to its disk and 1.76 s when it rewrote 10 MiB/s,
+> most of that the last disk round. See [Measured](#measured).
 
 ## Usage
 
@@ -292,15 +293,45 @@ before the fence) gets the whole bundle too.
 
 ### Bases
 
-A base is the disk image exactly as `hull run` built it, before the guest
-first wrote to it. `hull run` keeps one for every `hvi` instance on a block
-rootfs that has a control socket: it clones the new image (APFS
-`clonefile` on macOS, `FICLONE` on Linux, else a copy that keeps the
-holes) into `<store>/bases/`, hashes the copy, makes it read-only and names
-it `<digest>.ext4`. The digest is recorded in `state.json` (`base`) and
-passed to an `hvi` that takes `--disk-base-sha256`, which records it in
-its profile and in `disk.json`. On the Pis keeping the 111 MiB ubuntu base
-took 0.45 s of `hull run` (a copy: ext4 has no reflink).
+A base is the ext4 image `hull run` builds from an OCI image's rootfs, with
+the ownership and modes the image records and nothing of any one
+instance: no `/urunit.conf` (which carries the guest's environment and
+credentials), no init wrapper, no `/etc/hosts` entries. For an `hvi`
+instance on a block rootfs, `hull run` builds it once per image digest and
+size on a host, keeps it read-only under `<store>/bases/<digest>.ext4`, and
+records which base an image has in `<store>/bases/images/<key>.json`. Every
+instance of the image then starts from a copy of that base (APFS
+`clonefile` on macOS, `FICLONE` on Linux, else a copy that keeps the holes)
+with its own files written in by `debugfs`, and `state.json` records the
+base (`base`). A local image, which has no content digest, gets a base of
+its own at every run.
+
+So the instances of one image on a host share one base, and a destination
+that holds it takes a move of any of them by the blocks that differ.
+`mke2fs` writes a fresh UUID, hash seed and timestamps into every image,
+so two hosts build two bases of one image: a base goes to another host
+once per image, host it was built on and destination, and moves back of
+instances born on the source need no base at all.
+
+hull does not give `hvi` the base's digest (`--disk-base-sha256`): hvi
+defines it as the digest of the disk as it boots from it, and the
+instance's own files are written over the base before then, which hvi's
+blocks written since boot would not cover. A move finds every block that
+differs from the base by comparing the disk with it (round 0), then takes
+hvi's rounds. An instance recorded by an older hull, whose base was its
+own boot disk (`fromBoot`), still moves with hvi's blocks since boot.
+
+A base is kept while something on the host needs it: an instance or a
+move record that names it, an image still in the store whose base it is,
+or a `migrate-prepare` that received it ahead of a move
+(`bases/received/<digest>`). `hull rm` removes the instance's base when
+nothing else needs it. `hull prune` removes every base nothing needs, the
+entries of images gone from the store, bases set aside as corrupt and
+half-written ones left by a run or a prepare that died; `hull prune
+--bases` also removes the bases kept for images and received ahead of a
+move when no instance or move uses them. A base younger than ten minutes
+is left alone, since a run may be copying it into a disk it has not
+recorded yet.
 
 The disk digest is the sha256 of `HULLDISK1\0`, the image's size and the
 block size (64 KiB, big-endian u64 each), then, for every 64 KiB block on
@@ -311,11 +342,6 @@ one image have one digest. It is not the image's plain sha256, which would
 have to read every hole. hvi's own docs call the value of
 `--disk-base-sha256` the disk's SHA-256; hvi does not read the disk to
 check it, and from hull it is this digest.
-
-`mke2fs` writes a fresh UUID and timestamps into every image it builds, so
-two runs of one OCI image get two bases. A base therefore serves one
-instance and the moves of it, not every instance of an image. Nothing
-removes a base yet: `hull rm` and `hull prune` leave `<store>/bases` alone.
 
 ### Preparing a destination
 
@@ -350,10 +376,10 @@ One ssh session runs `hull migrate-receive --stream --txid T --name N`, and
 its stdin carries, in this order:
 
 1. The disk rounds while the guest runs. Round 0 is every block that
-   differs from the base: hvi's blocks written since boot when the running
-   `hvi` booted from the base or names it in its profile (an `hvi` that
-   does carries those blocks across a restore), otherwise every block of
-   the disk compared with the base. Rounds 1 to 4 are hvi's blocks written
+   differs from the base: every block of the disk compared with the base,
+   or, for an instance whose base was its own boot disk and whose `hvi`
+   booted from it or names it in its profile, hvi's blocks written since
+   boot. Rounds 1 to 4 are hvi's blocks written
    since the round before, read with `disk-dirty` and `disk-blocks`, until
    a round finds at most 32 blocks (2 MiB). Without hvi's rounds there is
    only round 0.
@@ -545,41 +571,88 @@ refusal is the move's error, with code `restore_refused`.
 Progress goes to stderr, one line per round prefixed `move: `, and every
 two seconds of a long round.
 
-### Measured on the Linux pair
+### Measured
 
-2026-10-15, hull built at 1ecb5c8 (it reports that commit; folding two
-fixups into an earlier commit of this series made it 81e118b, with the
-same tree) on rp1 and rp2 (Raspberry Pi 5, Linux 6.12.25,
-KVM), `hvi` ef8833a (`feat/teleport-fast` 3396415 merged with
-`feat/teleport-fast-disk` 4a4cb3d in a scratch clone; the two conflicted
-in the control ops and `disk.json`, resolved by keeping both), over real
-ssh. Guest: `docker.io/library/ubuntu:latest` on a block rootfs, `--profile
-portable-arm64-v1`, 1 GiB, 1 vCPU, `--net none`, running a shell that
-writes 32 MiB of random data to `/root/w/blob`, holds a deleted file open
-on fd 4 and writes a counter to the disk five times a second, syncing every
-fifth. After every move the counter went on, the guest's `boot_id`, the
-blob's sha256 and the deleted file's contents were unchanged, and no boot
-was logged. Downtime is what the guest's `hvi-time` driver logged for each
-move ("wall clock moved"); hull's own estimate (`downtimeMs`) was within
-10 ms of it.
+2026-10-15. `hvi` d01daab (above), built on each host from that commit
+(the two Pis' binaries are identical, sha256 e156dcc0f723...). hull at the
+commit named per row. The guest's downtime is the rise in the `downtime
+total` its `hvi-time` driver logs, which counts the time its clock was
+stopped; "wall clock moved" also counts any lag the guest's clock had
+before the move (one move logged 1947 ms of it against 571 ms of
+downtime). hull's `downtimeMs` reads a few ms to 120 ms above it. After
+every move the guest's counter had no gap, and its `boot_id`, the blob's
+sha256 and the deleted file still open on fd 4 were unchanged.
 
-| Move | Path | Total (`hull migrate`) | Guest stopped | Sent |
-|---|---|---|---|---|
-| rp1 to rp2 | streamed | 5.4 s | 279 ms | 109.5 MiB: disk 287 MiB as 34.6 MiB, RAM 74.9 MiB in 3 rounds |
-| rp2 to rp1 | streamed | 5.7 s | 340 ms | 109.3 MiB |
-| rp1 to rp2 | `--whole-bundle` | 8.2 s | 7.43 s | 288.2 MiB in 5.1 s (fence 1.29 s, restore 0.92 s) |
+Guests: `docker.io/library/ubuntu:latest` (1 GiB, 1 vCPU) on the Pis and
+`ghcr.io/brig-sh/claude-code-stock:root` (4 GiB, 4 vCPUs) from the Mac,
+both `--profile portable-arm64-v1`, block rootfs, `--net none`. "Writer"
+appends a counter ten times a second, syncs every tenth, and rewrites
+1 MiB of a 64 MiB file every 0.1 s (about 10 MiB/s); "light" is the same
+without the rewrites.
 
-For comparison, B4's idle move of the same guest with hvi 46a18dc stopped
-it for 6.51 s (reserved to `running`), sending 226.8 MB in 3.45 s. U3's
-move never got past the restore on KVM.
+| Move | hull | Guest | Total | Stopped | Of which the last disk round |
+|---|---|---|---|---|---|
+| this Mac to itself, through `HULL_MIGRATE_SSH` | ac5dbc6 | claude-code, writer | 3.8 s | 305 ms | 20.2 MiB in 74 ms |
+| this Mac to rp1 | ac5dbc6 | claude-code, light | 12.4 s | 559 ms | 0.5 MiB in 14 ms |
+| this Mac to rp1 | ebd638f | claude-code, light | 28.1 s | 332 ms | 0.25 MiB in 17 ms |
+| this Mac to rp1 | ac5dbc6 | claude-code, writer | 15.8 s | 1.76 s | 60.2 MiB in 1.41 s |
+| rp2 to rp1 | 3bdad7a | ubuntu, writer | 6.1 s | 514 ms | 20.2 MiB in 239 ms |
+| rp1 to rp2 | 7d50ddf | ubuntu, writer | 73.8 s | 1.79 s | 64.6 MiB in 1.52 s |
+| rp1 to rp2 | d4ae775 | ubuntu, 256 MiB dirtier and writer | 35.2 s | 4.51 s | 64.4 MiB in 0.79 s |
 
-Two earlier runs show what the disk can cost. Before 81e118b the source
-synced its spool before the last disk round, and on rp2, whose NVMe was
-slowed by another project's builds (the kernel logged an NVMe abort), a
-move back to rp1 kept the guest stopped 16.8 s, 16 s of it in that sync.
-The abort of a move whose destination refused the restore brought the
-guest back on rp1 from the spool, as far as hvi's own check: that `hvi`
-was built without its commit, which every restore refuses.
+The 28.1 s move spent 21.9 s waiting for rp1 to copy the 1.6 GB base (ext4,
+no clones); the spare copy a prepare now makes took that to 0.25 s. The
+12.4 s move ran when the link gave 10 MiB/s, a third of the others. The
+73.8 s move streamed at 6.4 MiB/s while rp2 ran another project's builds. The first prepare of rp1 for claude-code took
+54 s (image pull, kernel, the base's 1.5 GiB of data as 740.8 MiB in
+21.4 s); a second instance of the image found the base there (1 s), and a
+second `hull run` of an image took 1.5 s on a Pi (ubuntu) and under 1 s on
+this Mac. On rp1 a `hull run` of claude-code took 8.9 s and 7.3 s once its
+base was built (a copy of the base's data, ext4 having no clones); the
+first, which built the base, took 69 s with rp1 at load 8 from other work.
+On HVF hvi served 7088 write faults at 4.75 us each for the writer and 1166
+at 7.5 us for the light guest.
+
+Under a busy disk, an O_DIRECT writer on both Pis (a 4 KiB fsync then took
+0.73 s; rp2 also logged NVMe aborts), with the ubuntu writer:
+
+| hull | rp1 to rp2 | rp2 to rp1 |
+|---|---|---|
+| 331bf8c (before these fixes) | 91.3 s | 38.9 s |
+| 3bdad7a (spool sync off the trailer) | 1.40 s | 28.5 s |
+| 76baf68 (trailer no longer waits for the fence record) | 16.8 s | |
+| between 76baf68 and 7d50ddf: the fence records side by side, no spool sync mid-stream | | 23.0 s |
+| between 76baf68 and 7d50ddf: the fence on the move's record, the spool's sync still beside the commit | 13.9 s | |
+| d4ae775 (a 4 KiB fsync took 1.4 s) | 7.39 s | |
+
+The steps on record placed what was left. In the d4ae775 move, hvi's own
+pause took 4.9 s from the end of its pre-copy rounds to its seal (its
+`fdatasync` of the guest's disk is inside it), the last disk round 0.9 s,
+the destination's checks and restore 0.14 s, the source's commit point
+1.4 s (one synced write) and the destination's commit 0.1 s. In the
+intermediate builds the destination's `hull restore --move` and its
+records took up to 4.9 s and its commit's three synced writes 1.3 to 2.6 s. With that writer hvi's pause failed in 5 of 12
+attempts ("0 of 1 vCPUs parked in time"), and in the d4ae775 run once more;
+the guest ran on each time and a re-run moved it. Without the writer it
+happened 5 more times: three moving the 256 MiB dirtier off rp2 while
+another project's builds kept rp2 at load 7 to 8 with swap in use, and two
+off a quiet rp1.
+
+A guest dirtying 256 MiB in a loop reached hvi's round cap: with d4ae775,
+RAM rounds of 394, 301, 287, 287, 289 MiB with the guest running and 288 MiB
+with it stopped, at 67 to 84 MiB/s, and its counter and files came through
+whole. Before the writeback fix the same guest was stopped 51.5 s: the
+source throttled its own writes on 1.9 GiB of dirty spool, and the last
+RAM and disk rounds crawled at 22 and 3.5 MiB/s.
+
+hull killed with SIGKILL as hvi's seal line appeared (d4ae775, rp1 to rp2):
+the move's record had no fence and the spool no `sealed`. `hull migrate
+--abort` found the spool whole, sealed it, stopped the fenced hvi and
+restored the guest from the spool with `hvi restore --from-stream`, in 1 s.
+With the spool cut in half before the abort, the abort had the fenced hvi
+stream the guest again (138.7 MiB, the round after it empty) and restored
+from that, in 2 s. Both times the counter went on with no gap and
+`boot_id`, the blob and the deleted file were unchanged.
 
 ## Records
 

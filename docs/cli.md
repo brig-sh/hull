@@ -52,7 +52,7 @@ which only a move's own restore passes.
 | `inspect <id>` | print instance details as JSON |
 | `images` | list pulled images |
 | `rmi <image>` | remove images from the store |
-| `prune` | remove images and pull leftovers nothing needs |
+| `prune` | remove images, disk bases and pull leftovers nothing needs |
 | `assets` | manage the boot assets used for images that carry no kernel |
 | `store` | manage the volume the store lives on |
 | `compose` | run a multi-service compose file, one VM per service |
@@ -162,7 +162,7 @@ as a default that an explicit `--env TERM` beats.
 | `inspect <id>` | none. Always prints JSON |
 | `images` | `--json` prints the store's records with full digests |
 | `rmi <image>...` | `--force`, `-f` remove one a stopped instance refers to; `--platform <p>` narrow to one platform |
-| `prune` | `--all` also remove every image no instance refers to; `--dry-run` print and remove nothing |
+| `prune` | `--all` also remove every image no instance refers to; `--bases` also remove the disk bases kept for images and received ahead of a move that no instance or move uses ([migration.md](migration.md#bases)); `--dry-run` print and remove nothing |
 | `pause <id>`, `resume <id>` | none |
 | `checkpoint <id>` | `--timeout <secs>`, default 60; `hvi` only: `--then continue\|fence`, default `continue`; `--dir <path>`, an empty directory for the bundle, below `<instance>/checkpoint` |
 | `restore <id>` | `--detach`, `-d`; `--stop-grace <secs>`, default 10; `--wait-ip`; `--gateway-sock <path>` (`vz` only); `hvi` only: `--paused`, `--timeout <secs>`, default 120, `--adopt-latest` |
@@ -226,7 +226,8 @@ The destination's verbs each print one JSON object on stdout:
 `Nothing to prune` and exits 0 the same way.
 
 `hull rmi` and `hull prune` remove from the image cache; `hull rm` removes an
-instance and never touches the cache. Neither returns space to the host on its
+instance and never touches the cache, but takes the instance's disk base
+with it when nothing else needs that base. Neither returns space to the host on its
 own -- the store's sparse image only shrinks under `hull store compact`. See
 [storage.md](storage.md#disk-space-and-how-to-get-it-back).
 

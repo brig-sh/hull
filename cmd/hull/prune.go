@@ -37,6 +37,9 @@ func pruneCommand() *cli.Command {
 			"left by an interrupted pull, image directories whose metadata or rootfs is " +
 			"missing, and digests superseded by a later pull of the same reference and " +
 			"platform. With --all it also removes every image no instance refers to.\n\n" +
+			"It also removes the disk bases (<store>/bases) nothing needs: no instance, no move, " +
+			"no image still in the store, and no prepare that received one ahead of a move. With " +
+			"--bases it removes the last two kinds too, when no instance or move uses them.\n\n" +
 			"An image any instance refers to is never removed, running or stopped. Stop " +
 			"running instances first, then use `hull rmi --force` for that case.\n\n" +
 			"Nothing removed here is unrecoverable: every image can be pulled again.\n\n" +
@@ -51,6 +54,11 @@ func pruneCommand() *cli.Command {
 				Name:  "dry-run",
 				Usage: "print what would be removed and remove nothing",
 			},
+			&cli.BoolFlag{
+				Name: "bases",
+				Usage: "also remove the disk bases kept for images and those received ahead of a move, " +
+					"when no instance or move uses them",
+			},
 		},
 		Action: func(_ context.Context, cmd *cli.Command) error {
 			return pruneStore(cmd)
@@ -64,7 +72,7 @@ func pruneStore(cmd *cli.Command) error {
 		return err
 	}
 	hint := storeCompactHint(cmd.String("store-dir"))
-	return pruneStoreIn(os.Stdout, s, cmd.Bool("all"), cmd.Bool("dry-run"), hint)
+	return pruneStoreWith(os.Stdout, s, cmd.Bool("all"), cmd.Bool("bases"), cmd.Bool("dry-run"), hint)
 }
 
 // pruneTarget is one directory prune has decided to remove.
@@ -81,17 +89,39 @@ type pruneTarget struct {
 	bytes  int64
 }
 
-func pruneStoreIn(w io.Writer, s *store.Store, all, dryRun bool, compactHint string) error {
+// pruneStoreWith is prune: the images, then the bases (basegc.go), with
+// bases also dropping the bases kept for images and received ahead of a
+// move.
+func pruneStoreWith(w io.Writer, s *store.Store, all, bases, dryRun bool, compactHint string) error {
 	targets, err := pruneTargets(s, all)
 	if err != nil {
 		return err
 	}
+	// The bases are swept after the images, so a base whose image this
+	// prune removes goes too; a dry run removes no image, so it lists only
+	// the bases nothing needs now.
+	sweepBases := func() (int64, error) { return pruneBasesIn(w, s, bases, dryRun) }
 	if len(targets) == 0 {
-		_, _ = fmt.Fprintln(w, "Nothing to prune")
-		return nil
+		freed, err := sweepBases()
+		if freed == 0 && err == nil {
+			_, _ = fmt.Fprintln(w, "Nothing to prune")
+			return nil
+		}
+		verb := "Reclaimed"
+		if dryRun {
+			verb = "Would reclaim"
+		}
+		_, _ = fmt.Fprintf(w, "%s %s\n", verb, formatSize(freed))
+		if compactHint != "" && freed > 0 && !dryRun {
+			_, _ = fmt.Fprintln(w, compactHint)
+		}
+		return err
 	}
 
 	reclaimed, err := removePruneTargets(w, s, targets, dryRun)
+	freed, sweepErr := sweepBases()
+	reclaimed += freed
+	err = errors.Join(err, sweepErr)
 
 	verb := "Reclaimed"
 	if dryRun {

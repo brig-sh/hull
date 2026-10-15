@@ -31,10 +31,11 @@ import (
 	"github.com/brig-sh/hull/pkg/store"
 )
 
-// A base is the disk image exactly as `hull run` built it, before the guest
-// wrote to it, kept read-only under <store>/bases by its disk digest. A
-// move whose destination holds the same base sends only the blocks the
-// guest changed (docs/migration.md, "Bases").
+// A base is an image's ext4 rootfs as `hull run` builds it, before any
+// instance's own files are written in (imagebase.go), kept read-only under
+// <store>/bases by its disk digest. A move whose destination holds the same
+// base sends only the blocks that differ from it (docs/migration.md,
+// "Bases").
 
 // diskBlockSize is the grain of a disk digest and of the disk blocks a
 // streamed move sends: 64 KiB, the block hvi's virtio-blk tracks writes at.
@@ -293,24 +294,7 @@ func baseHeld(s *store.Store, sum string) bool {
 	return err == nil && info.Mode().IsRegular()
 }
 
-// keepRunBase keeps the base of a run's freshly built disk image and returns
-// the record of it, with the flag that hands its digest to hvi when the hvi
-// at binary takes one (hvi records it in the checkpoint's disk.json). A base
-// that cannot be kept costs the run nothing but the fast move: that move
-// sends the whole disk instead.
-func keepRunBase(s *store.Store, binary, disk string) (*store.BaseState, []string) {
-	sum, err := keepBase(s, disk)
-	if err != nil {
-		log.Warnf("Could not keep the base image of %s (%v); moving this instance will send its whole disk",
-			disk, err)
-		return nil, nil
-	}
-	base := &store.BaseState{SHA256: sum, FromBoot: true}
-	if knows, err := hviBootKnowsFlag(binary, hviDiskBaseFlag); err != nil || !knows {
-		return base, nil
-	}
-	return base, []string{hviDiskBaseFlag, sum}
-}
-
-// hviDiskBaseFlag hands hvi the digest of the base the disk started from.
+// hviDiskBaseFlag hands hvi the digest of the disk as it boots from it. hull
+// no longer passes it (see imageBase); a restore still drops it from a
+// command line an older hull recorded.
 const hviDiskBaseFlag = "--disk-base-sha256"
