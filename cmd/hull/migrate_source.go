@@ -1026,7 +1026,12 @@ func (m *moveSource) commit(ctx context.Context) error {
 	if inSession {
 		reply, err = m.commitInSession()
 	}
-	if reply == nil || (reply.OK && reply.Record != nil && reply.Record.State != dstRunning) {
+	// In a session, a refusal that is not about the move itself (code
+	// failed: a commit that came garbled, or a step of the commit that
+	// failed) is no answer either; migrate-commit asks again, and is
+	// answered from the destination's record.
+	if reply == nil || (reply.OK && reply.Record != nil && reply.Record.State != dstRunning) ||
+		(inSession && !reply.OK && reply.Code == codeFailed) {
 		if inSession {
 			// The session ended before the commit's answer, or the
 			// destination did not take the commit in it.

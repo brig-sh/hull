@@ -26,6 +26,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -144,6 +145,61 @@ func TestStreamedMoveCommitsAfterTheSessionIsCut(t *testing.T) {
 	}
 }
 
+// garbleCommitPeer damages the first byte the destination reads after it
+// said verified: the commit's.
+type garbleCommitPeer struct {
+	*localPeer
+	armed atomic.Bool
+}
+
+func (p *garbleCommitPeer) session(ctx context.Context, verb string, args []string, stdin io.Reader,
+	event func(*migrateReply)) (*migrateReply, error) {
+	return p.localPeer.session(ctx, verb, args, &garbleAfter{r: stdin, armed: &p.armed}, func(r *migrateReply) {
+		if r.Event == eventVerified {
+			p.armed.Store(true)
+		}
+		event(r)
+	})
+}
+
+type garbleAfter struct {
+	r     io.Reader
+	armed *atomic.Bool
+	done  bool
+}
+
+func (g *garbleAfter) Read(b []byte) (int, error) {
+	n, err := g.r.Read(b)
+	if n > 0 && !g.done && g.armed.Load() {
+		b[0] ^= 0xff
+		g.done = true
+	}
+	return n, err
+}
+
+// A commit the destination refuses in the session as damaged (code
+// failed) is sent again as migrate-commit, which commits the guest the
+// destination still holds restored paused.
+func TestStreamedMoveSendsAGarbledCommitAgain(t *testing.T) {
+	f := newStreamFixture(t)
+	peer := &garbleCommitPeer{localPeer: f.peer}
+	opt := f.options(false)
+	var out bytes.Buffer
+	opt.out = &out
+	if err := sourceMigrate(context.Background(), f.src, f.name, opt, peer); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if rec := f.srcRecord(t); rec.State != srcCommitted {
+		t.Fatalf("source %s", rec.State)
+	}
+	if f.peer.called("migrate-commit") != 1 || !strings.Contains(out.String(), "after the trailer") {
+		t.Errorf("calls %v\n%s", f.peer.calls, out.String())
+	}
+	if dst := f.dstRecord(t, f.srcRecord(t).TxID); dst.State != dstRunning {
+		t.Errorf("destination %s", dst.State)
+	}
+}
+
 // A source that fails a check after the destination said verified, before
 // its commit point, ends the session with no commit: the destination keeps
 // the guest restored paused, for the re-run or the abort.
@@ -181,6 +237,14 @@ func TestStreamedMoveEndsTheSessionWithoutACommit(t *testing.T) {
 				t.Errorf("the destination received a commit: %v", dst.Stream.Steps)
 			}
 		}
+	}
+}
+
+// The destination's wait for the commit in a session ends before a
+// migrate-commit or an abort that waits for its lock gives up.
+func TestSessionCommitWaitIsShorterThanTheLockWait(t *testing.T) {
+	if sessionCommitWait >= moveLockWait {
+		t.Errorf("sessionCommitWait %s, moveLockWait %s", sessionCommitWait, moveLockWait)
 	}
 }
 
