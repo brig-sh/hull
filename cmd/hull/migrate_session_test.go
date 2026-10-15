@@ -236,6 +236,21 @@ func TestAckWindow(t *testing.T) {
 	if got, want := w.size(), int64(2*(1<<20)*10*0.1); got < want*9/10 || got > want*11/10 {
 		t.Errorf("size %d, want about %d", got, want)
 	}
+	// On a LAN the shortest round trip is a fraction of a millisecond:
+	// the window allows windowSlack at the rate.
+	lan := newAckWindow()
+	lan.now = clock.now
+	lan.wait(64 << 10)
+	clock.t = clock.t.Add(200 * time.Microsecond)
+	lan.ack(64 << 10)
+	for i := 0; i < 3; i++ {
+		lan.wait(1 << 20)
+		clock.t = clock.t.Add(20 * time.Millisecond)
+		lan.ack(64<<10 + int64(i+1)<<20)
+	}
+	if got, want := lan.size(), int64(float64(1<<20)/0.02*windowSlack.Seconds()); got < want*9/10 || got > want*11/10 {
+		t.Errorf("LAN size %d, want about %d", got, want)
+	}
 	w.close()
 	done := make(chan struct{})
 	go func() {
