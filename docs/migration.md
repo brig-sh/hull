@@ -279,13 +279,16 @@ path above and says why on its second line (`Transport: ...`). It needs:
 
 - an `hvi` here of checkpoint format 2 (the `checkpoint_format` in the
   instance's machine profile), which has the `migrate` op;
-- a hull there whose probe lists the capability `stream-v1`, and an `hvi`
+- a hull there whose probe lists the capability `stream-v2`, and an `hvi`
   there that takes `restore --from-stream`;
 - a base of the instance's disk in this store (below). The destination
   need not hold it yet: the move sends it before the guest stops.
 
 `--whole-bundle` asks for the old path. A hull from before streamed moves
-lists no capabilities, so the two still move instances the old way.
+lists no capabilities, so the two still move instances the old way. A hull
+that lists only `stream-v1` (the first streamed moves, whose trailer had no
+account of the disk rounds and whose destination did not accept the header
+before the fence) gets the whole bundle too.
 
 ### Bases
 
@@ -610,7 +613,8 @@ destination before the commit), and two fields, `moveTxid` and `peer`.
 | the commit's reply is lost | fenced, `committing` | `restored-paused` or `running` | run it again: it learns the commit |
 | streamed: the stream fails before hvi seals it | running (hvi resumes it), `transferring` | `receiving` with the error | run it again: it streams from the start; or `--abort` |
 | streamed: the stream fails after hvi sealed it | fenced, with the whole stream in its spool, `transferring` | `receiving` with the error | run it again: it sends the spool and the disk compared with the base; or `--abort`, which restores the guest here from the spool |
-| streamed: the destination lacks the base | running, `transferring` | `receiving`, code `no_base` | the source sends the base and tries once more by itself |
+| streamed: hull is killed after hvi sealed the stream, before its own seal | fenced, `transferring`, the spool without `sealed` | `receiving` | run it again or `--abort`: each checks the spool frame by frame and seals it, or has hvi stream the fenced guest again; with neither possible the error says no copy is left here |
+| streamed: the destination lacks the base, or refuses the header | running, `transferring` | `receiving`, code `no_base` (or why) | before hvi's `migrate` starts the source waits until the destination's record says it took this attempt's header and copied the base (`streamAccepted`), so a refusal there comes while the guest runs. On `no_base` the source sends the base and tries once more by itself |
 | commit refused (wrong epoch, aborted) | fenced, `committing` | `aborted` or other | `--abort` |
 | the resume fails after the commit | `committed` (the destination owns it) | `running` with the error | `hull resume NAME` on the destination |
 | `--abort` before the fence gets no answer | running, `aborted` | maybe `reserved` | `--abort` again releases the reservation |

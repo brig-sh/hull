@@ -130,6 +130,7 @@ func stopIncomingVMM(s *store.Store, name string) {
 type streamReceiver struct {
 	s        *store.Store
 	rec      *migrationRecord
+	path     string
 	instDir  string
 	root     string
 	hvi      string
@@ -282,6 +283,14 @@ func (r *streamReceiver) header(h moveStreamHeader) error {
 		return fmt.Errorf("the base is %d bytes and the guest's disk %d", info.Size(), h.DiskSize)
 	}
 	r.zero = make([]byte, diskBlockSize)
+	// The source waits for this before hvi's migrate fences the guest: a
+	// refusal from here on cannot be one the header would have told.
+	if h.Attempt != "" {
+		r.rec.StreamAccepted = h.Attempt
+		if err := writeMigrationRecord(r.path, r.rec); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -711,7 +720,8 @@ func destReceiveStream(s *store.Store, txid, name string, in io.Reader) *migrate
 	if err != nil {
 		return refuseWith(codeFailed, rec.fail(path, err), rec)
 	}
-	r := &streamReceiver{s: s, rec: rec, instDir: instDir, root: root, hvi: hvi,
+	rec.StreamAccepted = ""
+	r := &streamReceiver{s: s, rec: rec, path: path, instDir: instDir, root: root, hvi: hvi,
 		diskPath: filepath.Join(instDir, "bundle", "rootfs.ext4"), files: map[string][]byte{}}
 	rec.Stream = &migrateStreamStats{}
 	started := time.Now()

@@ -77,6 +77,9 @@ type moveStreamHeader struct {
 	// Replay says the hvi components come from the source's own copy of a
 	// stream hvi already sealed, sent again after a failed attempt.
 	Replay bool `json:"replay,omitempty"`
+	// Attempt names this attempt of the move; the destination records it
+	// as accepted once it has taken the header and copied the base.
+	Attempt string `json:"attempt,omitempty"`
 }
 
 // diskBatchHeader is a 'D' record: count adjacent blocks from first, as

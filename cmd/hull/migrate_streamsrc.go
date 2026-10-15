@@ -217,6 +217,11 @@ type streamSender struct {
 	// sealDone reports the spool's seal, which runs on behind the move
 	// once the stream is out.
 	sealDone chan error
+	// ctx is the move's; attempt names this attempt, and callDone is
+	// closed once the receive's ssh session has ended.
+	ctx      context.Context
+	attempt  string
+	callDone chan struct{}
 }
 
 func (ss *streamSender) progress(format string, args ...any) {
@@ -859,8 +864,12 @@ func (m *moveSource) streamTransfer(ctx context.Context) error {
 	pr, pw := io.Pipe()
 	link := &softLink{w: pw}
 	sw := newMoveStreamWriter(link)
+	attempt, err := newMoveTxID()
+	if err != nil {
+		return err
+	}
 	ss := &streamSender{m: m, state: state, sw: sw, link: link, disk: f, size: info.Size(), stats: stats,
-		spoolDir: spoolDir}
+		spoolDir: spoolDir, ctx: ctx, attempt: attempt, callDone: make(chan struct{})}
 	type sendResult struct {
 		hviReply json.RawMessage
 		err      error
@@ -872,6 +881,7 @@ func (m *moveSource) streamTransfer(ctx context.Context) error {
 		sent <- sendResult{reply, err}
 	}()
 	reply, err := m.peer.call(ctx, "migrate-receive", []string{"--stream", "--txid", m.rec.TxID, "--name", m.name}, pr)
+	close(ss.callDone)
 	_ = pr.CloseWithError(errors.New("the destination stopped reading"))
 	res := <-sent
 	m.spoolSealing = ss.sealDone
@@ -927,11 +937,20 @@ func (m *moveSource) streamTransfer(ctx context.Context) error {
 func (ss *streamSender) send(replay bool) (json.RawMessage, error) {
 	m := ss.m
 	if err := ss.sw.header(moveStreamHeader{TxID: m.rec.TxID, Name: m.name, Epoch: m.rec.Epoch,
-		BaseSHA256: m.rec.BaseSHA256, DiskSize: ss.size, BlockSize: diskBlockSize, Replay: replay}); err != nil {
+		BaseSHA256: m.rec.BaseSHA256, DiskSize: ss.size, BlockSize: diskBlockSize, Replay: replay,
+		Attempt: ss.attempt}); err != nil {
 		return nil, err
 	}
 	if err := ss.sw.flush(); err != nil {
 		return nil, err
+	}
+	if !replay {
+		// A refusal of the header (no base, another profile, no room
+		// for the base's copy) must come while the guest still runs:
+		// once hvi's migrate has begun, hull reads it to the end.
+		if err := ss.waitAccepted(); err != nil {
+			return nil, err
+		}
 	}
 	basePath := m.s.BasePath(m.rec.BaseSHA256)
 	if replay {
@@ -983,6 +1002,15 @@ func (ss *streamSender) send(replay bool) (json.RawMessage, error) {
 		sp.close()
 		unlock()
 		return nil, err
+	}
+	select {
+	case <-ss.callDone:
+		// The destination's receive ended before hvi's migrate began,
+		// which it never does unless it failed: its reply says why.
+		sp.close()
+		unlock()
+		return nil, errors.New("the destination stopped receiving before hvi's migrate began")
+	default:
 	}
 	// A restored guest that was never resumed may be resumed by the
 	// migrate op: hvi resumes the guest when the stream fails before its
@@ -1051,6 +1079,35 @@ func (ss *streamSender) send(replay bool) (json.RawMessage, error) {
 		return nil, sendErr
 	}
 	return reply, ss.link.err
+}
+
+// acceptPoll is how often the source asks whether the destination took the
+// stream's header.
+const acceptPoll = 50 * time.Millisecond
+
+// waitAccepted waits until the destination's record says it took this
+// attempt's header and copied the base, and fails if its receive ends
+// first.
+func (ss *streamSender) waitAccepted() error {
+	m := ss.m
+	started := time.Now()
+	for {
+		reply, err := m.peer.call(ss.ctx, "migrate-status", []string{"--txid", m.rec.TxID}, nil)
+		if err == nil && reply.Record != nil && reply.Record.StreamAccepted == ss.attempt {
+			ss.stats.step("destination accepted")
+			if took := time.Since(started); took > time.Second {
+				ss.progress("the destination took the stream in %.1f s (it copied the base)", took.Seconds())
+			}
+			return nil
+		}
+		select {
+		case <-ss.callDone:
+			return errors.New("the destination refused the stream before hvi's migrate began")
+		case <-ss.ctx.Done():
+			return ss.ctx.Err()
+		case <-time.After(acceptPoll):
+		}
+	}
 }
 
 // streamTestHook, when set, is called at points of a streamed move a test

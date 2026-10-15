@@ -209,7 +209,7 @@ The destination's verbs each print one JSON object on stdout:
 
 | Verb | Flags | What it does |
 |---|---|---|
-| `migrate-probe` | `--name`, `--hvi`, `--gateway-sock` | reports hull and hvi versions, whether hvi takes the control flags and `--profile` (a stand-in for "can restore a portable bundle"; see [migration.md](migration.md#usage)), has `restore` and restores from a stream, the hypervisor, free space, whether the name is taken, whether the gateway answers, the bases and profile kernels the store holds, and the capability `stream-v1` |
+| `migrate-probe` | `--name`, `--hvi`, `--gateway-sock` | reports hull and hvi versions, whether hvi takes the control flags and `--profile` (a stand-in for "can restore a portable bundle"; see [migration.md](migration.md#usage)), has `restore` and restores from a stream, the hypervisor, free space, whether the name is taken, whether the gateway answers, the bases and profile kernels the store holds, and the capability `stream-v2` |
 | `migrate-receive` | `--txid`, `--name`, `--reserve`, `--stream` | with `--reserve`, claims the name (a JSON request on stdin); with `--stream`, reads a streamed move on stdin, restores it paused as it arrives and ends `restored-paused`; with neither, reads the whole-bundle stream and ends `verified` |
 | `migrate-prepare` | `--txid` | restores the received checkpoint paused |
 | `migrate-commit` | `--txid`, `--epoch` | records `running`, then resumes the guest |
