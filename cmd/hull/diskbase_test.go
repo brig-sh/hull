@@ -16,6 +16,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -174,5 +175,60 @@ func TestKeepBase(t *testing.T) {
 	_ = f.Close()
 	if got, _, _ := diskDigestFile(s.BasePath(sum)); got != sum {
 		t.Errorf("the base changed with the disk: %s", got)
+	}
+}
+
+// The written bitmap sets exactly the blocks where the disk differs from
+// its base: a block changed, one written where the base has a hole, one
+// zeroed where the base had data, and the short last
+// block; a block written with the base's own bytes is not set.
+func TestDiskWrittenBitmap(t *testing.T) {
+	dir := t.TempDir()
+	const size = 20*diskBlockSize + 100
+	base, disk := filepath.Join(dir, "base"), filepath.Join(dir, "disk")
+	write := func(path string, at int64, b []byte) {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.WriteAt(b, at); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Truncate(size); err != nil {
+			t.Fatal(err)
+		}
+		_ = f.Close()
+	}
+	block := func(c byte) []byte { return bytes.Repeat([]byte{c}, diskBlockSize) }
+	for _, i := range []int64{1, 2, 3, 5, 7} {
+		write(base, i*diskBlockSize, block(byte(i)))
+	}
+	write(base, 20*diskBlockSize, bytes.Repeat([]byte{9}, 100))
+	if _, err := copyDisk(base, disk); err != nil {
+		t.Fatal(err)
+	}
+	write(disk, 1*diskBlockSize, block(0xee))         // changed
+	write(disk, 2*diskBlockSize, block(2))            // the base's own bytes
+	write(disk, 3*diskBlockSize, block(0))            // zeroed
+	write(disk, 10*diskBlockSize+7, []byte{1})        // into a hole
+	write(disk, 20*diskBlockSize, []byte{8, 8, 8, 8}) // the short last block
+	bits, n, err := diskWrittenBitmap(base, disk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bits) != 3 || n != 4 {
+		t.Fatalf("%d bytes, %d set", len(bits), n)
+	}
+	var set []int64
+	for i := int64(0); i < 21; i++ {
+		if bits[i/8]&(1<<(i%8)) != 0 {
+			set = append(set, i)
+		}
+	}
+	if fmt.Sprint(set) != "[1 3 10 20]" {
+		t.Errorf("set %v", set)
+	}
+	if _, _, err := diskWrittenBitmap(base, filepath.Join(dir, "none")); err == nil {
+		t.Error("a missing disk compared")
 	}
 }
