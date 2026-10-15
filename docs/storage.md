@@ -192,7 +192,9 @@ sets.
 ├── volumes/<project>_<name>/     compose named volumes
 ├── compose/<project>.json        compose project state, plus its gateway sockets and log
 ├── migrations/<txid>.json       the ledger of moves that committed or aborted here as their destination
-├── bases/<digest>.ext4          0400: block rootfs images as built, before the guest wrote, by disk digest
+├── bases/<digest>.ext4          0400: an image's block rootfs, before any instance's files, by disk digest
+├── bases/images/<key>.json      which base an image's instances start from on this host
+├── bases/received/<digest>      a base a prepare received ahead of a move
 ├── bases/kernels/<sha256>.Image a profile kernel a prepare sent here, which its install record names
 └── instances/<id>/
     ├── state.json               0600
@@ -515,13 +517,16 @@ or aborted on it as `<store>/migrations/<txid>.json`, which neither `hull rm`
 nor a later move removes; an abort removes the instance directory. See
 [migration.md](migration.md#records).
 
-An `hvi` run on a block rootfs with a control socket keeps its disk image,
-as built and before the guest writes to it, under `<store>/bases/` as a
-read-only file named by its disk digest, and records the digest in
-`state.json` as `base`. A streamed move sends only the blocks that differ
-from it (see [migration.md](migration.md#bases)). On APFS the base is a
-clone and costs no space until the guest writes; on ext4 it is a copy of
-the image's data. Nothing removes a base yet: `hull rm` and `hull prune`
-leave `<store>/bases` alone. A streamed move keeps hvi's stream on the
+An `hvi` run on a block rootfs builds its image's ext4 rootfs once per
+image and size, without any instance's own files, and keeps it under
+`<store>/bases/` as a read-only file named by its disk digest. Each
+instance's disk is a copy of it with that instance's files written in, and
+`state.json` records the base as `base`. A streamed move sends only the
+blocks that differ from it (see [migration.md](migration.md#bases)). On
+APFS each instance's copy is a clone and costs no space until written; on
+ext4 without reflinks it is a copy of the base's data. `hull rm` removes
+an instance's base once nothing else needs it, `hull prune` removes the
+bases nothing needs, and `hull prune --bases` also those kept for images
+and received ahead of a move. A streamed move keeps hvi's stream on the
 source in `<instance>/checkpoint/<txid>/`, as large as the guest's touched
 RAM, for an abort to restore from.
