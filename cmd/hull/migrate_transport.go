@@ -22,9 +22,10 @@ import (
 	"github.com/brig-sh/hull/pkg/store"
 )
 
-// streamCheckpointFormat is the first hvi checkpoint format with the
-// streamed migrate op.
-const streamCheckpointFormat = 2
+// streamCheckpointFormat is the first hvi checkpoint format whose migrate
+// stream carries the disk rounds (hvi docs/checkpoint.md, "The stream
+// format"). Format 2, RAM rounds only, left the disk to hull.
+const streamCheckpointFormat = 3
 
 // transportFacts are what decides how a move carries the guest.
 type transportFacts struct {
@@ -34,11 +35,14 @@ type transportFacts struct {
 	// unknown.
 	SourceFormat int
 	// HasBase says the instance records a base and this store still
-	// holds it.
+	// holds it; HviBase that the running hvi was given that base, so its
+	// migrate stream carries the blocks that differ from it.
 	HasBase    bool
+	HviBase    bool
 	BaseReason string
 	// DestStream is the destination hull taking a streamed move, and
-	// DestHviStream its hvi restoring from a stream.
+	// DestHviStream its hvi restoring from a stream with its disk rounds
+	// onto a copy of the base.
 	DestStream    bool
 	DestHviStream bool
 	DestHull      string
@@ -46,54 +50,69 @@ type transportFacts struct {
 }
 
 // decideTransport is how a move carries the guest, and why when it is the
-// whole bundle. The streamed move needs every piece: an hvi here that
-// streams, a hull and an hvi there that take a stream, and a base the disk
-// blocks apply to (the destination need not hold it yet: the move sends it
-// before the guest stops).
+// whole bundle. The streamed move needs every piece: an hvi here whose
+// migrate stream carries the disk rounds against the base it was booted
+// with, a hull and an hvi there that take such a stream, and the base
+// itself (the destination need not hold it yet: the move sends it before
+// the guest stops).
 func decideTransport(f transportFacts) (string, string) {
 	switch {
 	case f.WholeBundle:
 		return transportBundle, "--whole-bundle asked for it"
 	case !f.DestStream:
-		return transportBundle, fmt.Sprintf("the hull there (%s) takes no streamed move", f.DestHull)
+		return transportBundle, fmt.Sprintf("the hull there (%s) does not take a %s streamed move", f.DestHull,
+			moveCapStream)
 	case !f.DestHviStream:
-		return transportBundle, fmt.Sprintf("the hvi there (%s) cannot restore from a stream", f.DestHvi)
+		return transportBundle, fmt.Sprintf("the hvi there (%s) cannot restore a stream's disk rounds onto a base",
+			f.DestHvi)
 	case f.SourceFormat < streamCheckpointFormat:
 		return transportBundle, fmt.Sprintf("the hvi here writes checkpoint format %d, and a streamed "+
-			"move needs %d", f.SourceFormat, streamCheckpointFormat)
+			"move needs %d, whose stream carries the disk", f.SourceFormat, streamCheckpointFormat)
 	case !f.HasBase:
 		return transportBundle, f.BaseReason
+	case !f.HviBase:
+		return transportBundle, "the hvi running the instance was not given its base (it was started by " +
+			"an older hull), so its stream would not carry the disk"
 	}
 	return transportStream, ""
 }
 
-// hviCheckpointFormat reads the checkpoint format of the running hvi from
-// the machine profile it wrote, or asks it; 0 when neither answers.
-func hviCheckpointFormat(state *store.InstanceState) int {
-	var p struct {
-		CheckpointFormat int `json:"checkpoint_format"`
-	}
+// hviProfileFacts is what a move reads of the running hvi's machine
+// profile.
+type hviProfileFacts struct {
+	CheckpointFormat int `json:"checkpoint_format"`
+	// DiskBase is the base the disk was booted against
+	// (--disk-base-sha256), which a restore carries on.
+	DiskBase string `json:"disk_base_sha256"`
+}
+
+// runningHviProfile reads the machine profile the running hvi wrote, or
+// asks hvi for it.
+func runningHviProfile(state *store.InstanceState) (hviProfileFacts, bool) {
+	var p hviProfileFacts
 	if state.ProfilePath != "" {
 		if data, err := os.ReadFile(state.ProfilePath); err == nil && json.Unmarshal(data, &p) == nil &&
 			p.CheckpointFormat > 0 {
-			return p.CheckpointFormat
+			return p, true
 		}
 	}
 	if state.ControlSock != "" {
 		if reply, err := hviOp(state.ControlSock, "profile"); err == nil && json.Unmarshal(reply.Profile, &p) == nil {
-			return p.CheckpointFormat
+			return p, true
 		}
 	}
-	return 0
+	return p, false
 }
 
 // moveTransportFacts gathers the facts for a move of state to the probed
 // destination.
 func moveTransportFacts(s *store.Store, state *store.InstanceState, probe *migrateProbe, wholeBundle bool) transportFacts {
-	f := transportFacts{WholeBundle: wholeBundle, SourceFormat: hviCheckpointFormat(state)}
+	f := transportFacts{WholeBundle: wholeBundle}
+	prof, _ := runningHviProfile(state)
+	f.SourceFormat = prof.CheckpointFormat
 	if probe != nil {
 		f.DestStream = probe.hasCapability(moveCapStream)
-		f.DestHviStream = probe.HviStream
+		f.DestHviStream = probe.HviStream && probe.HviStreamDisk
 		f.DestHull, f.DestHvi = probe.HullVersion, probe.Hvi
 	}
 	switch b := state.Base; {
@@ -103,6 +122,7 @@ func moveTransportFacts(s *store.Store, state *store.InstanceState, probe *migra
 		f.BaseReason = fmt.Sprintf("its base %s is gone from this store", digestHead(b.SHA256))
 	default:
 		f.HasBase = true
+		f.HviBase = prof.DiskBase == b.SHA256
 	}
 	return f
 }

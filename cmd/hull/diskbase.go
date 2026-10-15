@@ -294,7 +294,12 @@ func baseHeld(s *store.Store, sum string) bool {
 	return err == nil && info.Mode().IsRegular()
 }
 
-// hviDiskBaseFlag hands hvi the digest of the disk as it boots from it. hull
-// no longer passes it (see imageBase); a restore still drops it from a
-// command line an older hull recorded.
-const hviDiskBaseFlag = "--disk-base-sha256"
+// hviDiskBaseFlag hands hvi the digest of the base its disk was made from,
+// and hviDiskWrittenFlag the bitmap of the blocks hull wrote over the base
+// before the boot (the instance's own files): with both, hvi's blocks
+// written since boot are every block that differs from the base, and its
+// migrate stream carries them as disk rounds.
+const (
+	hviDiskBaseFlag    = "--disk-base-sha256"
+	hviDiskWrittenFlag = "--disk-written"
+)

@@ -50,11 +50,13 @@ import (
 
 // moveCapStream is the capability a destination's probe lists when it takes
 // a streamed move (`migrate-receive --stream`) and the prepare verbs. A hull
-// from before them lists nothing and gets the whole-bundle move. v2 is the
-// stream whose header names an attempt the destination accepts in its
-// record before hvi's migrate starts, and whose trailer accounts for the
-// disk rounds; a v1 hull refuses that trailer, so it gets the whole bundle.
-const moveCapStream = "stream-v2"
+// from before them lists nothing and gets the whole-bundle move. v3 is the
+// stream (HULLMIG3) that carries hvi's migrate stream with the disk rounds
+// in it, which the destination hands whole to `hvi restore --from-stream`.
+// v2 (HULLMIG2) carried disk blocks hull read itself beside hvi's RAM
+// rounds; neither side reads the other's stream, so a v2 hull on either
+// side gets the whole bundle.
+const moveCapStream = "stream-v3"
 
 // probeMaxBases bounds the bases a probe lists.
 const probeMaxBases = 512
@@ -640,14 +642,15 @@ func prepareDestination(ctx context.Context, s *store.Store, state *store.Instan
 	if reply, err := p.call(ctx, "migrate-probe", probeArgs(remote, ""), nil); err == nil {
 		res.Holds = reply.Probe
 	}
-	res.Stream = state.Base != nil && res.Holds.holdsBase(state.Base.SHA256) && res.Holds.HviStream
+	res.Stream = state.Base != nil && res.Holds.holdsBase(state.Base.SHA256) && res.Holds.HviStream &&
+		res.Holds.HviStreamDisk
 	switch {
 	case len(failed) > 0:
 		return res, fmt.Errorf("prepare %s for %s: %s", remote.Target, state.ID, strings.Join(failed, "; "))
 	case res.Stream:
 		logf("%s is prepared: a move of %s sends only what the guest changed", remote.Target, state.ID)
-	case res.Holds != nil && !res.Holds.HviStream:
-		res.Why = fmt.Sprintf("its hvi (%s) cannot restore from a stream", res.Holds.Hvi)
+	case res.Holds != nil && (!res.Holds.HviStream || !res.Holds.HviStreamDisk):
+		res.Why = fmt.Sprintf("its hvi (%s) cannot restore a stream's disk rounds onto a base", res.Holds.Hvi)
 		logf("%s holds what it can, but %s; a move sends the whole checkpoint and disk", remote.Target, res.Why)
 	default:
 		logf("%s holds what it can; a move of %s sends the whole checkpoint and disk (%s)", remote.Target,
