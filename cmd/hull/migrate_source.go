@@ -619,13 +619,18 @@ func (m *moveSource) stopped(err error) error {
 	m.releaseSeal()
 	err = m.rec.fail(m.path, err)
 	fenced := migrateStateOrder(roleSource, m.rec.State) >= migrateStateOrder(roleSource, srcFenced)
+	unknown := false
 	if m.rec.Transport == transportStream && m.rec.State == srcTransferring {
-		// hvi fences the guest only once it has written its manifest; a
-		// stream that ended before the manifest left it running.
+		// hvi fences the guest once it has written its manifest, which
+		// may be before hull read it: what hvi says now wins over what
+		// hull made of the stream.
 		state, serr := m.s.GetInstance(m.name)
-		var ranOn *hviRanOnError
-		fenced = serr != nil || fencedFor(state, m.rec.TxID) ||
-			(!errors.As(err, &ranOn) && hviVMState(state) == store.MigrationFenced)
+		vm := ""
+		if serr == nil {
+			vm = hviVMState(state)
+		}
+		fenced = serr != nil || fencedFor(state, m.rec.TxID) || vm == store.MigrationFenced
+		unknown = vm == "?"
 	}
 	next := fmt.Sprintf("`hull migrate %s --txid %s` resumes it from here", m.name, m.rec.TxID)
 	if m.rec.State == srcCommitting {
@@ -643,6 +648,11 @@ func (m *moveSource) stopped(err error) error {
 		return fmt.Errorf("move %s stopped at %s: %w\nThe source stays fenced and will not run "+
 			"until the move commits or is aborted. %s; `hull migrate --abort %s` brings the instance "+
 			"back here", m.rec.TxID, m.rec.State, err, next, m.rec.TxID)
+	}
+	if unknown {
+		return fmt.Errorf("move %s stopped at %s: %w\nhvi did not say whether the guest is fenced. Do not "+
+			"stop the instance: a fenced guest's hvi holds the only copy of it. %s; `hull migrate --abort %s` "+
+			"ends the move with the instance here either way", m.rec.TxID, m.rec.State, err, next, m.rec.TxID)
 	}
 	return fmt.Errorf("move %s stopped at %s: %w\nThe instance still runs here. %s; `hull migrate "+
 		"--abort %s` releases the destination", m.rec.TxID, m.rec.State, err, next, m.rec.TxID)
