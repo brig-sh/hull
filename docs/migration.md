@@ -320,6 +320,18 @@ differs from the base by comparing the disk with it (round 0), then takes
 hvi's rounds. An instance recorded by an older hull, whose base was its
 own boot disk (`fromBoot`), still moves with hvi's blocks since boot.
 
+A base is kept while something on the host needs it: an instance or a
+move record that names it, an image still in the store whose base it is,
+or a `migrate-prepare` that received it ahead of a move
+(`bases/received/<digest>`). `hull rm` removes the instance's base when
+nothing else needs it. `hull prune` removes every base nothing needs, the
+entries of images gone from the store, bases set aside as corrupt and
+half-written ones left by a run or a prepare that died; `hull prune
+--bases` also removes the bases kept for images and received ahead of a
+move when no instance or move uses them. A base younger than ten minutes
+is left alone, since a run may be copying it into a disk it has not
+recorded yet.
+
 The disk digest is the sha256 of `HULLDISK1\0`, the image's size and the
 block size (64 KiB, big-endian u64 each), then, for every 64 KiB block on
 an absolute boundary that holds a byte that is not zero, the block's index

@@ -115,6 +115,10 @@ func removeInstanceIn(s *store.Store, instanceID string, force bool) error {
 	if err := s.DeleteInstance(instanceID); err != nil {
 		return fmt.Errorf("failed to remove instance: %w", err)
 	}
+	// Its disk's base goes too once nothing else needs it (basegc.go).
+	if state.Base != nil {
+		releaseBase(s, state.Base.SHA256)
+	}
 
 	fmt.Printf("Instance %s removed\n", instanceID)
 	return nil
