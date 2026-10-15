@@ -115,6 +115,56 @@ type moveStreamTrailer struct {
 	Chain   string `json:"chain"`
 	// HviReply is hvi's reply to the migrate op, after its manifest.
 	HviReply json.RawMessage `json:"hviReply,omitempty"`
+	// Disk is what the disk rounds were, for the destination to hold the
+	// batches it applied to, and to hvi's own digests in disk.json.
+	Disk *streamDiskRounds `json:"disk,omitempty"`
+}
+
+// streamDiskRounds is the trailer's account of the disk rounds.
+type streamDiskRounds struct {
+	// Engine is the source's disk engine: "hvi" or "compare".
+	Engine string `json:"engine"`
+	// Rounds are every disk round sent, in order, the final one last.
+	Rounds []streamDiskRound `json:"rounds"`
+}
+
+// streamDiskRound is one disk round as sent.
+type streamDiskRound struct {
+	Round int  `json:"round"`
+	Final bool `json:"final,omitempty"`
+	// From is "hvi" for a round of hvi's dirty blocks, "compare" for one
+	// hull found by comparing the disk with the base.
+	From    string `json:"from"`
+	Blocks  int64  `json:"blocks"`
+	Batches int64  `json:"batches"`
+	// SentSHA256 is the sha256 of the round's batch digests (each the hex
+	// sha256 of its raw bytes) in order, nothing between them: for a round
+	// from hvi, hvi's own sent_sha256 for it, which the source checked.
+	SentSHA256 string `json:"sentSha256"`
+	// Generation and BitmapSHA256 are from hvi's disk-dirty reply that
+	// started a round from hvi.
+	Generation   uint64 `json:"generation,omitempty"`
+	BitmapSHA256 string `json:"bitmapSha256,omitempty"`
+}
+
+// diskRoundDigest gathers a round's batches as they are sent or applied.
+type diskRoundDigest struct {
+	round   streamDiskRound
+	digests strings.Builder
+}
+
+// add counts one batch of count blocks whose raw bytes have sha256 sum.
+func (d *diskRoundDigest) add(count int64, sum string) {
+	d.round.Blocks += count
+	d.round.Batches++
+	d.digests.WriteString(sum)
+}
+
+// done is the round with its sent_sha256.
+func (d *diskRoundDigest) done() streamDiskRound {
+	r := d.round
+	r.SentSHA256 = sha256Hex([]byte(d.digests.String()))
+	return r
 }
 
 // moveChain is the running hash of the records' kinds and headers.
@@ -187,8 +237,8 @@ func (sw *moveStreamWriter) header(h moveStreamHeader) error {
 }
 
 // disk writes count adjacent blocks from first, raw being their bytes, and
-// returns the bytes it put on the wire.
-func (sw *moveStreamWriter) disk(round int, final bool, first, count int64, raw []byte) (int64, error) {
+// returns the bytes it put on the wire and the hex sha256 of raw.
+func (sw *moveStreamWriter) disk(round int, final bool, first, count int64, raw []byte) (int64, string, error) {
 	sum := sha256.Sum256(raw)
 	hdr := diskBatchHeader{Round: round, Final: final, First: first, Count: count, Codec: codecRaw,
 		RawSize: int64(len(raw)), Size: int64(len(raw)), SHA256: hex.EncodeToString(sum[:])}
@@ -201,16 +251,16 @@ func (sw *moveStreamWriter) disk(round int, final bool, first, count int64, raw 
 	}
 	js, err := json.Marshal(hdr)
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 	before := sw.written()
 	if err := sw.record('D', js); err != nil {
-		return 0, err
+		return 0, "", err
 	}
 	if _, err := sw.bw.Write(payload); err != nil {
-		return 0, err
+		return 0, "", err
 	}
-	return sw.written() - before, nil
+	return sw.written() - before, hdr.SHA256, nil
 }
 
 // component relays one hvi component: line is its header line as hvi wrote
@@ -240,8 +290,9 @@ func (sw *moveStreamWriter) component(line []byte, hdr hviComponentHeader, body 
 }
 
 // trailer seals the stream and flushes it.
-func (sw *moveStreamWriter) trailer(hviReply json.RawMessage) error {
-	js, err := json.Marshal(moveStreamTrailer{Records: sw.chain.n, Chain: sw.chain.sum(), HviReply: hviReply})
+func (sw *moveStreamWriter) trailer(hviReply json.RawMessage, disk *streamDiskRounds) error {
+	js, err := json.Marshal(moveStreamTrailer{Records: sw.chain.n, Chain: sw.chain.sum(), HviReply: hviReply,
+		Disk: disk})
 	if err != nil {
 		return err
 	}

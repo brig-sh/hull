@@ -64,10 +64,14 @@ type fakeStreamHvi struct {
 	// refuseFenced makes migrate refuse a fenced guest, as no hvi does
 	// today; hvi streams one again.
 	refuseFenced bool
-	writesAt     map[string][]int64
-	emitted      []byte
-	ops          []string
-	migrations   int
+	// generation counts the guest's writes; rounds are the disk-dirty
+	// reads since the last since-boot one, as disk.json lists them.
+	generation uint64
+	rounds     []fakeDiskRound
+	writesAt   map[string][]int64
+	emitted    []byte
+	ops        []string
+	migrations int
 	// pid is the process standing in for this hvi, which stop ends.
 	pid int
 }
@@ -99,9 +103,19 @@ func newFakeStreamHvi(t *testing.T, disk string, diskOps bool) *fakeStreamHvi {
 	return h
 }
 
+// fakeDiskRound is one round as hvi records it in disk.json.
+type fakeDiskRound struct {
+	Round        int     `json:"round"`
+	Generation   uint64  `json:"generation"`
+	Blocks       int     `json:"blocks"`
+	BitmapSHA256 string  `json:"bitmap_sha256"`
+	SentSHA256   *string `json:"sent_sha256"`
+}
+
 // guestWrite has the guest write block index, as virtio-blk would: marked,
 // then written.
 func (h *fakeStreamHvi) guestWrite(index int64, b byte) {
+	h.generation++
 	h.sinceBoot[index] = true
 	h.sinceRead[index] = true
 	f, err := os.OpenFile(h.disk, os.O_WRONLY, 0)
@@ -163,8 +177,15 @@ func (h *fakeStreamHvi) serve(conn net.Conn) {
 			h.last = append(h.last, b)
 		}
 		sort.Slice(h.last, func(i, j int) bool { return h.last[i] < h.last[j] })
-		reply(`{"v":1,"ok":true,"since":%q,"round":%d,"block_size":65536,"blocks":%d,"dirty":%d,"generation":7,"bitmap_b64":%q}`,
-			req["since"], h.round, blocks, len(set), base64.StdEncoding.EncodeToString(bits))
+		if h.round == 0 {
+			h.rounds = nil
+		}
+		bitmapSum := sha256.Sum256(bits)
+		h.rounds = append(h.rounds, fakeDiskRound{Round: h.round, Generation: h.generation, Blocks: len(set),
+			BitmapSHA256: hex.EncodeToString(bitmapSum[:])})
+		reply(`{"v":1,"ok":true,"since":%q,"round":%d,"block_size":65536,"blocks":%d,"dirty":%d,"generation":%d,"bitmap_sha256":"%s","bitmap_b64":%q}`,
+			req["since"], h.round, blocks, len(set), h.generation, hex.EncodeToString(bitmapSum[:]),
+			base64.StdEncoding.EncodeToString(bits))
 	case "disk-blocks":
 		if int(req["round"].(float64)) != h.round {
 			reply(`{"v":1,"ok":false,"code":"refused","error":"not the last round"}`)
@@ -176,7 +197,8 @@ func (h *fakeStreamHvi) serve(conn net.Conn) {
 			return
 		}
 		defer func() { _ = f.Close() }()
-		batch := 0
+		batch, sent := 0, 0
+		var digests strings.Builder
 		for i := 0; i < len(h.last); {
 			first, count := h.last[i], int64(1)
 			for i+int(count) < len(h.last) && h.last[i+int(count)] == first+count && count < 16 {
@@ -189,10 +211,18 @@ func (h *fakeStreamHvi) serve(conn net.Conn) {
 			reply(`{"component":"disk-blocks","batch":%d,"first":%d,"count":%d,"offset":%d,"size":%d,"sha256":"%s"}`,
 				batch, first, count, first*diskBlockSize, len(data), hex.EncodeToString(sum[:]))
 			_, _ = w.Write(data)
+			digests.WriteString(hex.EncodeToString(sum[:]))
 			batch++
+			sent += len(data)
 			i += int(count)
 		}
-		reply(`{"v":1,"ok":true,"blocks":%d,"bytes":0,"batches":%d,"generation":7,"max_lock_us":3}`, len(h.last), batch)
+		chain := sha256.Sum256([]byte(digests.String()))
+		sentSum := hex.EncodeToString(chain[:])
+		if n := len(h.rounds); n > 0 && h.rounds[n-1].Round == h.round {
+			h.rounds[n-1].SentSHA256 = &sentSum
+		}
+		reply(`{"v":1,"ok":true,"round":%d,"blocks":%d,"bytes":%d,"batches":%d,"generation":%d,"max_lock_us":3,"sent_sha256":"%s"}`,
+			h.round, len(h.last), sent, batch, h.generation, sentSum)
 	case "migrate":
 		// hvi streams a fenced guest again, unchanged: it has not run since
 		// the stream that fenced it. refuseFenced stands for an hvi that
@@ -254,7 +284,14 @@ func (h *fakeStreamHvi) serve(conn net.Conn) {
 		}
 		emit("ram-round-2", bytes.Repeat([]byte("last"), 1<<10))
 		for _, name := range []string{"cpu.json", "platform.json", "devices.json", "disk.json", "session.json"} {
-			emit(name, []byte(`{"version":1,"of":"`+name+`"}`))
+			doc := []byte(`{"version":1,"of":"` + name + `"}`)
+			if name == "disk.json" {
+				// As hvi captures it with the guest fenced: the
+				// generation and every round read so far.
+				doc, _ = json.Marshal(map[string]any{"version": 1, "generation": h.generation,
+					"rounds": append([]fakeDiskRound{}, h.rounds...)})
+			}
+			emit(name, doc)
 		}
 		var listed []string
 		for _, c := range comps {

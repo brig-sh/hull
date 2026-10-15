@@ -17,6 +17,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -166,6 +167,11 @@ type streamReceiver struct {
 	syncErr     error
 	// filesDone reports the documents written beside the record.
 	filesDone chan error
+	// applied is each disk round's batches as applied, by round.
+	applied map[int]*diskRoundDigest
+	// baseChecked reports the check of the base's digest, which runs while
+	// the stream arrives.
+	baseChecked chan error
 }
 
 // maybeSyncDisk asks for a sync of the disk in the background once
@@ -240,6 +246,17 @@ func (r *streamReceiver) header(h moveStreamHeader) error {
 	}
 	r.base = h.BaseSHA256
 	r.size = h.DiskSize
+	// The base is trusted by its name only until this check, which reads
+	// it while the stream's rounds arrive and is waited for before hvi
+	// gets the machine.
+	r.baseChecked = make(chan error, 1)
+	go func(path, want string) {
+		got, _, err := diskDigestFile(path)
+		if err == nil && got != want {
+			err = fmt.Errorf("its blocks hash to %s", got)
+		}
+		r.baseChecked <- err
+	}(r.s.BasePath(h.BaseSHA256), h.BaseSHA256)
 	// A fresh copy of the base on every attempt: whatever an earlier one
 	// applied is gone with it.
 	if err := os.MkdirAll(filepath.Dir(r.diskPath), 0o700); err != nil {
@@ -268,6 +285,135 @@ func (r *streamReceiver) header(h moveStreamHeader) error {
 	return nil
 }
 
+// checkBase waits for the check of the base's digest. A base whose blocks
+// do not hash to its name is set aside, so the source sends it again, as
+// for a base this host never held.
+func (r *streamReceiver) checkBase() error {
+	if r.baseChecked == nil {
+		return errors.New("the stream named no base")
+	}
+	err := <-r.baseChecked
+	r.baseChecked = nil
+	if err == nil {
+		r.rec.Stream.step("base checked")
+		return nil
+	}
+	path := r.s.BasePath(r.base)
+	aside := fmt.Sprintf("%s.bad-%d", path, time.Now().UnixNano())
+	if rerr := os.Rename(path, aside); rerr != nil {
+		return fmt.Errorf("base %s is corrupt (%v), and setting it aside failed: %w", r.base, err, rerr)
+	}
+	log.Warnf("Base %s is corrupt (%v); set aside as %s", r.base, err, aside)
+	return &noBaseError{sum: r.base}
+}
+
+// checkDiskRounds holds the disk rounds the destination applied to the
+// trailer's account of them: every round, with as many blocks and batches,
+// and the same digest of its batches' digests. For the rounds from hvi's
+// dirty blocks it then holds that account to what hvi itself recorded in
+// disk.json, which the manifest covers: each round hvi read went out
+// whole, as hvi streamed it, and the final round, read after the fence,
+// is the one after the last listed, at the generation hvi captured the
+// disk at, so no write of the guest was left out. A replay sends the disk
+// by comparison, which disk.json does not describe.
+func checkDiskRounds(replay bool, t *streamDiskRounds, applied map[int]*diskRoundDigest, diskJSON []byte) error {
+	if t == nil {
+		if len(applied) > 0 {
+			return errors.New("the stream's trailer gives no account of its disk rounds")
+		}
+		return nil
+	}
+	sent := map[int]streamDiskRound{}
+	for _, want := range t.Rounds {
+		if _, dup := sent[want.Round]; dup {
+			return fmt.Errorf("the trailer lists disk round %d twice", want.Round)
+		}
+		sent[want.Round] = want
+		got := (&diskRoundDigest{}).done()
+		if a := applied[want.Round]; a != nil {
+			got = a.done()
+			if got.Final != want.Final {
+				return fmt.Errorf("disk round %d arrived final %v, the trailer says %v", want.Round, got.Final, want.Final)
+			}
+		}
+		if got.Blocks != want.Blocks || got.Batches != want.Batches || got.SentSHA256 != want.SentSHA256 {
+			return fmt.Errorf("disk round %d: %d blocks in %d batches arrived (digest %s); the source sent %d "+
+				"in %d (digest %s)", want.Round, got.Blocks, got.Batches, got.SentSHA256, want.Blocks,
+				want.Batches, want.SentSHA256)
+		}
+	}
+	for round := range applied {
+		if _, ok := sent[round]; !ok {
+			return fmt.Errorf("disk round %d arrived, and the trailer does not list it", round)
+		}
+	}
+	var final *streamDiskRound
+	fromHvi := false
+	for i, r := range t.Rounds {
+		fromHvi = fromHvi || r.From == "hvi"
+		if r.Final {
+			if final != nil {
+				return errors.New("the trailer lists two final disk rounds")
+			}
+			final = &t.Rounds[i]
+		}
+	}
+	if replay || !fromHvi {
+		return nil
+	}
+	var doc struct {
+		Generation uint64 `json:"generation"`
+		Rounds     []struct {
+			Round        int     `json:"round"`
+			Generation   uint64  `json:"generation"`
+			Blocks       int64   `json:"blocks"`
+			BitmapSHA256 string  `json:"bitmap_sha256"`
+			SentSHA256   *string `json:"sent_sha256"`
+		} `json:"rounds"`
+	}
+	if diskJSON == nil {
+		return errors.New("the disk rounds came from hvi, and its stream has no disk.json to hold them to")
+	}
+	if err := json.Unmarshal(diskJSON, &doc); err != nil {
+		return fmt.Errorf("hvi's disk.json: %w", err)
+	}
+	last := -1
+	listed := map[int]bool{}
+	for _, l := range doc.Rounds {
+		listed[l.Round] = true
+		last = max(last, l.Round)
+		s, ok := sent[l.Round]
+		switch {
+		case !ok:
+			return fmt.Errorf("hvi read disk round %d, and the stream does not carry it", l.Round)
+		case s.From != "hvi":
+			continue
+		case l.SentSHA256 == nil || *l.SentSHA256 != s.SentSHA256:
+			return fmt.Errorf("hvi recorded disk round %d as sent with digest %v; the stream carried %s",
+				l.Round, l.SentSHA256, s.SentSHA256)
+		case l.Generation != s.Generation || l.Blocks != s.Blocks ||
+			(l.BitmapSHA256 != "" && l.BitmapSHA256 != s.BitmapSHA256):
+			return fmt.Errorf("hvi recorded disk round %d at generation %d with %d blocks; the source sent it "+
+				"as read at %d with %d", l.Round, l.Generation, l.Blocks, s.Generation, s.Blocks)
+		}
+	}
+	for _, s := range t.Rounds {
+		if s.From == "hvi" && !s.Final && !listed[s.Round] {
+			return fmt.Errorf("disk round %d is not one hvi recorded before the fence", s.Round)
+		}
+	}
+	switch {
+	case final == nil || final.From != "hvi":
+		return errors.New("the stream has no final disk round from hvi: the guest's last writes would be missing")
+	case final.Round != last+1:
+		return fmt.Errorf("the final disk round is %d; hvi's last recorded round was %d", final.Round, last)
+	case final.Generation != doc.Generation:
+		return fmt.Errorf("the final disk round was read at generation %d, and hvi captured the disk at %d: "+
+			"a write of the guest is missing", final.Generation, doc.Generation)
+	}
+	return nil
+}
+
 // noBaseError is a stream whose base this store does not hold.
 type noBaseError struct{ sum string }
 
@@ -276,6 +422,17 @@ func (e *noBaseError) Error() string {
 }
 
 func (r *streamReceiver) disk(d diskBatchHeader, raw []byte) error {
+	if r.applied == nil {
+		r.applied = map[int]*diskRoundDigest{}
+	}
+	round := r.applied[d.Round]
+	if round == nil {
+		round = &diskRoundDigest{round: streamDiskRound{Round: d.Round, Final: d.Final}}
+		r.applied[d.Round] = round
+	} else if round.round.Final != d.Final {
+		return fmt.Errorf("disk round %d is sent as both final and not", d.Round)
+	}
+	round.add(d.Count, d.SHA256)
 	cur := make([]byte, diskBlockSize)
 	for i := int64(0); i < d.Count; i++ {
 		index := d.First + i
@@ -463,6 +620,9 @@ func (r *streamReceiver) finish() error {
 // abandon ends a receive that failed: hvi's input is cut, and the restore
 // and any hvi it started are stopped.
 func (r *streamReceiver) abandon() {
+	if r.baseChecked != nil {
+		<-r.baseChecked
+	}
 	r.syncing.Wait()
 	if r.filesDone != nil {
 		<-r.filesDone
@@ -556,6 +716,12 @@ func destReceiveStream(s *store.Store, txid, name string, in io.Reader) *migrate
 	rec.Stream = &migrateStreamStats{}
 	started := time.Now()
 	res, err := readMoveStream(in, r)
+	if err == nil {
+		err = r.checkBase()
+	}
+	if err == nil {
+		err = checkDiskRounds(res.Header.Replay, res.Trailer.Disk, r.applied, r.files["disk.json"])
+	}
 	if err == nil {
 		err = r.finish()
 	}

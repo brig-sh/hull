@@ -368,7 +368,8 @@ rounds while `migrate` holds the socket: the last disk round is read after
 the seal, not inside the pause. The guest never runs again after the
 pause, so that round and the RAM still describe one machine. It also means
 the `disk.json` hvi writes inside the pause does not list the last round,
-so the destination's restore is not given `--disk-rounds`.
+and the destination's restore cannot be given `--disk-generation`, whose
+value comes from that round. hull makes the same check itself (below).
 
 ### The format
 
@@ -378,7 +379,7 @@ so the destination's restore is not given `--disk-rounds`.
 'D' u32 len  {"round", "final"?, "first", "count", "codec": "lz4"|"raw", "rawSize", "size", "sha256"}
              then size bytes: count adjacent blocks from first, lz4 when smaller
 'C' u32 len  hvi's frame header line, as hvi wrote it, then its bytes
-'T' u32 len  {"records", "chain", "hviReply"}
+'T' u32 len  {"records", "chain", "hviReply", "disk"}
 ```
 
 A disk batch's sha256 is of its raw bytes and is checked before a byte is
@@ -390,14 +391,43 @@ moved or altered fails the move even when each payload is intact. The
 reader holds every length, index and name to limits before it allocates,
 and refuses a stream without its trailer or with bytes after it.
 
+The trailer's `disk` is the source's account of the disk rounds:
+`{"engine", "rounds": [{"round", "final"?, "from": "hvi"|"compare",
+"blocks", "batches", "sentSha256", "generation"?, "bitmapSha256"?}]}`.
+`sentSha256` is the sha256 of the round's batch digests (the hex `sha256`
+of each `D` record) in order, with nothing between them. For a round from
+hvi it is hvi's own `sent_sha256`, which the source checks against the
+batches it read before it sends them; the source also checks each
+`disk-dirty` bitmap against its `bitmap_sha256`, and every `disk-blocks`
+reply's counts. The destination counts the batches of each round as it
+applies them and refuses, before hvi gets the machine:
+
+- a round whose blocks, batches or digest differ from the trailer's, or
+  one the trailer does not list;
+- for a live move with hvi's rounds, a round `disk.json` lists that the
+  stream does not carry, or whose `sent_sha256`, generation, block count
+  or bitmap digest there differ from the trailer's; `disk.json` is covered
+  by hvi's manifest;
+- a live move with hvi's rounds whose final round is missing, is not the
+  round after the last one `disk.json` lists, or was read at a generation
+  other than the one hvi captured the disk at: a write of the guest would
+  be missing. This is the check `hvi restore --disk-generation` makes.
+
+A replay sends the disk by comparison, which `disk.json` does not
+describe, so only the trailer's own account is checked there.
+
 ### The destination
 
 `migrate-receive --stream` copies the base to the instance's disk, applies
 each disk batch to it, and starts `hull restore --detach --paused --move T`
 with a pipe as its stdin once `profile.json` has arrived and matched the
 move's machine profile; that restore runs `hvi restore --from-stream -`,
-which reads the pipe. RAM frames go to hvi as they arrive, so no RAM
-reaches the destination's disk. The machine's documents and the manifest
+which reads the pipe. While the stream arrives it reads the base and
+checks that its blocks hash to the digest it is named by; one that does
+not is set aside as `<digest>.ext4.bad-<time>` and the move refused with
+`no_base`, so the source sends the base again and goes on from its spool.
+RAM frames go to hvi as they arrive, so no RAM reaches the destination's
+disk. The machine's documents and the manifest
 are held until the trailer has checked out and the last disk round is
 written; only then does hvi get them, check its manifest and build the
 machine over the disk, which is complete by then. hvi reads the disk
