@@ -44,8 +44,9 @@ func spoolOf(t *testing.T, data []byte) string {
 // offset at which its manifest's frame starts.
 func fakeHviStream(t *testing.T) ([]byte, int) {
 	t.Helper()
-	f := newStreamFixture(t, true, true)
-	conn, br, err := hviStreamOp(f.hvi.path, map[string]any{"op": "migrate", "then": "fence"}, hviStreamIdle)
+	f := newStreamFixture(t)
+	conn, br, err := hviStreamOp(f.hvi.path, map[string]any{"op": "migrate", "then": "fence",
+		"txid": strings.Repeat("ab", 16), "epoch": 1}, hviStreamIdle)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +184,7 @@ func TestStreamedMoveAbortAfterAKillInTheSealWindow(t *testing.T) {
 		{"recorded-cut", "recorded", true}} {
 		cut := tc.cut
 		t.Run(tc.name, func(t *testing.T) {
-			f := newStreamFixture(t, true, true)
+			f := newStreamFixture(t)
 			dir := crashMoveAt(t, f, tc.stage)
 			if spoolIsSealed(dir) {
 				t.Fatal("the dead hull sealed its spool")
@@ -230,7 +231,7 @@ func TestStreamedMoveAbortAfterAKillInTheSealWindow(t *testing.T) {
 // The same kill, then the move run again: it records the fence it finds
 // and finishes the move from the spool.
 func TestStreamedMoveRerunAfterAKillInTheSealWindow(t *testing.T) {
-	f := newStreamFixture(t, true, true)
+	f := newStreamFixture(t)
 	dir := crashMoveAfterSeal(t, f)
 	rec := f.srcRecord(t)
 	if err := f.migrate(t, rec.TxID); err != nil {
@@ -246,17 +247,18 @@ func TestStreamedMoveRerunAfterAKillInTheSealWindow(t *testing.T) {
 	f.checkArrived(t, rec)
 }
 
-// With the spool cut short and an hvi that cannot stream the fenced guest
-// again, nothing can bring the guest back but that hvi: the abort changes
-// nothing, does not stop it, and does not tell the operator to abort.
+// With the spool cut short and the fenced guest's second stream failing
+// (here: a reader hvi cut), nothing can bring the guest back but that hvi:
+// the abort changes nothing, does not stop it, and does not tell the
+// operator to abort.
 func TestStreamedMoveAbortRefusesWithNoWholeStream(t *testing.T) {
-	f := newStreamFixture(t, true, true)
+	f := newStreamFixture(t)
 	dir := crashMoveAfterSeal(t, f)
 	if err := os.Truncate(filepath.Join(dir, spoolStream), 100); err != nil {
 		t.Fatal(err)
 	}
 	f.hvi.mu.Lock()
-	f.hvi.refuseFenced = true
+	f.hvi.failRestream = true
 	f.hvi.mu.Unlock()
 	restored := false
 	localRestore = func(*store.Store, string) error { restored = true; return nil }
@@ -279,10 +281,10 @@ func TestStreamedMoveAbortRefusesWithNoWholeStream(t *testing.T) {
 
 // The spool's sync is not part of the downtime: with the sync of the
 // spooled stream held, the move still commits, and hull waits for the
-// sync only before it exits. The destination's last disk sync runs while
-// hvi restores, and the move waits for it before it is verified.
+// sync only before it exits. The destination hands hvi the whole stream
+// as it comes, and checks its base while hvi restores.
 func TestStreamedMoveCommitsWhileTheSpoolSyncs(t *testing.T) {
-	f := newStreamFixture(t, true, true)
+	f := newStreamFixture(t)
 	f.hvi.writesAt["ram-round-0"] = []int64{3}
 	release := make(chan struct{})
 	held := make(chan struct{}, 1)
@@ -342,7 +344,7 @@ func TestStreamedMoveCommitsWhileTheSpoolSyncs(t *testing.T) {
 	for _, s := range dst.Stream.Steps {
 		order = append(order, s.Step)
 	}
-	if strings.Join(order, ",") != "base checked,trailer read,hvi restored the guest paused,disk synced" {
+	if strings.Join(order, ",") != "trailer read,hvi restored the guest paused,base checked" {
 		t.Errorf("destination steps %v", order)
 	}
 }
@@ -351,7 +353,7 @@ func TestStreamedMoveCommitsWhileTheSpoolSyncs(t *testing.T) {
 // leave no record of the fence: the abort finds the whole spool of the
 // move and brings the guest back from it.
 func TestStreamedMoveAbortAfterHviIsGone(t *testing.T) {
-	f := newStreamFixture(t, true, true)
+	f := newStreamFixture(t)
 	dir := crashMoveAt(t, f, "relayed")
 	if err := syscall.Kill(f.vm.pid, syscall.SIGKILL); err != nil {
 		t.Fatal(err)

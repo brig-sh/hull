@@ -25,7 +25,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -36,15 +35,15 @@ import (
 )
 
 // The destination's half of a streamed move: `migrate-receive --stream`
-// reads the stream on stdin, applies the disk blocks to a copy of the base
-// that becomes the instance's disk, and relays hvi's components to an `hvi
-// restore --from-stream` it starts for the instance. RAM rounds go to hvi
-// as they arrive, so no RAM lands on this host's disk; the machine's state
-// and the manifest are held until the stream's trailer has been checked
-// and the last disk round is on disk, so hvi rebuilds the machine only from
-// a stream hull has verified whole, over a disk that is complete. The move
-// is verified, and the guest restored paused, when both hull and hvi have
-// checked everything; only the source's commit resumes it.
+// reads the stream on stdin, makes a synced copy of the base the
+// instance's disk, and hands hvi's stream, as hvi wrote it, to an `hvi
+// restore --from-stream - --disk <the copy> --disk-base-sha256 <base>` it
+// starts for the instance. hvi writes the disk rounds into the copy and
+// the RAM rounds into guest RAM as they arrive, so no RAM lands on this
+// host's disk, and checks every frame, the manifest and the disk rounds
+// before it builds the machine. The move is verified, and the guest
+// restored paused, when hull has checked the stream's trailer and hvi has
+// restored; only the source's commit resumes it.
 
 // streamRestoreTimeout bounds a streamed restore: it lasts as long as the
 // stream, pre-copy rounds included.
@@ -136,95 +135,26 @@ type streamReceiver struct {
 	root     string
 	hvi      string
 	diskPath string
-	diskFile *os.File
 	size     int64
 	base     string
 
 	restore *streamRestore
-	// stage: 0 before profile.json, 1 after it, 2 in the RAM rounds, 3 in
-	// the machine's state.
-	stage int
-	// pending is the component being read, when it is kept whole.
-	pending *bytesBuffer
-	// held are the state components, framed for hvi, held until the
-	// trailer; files the small components kept beside the record.
-	held      [][]byte
-	heldBytes int64
-	files     map[string][]byte
-	manifest  []byte
-	zero      []byte
+	// profileLine and pending are hvi's profile.json, held until it is
+	// checked; pending is then each document being read, kept for the
+	// record.
+	profileLine []byte
+	pending     *bytesBuffer
+	// files are the documents kept beside the record, docBytes their size.
+	files    map[string][]byte
+	docBytes int64
+	manifest []byte
 	// restoreErr is why hvi's restore failed, once it did.
 	restoreErr error
-	// profileLine is hvi's header line of profile.json, held with it.
-	profileLine []byte
-	// unsynced is what was written to the disk since the last background
-	// sync was asked for. syncing waits for the syncs in the background;
-	// syncMu guards whether one runs, whether another is asked for, and
-	// the first error one met.
-	unsynced    int64
-	syncing     sync.WaitGroup
-	syncMu      sync.Mutex
-	syncRunning bool
-	syncAgain   bool
-	syncErr     error
 	// filesDone reports the documents written beside the record.
 	filesDone chan error
-	// applied is each disk round's batches as applied, by round.
-	applied map[int]*diskRoundDigest
 	// baseChecked reports the check of the base's digest, which runs while
 	// the stream arrives.
 	baseChecked chan error
-}
-
-// maybeSyncDisk starts the disk's writeback, without waiting, once
-// spoolSyncEvery bytes were written to it since the last (where the host
-// cannot, it syncs the disk in the background instead): the sync the guest
-// waits for, after the stream, then has only the last round left, and no
-// sync runs to hold up the records written while the guest is stopped.
-func (r *streamReceiver) maybeSyncDisk(n int64) {
-	r.unsynced += n
-	if r.unsynced < spoolSyncEvery {
-		return
-	}
-	if canStartWriteback {
-		r.unsynced = 0
-		startWriteback(r.diskFile, 0, 0)
-		return
-	}
-	r.syncDisk()
-}
-
-// syncDisk syncs the disk in the background. One asked for while another
-// runs runs after it, so every write made before the call is covered once
-// syncing is done.
-func (r *streamReceiver) syncDisk() {
-	r.unsynced = 0
-	r.syncMu.Lock()
-	defer r.syncMu.Unlock()
-	if r.syncRunning {
-		r.syncAgain = true
-		return
-	}
-	r.syncRunning = true
-	r.syncing.Add(1)
-	f := r.diskFile
-	go func() {
-		defer r.syncing.Done()
-		for {
-			err := syncFile(f)
-			r.syncMu.Lock()
-			if err != nil && r.syncErr == nil {
-				r.syncErr = err
-			}
-			if !r.syncAgain {
-				r.syncRunning = false
-				r.syncMu.Unlock()
-				return
-			}
-			r.syncAgain = false
-			r.syncMu.Unlock()
-		}
-	}()
 }
 
 // toHvi writes data to hvi's stdin. A write that fails means hvi stopped
@@ -256,8 +186,8 @@ func (r *streamReceiver) header(h moveStreamHeader) error {
 	r.base = h.BaseSHA256
 	r.size = h.DiskSize
 	// The base is trusted by its name only until this check, which reads
-	// it while the stream's rounds arrive and is waited for before hvi
-	// gets the machine.
+	// it while the stream's rounds arrive and is waited for before the
+	// move is verified.
 	r.baseChecked = make(chan error, 1)
 	go func(path, want string) {
 		r.baseChecked <- checkBaseDigest(path, want)
@@ -280,15 +210,23 @@ func (r *streamReceiver) header(h moveStreamHeader) error {
 	if err != nil {
 		return err
 	}
-	r.diskFile = f
 	info, err := f.Stat()
+	if err == nil && info.Size() != h.DiskSize {
+		err = fmt.Errorf("the base is %d bytes and the guest's disk %d", info.Size(), h.DiskSize)
+	}
+	if err == nil {
+		// hvi syncs the disk after the rounds it writes and waits for that
+		// sync before the guest may run, so a copy whose writeback is
+		// still under way is paid for in the guest's downtime: seconds,
+		// on a busy Pi. The copy is synced here, before the guest stops.
+		err = syncFile(f)
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
 	if err != nil {
 		return err
 	}
-	if info.Size() != h.DiskSize {
-		return fmt.Errorf("the base is %d bytes and the guest's disk %d", info.Size(), h.DiskSize)
-	}
-	r.zero = make([]byte, diskBlockSize)
 	// The source waits for this before hvi's migrate fences the guest: a
 	// refusal from here on cannot be one the header would have told.
 	if h.Attempt != "" {
@@ -357,113 +295,6 @@ func (r *streamReceiver) checkBase() error {
 	return &noBaseError{sum: r.base}
 }
 
-// checkDiskRounds holds the disk rounds the destination applied to the
-// trailer's account of them: every round, with as many blocks and batches,
-// and the same digest of its batches' digests. For the rounds from hvi's
-// dirty blocks it then holds that account to what hvi itself recorded in
-// disk.json, which the manifest covers: each round hvi read went out
-// whole, as hvi streamed it, and the final round, read after the fence,
-// is the one after the last listed, at the generation hvi captured the
-// disk at, so no write of the guest was left out. A replay sends the disk
-// by comparison, which disk.json does not describe.
-func checkDiskRounds(replay bool, t *streamDiskRounds, applied map[int]*diskRoundDigest, diskJSON []byte) error {
-	if t == nil {
-		if len(applied) > 0 {
-			return errors.New("the stream's trailer gives no account of its disk rounds")
-		}
-		return nil
-	}
-	sent := map[int]streamDiskRound{}
-	for _, want := range t.Rounds {
-		if _, dup := sent[want.Round]; dup {
-			return fmt.Errorf("the trailer lists disk round %d twice", want.Round)
-		}
-		sent[want.Round] = want
-		got := (&diskRoundDigest{}).done()
-		if a := applied[want.Round]; a != nil {
-			got = a.done()
-			if got.Final != want.Final {
-				return fmt.Errorf("disk round %d arrived final %v, the trailer says %v", want.Round, got.Final, want.Final)
-			}
-		}
-		if got.Blocks != want.Blocks || got.Batches != want.Batches || got.SentSHA256 != want.SentSHA256 {
-			return fmt.Errorf("disk round %d: %d blocks in %d batches arrived (digest %s); the source sent %d "+
-				"in %d (digest %s)", want.Round, got.Blocks, got.Batches, got.SentSHA256, want.Blocks,
-				want.Batches, want.SentSHA256)
-		}
-	}
-	for round := range applied {
-		if _, ok := sent[round]; !ok {
-			return fmt.Errorf("disk round %d arrived, and the trailer does not list it", round)
-		}
-	}
-	var final *streamDiskRound
-	fromHvi := false
-	for i, r := range t.Rounds {
-		fromHvi = fromHvi || r.From == "hvi"
-		if r.Final {
-			if final != nil {
-				return errors.New("the trailer lists two final disk rounds")
-			}
-			final = &t.Rounds[i]
-		}
-	}
-	if replay || !fromHvi {
-		return nil
-	}
-	var doc struct {
-		Generation uint64 `json:"generation"`
-		Rounds     []struct {
-			Round        int     `json:"round"`
-			Generation   uint64  `json:"generation"`
-			Blocks       int64   `json:"blocks"`
-			BitmapSHA256 string  `json:"bitmap_sha256"`
-			SentSHA256   *string `json:"sent_sha256"`
-		} `json:"rounds"`
-	}
-	if diskJSON == nil {
-		return errors.New("the disk rounds came from hvi, and its stream has no disk.json to hold them to")
-	}
-	if err := json.Unmarshal(diskJSON, &doc); err != nil {
-		return fmt.Errorf("hvi's disk.json: %w", err)
-	}
-	last := -1
-	listed := map[int]bool{}
-	for _, l := range doc.Rounds {
-		listed[l.Round] = true
-		last = max(last, l.Round)
-		s, ok := sent[l.Round]
-		switch {
-		case !ok:
-			return fmt.Errorf("hvi read disk round %d, and the stream does not carry it", l.Round)
-		case s.From != "hvi":
-			continue
-		case l.SentSHA256 == nil || *l.SentSHA256 != s.SentSHA256:
-			return fmt.Errorf("hvi recorded disk round %d as sent with digest %v; the stream carried %s",
-				l.Round, l.SentSHA256, s.SentSHA256)
-		case l.Generation != s.Generation || l.Blocks != s.Blocks ||
-			(l.BitmapSHA256 != "" && l.BitmapSHA256 != s.BitmapSHA256):
-			return fmt.Errorf("hvi recorded disk round %d at generation %d with %d blocks; the source sent it "+
-				"as read at %d with %d", l.Round, l.Generation, l.Blocks, s.Generation, s.Blocks)
-		}
-	}
-	for _, s := range t.Rounds {
-		if s.From == "hvi" && !s.Final && !listed[s.Round] {
-			return fmt.Errorf("disk round %d is not one hvi recorded before the fence", s.Round)
-		}
-	}
-	switch {
-	case final == nil || final.From != "hvi":
-		return errors.New("the stream has no final disk round from hvi: the guest's last writes would be missing")
-	case final.Round != last+1:
-		return fmt.Errorf("the final disk round is %d; hvi's last recorded round was %d", final.Round, last)
-	case final.Generation != doc.Generation:
-		return fmt.Errorf("the final disk round was read at generation %d, and hvi captured the disk at %d: "+
-			"a write of the guest is missing", final.Generation, doc.Generation)
-	}
-	return nil
-}
-
 // noBaseError is a stream whose base this store does not hold.
 type noBaseError struct{ sum string }
 
@@ -471,47 +302,18 @@ func (e *noBaseError) Error() string {
 	return fmt.Sprintf("this host does not hold base %s: `hull migrate-prepare` sends it", e.sum)
 }
 
-func (r *streamReceiver) disk(d diskBatchHeader, raw []byte) error {
-	if r.applied == nil {
-		r.applied = map[int]*diskRoundDigest{}
-	}
-	round := r.applied[d.Round]
-	if round == nil {
-		round = &diskRoundDigest{round: streamDiskRound{Round: d.Round, Final: d.Final}}
-		r.applied[d.Round] = round
-	} else if round.round.Final != d.Final {
-		return fmt.Errorf("disk round %d is sent as both final and not", d.Round)
-	}
-	round.add(d.Count, d.SHA256)
-	cur := make([]byte, diskBlockSize)
-	for i := int64(0); i < d.Count; i++ {
-		index := d.First + i
-		lo := i * diskBlockSize
-		block := raw[lo:min(lo+diskBlockSize, int64(len(raw)))]
-		off := index * diskBlockSize
-		if isZero(block) {
-			// A zero block over one that is zero already (a hole of the
-			// base) is left alone, so the disk stays sparse.
-			n, err := r.diskFile.ReadAt(cur[:len(block)], off)
-			if err != nil && !errors.Is(err, io.EOF) {
-				return err
-			}
-			if isZero(cur[:n]) {
-				continue
-			}
-		}
-		if _, err := r.diskFile.WriteAt(block, off); err != nil {
-			return fmt.Errorf("write disk block %d: %w", index, err)
-		}
-		r.maybeSyncDisk(int64(len(block)))
-	}
-	return nil
-}
-
+// component takes one of hvi's frames. profile.json, first, is held until
+// it is checked and hvi's restore is started for it; every frame after it
+// goes to hvi as it arrives, rounds and documents alike, since hvi checks
+// each frame's sha256, the manifest over all of them and the disk rounds
+// against disk.json before anything runs, and writes the disk rounds into
+// the copy of the base itself. The documents are kept for the record too.
 func (r *streamReceiver) component(line []byte, hdr hviComponentHeader, body io.Reader) error {
 	name := hdr.Component
-	switch {
-	case r.stage == 0:
+	if r.manifest != nil {
+		return fmt.Errorf("hvi's %s comes after its manifest", name)
+	}
+	if r.restore == nil {
 		if name != "profile.json" {
 			return fmt.Errorf("hvi's stream starts with %s, not profile.json", name)
 		}
@@ -522,59 +324,51 @@ func (r *streamReceiver) component(line []byte, hdr hviComponentHeader, body io.
 		r.pending = &bytesBuffer{}
 		_, err := io.Copy(r.pending, body)
 		return err
-	case isRAMRound(name):
-		if r.stage == 3 {
-			return fmt.Errorf("hvi's %s comes after the machine's state", name)
+	}
+	if err := r.toHvi(name, append(append([]byte{}, line...), '\n')); err != nil {
+		return err
+	}
+	r.pending = nil
+	if !isRound(name) {
+		if r.docBytes+hdr.Size > spooledStateMax {
+			return fmt.Errorf("hvi's %s of %d bytes is not a round and too large to keep", name, hdr.Size)
 		}
-		r.stage = 2
-		if err := r.toHvi(name, append(append([]byte{}, line...), '\n')); err != nil {
+		r.docBytes += hdr.Size
+		r.pending = &bytesBuffer{}
+	}
+	buf := make([]byte, 1<<20)
+	for {
+		n, err := body.Read(buf)
+		if n > 0 {
+			if werr := r.toHvi(name, buf[:n]); werr != nil {
+				return werr
+			}
+			if r.pending != nil {
+				_, _ = r.pending.Write(buf[:n])
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
 			return err
 		}
-		buf := make([]byte, 1<<20)
-		for {
-			n, err := body.Read(buf)
-			if n > 0 {
-				if werr := r.toHvi(name, buf[:n]); werr != nil {
-					return werr
-				}
-			}
-			if errors.Is(err, io.EOF) {
-				return nil
-			}
-			if err != nil {
-				return err
-			}
-		}
 	}
-	r.stage = 3
-	if r.heldBytes+hdr.Size > spooledStateMax {
-		return fmt.Errorf("hvi's %s of %d bytes is not a RAM round and too large to hold", name, hdr.Size)
-	}
-	r.heldBytes += hdr.Size
-	r.pending = &bytesBuffer{}
-	_, err := io.Copy(r.pending, body)
-	if err == nil {
-		r.held = append(r.held, append(append(append([]byte{}, line...), '\n'), r.pending.b...))
-	}
-	return err
 }
 
 func (r *streamReceiver) componentVerified(hdr hviComponentHeader) error {
 	name := hdr.Component
-	if isRAMRound(name) {
+	if isRound(name) {
 		return nil
 	}
-	if r.manifest != nil {
-		return fmt.Errorf("hvi's %s comes after its manifest", name)
+	if name == "profile.json" && r.restore != nil {
+		return errors.New("hvi's stream carries profile.json twice")
 	}
 	r.files[name] = append(r.files[name], r.pending.b...)
 	switch name {
 	case "manifest.json":
 		r.manifest = r.pending.b
 	case "profile.json":
-		if r.stage != 0 {
-			return errors.New("hvi's stream carries profile.json twice")
-		}
 		if err := checkStreamProfile(r.pending.b, r.rec.Spec.Profile); err != nil {
 			return err
 		}
@@ -586,13 +380,6 @@ func (r *streamReceiver) componentVerified(hdr hviComponentHeader) error {
 			return fmt.Errorf("start hvi restore: %w", err)
 		}
 		r.restore = restore
-		r.stage = 1
-		// The disk rounds that run with the guest running are all in: sync
-		// them while the RAM rounds arrive, so the sync after the stream
-		// has only the last round to write.
-		if r.diskFile != nil {
-			r.syncDisk()
-		}
 		if err := r.toHvi(name, append(append(r.profileLine, '\n'), r.pending.b...)); err != nil {
 			return err
 		}
@@ -615,18 +402,16 @@ func checkStreamProfile(data []byte, want string) error {
 	return checkBundleProfile(dir, want)
 }
 
-// finish hands hvi the state it held, once the stream is verified whole
-// and the last disk round is written, and waits for hvi to report the
-// guest restored paused. hvi reads the disk through the page cache, so
-// the sync that makes the last round durable runs while hvi rebuilds the
-// machine rather than before it; finish returns once both are done. The
-// documents kept beside the record are written meanwhile too, unsynced.
+// finish ends hvi's input once the stream is verified whole, and waits for
+// hvi to report the guest restored paused: by then hvi has checked every
+// frame, the manifest and the disk rounds, and synced the disk. The check
+// of the base runs meanwhile, and the documents kept beside the record are
+// written, unsynced.
 func (r *streamReceiver) finish() error {
 	if r.restore == nil || r.manifest == nil {
 		return errors.New("the stream carried no hvi checkpoint")
 	}
 	r.rec.Stream.step("trailer read")
-	r.syncDisk()
 	r.filesDone = make(chan error, 1)
 	go func() {
 		// Kept for the record only: hvi has the machine from the stream,
@@ -640,11 +425,6 @@ func (r *streamReceiver) finish() error {
 		}
 		r.filesDone <- nil
 	}()
-	for _, c := range r.held {
-		if err := r.toHvi("the machine's state", c); err != nil {
-			return err
-		}
-	}
 	if err := r.restore.in.Close(); err != nil {
 		return err
 	}
@@ -653,14 +433,7 @@ func (r *streamReceiver) finish() error {
 		return err
 	}
 	r.rec.Stream.step("hvi restored the guest paused")
-	r.syncing.Wait()
-	r.rec.Stream.step("disk synced")
-	if r.syncErr != nil {
-		return fmt.Errorf("sync the disk: %w", r.syncErr)
-	}
-	err := r.diskFile.Close()
-	r.diskFile = nil
-	if err != nil {
+	if err := r.checkBase(); err != nil {
 		return err
 	}
 	if err := <-r.filesDone; err != nil {
@@ -676,12 +449,8 @@ func (r *streamReceiver) abandon() {
 	if r.baseChecked != nil {
 		<-r.baseChecked
 	}
-	r.syncing.Wait()
 	if r.filesDone != nil {
 		<-r.filesDone
-	}
-	if r.diskFile != nil {
-		_ = r.diskFile.Close()
 	}
 	if r.restore != nil {
 		r.restore.kill()
@@ -771,12 +540,6 @@ func destReceiveStream(s *store.Store, txid, name string, in io.Reader) *migrate
 	started := time.Now()
 	res, err := readMoveStream(in, r)
 	if err == nil {
-		err = r.checkBase()
-	}
-	if err == nil {
-		err = checkDiskRounds(res.Header.Replay, res.Trailer.Disk, r.applied, r.files["disk.json"])
-	}
-	if err == nil {
 		err = r.finish()
 	}
 	if err != nil {
@@ -794,13 +557,14 @@ func destReceiveStream(s *store.Store, txid, name string, in io.Reader) *migrate
 	rec.ManifestSHA256 = sha256Hex(r.manifest)
 	rec.BaseSHA256 = r.base
 	rec.Transport = transportStream
-	rec.Disk = &migrateDisk{Path: r.diskPath, Size: r.size, DataBytes: res.Disk.Bytes}
+	diskBytes := hviReplyDiskBytes(res.Trailer.HviReply)
+	rec.Disk = &migrateDisk{Path: r.diskPath, Size: r.size, DataBytes: diskBytes}
 	rec.Transfer = &migrateTransfer{Bytes: res.Bytes, Seconds: took.Seconds(), StartedAt: started.UTC(),
 		BytesPerSec: perSec(res.Bytes, took.Seconds())}
-	rec.Stream = &migrateStreamStats{Chain: res.Trailer.Chain, DiskBytes: res.Disk.Bytes,
+	rec.Stream = &migrateStreamStats{Chain: res.Trailer.Chain, DiskBytes: diskBytes,
 		WireBytes: res.Bytes, Seconds: took.Seconds(), HviReply: res.Trailer.HviReply, Steps: rec.Stream.Steps}
-	rec.Verify = fmt.Sprintf("stream: %d hvi components and %d disk blocks in %d batches checked; hvi restored "+
-		"the guest paused", len(res.Components), res.Disk.Blocks, res.Disk.Batches)
+	rec.Verify = fmt.Sprintf("stream: %d hvi components checked; hvi checked them against its manifest, "+
+		"wrote the disk rounds onto base %s and restored the guest paused", len(res.Components), digestHead(r.base))
 	if state, err := s.GetInstance(name); err == nil && state.Migration != nil {
 		state.Migration.ManifestSHA256 = rec.ManifestSHA256
 		if err := s.SaveInstance(state); err != nil {
@@ -813,4 +577,18 @@ func destReceiveStream(s *store.Store, txid, name string, in io.Reader) *migrate
 		return refuseWith(codeFailed, err, rec)
 	}
 	return &migrateReply{OK: true, Record: rec, VM: store.MigrationRestoredPaused}
+}
+
+// hviReplyDiskBytes is the bytes of disk blocks hvi's reply to migrate says
+// its disk rounds carried, 0 when it does not say.
+func hviReplyDiskBytes(reply json.RawMessage) int64 {
+	var r struct {
+		Stats struct {
+			DiskRawBytes int64 `json:"disk_raw_bytes"`
+		} `json:"stats"`
+	}
+	if json.Unmarshal(reply, &r) != nil {
+		return 0
+	}
+	return r.Stats.DiskRawBytes
 }

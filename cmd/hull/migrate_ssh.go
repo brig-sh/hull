@@ -85,8 +85,12 @@ type migrateProbe struct {
 	// that does not cannot restore a portable instance.
 	HviProfile bool `json:"hviProfile,omitempty"`
 	// HviStream is whether the destination's hvi restores from a stream
-	// (`restore --from-stream`), which a streamed move needs.
-	HviStream bool `json:"hviStream,omitempty"`
+	// (`restore --from-stream`), which a streamed move needs, and
+	// HviStreamDisk whether it writes the stream's disk rounds onto a copy
+	// of the base it is told of (`restore --disk-base-sha256`), which a
+	// stream-v3 move needs.
+	HviStream     bool `json:"hviStream,omitempty"`
+	HviStreamDisk bool `json:"hviStreamDisk,omitempty"`
 	// Capabilities are the move features this hull takes beyond protocol
 	// 1, such as moveCapStream. A hull from before them lists none.
 	Capabilities []string `json:"capabilities,omitempty"`

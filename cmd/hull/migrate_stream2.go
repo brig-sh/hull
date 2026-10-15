@@ -27,30 +27,31 @@ import (
 	"io"
 	"regexp"
 	"strings"
-
-	"github.com/pierrec/lz4/v4"
 )
 
 // The streamed move's wire format: what `hull migrate` writes into one ssh
 // session and `hull migrate-receive --stream` reads (docs/migration.md,
-// "The streamed move"). It multiplexes two sources into one stream: the
-// disk blocks the guest changed since its base, which hull reads, and the
-// components of hvi's migrate stream (RAM rounds, then the machine's state
-// and the manifest), which hull relays as hvi wrote them.
+// "The streamed move"). It carries hvi's migrate stream as hvi wrote it:
+// the disk rounds (when the guest's disk has a base), the RAM rounds, the
+// machine's state and the manifest, which covers every one of them. hull
+// adds a header naming the move and the base, and a trailer.
 //
-//	"HULLMIG2"
+//	"HULLMIG3"
 //	'H' u32 len, JSON moveStreamHeader
-//	'D' u32 len, JSON diskBatchHeader, then size bytes      (disk blocks)
 //	'C' u32 len, hvi's component header line, then size bytes
 //	'T' u32 len, JSON moveStreamTrailer
 //
-// Integers are big-endian. Every record's payload carries its own sha256
-// in its header, checked before the payload is used (a disk batch) or as
-// it is relayed (a component, which hvi checks again). The trailer carries
+// Integers are big-endian. Every component's bytes are checked against the
+// sha256 in hvi's header line as they are relayed, and hvi checks them
+// again, and the manifest over them, as it restores. The trailer carries
 // the number of records and a running sha256 over every record's kind and
 // header, so a record lost, added, reordered or altered fails the move, and
 // a stream that ends without its trailer is refused.
-const moveStreamMagic = "HULLMIG2"
+//
+// HULLMIG2 (stream-v2) also carried disk blocks hull read itself, in 'D'
+// records; a hull of this version neither sends nor reads it, and a move
+// between the two takes the whole-bundle path (moveCapStream).
+const moveStreamMagic = "HULLMIG3"
 
 // Limits a reader holds the stream to before it allocates or writes.
 const (
@@ -58,9 +59,6 @@ const (
 	// moveMaxComponents bounds hvi's frames: a RAM round comes in frames
 	// of about 1 MiB, so a 64 GiB guest's first round alone is 65536.
 	moveMaxComponents = 1 << 21
-	// moveMaxBatchBlocks is the most blocks one disk batch carries; hvi's
-	// own batches are at most 16.
-	moveMaxBatchBlocks = 64
 )
 
 // hviComponentName is a name an hvi component may carry.
@@ -68,12 +66,14 @@ var hviComponentName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 
 // moveStreamHeader is the 'H' record.
 type moveStreamHeader struct {
-	TxID       string `json:"txid"`
-	Name       string `json:"name"`
-	Epoch      uint64 `json:"epoch"`
+	TxID  string `json:"txid"`
+	Name  string `json:"name"`
+	Epoch uint64 `json:"epoch"`
+	// BaseSHA256 is the base hvi's disk rounds apply to, which the
+	// destination copies to make the guest's disk, and DiskSize the size
+	// of the guest's disk, which the base's must equal.
 	BaseSHA256 string `json:"baseSha256"`
 	DiskSize   int64  `json:"diskSize"`
-	BlockSize  int64  `json:"blockSize"`
 	// Replay says the hvi components come from the source's own copy of a
 	// stream hvi already sealed, sent again after a failed attempt.
 	Replay bool `json:"replay,omitempty"`
@@ -82,34 +82,12 @@ type moveStreamHeader struct {
 	Attempt string `json:"attempt,omitempty"`
 }
 
-// diskBatchHeader is a 'D' record: count adjacent blocks from first, as
-// rawSize bytes whose sha256 is SHA256, sent as size bytes in codec.
-type diskBatchHeader struct {
-	Round   int    `json:"round"`
-	Final   bool   `json:"final,omitempty"`
-	First   int64  `json:"first"`
-	Count   int64  `json:"count"`
-	Codec   string `json:"codec"`
-	RawSize int64  `json:"rawSize"`
-	Size    int64  `json:"size"`
-	SHA256  string `json:"sha256"`
-}
-
-// Disk batch codecs.
-const (
-	codecRaw = "raw"
-	codecLZ4 = "lz4"
-)
-
 // hviComponentHeader is what hull reads of an hvi component's header line;
 // the line itself goes on as hvi wrote it.
 type hviComponentHeader struct {
 	Component string `json:"component"`
 	Size      int64  `json:"size"`
 	SHA256    string `json:"sha256"`
-	// First and Count are set on hvi's disk-blocks batches.
-	First *int64 `json:"first,omitempty"`
-	Count *int64 `json:"count,omitempty"`
 }
 
 // moveStreamTrailer is the 'T' record.
@@ -118,56 +96,6 @@ type moveStreamTrailer struct {
 	Chain   string `json:"chain"`
 	// HviReply is hvi's reply to the migrate op, after its manifest.
 	HviReply json.RawMessage `json:"hviReply,omitempty"`
-	// Disk is what the disk rounds were, for the destination to hold the
-	// batches it applied to, and to hvi's own digests in disk.json.
-	Disk *streamDiskRounds `json:"disk,omitempty"`
-}
-
-// streamDiskRounds is the trailer's account of the disk rounds.
-type streamDiskRounds struct {
-	// Engine is the source's disk engine: "hvi" or "compare".
-	Engine string `json:"engine"`
-	// Rounds are every disk round sent, in order, the final one last.
-	Rounds []streamDiskRound `json:"rounds"`
-}
-
-// streamDiskRound is one disk round as sent.
-type streamDiskRound struct {
-	Round int  `json:"round"`
-	Final bool `json:"final,omitempty"`
-	// From is "hvi" for a round of hvi's dirty blocks, "compare" for one
-	// hull found by comparing the disk with the base.
-	From    string `json:"from"`
-	Blocks  int64  `json:"blocks"`
-	Batches int64  `json:"batches"`
-	// SentSHA256 is the sha256 of the round's batch digests (each the hex
-	// sha256 of its raw bytes) in order, nothing between them: for a round
-	// from hvi, hvi's own sent_sha256 for it, which the source checked.
-	SentSHA256 string `json:"sentSha256"`
-	// Generation and BitmapSHA256 are from hvi's disk-dirty reply that
-	// started a round from hvi.
-	Generation   uint64 `json:"generation,omitempty"`
-	BitmapSHA256 string `json:"bitmapSha256,omitempty"`
-}
-
-// diskRoundDigest gathers a round's batches as they are sent or applied.
-type diskRoundDigest struct {
-	round   streamDiskRound
-	digests strings.Builder
-}
-
-// add counts one batch of count blocks whose raw bytes have sha256 sum.
-func (d *diskRoundDigest) add(count int64, sum string) {
-	d.round.Blocks += count
-	d.round.Batches++
-	d.digests.WriteString(sum)
-}
-
-// done is the round with its sent_sha256.
-func (d *diskRoundDigest) done() streamDiskRound {
-	r := d.round
-	r.SentSHA256 = sha256Hex([]byte(d.digests.String()))
-	return r
 }
 
 // moveChain is the running hash of the records' kinds and headers.
@@ -194,8 +122,6 @@ type moveStreamWriter struct {
 	cw    *countingWriter
 	bw    *bufio.Writer
 	chain *moveChain
-	lz    lz4.Compressor
-	comp  []byte
 }
 
 func newMoveStreamWriter(w io.Writer) *moveStreamWriter {
@@ -239,33 +165,6 @@ func (sw *moveStreamWriter) header(h moveStreamHeader) error {
 	return sw.record('H', js)
 }
 
-// disk writes count adjacent blocks from first, raw being their bytes, and
-// returns the bytes it put on the wire and the hex sha256 of raw.
-func (sw *moveStreamWriter) disk(round int, final bool, first, count int64, raw []byte) (int64, string, error) {
-	sum := sha256.Sum256(raw)
-	hdr := diskBatchHeader{Round: round, Final: final, First: first, Count: count, Codec: codecRaw,
-		RawSize: int64(len(raw)), Size: int64(len(raw)), SHA256: hex.EncodeToString(sum[:])}
-	payload := raw
-	if bound := lz4.CompressBlockBound(len(raw)); len(sw.comp) < bound {
-		sw.comp = make([]byte, bound)
-	}
-	if n, err := sw.lz.CompressBlock(raw, sw.comp); err == nil && n > 0 && n < len(raw) {
-		hdr.Codec, hdr.Size, payload = codecLZ4, int64(n), sw.comp[:n]
-	}
-	js, err := json.Marshal(hdr)
-	if err != nil {
-		return 0, "", err
-	}
-	before := sw.written()
-	if err := sw.record('D', js); err != nil {
-		return 0, "", err
-	}
-	if _, err := sw.bw.Write(payload); err != nil {
-		return 0, "", err
-	}
-	return sw.written() - before, hdr.SHA256, nil
-}
-
 // component relays one hvi component: line is its header line as hvi wrote
 // it (without the newline), body its bytes. The bytes are checked against
 // the line's sha256 as they pass, and a component that does not match fails
@@ -293,9 +192,8 @@ func (sw *moveStreamWriter) component(line []byte, hdr hviComponentHeader, body 
 }
 
 // trailer seals the stream and flushes it.
-func (sw *moveStreamWriter) trailer(hviReply json.RawMessage, disk *streamDiskRounds) error {
-	js, err := json.Marshal(moveStreamTrailer{Records: sw.chain.n, Chain: sw.chain.sum(), HviReply: hviReply,
-		Disk: disk})
+func (sw *moveStreamWriter) trailer(hviReply json.RawMessage) error {
+	js, err := json.Marshal(moveStreamTrailer{Records: sw.chain.n, Chain: sw.chain.sum(), HviReply: hviReply})
 	if err != nil {
 		return err
 	}
@@ -309,8 +207,6 @@ func (sw *moveStreamWriter) trailer(hviReply json.RawMessage, disk *streamDiskRo
 type moveStreamHandler interface {
 	// header is the 'H' record.
 	header(h moveStreamHeader) error
-	// disk is a disk batch, decompressed and checked against its sha256.
-	disk(hdr diskBatchHeader, raw []byte) error
 	// component is an hvi component: line is hvi's header line, body its
 	// bytes, which the handler reads in full. They are checked against the
 	// line's sha256 once the handler returns, and a mismatch fails the
@@ -326,7 +222,6 @@ type moveStreamResult struct {
 	Header  moveStreamHeader
 	Trailer moveStreamTrailer
 	Bytes   int64
-	Disk    struct{ Batches, Blocks, Bytes int64 }
 	// Components are the hvi components by name, in order.
 	Components []hviComponentHeader
 }
@@ -365,9 +260,6 @@ func readMoveStream(r io.Reader, h moveStreamHandler) (*moveStreamResult, error)
 	if err := h.header(res.Header); err != nil {
 		return nil, err
 	}
-	blocks := diskBlocks(res.Header.DiskSize)
-	raw := make([]byte, moveMaxBatchBlocks*diskBlockSize)
-	var comp []byte
 	for {
 		kind, js, err := readStreamRecord(br)
 		if err != nil {
@@ -377,43 +269,6 @@ func readMoveStream(r io.Reader, h moveStreamHandler) (*moveStreamResult, error)
 			return nil, fmt.Errorf("the stream has more than %d records", moveMaxRecords)
 		}
 		switch kind {
-		case 'D':
-			var d diskBatchHeader
-			if err := strictUnmarshal(js, &d); err != nil {
-				return nil, fmt.Errorf("disk batch: %w", err)
-			}
-			want, err := checkDiskBatch(d, res.Header.DiskSize, blocks)
-			if err != nil {
-				return nil, err
-			}
-			chain.add(kind, js)
-			data := raw[:want]
-			switch d.Codec {
-			case codecRaw:
-				if _, err := io.ReadFull(br, data); err != nil {
-					return nil, fmt.Errorf("the stream ended in a disk batch: %w", err)
-				}
-			case codecLZ4:
-				if int64(len(comp)) < d.Size {
-					comp = make([]byte, lz4.CompressBlockBound(len(raw)))
-				}
-				if _, err := io.ReadFull(br, comp[:d.Size]); err != nil {
-					return nil, fmt.Errorf("the stream ended in a disk batch: %w", err)
-				}
-				n, err := lz4.UncompressBlock(comp[:d.Size], data)
-				if err != nil || int64(n) != want {
-					return nil, fmt.Errorf("disk batch at block %d does not decompress to its %d bytes", d.First, want)
-				}
-			}
-			if sum := sha256.Sum256(data); hex.EncodeToString(sum[:]) != d.SHA256 {
-				return nil, fmt.Errorf("disk batch at block %d (round %d) arrived corrupted", d.First, d.Round)
-			}
-			if err := h.disk(d, data); err != nil {
-				return nil, err
-			}
-			res.Disk.Batches++
-			res.Disk.Blocks += d.Count
-			res.Disk.Bytes += want
 		case 'C':
 			c, err := parseHviComponentHeader(js)
 			if err != nil {
@@ -472,44 +327,12 @@ func checkMoveHeader(h moveStreamHeader) error {
 	switch {
 	case checkTxID(h.TxID) != nil:
 		return fmt.Errorf("the stream names move %q", h.TxID)
-	case h.BlockSize != diskBlockSize:
-		return fmt.Errorf("the stream's disk blocks are %d bytes, not %d", h.BlockSize, diskBlockSize)
 	case h.DiskSize <= 0 || h.DiskSize > migrateMaxDiskSize:
 		return fmt.Errorf("the stream says the disk is %d bytes", h.DiskSize)
 	case checkDiskDigest(h.BaseSHA256) != nil:
 		return fmt.Errorf("the stream names base %q", h.BaseSHA256)
 	}
 	return nil
-}
-
-// checkDiskBatch holds a disk batch to the disk and returns its raw length.
-func checkDiskBatch(d diskBatchHeader, size, blocks int64) (int64, error) {
-	if d.Count < 1 || d.Count > moveMaxBatchBlocks || d.First < 0 || d.First >= blocks || d.Count > blocks-d.First {
-		return 0, fmt.Errorf("a disk batch of %d blocks at %d is outside the %d blocks of the disk", d.Count, d.First, blocks)
-	}
-	if d.Round < 0 {
-		return 0, fmt.Errorf("a disk batch of round %d", d.Round)
-	}
-	want := min(d.Count*diskBlockSize, size-d.First*diskBlockSize)
-	if d.RawSize != want {
-		return 0, fmt.Errorf("a disk batch of %d blocks at %d says %d bytes, not %d", d.Count, d.First, d.RawSize, want)
-	}
-	switch d.Codec {
-	case codecRaw:
-		if d.Size != want {
-			return 0, fmt.Errorf("a raw disk batch at %d is %d bytes, not %d", d.First, d.Size, want)
-		}
-	case codecLZ4:
-		if d.Size <= 0 || d.Size > int64(lz4.CompressBlockBound(int(want))) {
-			return 0, fmt.Errorf("a compressed disk batch at %d says %d bytes", d.First, d.Size)
-		}
-	default:
-		return 0, fmt.Errorf("a disk batch at %d has codec %q", d.First, d.Codec)
-	}
-	if len(d.SHA256) != 64 {
-		return 0, fmt.Errorf("a disk batch at %d has no sha256", d.First)
-	}
-	return want, nil
 }
 
 // parseHviComponentHeader reads an hvi component's header line and holds it
