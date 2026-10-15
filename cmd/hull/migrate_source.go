@@ -1079,7 +1079,7 @@ func (m *moveSource) finish() error {
 		m.logf("Timings (ms): fence %d, transfer %d, restore paused %d, commit %d", t["fence"], t["transfer"],
 			t["prepare"], t["commit"])
 	}
-	if st := m.rec.Stream; st != nil {
+	if st := m.rec.Stream; st != nil && st.Mode != "adopted" {
 		m.logf("move: %s in %.1f s; disk %s, RAM %s, state %s; sealed %d ms after the pause, "+
 			"last disk round %s in %d ms; downtime about %d ms", humanBytes(st.WireBytes), st.Seconds,
 			humanBytes(st.DiskWireBytes), humanBytes(st.RAMBytes), humanBytes(st.StateBytes), st.SealedMs,
