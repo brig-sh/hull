@@ -328,10 +328,14 @@ func (m *moveSource) restreamFenced(state *store.InstanceState, dir string) ([]b
 		sp.close()
 		return nil, "", err
 	}
-	var r struct {
-		First string `json:"first_manifest_sha256"`
+	// hvi gives the first manifest in the reply's stats.
+	var rep struct {
+		Stats struct {
+			First string `json:"first_manifest_sha256"`
+		} `json:"stats"`
 	}
-	_ = json.Unmarshal(reply, &r)
+	_ = json.Unmarshal(reply, &rep)
+	r := rep.Stats
 	want := m.recordedFirstManifest(state)
 	switch {
 	case r.First == "":

@@ -345,9 +345,11 @@ func (h *fakeStreamHvi) migrate(req map[string]any, w *bufio.Writer, reply func(
 	sum := sha256.Sum256(man)
 	now := time.Now().UnixMilli()
 	if again {
-		reply(`{"v":1,"ok":true,"state":"fenced","manifest_sha256":"%s","first_manifest_sha256":"%s",`+
+		// As hvi's: the first manifest and what equals the first stream's
+		// are in the stats.
+		reply(`{"v":1,"ok":true,"state":"fenced","manifest_sha256":"%s","stats":{"first_manifest_sha256":"%s",`+
 			`"same_as_first":["profile.json","cpu.json","platform.json","devices.json","session.json"],`+
-			`"stats":{"disk_rounds":[%s]}}`, hex.EncodeToString(sum[:]), h.firstManifest, strings.Join(statsRounds, ","))
+			`"disk_rounds":[%s]}}`, hex.EncodeToString(sum[:]), h.firstManifest, strings.Join(statsRounds, ","))
 		return
 	}
 	h.state = "fenced"
