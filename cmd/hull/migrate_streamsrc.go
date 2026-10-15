@@ -476,16 +476,35 @@ func (ss *streamSender) diskFinal() error {
 // spoolWriter keeps hvi's stream on this host as hvi wrote it, and the
 // small components beside it as files. Nothing syncs it while the stream
 // runs: on a busy disk a sync of the spool held up the synced records the
-// stopped guest waits for. The seal syncs it, behind the move.
+// stopped guest waits for. The seal syncs it, behind the move. Every
+// spoolSyncEvery bytes its writeback is started (startWriteback), with no
+// wait: without that a 2 GiB stream left so many dirty pages that the
+// kernel throttled every write on the host, the move's included.
 type spoolWriter struct {
 	dir string
 	f   *os.File
 	cw  *countingWriter
 	bw  *bufio.Writer
+	// started is how far the writeback has been started.
+	started int64
 }
 
-// spoolSyncEvery is how much a destination writes to the incoming disk
-// between the syncs it runs in the background while the stream goes on.
+// writeback starts the writeback of what was written since the last call,
+// once that is spoolSyncEvery bytes or more.
+func (sp *spoolWriter) writeback() {
+	if sp.cw.n+int64(sp.bw.Buffered())-sp.started < spoolSyncEvery {
+		return
+	}
+	if sp.bw.Flush() != nil {
+		return // the seal reports it
+	}
+	startWriteback(sp.f, sp.started, sp.cw.n-sp.started)
+	sp.started = sp.cw.n
+}
+
+// spoolSyncEvery is how much the source writes to its spool between the
+// starts of its writeback, and a destination to the incoming disk between
+// the syncs it runs in the background while the stream goes on.
 const spoolSyncEvery = 32 << 20
 
 func newSpool(dir string) (*spoolWriter, error) {
@@ -656,6 +675,7 @@ func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][
 		if err := ss.relayFrame(folder, line, hdr, body, also); err != nil {
 			return err
 		}
+		sp.writeback()
 		if keep != nil {
 			files[hdr.Component] = append(files[hdr.Component], keep.b...)
 			if hdr.Component == "manifest.json" {
