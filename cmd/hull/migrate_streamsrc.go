@@ -395,8 +395,17 @@ func (ss *streamSender) relayFrame(f *roundFolder, line []byte, hdr hviComponent
 // is not fenced (fenceAfterBreak).
 func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][]byte, error) {
 	m := ss.m
-	conn, br, err := hviStreamOp(ss.state.ControlSock, map[string]any{"op": "migrate", "then": hviThenFence,
-		"txid": m.rec.TxID, "epoch": m.rec.Epoch}, hviStreamIdle)
+	// In a session the window holds back what hull relays, and what hull
+	// has read from hvi and not yet relayed is behind the window, where
+	// the window does not count it: at hvi's seal the guest waits for it
+	// too. A reader no larger than the session's writes keeps that short;
+	// the rest of it is in hvi's side of the socket.
+	size := 1 << 20
+	if ss.link.win != nil {
+		size = sessionWriteBuffer
+	}
+	conn, br, err := hviStreamOpSize(ss.state.ControlSock, map[string]any{"op": "migrate", "then": hviThenFence,
+		"txid": m.rec.TxID, "epoch": m.rec.Epoch}, hviStreamIdle, size)
 	if err != nil {
 		if ss.restream {
 			return nil, nil, err
