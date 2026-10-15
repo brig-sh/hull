@@ -175,12 +175,19 @@ type streamReceiver struct {
 	baseChecked chan error
 }
 
-// maybeSyncDisk asks for a sync of the disk in the background once
-// spoolSyncEvery bytes were written to it since the last: the sync the
-// guest waits for, after the stream, then has only the last round left.
+// maybeSyncDisk starts the disk's writeback, without waiting, once
+// spoolSyncEvery bytes were written to it since the last (where the host
+// cannot, it syncs the disk in the background instead): the sync the guest
+// waits for, after the stream, then has only the last round left, and no
+// sync runs to hold up the records written while the guest is stopped.
 func (r *streamReceiver) maybeSyncDisk(n int64) {
 	r.unsynced += n
 	if r.unsynced < spoolSyncEvery {
+		return
+	}
+	if canStartWriteback {
+		r.unsynced = 0
+		startWriteback(r.diskFile, 0, 0)
 		return
 	}
 	r.syncDisk()
