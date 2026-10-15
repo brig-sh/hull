@@ -188,6 +188,19 @@ func (r *streamReceiver) header(h moveStreamHeader) error {
 	}
 	r.base = h.BaseSHA256
 	r.size = h.DiskSize
+	// A maker of the spare at work here, most often the background step
+	// of the move that left this host, is waited for: it leaves the spare
+	// and the base's check on record, which this receive would otherwise
+	// make again, the check with the guest paused. The wait is before
+	// the stream is accepted, so before hvi's migrate fences the guest.
+	release, waited, gaveUp := waitSpareMaker(r.s, h.BaseSHA256, spareMakerWait)
+	defer release()
+	switch {
+	case gaveUp:
+		r.rec.Stream.step("gave up waiting for the base's spare being made")
+	case waited > 0:
+		r.rec.Stream.step("waited for the base's spare being made")
+	}
 	// The base is trusted by its name only until this check, which reads
 	// it while the stream's rounds arrive and is waited for before the
 	// move is verified.
@@ -201,10 +214,17 @@ func (r *streamReceiver) header(h moveStreamHeader) error {
 		return err
 	}
 	_ = os.Remove(r.diskPath)
-	if !takeSpareBase(r.s, h.BaseSHA256, r.diskPath) {
-		if _, err := copyDisk(r.s.BasePath(h.BaseSHA256), r.diskPath); err != nil {
+	// On the record, so a move can be seen to have had the spare: a copy
+	// here took 22 s on a Pi.
+	made := "disk made from the base's spare"
+	took := takeSpareBase(r.s, h.BaseSHA256, r.diskPath)
+	release()
+	if !took {
+		how, err := copyDisk(r.s.BasePath(h.BaseSHA256), r.diskPath)
+		if err != nil {
 			return fmt.Errorf("copy the base: %w", err)
 		}
+		made = "disk made from the base by " + how + ", with no spare"
 	}
 	if err := os.Chmod(r.diskPath, 0o600); err != nil {
 		return err
@@ -230,6 +250,7 @@ func (r *streamReceiver) header(h moveStreamHeader) error {
 	if err != nil {
 		return err
 	}
+	r.rec.Stream.step(made)
 	// The source waits for this before hvi's migrate fences the guest: a
 	// refusal from here on cannot be one the header would have told.
 	if h.Attempt != "" {
@@ -247,16 +268,28 @@ func (r *streamReceiver) header(h moveStreamHeader) error {
 // (<base>.checked: the digest, and the file's size, change time and inode)
 // and stands until any of them changes; a move with little to send then never waits for a hash of
 // a 1.6 GB base.
+//
+// Two checks of one base take turns on a lock of the base file itself, so
+// the second finds the first's on record rather than reading the base
+// again beside it; the wait is bounded by baseCheckWait.
 func checkBaseDigest(path, want string) error {
+	if baseCheckStands(path, want) {
+		return nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	if got, _, _ := flockWait(f, baseCheckWait, nil); got && baseCheckStands(path, want) {
+		return nil
+	}
 	stamp, err := baseStamp(path)
 	if err != nil {
 		return err
 	}
 	stamp = want + " " + stamp
-	if old, err := os.ReadFile(path + ".checked"); err == nil && string(old) == stamp {
-		return nil
-	}
-	got, _, err := diskDigestFile(path)
+	got, _, err := hashBase(path)
 	if err != nil {
 		return err
 	}
@@ -265,6 +298,24 @@ func checkBaseDigest(path, want string) error {
 	}
 	_ = os.WriteFile(path+".checked", []byte(stamp), 0o600)
 	return nil
+}
+
+// baseCheckWait bounds a check's wait for another check of the same base.
+var baseCheckWait = time.Minute
+
+// hashBase hashes a base for its check. A variable so a test can count
+// the base's reads.
+var hashBase = diskDigestFile
+
+// baseCheckStands reports whether a check that the base at path hashes to
+// want is on record and stands.
+func baseCheckStands(path, want string) bool {
+	stamp, err := baseStamp(path)
+	if err != nil {
+		return false
+	}
+	old, err := os.ReadFile(path + ".checked")
+	return err == nil && string(old) == want+" "+stamp
 }
 
 // baseStamp is what a base's check is recorded against: its size, change

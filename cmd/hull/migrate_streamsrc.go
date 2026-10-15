@@ -1075,7 +1075,7 @@ func (ss *streamSender) waitAccepted() error {
 		}
 		ss.stats.step("destination accepted")
 		if took := time.Since(started); took > time.Second {
-			ss.progress("the destination took the stream in %.1f s (it copied the base)", took.Seconds())
+			ss.progress("the destination took the stream in %.1f s (it made the guest's disk from the base)", took.Seconds())
 		}
 		return nil
 	}
@@ -1084,7 +1084,7 @@ func (ss *streamSender) waitAccepted() error {
 		if err == nil && reply.Record != nil && reply.Record.StreamAccepted == ss.attempt {
 			ss.stats.step("destination accepted")
 			if took := time.Since(started); took > time.Second {
-				ss.progress("the destination took the stream in %.1f s (it copied the base)", took.Seconds())
+				ss.progress("the destination took the stream in %.1f s (it made the guest's disk from the base)", took.Seconds())
 			}
 			return nil
 		}

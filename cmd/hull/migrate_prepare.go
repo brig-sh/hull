@@ -797,8 +797,13 @@ func migratePrepareRemoteCommands() []*cli.Command {
 				return destTakeBase(s, cmd.String("sha256"), os.Stdin)
 			}),
 		migrateRemoteVerb("migrate-spare-base", "make a spare copy of a held base for a move to take",
-			[]cli.Flag{&cli.StringFlag{Name: "sha256", Required: true}},
+			[]cli.Flag{&cli.StringFlag{Name: "sha256", Required: true},
+				&cli.StringFlag{Name: "for", Usage: "the instance a move took away, whose log is stderr " +
+					"(the source's spare for a move back)"}},
 			func(cmd *cli.Command, s *store.Store) *migrateReply {
+				if name := cmd.String("for"); name != "" {
+					return spareAfterMove(s, name, cmd.String("sha256"), os.Stderr)
+				}
 				return destSpareBase(s, cmd.String("sha256"))
 			}),
 		migrateRemoteVerb("migrate-take-kernel", "install the profile kernel on stdin",

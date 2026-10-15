@@ -186,3 +186,48 @@ func TestPruneRemovesBasesNothingNeeds(t *testing.T) {
 		t.Errorf("the received mark outlived its base: %v", err)
 	}
 }
+
+// `hull prune` sweeps bases/spare too: the half-written copy of a spare's
+// maker that died, and the spare and lock of a base no longer held. The
+// spare and lock of a held base, and a copy that may be at work, stay.
+func TestPruneSweepsTheSpares(t *testing.T) {
+	s := shortStore(t)
+	old := time.Now().Add(-2 * time.Hour)
+	held := fakeBase(t, s, 0, old)
+	fakeInstance(t, s, "a", held)
+	gone := strings.Repeat("f", 64)
+	if err := os.MkdirAll(spareBasesDir(s), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	put := func(name string, at time.Time) string {
+		path := filepath.Join(spareBasesDir(s), name)
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, at, at); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	stale, working := put(".new-0123", old), put(".new-4567", time.Now())
+	goneSpare, goneLock := put(gone+".ext4", old), put(gone+".lock", old)
+	heldSpare, heldLock := put(held+".ext4", old), put(held+".lock", old)
+	var out bytes.Buffer
+	if err := pruneStoreWith(&out, s, false, false, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{stale, goneSpare, goneLock} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("%s is still there: %v\n%s", filepath.Base(path), err, out.String())
+		}
+	}
+	for _, path := range []string{working, heldSpare, heldLock} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("%s was removed: %v\n%s", filepath.Base(path), err, out.String())
+		}
+	}
+	if !strings.Contains(out.String(), "Removed spare/.new-0123 (left by a spare's maker that died") ||
+		!strings.Contains(out.String(), "Removed the spare of base "+digestHead(gone)+" (its base is gone") {
+		t.Errorf("prune said:\n%s", out.String())
+	}
+}

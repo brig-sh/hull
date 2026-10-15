@@ -363,11 +363,14 @@ either flag, and a move of the instance sends the whole bundle.
 
 A base is kept while something on the host needs it: an instance or a
 move record that names it, an image still in the store whose base it is,
-or a `migrate-prepare` that received it ahead of a move
-(`bases/received/<digest>`). `hull rm` removes the instance's base when
+or a `migrate-prepare` that received it ahead of a move, or a streamed
+move that committed away from this host, for the way back (both
+`bases/received/<digest>`). `hull rm` removes the instance's base when
 nothing else needs it. `hull prune` removes every base nothing needs, the
-entries of images gone from the store, bases set aside as corrupt and
-half-written ones left by a run or a prepare that died; `hull prune
+entries of images gone from the store, bases set aside as corrupt,
+half-written ones left by a run or a prepare that died, and in
+`bases/spare` the half-written copy of a spare's maker that died (older
+than an hour) and the spare and lock of a base no longer held; `hull prune
 --bases` also removes the bases kept for images and received ahead of a
 move when no instance or move uses them. A base younger than ten minutes
 is left alone, since a run may be copying it into a disk it has not
@@ -397,7 +400,7 @@ move then does not carry:
 |---|---|
 | image | `hull pull REF` there by the reference this store pulled it by, unless that store has the digest. The move does not need it; a later `hull run` there does. A failure is reported and fails nothing |
 | profile kernel | for a `--profile` instance, this store's kernel of that profile, when the destination has none. It is checked against the sha256 and installed through the same import as `HULL_PORTABLE_KERNEL`, from a copy kept under `bases/kernels/`. A destination that holds another kernel of the profile keeps it, and the step says so: a profile run there boots only its installed kernel, and whoever installed it expects those bytes. The move does not need the kernel |
-| base | the base, as lz4-compressed non-zero blocks (`HULLBAS1`); the destination writes it to a temporary file, keeps it only if what arrived has the base's digest, and makes it read-only. It also keeps a spare copy (`bases/spare/<digest>.ext4`), made again by every prepare after a move took it, which a streamed receive takes as the instance's disk: on the Pis, without clones, copying the 1.6 GB claude-code base took 22 s, all of it before the stream could start. A copy that is not a clone is synced before it is kept |
+| base | the base, as lz4-compressed non-zero blocks (`HULLBAS1`); the destination writes it to a temporary file, keeps it only if what arrived has the base's digest, and makes it read-only. It also keeps a spare copy (`bases/spare/<digest>.ext4`), made again by every prepare after a move took it, and by the source of a move once it commits ([The way back](#the-way-back)), which a streamed receive takes as the instance's disk: on the Pis, without clones, copying the 1.6 GB claude-code base took 22 s, all of it before the stream could start. The copy is synced before it is kept, and two makers of one spare take turns on its lock (`bases/spare/<digest>.lock`), so the second finds it made; a streamed receive waits on that lock for a maker at work, for at most a minute, and takes its spare |
 | gateway | with `--remote-gateway-sock`, whether it answers. hull does not start one: brig starts the gateway with the session's policy |
 
 Each step finds its effect already there and sends nothing, so the command
@@ -408,8 +411,69 @@ in 1.1 s) and the second 0.24 s, every step `held`.
 
 The destination's own step of a move keeps the name: `migrate-prepare
 --txid T` still brings a received checkpoint up paused. The prepare verbs
-it runs there are hidden: `migrate-take-image`, `migrate-take-kernel` and
-`migrate-take-base`.
+it runs there are hidden: `migrate-take-image`, `migrate-take-kernel`,
+`migrate-take-base` and `migrate-spare-base`.
+
+#### The way back
+
+A move from A to B leaves A as the likeliest destination of the next
+move: the way back. A has the base already, but a receive there finds
+no spare and copies the base first, and a base A built itself was never
+checked, so the receive hashes it while the stream arrives. The move
+waits for that hash before it is verified, with the guest paused when
+the hash outlasts the stream. The source prepares the way back itself. Once a streamed move commits, the
+source's `hull migrate` starts `hull migrate-spare-base --sha256 <digest>
+--for NAME` and does not wait for it:
+
+- It runs in a session and process group of its own, with its output
+  appended to the instance's log (`<store>/instances/NAME/log`), and the
+  move's output does not wait for it. The hangup at the end of the ssh
+  session that drove the move, or a ^C to the brig that did, does not
+  reach it. A kill of the whole cgroup does: with systemd-logind's
+  `KillUserProcesses=yes` the end of the ssh session's scope ends it, and
+  so does the stop of a systemd unit with `KillMode=control-group` that
+  ran the move. A move back then finds no spare and copies the base, as
+  with no step at all. hull does not start the step under `systemd-run`:
+  a user scope ends with the user's manager, which `KillUserProcesses=yes`
+  stops with the last session, and a system unit needs root. Both Pis
+  have `KillUserProcesses=no`.
+- It makes the spare unless there is one, then checks the base and
+  records the check beside it (`<digest>.ext4.checked`), unless a check
+  stands. It holds the spare's lock (`bases/spare/<digest>.lock`) through
+  both. Each step writes a dated line to the log (`hull: making a
+  spare copy of base 83d3e4711f0a for a move back of hb2 (pid 979024)`,
+  `made a spare copy ... (copy, 0.4 s)`, `checked base ... (0.1 s)`),
+  then the step's JSON reply.
+- With the spare there and the check on record, the move starts nothing
+  and says `move: base ... has a spare copy here for a move back`. With
+  the base gone from the store it says so, and starts nothing.
+- The base is marked as kept for a move, as a prepare's is
+  (`bases/received/<digest>`). The move back must first `hull rm NAME`
+  on A, the stale copy (see [Operator recovery](#operator-recovery));
+  that leaves the base and the spare. `hull prune --bases` removes both
+  when nothing else uses the base.
+
+- A move back that arrives while the step is at work waits for it, at
+  most a minute, before it accepts the stream, so before hvi's migrate
+  fences the guest. It then takes the spare and finds the check on
+  record, and the destination's steps start with `waited for the base's
+  spare being made`. A step that holds the lock past the minute is not
+  waited for: the receive copies the base and hashes it while the stream
+  arrives, as with no step, and records `gave up waiting for the base's
+  spare being made`. Two checks of one base also take turns, on a lock of
+  the base file, so the second finds the first's on record.
+
+So a streamed move back from B to A needs no `migrate-prepare` while A
+holds the base, from the commit on: a move back that comes before the
+step has finished waits for it outside the pause. A `hull prune --bases`
+on A, or a move that went by bundle, leaves A without the spare, and a
+prepare makes it again. The move to B took B's spare, the one its
+prepare made, and B makes the next one itself once the move back
+commits, so a later move to B again needs no prepare either. The
+destination's record says which way the receive made the disk: the step
+`disk made from the base's spare`, or `disk made from the base by copy,
+with no spare` (or `by clone`), after `waited for the base's spare being
+made` when it waited for a maker.
 
 ### The order on the wire
 
@@ -469,12 +533,13 @@ document, and the documents of one stream are held to 64 MiB together.
 
 ### The destination
 
-`migrate-receive --stream` takes the base's spare copy as the instance's
-disk (or copies the base when there is none), syncs it, and records that
-it took this attempt's header (`streamAccepted`); the source waits for
-that before it asks hvi to `migrate` (in a session the destination says
-so on its stdout; otherwise the source polls `migrate-status` every
-50 ms), so a refusal of the header comes while the guest still runs. A copy whose writeback is still under way
+`migrate-receive --stream` waits for a maker of the base's spare at work
+(at most a minute; see [The way back](#the-way-back)), takes the spare as
+the instance's disk (or copies the base when there is none), syncs it,
+and records that it took this attempt's header (`streamAccepted`); the
+source waits for that before it asks hvi to `migrate` (in a session the
+destination says so on its stdout; otherwise the source polls
+`migrate-status` every 50 ms), so a refusal of the header comes while the guest still runs. A copy whose writeback is still under way
 would cost the downtime: hvi syncs the disk after the rounds it writes and
 waits for that before the guest may run, and on rp2 an unsynced 64 MiB
 copy made that 4 to 20 s.
@@ -597,6 +662,28 @@ copy to restore from. So:
   though hull did not take its whole stream", and a re-run or `--abort`
   has hvi stream it again (below); with no answer, the error says hvi did
   not say whether it fenced the guest, and not to stop the instance;
+- hvi gives the part of the stream it writes with the guest paused, from
+  `disk-round-final` to the manifest, 10 s plus twice the last round with
+  the guest running (its RAM round and the disk round before it). Past
+  that every write of hvi's fails and the guest runs on, but in the
+  middle of a frame hvi cannot say so: its refusal lands among the
+  frame's bytes, and it then waits for the next request on the open
+  connection. hull waits up to 2 minutes for a byte from hvi while the
+  guest runs.
+  Once it has the first frame of `disk-round-final` (in a stream with no
+  disk rounds, the first document after the RAM rounds) it waits only as
+  long as that budget, from the rounds as it timed them, plus 5 s. hull
+  times a round by its frames' arrival, so the last running round
+  includes hvi's sync and pause before `disk-round-final`, and the bound
+  is at least hvi's. A stall past it fails with `hvi sent nothing for
+  B s in the part of its stream it writes with the guest paused, longer
+  than it gives that part (P s: 10 s and twice the last round with the
+  guest running, R s)`, and hull asks hvi's `status` as above. Running
+  on, the move says the guest runs on here; fenced, it says so. A second
+  stream of a fenced guest has no paused budget in
+  hvi, so the 2 minutes stand for it. Before this bound, one move under
+  the hog waited out the 2 minutes after `ram-round-2` stalled (see
+  [From the seal to the resume](#from-the-seal-to-the-resume));
 - one that fails after the manifest leaves the guest fenced with its spool
   recorded as the instance's checkpoint (`migrating`). Running the move
   again sends the spool (`"replay": true`) to a fresh copy of the base
@@ -702,7 +789,7 @@ refusal is the move's error, with code `restore_refused`.
 | `chain` | the trailer's hash, which the destination's record must match |
 | `hviReply` | hvi's reply to `migrate`, as hvi wrote it |
 | `steps` | when this host reached each step from hvi's seal to the commit, by its own clock: `destination accepted`, `hvi sealed the stream`, `instance's fence recorded`, `trailer sent`, `destination answered`, `commit point recorded`, `commit sent`, `commit answered` |
-| `destSteps` | the destination's steps, by its clock, from its replies: `manifest read`, `trailer read`, `hvi restored the guest paused`, `base checked`, `verified recorded`, `commit received`, `epoch saved` (only when the receive did not save it), `ledger written`, `running recorded`, `resumed`; its own record has them too |
+| `destSteps` | the destination's steps, by its clock, from its replies: `waited for the base's spare being made` (or `gave up waiting for ...`; only when a maker of the spare was at work), `disk made from the base's spare` (or `... by copy, with no spare`), `manifest read`, `trailer read`, `hvi restored the guest paused`, `base checked`, `verified recorded`, `commit received`, `epoch saved` (only when the receive did not save it), `ledger written`, `running recorded`, `resumed`; its own record has them too |
 
 A source that took the spool from hvi again also records
 `firstManifestSha256` beside `manifestSha256`.
@@ -1111,6 +1198,74 @@ by the UDP probe before each move; "from hvi's seal" counts from
   rp2 was 37 to 89 ms with this hull and 34 and 38 ms with 7b3f7b1. No
   move lost a line of its counter.
 
+#### Moving back with no prepare
+
+2026-10-16, rp1 to rp2 and back with no `migrate-prepare` for the way
+back. hull at aae490a (the spare only) and 71cc8c4 (the spare and the
+base's check), built on rp1, hvi ba9b2d2. The guest is the idle ubuntu
+one above (1 GiB, 1 vCPU, a counter ten times a second); its base is the
+15 GiB image with 110.8 MiB of data. Each run: boot on rp1, prepare
+rp2, move to rp2, wait for rp1's background step, `hull rm` the stale
+copy on rp1, move back from rp2. Downtime is the rise in the guest's
+`hvi-time` `downtime total` over each move.
+
+| Run | Away: total, downtime | rp1's background step | Back: total, downtime | rp1's disk for the move back |
+|---|---|---|---|---|
+| aae490a | 2.14 s, 57.3 ms | spare copied in 0.4 s | 2.45 s, 46.4 ms | the spare, 1.86 s before the pause |
+| 71cc8c4 | 2.16 s, 57.3 ms | spare copied in 0.4 s, base checked in 0.1 s | 2.37 s, 46.6 ms | the spare, 1.79 s before the pause |
+| 71cc8c4, spare removed by hand before the move back | 2.18 s, 73.2 ms | spare copied in 0.3 s | 2.78 s, 87.2 ms | copied from the base, 1.74 s before the pause |
+
+- The background step had written its lines to the instance's log by
+  the time `hull migrate` had returned and the run script had checked
+  the guest on rp2. `hull rm` on rp1 left the base, the spare and the
+  `received` mark.
+- The receive on rp1 made the disk before it accepted the header, so
+  neither the spare nor the copy fell inside the pause (the times before
+  the pause are across the two clocks, a few ms apart). That holds for
+  the hull the recording ran (of the 9cb3440 era) too: since f43490c the
+  receive copies the base and syncs the copy before it accepts the
+  header, and the source starts hvi's migrate only after that. So a copy
+  cannot be what paused the brig recording's move back 22.9 s. The
+  likely cause is the receive's hash of rp1's base, which rp1 had built
+  itself and never checked: the hash runs while the stream arrives, and
+  the move waits for it before it is verified, with the guest paused
+  once it outlasts the stream. The recorder's workaround, running
+  `migrate-spare-base` by hand first, reads the whole base, which likely
+  left it in rp1's page cache and made the hash after it fast. No run
+  here shows the 22.9 s: this base hashed in 0.1 s.
+- The guest's counter had no gap after any move, and `boot_id`, the
+  blob and the held file were the same.
+- The bound on the paused part of the stream was tested with a fake
+  hvi only (`TestStreamedMoveStallInThePausedPart`), not live.
+
+A move back that comes while rp1's background step is still at work,
+2026-10-16, hull at 9b4d52e on both Pis, hvi ba9b2d2, the same guest and
+base. With this base the step takes 0.5 s, so a holder of the spare's
+lock on rp1 stood in for a slow copy: rp1's `.checked` and spare were
+removed, the holder took the lock before the move away, and let it go 4
+s after the move back started. The move away ran in an ssh session to
+rp1 that ended at the commit. Another agent's benchmark was running on
+rp2 (load 5 to 8, O_DIRECT writes with fsync), so the downtimes below
+are not counted against the target.
+
+- After the ssh session of the move away had ended, `ps` showed the step
+  (`hull migrate-spare-base --for hc2`) with parent 1 in a session of its
+  own. It waited on the holder for 4.6 s more, then made the spare and
+  wrote the check 0.48 s after the holder let go.
+- The receive of the move back on rp1 recorded `waited for the base's
+  spare being made` 8 ms after the check was written, and `disk made
+  from the base's spare` 1.7 ms after that. rp2 printed `the destination
+  took the stream in 4.0 s`. `base checked` came 3 µs after `hvi
+  restored the guest paused`: no hash in the pause.
+- The move back's downtime was 48.8 s, by hvi-time. rp2, the source,
+  took 46.9 s to record its commit point, a synced write, and hvi synced
+  rp2's disk for 1.8 s in the pause. rp1's part after the manifest took
+  33 ms.
+- In a first run the move away took 50 s (rp2 restored the guest 41.5 s
+  after the manifest), and the holder had let go before it committed.
+  The step then finished before the move back came, and the move back
+  took the spare, with 70.1 ms of downtime by hvi-time.
+
 ## Records
 
 Both hosts keep `<store>/instances/<name>/migration.json`, 0600:
@@ -1160,7 +1315,7 @@ destination before the commit), and two fields, `moveTxid` and `peer`.
 | `hvi checkpoint-verify` fails | fenced, `transferring` | `received` with the error | `--abort` |
 | restore refused | fenced, `transferred` | `verified` with the error | fix the destination and run it again, or `--abort` |
 | the commit's reply is lost | fenced, `committing` | `restored-paused` or `running` | run it again: it learns the commit |
-| streamed: hvi's stream ends before its manifest (a refusal, a failed capture or park, a reader hvi cut for stalling) | running, unfenced, `transferring`; the error says the guest runs on here | `receiving` with the error | run it again: it streams from the start; or `--abort`, which leaves the guest running |
+| streamed: hvi's stream ends before its manifest (a refusal, a failed capture or park, a reader hvi cut for stalling, the paused part past hvi's budget, which hull reports within that budget plus 5 s and then asks hvi's `status`) | running, unfenced, `transferring`; the error says the guest runs on here | `receiving` with the error | run it again: it streams from the start; or `--abort`, which leaves the guest running |
 | streamed: hull fails on one of hvi's frames before the manifest (a full spool disk, a document too large, a frame whose sha256 is wrong) | as hvi's `status` says: running and unfenced (the error says the guest runs on here), or fenced with the spool cut short (the error says hvi fenced the guest); `transferring` | `receiving` with the error | running: as above. Fenced: run it again or `--abort`: hvi streams the fenced guest again first |
 | streamed: the stream fails after hvi's manifest | fenced, with the whole stream in its spool, `transferring` | `receiving` with the error | run it again: it sends the spool, disk rounds and all; or `--abort`, which restores the guest here from the spool |
 | streamed: hull is killed after hvi's manifest, before its own seal | fenced, `transferring`, the spool without `sealed` | `receiving` | run it again or `--abort`: each checks the spool frame by frame and seals it, or has hvi stream the fenced guest again for the move's txid and epoch; with neither possible the error says no copy is left here |
@@ -1201,7 +1356,11 @@ destination before the commit), and two fields, `moveTxid` and `peer`.
 - **Moving back.** A move from B back to A is a new move, run on B. A still
   has the stale copy the first move left under the same name, so the probe
   refuses until `hull rm NAME` on A removes it. The owner epoch goes on
-  counting: 0 on A, 1 on B, 2 back on A.
+  counting: 0 on A, 1 on B, 2 back on A. A streamed move back needs no
+  `migrate-prepare` while A holds the base: A makes the spare and checks
+  the base after the first move commits, a move back that comes first
+  waits for that ([The way back](#the-way-back)), and `hull rm` leaves
+  both.
 
 ## Testing a move
 
