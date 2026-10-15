@@ -424,6 +424,10 @@ func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][
 	files := map[string][]byte{}
 	var kept int64
 	folder := &roundFolder{ss: ss}
+	// The wait for hvi drops to its own bound once the paused part begins
+	// (hviPausedBound); 0 until then.
+	var pausedBound, lastRun time.Duration
+	ic, _ := conn.(*idleConn)
 	reply, line, err := readHviComponents("migrate", br, func(line []byte, hdr hviComponentHeader, body io.Reader) error {
 		if relayFrameTestHook != nil {
 			if err := relayFrameTestHook(hdr.Component); err != nil {
@@ -432,6 +436,15 @@ func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][
 		}
 		if ss.manifest != nil {
 			return fmt.Errorf("hvi's %s comes after its manifest", hdr.Component)
+		}
+		// A second stream of a fenced guest has no paused part: hvi gives
+		// it only the 30 s it gives any reader that takes nothing.
+		if pausedBound == 0 && ic != nil && !ss.restream && pausedPartBegins(folder, hdr.Component) {
+			// The round before is flushed, so it is among those timed.
+			folder.begin(hdr.Component)
+			lastRun = lastRunningRound(ss.stats.Rounds, !isRound(hdr.Component))
+			pausedBound = hviPausedBound(lastRun)
+			ic.setIdle(pausedBound)
 		}
 		if _, err := sp.bw.Write(append(append([]byte{}, line...), '\n')); err != nil {
 			return err
@@ -467,6 +480,12 @@ func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][
 		return nil
 	})
 	folder.flush()
+	if pausedBound > 0 && errors.Is(err, os.ErrDeadlineExceeded) {
+		err = fmt.Errorf("hvi sent nothing for %.1f s in the part of its stream it writes with the guest "+
+			"paused, longer than it gives that part (%.1f s: %g s and twice the last round with the guest "+
+			"running, %.2f s): %w", pausedBound.Seconds(), (pausedBound - hviPausedMargin).Seconds(),
+			hviPausedFloor.Seconds(), lastRun.Seconds(), err)
+	}
 	var refused *hviRefusal
 	switch {
 	case err != nil && ss.manifest == nil && ss.restream:
@@ -488,6 +507,67 @@ func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][
 	}
 	ss.takeHviStats(reply)
 	return line, files, nil
+}
+
+// hvi gives the part of a move's stream it writes with the guest paused,
+// from disk-round-final to the manifest, a budget: hviPausedFloor plus
+// twice the last round taken with the guest running, its RAM round and the
+// disk round before it (hvi src/checkpoint/server.rs, paused_budget). Past
+// it every write fails, and the guest runs on. hvi cannot say so in the
+// middle of a frame, and it leaves the connection open, so hull, waiting
+// for the rest of the frame, waited out the whole hviStreamIdle of 2
+// minutes before it asked hvi whether the guest runs. Once the paused part
+// begins hull waits for a byte only as long as that budget, with a margin.
+
+// hviPausedFloor is hvi's STREAM_PAUSED_FLOOR. A variable so a test need
+// not wait it out.
+var hviPausedFloor = 10 * time.Second
+
+// hviPausedMargin is what hull adds to hvi's budget for the paused part.
+// hull times a round from its first frame to the next round's, as the
+// frames reach it, which is longer than hvi's time for it by the sync and
+// the pause before disk-round-final, and shorter by at most what sat in
+// the socket's buffers when the round began.
+var hviPausedMargin = 5 * time.Second
+
+// pausedPartBegins reports whether the frame of component, about to be
+// relayed, is the first of the paused part: disk-round-final, or, in a
+// stream with no disk rounds, the first document after the RAM rounds
+// (whose last round was the paused one).
+func pausedPartBegins(f *roundFolder, component string) bool {
+	return component == "disk-round-final" || (f.ramSeen && !isRound(component))
+}
+
+// lastRunningRound is how long hull took to relay the last round taken
+// with the guest running: the last RAM round of rounds, or the one before
+// it when the last was taken paused, and the last disk round but
+// disk-round-final.
+func lastRunningRound(rounds []streamRound, lastRAMPaused bool) time.Duration {
+	var ram []float64
+	disk := 0.0
+	for _, r := range rounds {
+		switch {
+		case r.Kind == "ram":
+			ram = append(ram, r.Seconds)
+		case r.Kind == "disk" && r.Name != "disk-round-final":
+			disk = r.Seconds
+		}
+	}
+	if lastRAMPaused && len(ram) > 0 {
+		ram = ram[:len(ram)-1]
+	}
+	last := disk
+	if len(ram) > 0 {
+		last += ram[len(ram)-1]
+	}
+	return time.Duration(last * float64(time.Second))
+}
+
+// hviPausedBound is how long the relay waits for a byte of hvi's stream
+// once its paused part has begun: hvi's budget for that part, given the
+// last running round as hull timed it, and the margin.
+func hviPausedBound(lastRunning time.Duration) time.Duration {
+	return hviPausedFloor + 2*lastRunning + hviPausedMargin
 }
 
 // hviUnwindWait is how long hull waits for hvi to answer whether it fenced
