@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/urunc-dev/urunc/pkg/unikontainers/hypervisors"
+	"golang.org/x/sys/unix"
 
 	"github.com/brig-sh/hull/pkg/store"
 )
@@ -259,11 +260,7 @@ func (r *streamReceiver) header(h moveStreamHeader) error {
 	// gets the machine.
 	r.baseChecked = make(chan error, 1)
 	go func(path, want string) {
-		got, _, err := diskDigestFile(path)
-		if err == nil && got != want {
-			err = fmt.Errorf("its blocks hash to %s", got)
-		}
-		r.baseChecked <- err
+		r.baseChecked <- checkBaseDigest(path, want)
 	}(r.s.BasePath(h.BaseSHA256), h.BaseSHA256)
 	// A fresh copy of the base on every attempt: whatever an earlier one
 	// applied is gone with it.
@@ -301,6 +298,41 @@ func (r *streamReceiver) header(h moveStreamHeader) error {
 		}
 	}
 	return nil
+}
+
+// checkBaseDigest checks that the base at path hashes to want. A base is
+// read-only and never written, so a check that passed is recorded beside it
+// (<base>.checked: the digest, and the file's size, change time and inode)
+// and stands until any of them changes; a move with little to send then never waits for a hash of
+// a 1.6 GB base.
+func checkBaseDigest(path, want string) error {
+	stamp, err := baseStamp(path)
+	if err != nil {
+		return err
+	}
+	stamp = want + " " + stamp
+	if old, err := os.ReadFile(path + ".checked"); err == nil && string(old) == stamp {
+		return nil
+	}
+	got, _, err := diskDigestFile(path)
+	if err != nil {
+		return err
+	}
+	if got != want {
+		return fmt.Errorf("its blocks hash to %s", got)
+	}
+	_ = os.WriteFile(path+".checked", []byte(stamp), 0o600)
+	return nil
+}
+
+// baseStamp is what a base's check is recorded against: its size, change
+// time and inode.
+func baseStamp(path string) (string, error) {
+	var st unix.Stat_t
+	if err := unix.Stat(path, &st); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("size %d ctime %d.%09d ino %d\n", st.Size, st.Ctim.Sec, st.Ctim.Nsec, st.Ino), nil
 }
 
 // checkBase waits for the check of the base's digest. A base whose blocks
