@@ -515,23 +515,36 @@ reading is the guest. In that window:
   that cannot work. If the destination verified the stream, running the
   move again commits it there.
 
-The fence is recorded while the last disk round and the trailer go out and
-the destination checks them; the commit, not the stream, waits for that
-record. A source that dies before it leaves a destination that may have
-verified the stream and a fence this host never recorded: a re-run then
-refuses to commit without a record of what it sent, and `--abort` brings
-the guest back here from the spool. The spool's sync is not part of the
-downtime:
-it runs behind the move, and `hull migrate` waits for it only before it
-exits. The destination syncs its disk in the background every 32 MiB and
-once the disk rounds that ran with the guest running are in, so the sync
-after the stream has only the last round to write, and that sync overlaps
-hvi's restore. hvi's documents kept beside the destination's record are
-written without a sync: hvi has the machine from the stream. The record
-writes the stopped guest waits for are one per host: the source records the transfer and its commit point (`committing`)
-together, and the destination `received`, `verified` and `restored-paused`
-together. The source pays for the spool with a write of the guest's touched
-RAM to its own disk.
+On a busy disk every synced write is a wait the stopped guest sits
+through, so from hvi's seal to the commit each host makes one:
+
+- The source puts the fence (the spool, its manifest, the disk as fenced)
+  on the move's record in memory, and writes it with the commit point
+  (`transferred` and `committing` together), the one synced write the
+  commit waits for. The move's record, synced at `transferring` before the
+  stream began, already keeps the instance from running here meanwhile.
+  The instance's own records of the fence (`latest.json`, `state.json`)
+  are written beside the last disk round, the trailer and the
+  destination's checks, and the commit does not wait for them.
+- The spool is not synced while the stream runs, and its seal syncs it
+  only once the commit is answered or the move stops: on the Pis a sync of
+  the spool beside the commit point's record held that record up for
+  13 s. `hull migrate` waits for the seal before it exits.
+- The destination syncs its disk in the background every 32 MiB and once
+  the disk rounds that ran with the guest running are in, so the sync after
+  the stream has only the last round to write, and that sync overlaps
+  hvi's restore. hvi's documents kept beside its record are written
+  without a sync (hvi has the machine from the stream), and it records
+  `received`, `verified` and `restored-paused` in one write.
+
+A source that dies after hvi's seal leaves a destination that may have
+verified the stream and a fence this host may not have recorded: a re-run
+then refuses to commit without a record of what it sent, and `--abort`
+brings the guest back here from the spool (or from hvi, streaming the
+fenced guest again). An abort finds the spool of a move whose hvi no
+longer answers (a source host that went down) and restores from it when it
+checks out whole. The source pays for the spool with a write of the
+guest's touched RAM to its own disk.
 
 A destination whose `hvi` refuses the machine stops reading, and the
 refusal is the move's error, with code `restore_refused`.

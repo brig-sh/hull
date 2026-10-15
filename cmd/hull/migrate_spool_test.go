@@ -162,8 +162,9 @@ func crashMoveAt(t *testing.T, f *streamFixture, stage string) string {
 		t.Fatalf("hvi is %s after the child died", f.hvi.state)
 	}
 	rec := f.srcRecord(t)
-	if recorded := rec.ManifestSHA256 != ""; rec.State != srcTransferring || recorded != (stage == "recorded") {
-		t.Fatalf("the child died at %s with the move %s, manifest %q", stage, rec.State, rec.ManifestSHA256)
+	st := mustInstance(t, f.src, f.name)
+	if recorded := fencedFor(st, rec.TxID); rec.State != srcTransferring || recorded != (stage == "recorded") {
+		t.Fatalf("the child died at %s with the move %s, the instance's migration %+v", stage, rec.State, st.Migration)
 	}
 	root, _ := flagValue(mustInstance(t, f.src, f.name).CmdLine, "--checkpoint-root")
 	return filepath.Join(root, rec.TxID)
@@ -330,8 +331,8 @@ func TestStreamedMoveCommitsWhileTheSpoolSyncs(t *testing.T) {
 	for _, s := range rec.Stream.Steps {
 		steps[s.Step] = true
 	}
-	for _, want := range []string{"hvi sealed the stream", "fence recorded", "trailer sent", "destination answered",
-		"commit sent"} {
+	for _, want := range []string{"hvi sealed the stream", "instance's fence recorded", "trailer sent",
+		"destination answered", "commit sent"} {
 		if !steps[want] {
 			t.Errorf("no step %q in %+v", want, rec.Stream.Steps)
 		}
@@ -343,5 +344,45 @@ func TestStreamedMoveCommitsWhileTheSpoolSyncs(t *testing.T) {
 	}
 	if strings.Join(order, ",") != "base checked,trailer read,hvi restored the guest paused,disk synced" {
 		t.Errorf("destination steps %v", order)
+	}
+}
+
+// A host that goes down right after hvi's seal takes hvi with it and may
+// leave no record of the fence: the abort finds the whole spool of the
+// move and brings the guest back from it.
+func TestStreamedMoveAbortAfterHviIsGone(t *testing.T) {
+	f := newStreamFixture(t, true, true)
+	dir := crashMoveAt(t, f, "relayed")
+	if err := syscall.Kill(f.vm.pid, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	<-f.vm.done
+	f.hvi.mu.Lock()
+	f.hvi.state = "stopped"
+	f.hvi.mu.Unlock()
+	st := mustInstance(t, f.src, f.name)
+	st.ControlSock = filepath.Join(t.TempDir(), "gone.sock")
+	if err := f.src.SaveInstance(st); err != nil {
+		t.Fatal(err)
+	}
+	var restoredFrom string
+	localRestore = func(s *store.Store, name string) error {
+		st, err := s.GetInstance(name)
+		if err != nil {
+			return err
+		}
+		r, err := restoreStreamSource(st, hviRestoreOptions{detach: true})
+		if r != nil {
+			restoredFrom = r.Name()
+			_ = r.Close()
+		}
+		return err
+	}
+	var out bytes.Buffer
+	if err := sourceAbort(context.Background(), f.src, f.name, &out, f.peer); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if restoredFrom != filepath.Join(dir, spoolStream) {
+		t.Fatalf("restored from %q\n%s", restoredFrom, out.String())
 	}
 }
