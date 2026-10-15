@@ -52,6 +52,8 @@ type migrateOptions struct {
 	wholeBundle bool
 	// out takes the progress lines.
 	out io.Writer
+	// signals are held while hvi's stream is not on record; nil in tests.
+	signals *moveSignals
 }
 
 func migrateCommand() *cli.Command {
@@ -113,6 +115,9 @@ func migrateCommand() *cli.Command {
 				fenceTimout: time.Duration(cmd.Int("timeout")) * time.Second,
 				out:         os.Stderr,
 			}
+			ctx, signals, stop := watchMoveSignals(ctx, os.Stderr)
+			defer stop()
+			opt.signals = signals
 			return sourceMigrate(ctx, s, arg, opt, nil)
 		},
 	}
@@ -203,7 +208,7 @@ func sourceMigrate(ctx context.Context, s *store.Store, name string, opt migrate
 		_, _ = fmt.Fprintf(opt.out, "Resuming move %s of %s to %s at %s\n", rec.TxID, name, rec.Peer, rec.State)
 	}
 	m := &moveSource{s: s, name: name, path: path, rec: rec, peer: peerFor(rec, peer), out: opt.out,
-		fenceTimeout: opt.fenceTimout, probed: probe != nil, probe: probe}
+		fenceTimeout: opt.fenceTimout, probed: probe != nil, probe: probe, signals: opt.signals}
 	return m.run(ctx)
 }
 
@@ -493,6 +498,8 @@ type moveSource struct {
 	// receive says the guest is restored paused there already, so the
 	// prepare step has nothing to ask.
 	destPaused bool
+	// signals are held while hvi's stream is not on record.
+	signals *moveSignals
 }
 
 func (m *moveSource) logf(format string, args ...any) {

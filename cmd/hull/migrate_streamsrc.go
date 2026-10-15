@@ -942,7 +942,13 @@ func (ss *streamSender) send(replay bool) (json.RawMessage, error) {
 	var reply json.RawMessage
 	var files map[string][]byte
 	if err == nil {
+		// From the migrate op until the fence is recorded, a signal that
+		// would end hull waits (moveSignals).
+		m.signals.hold()
 		reply, files, err = ss.relayHvi(sp)
+		if err != nil {
+			m.signals.release()
+		}
 	}
 	if err != nil {
 		sp.close()
@@ -966,6 +972,7 @@ func (ss *streamSender) send(replay bool) (json.RawMessage, error) {
 		if err == nil {
 			err = ss.recordFence()
 		}
+		m.signals.release()
 		unlock()
 		sealed <- err
 	}()
