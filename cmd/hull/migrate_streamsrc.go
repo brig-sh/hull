@@ -531,7 +531,12 @@ func (m *moveSource) streamTransfer(ctx context.Context) (retErr error) {
 		return err
 	}
 	replay := fencedFor(state, m.rec.TxID)
-	if !replay && hviVMState(state) == store.MigrationFenced {
+	// A fence hvi made for this move that the move's record does not hold:
+	// hull died after hvi's manifest, before it recorded the fence on the
+	// instance, or after that and before the move's record took it (the
+	// commit point writes it). Either way it is taken from the spool, which
+	// is checked whole or streamed again.
+	if (!replay && hviVMState(state) == store.MigrationFenced) || (replay && m.rec.Disk == nil) {
 		if err := m.adoptStreamFence(state); err != nil {
 			return err
 		}
@@ -637,7 +642,7 @@ func (m *moveSource) streamTransfer(ctx context.Context) (retErr error) {
 	}
 	if err != nil {
 		if res.err != nil && !errors.Is(res.err, io.ErrClosedPipe) && !strings.Contains(err.Error(), res.err.Error()) {
-			err = fmt.Errorf("%w (sending: %v)", err, res.err)
+			err = fmt.Errorf("%w (sending: %w)", err, res.err)
 		}
 		return fmt.Errorf("transfer to %s: %w", m.rec.Peer, err)
 	}
