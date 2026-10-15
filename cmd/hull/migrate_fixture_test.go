@@ -27,6 +27,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -279,6 +280,8 @@ type localPeer struct {
 	// mangle, when set, stands between a verb and its stdin, to damage or
 	// cut what crosses the link.
 	mangle func(verb string, args []string, in io.Reader) io.Reader
+	// cutSession ends the next session's lines after its verified line.
+	cutSession bool
 }
 
 func newLocalPeer(s *store.Store) *localPeer {
@@ -312,7 +315,7 @@ func (p *localPeer) call(_ context.Context, verb string, args []string, stdin io
 	}
 	flags := map[string]string{}
 	for i := 0; i < len(args); i++ {
-		if i+1 < len(args) && args[i] != "--reserve" && args[i] != "--stream" {
+		if i+1 < len(args) && args[i] != "--reserve" && args[i] != "--stream" && args[i] != "--session" {
 			flags[args[i]] = args[i+1]
 			i++
 		} else {
@@ -325,7 +328,7 @@ func (p *localPeer) call(_ context.Context, verb string, args []string, stdin io
 		reply = destProbe(p.s, flags["--name"], flags["--hvi"], flags["--gateway-sock"])
 	case "migrate-receive":
 		if flags["--stream"] == "true" {
-			reply = destReceiveStream(p.s, flags["--txid"], flags["--name"], stdin)
+			reply = destReceiveStream(p.s, flags["--txid"], flags["--name"], stdin, nil)
 			// As ssh: the call ends with the remote command, and what the
 			// source still writes goes nowhere.
 			go func() { _, _ = io.Copy(io.Discard, stdin) }()
@@ -375,6 +378,77 @@ func (p *localPeer) call(_ context.Context, verb string, args []string, stdin io
 		return reply, &migrateRefusal{Verb: verb, Reply: reply}
 	}
 	return reply, nil
+}
+
+// session is the streamed receive in a session, its lines through a pipe
+// as JSON, as over ssh. noSession makes the peer one that has none;
+// cutSession ends the next session's lines after its verified line, as a
+// link lost there would, with the destination running on.
+func (p *localPeer) session(ctx context.Context, verb string, args []string, stdin io.Reader,
+	event func(*migrateReply)) (*migrateReply, error) {
+	p.mu.Lock()
+	p.calls = append(p.calls, verb+" --session")
+	down, cut := p.down, p.cutSession
+	p.cutSession = false
+	p.mu.Unlock()
+	if verb != "migrate-receive" || down {
+		return p.call(ctx, verb, args, stdin)
+	}
+	if p.mangle != nil {
+		stdin = p.mangle(verb, args, stdin)
+	}
+	flags := map[string]string{}
+	for i := 0; i+1 < len(args); i++ {
+		if strings.HasPrefix(args[i+1], "--") {
+			continue
+		}
+		flags[args[i]] = args[i+1]
+		i++
+	}
+	lr, lw := io.Pipe()
+	out := &sessionOut{w: lw}
+	if cut {
+		out.w = &cutAfterVerified{w: lw}
+	}
+	go func() {
+		reply := destReceiveStream(p.s, flags["--txid"], flags["--name"], stdin, out)
+		out.send(reply)
+		_ = lw.Close()
+		go func() { _, _ = io.Copy(io.Discard, stdin) }()
+	}()
+	reply, err := readSession(lr, event)
+	_, _ = io.Copy(io.Discard, lr)
+	if err != nil {
+		return nil, fmt.Errorf("%w to %s: %v", errMoveNoAnswer, verb, err)
+	}
+	if !reply.OK {
+		return reply, &migrateRefusal{Verb: verb, Reply: reply}
+	}
+	return reply, nil
+}
+
+// cutAfterVerified passes a session's lines until its verified line, and
+// none after it.
+type cutAfterVerified struct {
+	w   io.Writer
+	cut bool
+}
+
+func (c *cutAfterVerified) Write(b []byte) (int, error) {
+	if c.cut {
+		return len(b), nil
+	}
+	if bytes.Contains(b, []byte(`"event":"verified"`)) {
+		c.cut = true
+		if _, err := c.w.Write(b); err != nil {
+			return 0, err
+		}
+		if pw, ok := c.w.(*io.PipeWriter); ok {
+			_ = pw.Close()
+		}
+		return len(b), nil
+	}
+	return c.w.Write(b)
 }
 
 func (p *localPeer) called(verb string) int {

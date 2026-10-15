@@ -26,6 +26,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -706,6 +707,13 @@ func destCommit(s *store.Store, txid string, epoch uint64) *migrateReply {
 	if unlock != nil {
 		defer unlock()
 	}
+	return destCommitLocked(s, rec, path, epoch)
+}
+
+// destCommitLocked is destCommit with the move's lock held: from
+// migrate-commit, or from the session the stream came in.
+func destCommitLocked(s *store.Store, rec *migrationRecord, path string, epoch uint64) *migrateReply {
+	txid := rec.TxID
 	if rec.Epoch != epoch {
 		return refuseWith(codeWrongEpoch, fmt.Errorf("move %s hands over epoch %d, not %d", txid, rec.Epoch, epoch), rec)
 	}
@@ -873,6 +881,10 @@ func destStatus(s *store.Store, txid string) *migrateReply {
 	return reply
 }
 
+// migrateVerbOut is the stdout of the destination verb this process runs,
+// for a session's lines (migrate_session.go).
+var migrateVerbOut io.Writer = os.Stdout
+
 // migrateRemoteVerb wraps a destination verb: stdout carries its one reply
 // and nothing else, so everything the verb prints on the way (stop and
 // resume print to stdout) goes to stderr instead.
@@ -887,6 +899,7 @@ func migrateRemoteVerb(name, usage string, flags []cli.Flag,
 			out := os.Stdout
 			os.Stdout = os.Stderr
 			defer func() { os.Stdout = out }()
+			migrateVerbOut = out
 			var reply *migrateReply
 			if s, err := globalStore(cmd); err != nil {
 				reply = refuse(codeFailed, err)
@@ -911,10 +924,19 @@ func migrateRemoteCommands() []*cli.Command {
 				return destProbe(s, cmd.String("name"), cmd.String("hvi"), cmd.String("gateway-sock"))
 			}),
 		migrateRemoteVerb("migrate-receive", "reserve a name for a move, or receive its stream on stdin",
-			[]cli.Flag{txidFlag, nameFlag, &cli.BoolFlag{Name: "reserve"}, &cli.BoolFlag{Name: "stream"}},
+			[]cli.Flag{txidFlag, nameFlag, &cli.BoolFlag{Name: "reserve"}, &cli.BoolFlag{Name: "stream"},
+				&cli.BoolFlag{Name: "session", Usage: "with --stream: one session from the header to the " +
+					"resume, with lines on stdout as it goes"}},
 			func(cmd *cli.Command, s *store.Store) *migrateReply {
+				if cmd.Bool("stream") && cmd.Bool("session") {
+					// A source that is gone makes a line fail with EPIPE,
+					// which must not kill the receive half way.
+					signal.Ignore(syscall.SIGPIPE)
+					return destReceiveStream(s, cmd.String("txid"), cmd.String("name"), os.Stdin,
+						&sessionOut{w: migrateVerbOut})
+				}
 				if cmd.Bool("stream") {
-					return destReceiveStream(s, cmd.String("txid"), cmd.String("name"), os.Stdin)
+					return destReceiveStream(s, cmd.String("txid"), cmd.String("name"), os.Stdin, nil)
 				}
 				if cmd.Bool("reserve") {
 					var req migrateReserveRequest

@@ -40,6 +40,7 @@ import (
 //	'H' u32 len, JSON moveStreamHeader
 //	'C' u32 len, hvi's component header line, then size bytes
 //	'T' u32 len, JSON moveStreamTrailer
+//	'K' u32 len, JSON moveStreamCommit (a session only, see below)
 //
 // Integers are big-endian. Every component's bytes are checked against the
 // sha256 in hvi's header line as they are relayed, and hvi checks them
@@ -47,6 +48,12 @@ import (
 // the number of records and a running sha256 over every record's kind and
 // header, so a record lost, added, reordered or altered fails the move, and
 // a stream that ends without its trailer is refused.
+//
+// In a session (moveCapSession) the stream does not end at its trailer:
+// once the destination has said the move is verified, the source records
+// its commit point and sends the commit as one 'K' record, or ends the
+// stream to leave the guest restored paused there. A reader that is not in
+// a session refuses anything after the trailer.
 //
 // HULLMIG2 (stream-v2) also carried disk blocks hull read itself, in 'D'
 // records; a hull of this version neither sends nor reads it, and a move
@@ -98,6 +105,13 @@ type moveStreamTrailer struct {
 	HviReply json.RawMessage `json:"hviReply,omitempty"`
 }
 
+// moveStreamCommit is the 'K' record: the source's commit of the move it
+// has recorded committing, sent in the session the stream came in.
+type moveStreamCommit struct {
+	TxID  string `json:"txid"`
+	Epoch uint64 `json:"epoch"`
+}
+
 // moveChain is the running hash of the records' kinds and headers.
 type moveChain struct {
 	h hash.Hash
@@ -125,8 +139,13 @@ type moveStreamWriter struct {
 }
 
 func newMoveStreamWriter(w io.Writer) *moveStreamWriter {
+	return newMoveStreamWriterSize(w, 1<<20)
+}
+
+// newMoveStreamWriterSize is newMoveStreamWriter with a buffer of size.
+func newMoveStreamWriterSize(w io.Writer, size int) *moveStreamWriter {
 	cw := &countingWriter{w: w}
-	return &moveStreamWriter{cw: cw, bw: bufio.NewWriterSize(cw, 1<<20), chain: newMoveChain()}
+	return &moveStreamWriter{cw: cw, bw: bufio.NewWriterSize(cw, size), chain: newMoveChain()}
 }
 
 // written is the bytes of the stream so far.
@@ -203,6 +222,18 @@ func (sw *moveStreamWriter) trailer(hviReply json.RawMessage) error {
 	return sw.bw.Flush()
 }
 
+// commit sends the 'K' record after the trailer and flushes it.
+func (sw *moveStreamWriter) commit(c moveStreamCommit) error {
+	js, err := json.Marshal(c)
+	if err != nil {
+		return err
+	}
+	if err := sw.record('K', js); err != nil {
+		return err
+	}
+	return sw.bw.Flush()
+}
+
 // moveStreamHandler is what a reader hands each record to, in order.
 type moveStreamHandler interface {
 	// header is the 'H' record.
@@ -232,8 +263,41 @@ type moveStreamResult struct {
 // and a stream with no trailer, a trailer that disagrees, or bytes after it
 // is refused.
 func readMoveStream(r io.Reader, h moveStreamHandler) (*moveStreamResult, error) {
+	res, _, err := readMoveStreamOpen(r, h, false)
+	return res, err
+}
+
+// readMoveStreamOpen is readMoveStream for a session when open is set: the
+// stream may go on after its trailer, and the reader it returns holds what
+// follows, for readMoveCommit.
+func readMoveStreamOpen(r io.Reader, h moveStreamHandler, open bool) (*moveStreamResult, *bufio.Reader, error) {
 	cr := &countingReader{r: r}
 	br := bufio.NewReaderSize(cr, 1<<20)
+	res, err := readMoveRecords(cr, br, h, open)
+	return res, br, err
+}
+
+// readMoveCommit reads what follows a session's trailer: the source's
+// commit, or nil at the end of the stream, which leaves the move verified.
+func readMoveCommit(br *bufio.Reader) (*moveStreamCommit, error) {
+	if _, err := br.Peek(1); errors.Is(err, io.EOF) {
+		return nil, nil
+	}
+	kind, js, err := readStreamRecord(br)
+	if err != nil {
+		return nil, err
+	}
+	if kind != 'K' {
+		return nil, fmt.Errorf("the stream goes on after its trailer with a %q record", kind)
+	}
+	var c moveStreamCommit
+	if err := strictUnmarshal(js, &c); err != nil {
+		return nil, fmt.Errorf("the commit: %w", err)
+	}
+	return &c, nil
+}
+
+func readMoveRecords(cr *countingReader, br *bufio.Reader, h moveStreamHandler, open bool) (*moveStreamResult, error) {
 	magic := make([]byte, len(moveStreamMagic))
 	if _, err := io.ReadFull(br, magic); err != nil {
 		return nil, fmt.Errorf("the stream ended before it began: %w", err)
@@ -310,11 +374,14 @@ func readMoveStream(r io.Reader, h moveStreamHandler) (*moveStreamResult, error)
 				return nil, fmt.Errorf("the trailer counts %d records with chain %s; %d arrived with chain %s",
 					t.Records, t.Chain, chain.n, chain.sum())
 			}
+			res.Trailer = t
+			res.Bytes = cr.n - int64(br.Buffered())
+			if open {
+				return res, nil
+			}
 			if _, err := br.ReadByte(); !errors.Is(err, io.EOF) {
 				return nil, errors.New("the stream goes on after its trailer")
 			}
-			res.Trailer = t
-			res.Bytes = cr.n
 			return res, nil
 		default:
 			return nil, fmt.Errorf("the stream has a record of unknown kind %q", kind)
