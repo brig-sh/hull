@@ -1089,7 +1089,15 @@ func (m *moveSource) finish() error {
 		m.logf("Timings (ms): fence %d, transfer %d, restore paused %d, commit %d", t["fence"], t["transfer"],
 			t["prepare"], t["commit"])
 	}
-	if st := m.rec.Stream; st != nil && st.Mode != "adopted" {
+	switch st := m.rec.Stream; {
+	case st == nil || st.Mode == "adopted":
+	case st.PausedAt.IsZero():
+		// A replay whose pause, in an earlier attempt, is on no record:
+		// its downtime is not known, and none is made up from the replay.
+		m.logf("move: %s in %.1f s; disk %s, RAM %s, state %s; the guest was paused in an earlier "+
+			"attempt, at a time not on record", humanBytes(st.WireBytes), st.Seconds,
+			humanBytes(st.DiskWireBytes), humanBytes(st.RAMBytes), humanBytes(st.StateBytes))
+	default:
 		m.logf("move: %s in %.1f s; disk %s, RAM %s, state %s; sealed %d ms after the pause, "+
 			"last disk round %s in %d ms; downtime about %d ms", humanBytes(st.WireBytes), st.Seconds,
 			humanBytes(st.DiskWireBytes), humanBytes(st.RAMBytes), humanBytes(st.StateBytes), st.SealedMs,

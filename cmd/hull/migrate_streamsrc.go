@@ -66,6 +66,9 @@ type streamSender struct {
 	ctx      context.Context
 	attempt  string
 	callDone chan struct{}
+	// prev is the record of the stream of this move's earlier attempt,
+	// when there was one.
+	prev *migrateStreamStats
 }
 
 func (ss *streamSender) progress(format string, args ...any) {
@@ -312,6 +315,9 @@ type roundFolder struct {
 	printed time.Time
 	lastRAM time.Time
 	ramSeen bool
+	// replay is a stream relayed from the spool: its frames arrive long
+	// after the pause, which they say nothing of.
+	replay bool
 }
 
 // begin starts the frame of component name, which ends the round before
@@ -329,7 +335,7 @@ func (f *roundFolder) begin(name string) {
 		f.lastRAM, f.ramSeen = now, true
 	case isDiskRound(name):
 		kind = "disk"
-	case f.ramSeen && f.ss.stats.PausedAt.IsZero():
+	case f.ramSeen && !f.replay && f.ss.stats.PausedAt.IsZero():
 		// The first document after the RAM rounds: the round before it
 		// was the last, which hvi takes with the guest paused.
 		f.ss.stats.PausedAt = f.lastRAM.UTC()
@@ -534,7 +540,7 @@ func (ss *streamSender) replayHvi(dir string) (json.RawMessage, error) {
 		return nil, fmt.Errorf("the spooled stream %s was never sealed: %w", dir, err)
 	}
 	br := bufio.NewReaderSize(f, 1<<20)
-	folder := &roundFolder{ss: ss}
+	folder := &roundFolder{ss: ss, replay: true}
 	for {
 		if _, err := br.Peek(1); errors.Is(err, io.EOF) {
 			break
@@ -564,7 +570,64 @@ func (ss *streamSender) replayHvi(dir string) (json.RawMessage, error) {
 	if ss.manifest == nil {
 		return nil, errors.New("the spooled stream has no manifest.json")
 	}
-	return json.RawMessage(strings.TrimSpace(string(reply))), nil
+	line := json.RawMessage(strings.TrimSpace(string(reply)))
+	ss.takeReplayPause(line)
+	return line, nil
+}
+
+// takeReplayPause puts on the record of a replay when hvi paused the
+// guest, which was in an earlier attempt: from the spool's reply when that
+// is hvi's reply to the migrate that fenced the guest, or else from what
+// the instance's record of the fence or the earlier attempt's record of
+// the stream kept of it. A second stream's reply will not do, nor will a
+// reply hull wrote for a spool it checked: hvi stamps the first with its
+// own seal and the second has no stats. With none of them, the pause is
+// left unknown, and so is the downtime, rather than counted from the
+// replay.
+func (ss *streamSender) takeReplayPause(reply json.RawMessage) {
+	if _, _, ok := firstPause(reply); ok {
+		var r hviReply
+		if json.Unmarshal(reply, &r) == nil {
+			ss.takeHviStats(&r)
+			return
+		}
+	}
+	m := ss.m
+	if rec, err := readHviCheckpointRecord(instanceCheckpointDir(m.s, m.name)); err == nil &&
+		rec.TxID == m.rec.TxID {
+		if at, sealed, ok := firstPause(rec.Stats); ok {
+			ss.stats.PausedAt, ss.stats.SealedMs = at, sealed
+			return
+		}
+	}
+	if p := ss.prev; p != nil && !p.PausedAt.IsZero() {
+		ss.stats.PausedAt, ss.stats.SealedMs = p.PausedAt, p.SealedMs
+	}
+}
+
+// firstPause reads when hvi paused the guest, and how long after that it
+// sealed the stream, from hvi's reply to the migrate that fenced the
+// guest. A reply to a second stream of a fenced guest, which names the
+// first manifest, gives that stream's seal as its pause, and does not
+// count.
+func firstPause(line []byte) (time.Time, int64, bool) {
+	var r hviReply
+	if len(line) == 0 || json.Unmarshal(line, &r) != nil || len(r.Stats) == 0 {
+		return time.Time{}, 0, false
+	}
+	var st struct {
+		First      *string `json:"first_manifest_sha256"`
+		PrecopyEnd int64   `json:"precopy_end_unix_ms"`
+		SealedAt   int64   `json:"sealed_at_unix_ms"`
+	}
+	if json.Unmarshal(r.Stats, &st) != nil || st.First != nil || st.PrecopyEnd <= 0 {
+		return time.Time{}, 0, false
+	}
+	var sealed int64
+	if st.SealedAt >= st.PrecopyEnd {
+		sealed = st.SealedAt - st.PrecopyEnd
+	}
+	return time.UnixMilli(st.PrecopyEnd).UTC(), sealed, true
 }
 
 // streamTransfer is transfer for a streamed move. A destination that has
@@ -572,6 +635,7 @@ func (ss *streamSender) replayHvi(dir string) (json.RawMessage, error) {
 // fenced yet is sent live; one whose stream hvi sealed in an earlier
 // attempt is sent from the spool, which holds hvi's disk rounds too.
 func (m *moveSource) streamTransfer(ctx context.Context) (retErr error) {
+	prev := m.rec.Stream
 	if reply, err := m.peer.call(ctx, "migrate-status", []string{"--txid", m.rec.TxID}, nil); err == nil &&
 		reply.Record != nil &&
 		migrateStateOrder(roleDestination, reply.Record.State) >= migrateStateOrder(roleDestination, dstVerified) {
@@ -660,7 +724,8 @@ func (m *moveSource) streamTransfer(ctx context.Context) (retErr error) {
 	}
 	m.sealGate, m.sealGateOnce = make(chan struct{}), sync.Once{}
 	ss := &streamSender{m: m, state: state, sw: sw, link: link, size: info.Size(), stats: stats,
-		spoolDir: spoolDir, ctx: ctx, attempt: attempt, callDone: make(chan struct{}), sealGate: m.sealGate}
+		spoolDir: spoolDir, ctx: ctx, attempt: attempt, callDone: make(chan struct{}), sealGate: m.sealGate,
+		prev: prev}
 	type sendResult struct {
 		hviReply json.RawMessage
 		err      error
