@@ -355,7 +355,8 @@ func TestStreamedMoveAbortRefusesWithNoWholeStream(t *testing.T) {
 	restored := false
 	localRestore = func(*store.Store, string) error { restored = true; return nil }
 	err := sourceAbort(context.Background(), f.src, f.name, io.Discard, f.peer)
-	if err == nil || !strings.Contains(err.Error(), "Do not stop that hvi") || strings.Contains(err.Error(), "--abort") {
+	if err == nil || !strings.Contains(err.Error(), "Do not stop that hvi") || strings.Contains(err.Error(), "--abort") ||
+		strings.Contains(err.Error(), "runs on") {
 		t.Fatalf("err = %v", err)
 	}
 	if restored || syscall.Kill(f.vm.pid, 0) != nil || f.hvi.state != "fenced" {
@@ -366,7 +367,8 @@ func TestStreamedMoveAbortRefusesWithNoWholeStream(t *testing.T) {
 	}
 	// A re-run says the same, and offers no abort either.
 	err = f.migrate(t, f.srcRecord(t).TxID)
-	if err == nil || !strings.Contains(err.Error(), "Do not stop that hvi") || strings.Contains(err.Error(), "--abort") {
+	if err == nil || !strings.Contains(err.Error(), "Do not stop that hvi") || strings.Contains(err.Error(), "--abort") ||
+		strings.Contains(err.Error(), "runs on") || strings.Contains(err.Error(), "still runs here") {
 		t.Fatalf("re-run: %v", err)
 	}
 }

@@ -66,6 +66,9 @@ type streamSender struct {
 	ctx      context.Context
 	attempt  string
 	callDone chan struct{}
+	// restream is a second stream of a guest hvi fenced already: one that
+	// ends early leaves it fenced, never running on.
+	restream bool
 	// prev is the record of the stream of this move's earlier attempt,
 	// when there was one.
 	prev *migrateStreamStats
@@ -386,6 +389,9 @@ func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][
 	conn, br, err := hviStreamOp(ss.state.ControlSock, map[string]any{"op": "migrate", "then": hviThenFence,
 		"txid": m.rec.TxID, "epoch": m.rec.Epoch}, hviStreamIdle)
 	if err != nil {
+		if ss.restream {
+			return nil, nil, err
+		}
 		// hvi never had the request, so the guest is as it was.
 		return nil, nil, &hviRanOnError{err: err}
 	}
@@ -445,6 +451,9 @@ func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][
 	folder.flush()
 	var refused *hviRefusal
 	switch {
+	case err != nil && ss.manifest == nil && ss.restream:
+		// The guest was fenced before this stream began, and stays so.
+		return nil, nil, fmt.Errorf("hvi's second stream of the fenced guest ended before its manifest: %w", err)
 	case err != nil && ss.manifest == nil && errors.As(err, &refused):
 		// hvi's own answer, in place of a frame: nothing was fenced.
 		return nil, nil, &hviRanOnError{err: err}

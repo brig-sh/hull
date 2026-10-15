@@ -322,7 +322,7 @@ func (m *moveSource) restreamFenced(state *store.InstanceState, dir string) ([]b
 		return nil, "", err
 	}
 	ss := &streamSender{m: m, state: state, sw: newMoveStreamWriter(io.Discard), link: &softLink{w: io.Discard},
-		stats: &migrateStreamStats{Mode: "restream"}, spoolDir: dir}
+		stats: &migrateStreamStats{Mode: "restream"}, spoolDir: dir, restream: true}
 	reply, files, err := ss.relayHvi(sp)
 	if err != nil {
 		sp.close()
