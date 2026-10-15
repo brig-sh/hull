@@ -341,7 +341,7 @@ func TestStreamedMoveCommitsWhileTheSpoolSyncs(t *testing.T) {
 	for _, s := range dst.Stream.Steps {
 		order = append(order, s.Step)
 	}
-	if strings.Join(order, ",") != "trailer read,hvi restored the guest paused,disk synced" {
+	if strings.Join(order, ",") != "base checked,trailer read,hvi restored the guest paused,disk synced" {
 		t.Errorf("destination steps %v", order)
 	}
 }

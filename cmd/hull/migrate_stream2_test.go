@@ -89,7 +89,7 @@ func testMoveStream(t *testing.T) ([]byte, map[int64][]byte, map[string][]byte) 
 	disk := map[int64][]byte{}
 	a := bytes.Repeat([]byte("abcd"), 2*diskBlockSize/4)
 	disk[3], disk[4] = a[:diskBlockSize], a[diskBlockSize:]
-	if _, err := sw.disk(0, false, 3, 2, a); err != nil {
+	if _, _, err := sw.disk(0, false, 3, 2, a); err != nil {
 		t.Fatal(err)
 	}
 	noise := make([]byte, diskBlockSize+1000)
@@ -97,7 +97,7 @@ func testMoveStream(t *testing.T) ([]byte, map[int64][]byte, map[string][]byte) 
 		noise[i] = byte(i*7919 + i>>5)
 	}
 	disk[39], disk[40] = noise[:diskBlockSize], noise[diskBlockSize:]
-	if _, err := sw.disk(1, true, 39, 2, noise); err != nil {
+	if _, _, err := sw.disk(1, true, 39, 2, noise); err != nil {
 		t.Fatal(err)
 	}
 	comps := map[string][]byte{
@@ -119,7 +119,7 @@ func testMoveStream(t *testing.T) ([]byte, map[int64][]byte, map[string][]byte) 
 			t.Fatal(err)
 		}
 	}
-	if err := sw.trailer([]byte(`{"v":1,"ok":true}`)); err != nil {
+	if err := sw.trailer([]byte(`{"v":1,"ok":true}`), nil); err != nil {
 		t.Fatal(err)
 	}
 	return buf.Bytes(), disk, comps

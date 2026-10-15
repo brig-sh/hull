@@ -212,6 +212,8 @@ type streamSender struct {
 	roundTotal int64
 	// link is what sw writes to; its error is the destination's failure.
 	link *softLink
+	// diskRounds gather each disk round's batches for the trailer.
+	diskRounds []*diskRoundDigest
 	// sealDone reports the spool's seal, which runs on behind the move
 	// once the stream is out.
 	sealDone chan error
@@ -221,19 +223,42 @@ func (ss *streamSender) progress(format string, args ...any) {
 	ss.m.logf("move: "+format, args...)
 }
 
+// beginDiskRound starts the trailer's account of a disk round: from hvi's
+// dirty blocks when dirty is hvi's reply that started it, else found by
+// comparison.
+func (ss *streamSender) beginDiskRound(round int, final bool, dirty *hviDiskDirtyReply) *diskRoundDigest {
+	d := &diskRoundDigest{round: streamDiskRound{Round: round, Final: final, From: "compare"}}
+	if dirty != nil {
+		d.round.From, d.round.Generation, d.round.BitmapSHA256 = "hvi", dirty.Generation, dirty.BitmapSHA256
+	}
+	ss.diskRounds = append(ss.diskRounds, d)
+	return d
+}
+
+// diskTrailer is the trailer's account of the disk rounds sent.
+func (ss *streamSender) diskTrailer() *streamDiskRounds {
+	t := &streamDiskRounds{Engine: ss.stats.DiskEngine, Rounds: []streamDiskRound{}}
+	for _, d := range ss.diskRounds {
+		t.Rounds = append(t.Rounds, d.done())
+	}
+	return t
+}
+
 // sendBatch writes one disk batch and counts it in round r, of total
-// blocks when that is known (0 when not).
-func (ss *streamSender) sendBatch(r *streamRound, round int, final bool) func(first, count int64, data []byte) error {
+// blocks when that is known (0 when not), and in the trailer's account d.
+func (ss *streamSender) sendBatch(r *streamRound, d *diskRoundDigest, round int,
+	final bool) func(first, count int64, data []byte) error {
 	started := time.Now()
 	last := started
 	return func(first, count int64, data []byte) error {
 		if err := ss.link.err; err != nil {
 			return err
 		}
-		wire, err := ss.sw.disk(round, final, first, count, data)
+		wire, sum, err := ss.sw.disk(round, final, first, count, data)
 		if err != nil {
 			return err
 		}
+		d.add(count, sum)
 		r.Blocks += count
 		r.Bytes += int64(len(data))
 		r.WireBytes += wire
@@ -295,10 +320,8 @@ func (ss *streamSender) diskPreCopy(basePath string) error {
 	if ss.hviDisk && fromBoot {
 		// hvi's blocks since boot are every difference from the base.
 		ss.stats.DiskEngine = "hvi"
-		if read.Dirty > 0 {
-			if err := ss.hviRoundBlocks(&r, read.Round, false, read.Dirty); err != nil {
-				return err
-			}
+		if err := ss.hviRoundBlocks(&r, read, false); err != nil {
+			return err
 		}
 	} else {
 		// The running hvi did not boot from the base (it was restored),
@@ -311,7 +334,7 @@ func (ss *streamSender) diskPreCopy(basePath string) error {
 			return fmt.Errorf("read the base: %w", err)
 		}
 		ss.cmp = cmp
-		b := newBatcher(ss.size, ss.sendBatch(&r, 0, false))
+		b := newBatcher(ss.size, ss.sendBatch(&r, ss.beginDiskRound(0, false, nil), 0, false))
 		if err := cmp.diff(ss.disk, b.add); err != nil {
 			return err
 		}
@@ -333,10 +356,8 @@ func (ss *streamSender) diskPreCopy(basePath string) error {
 		ss.lastRound = read.Round
 		r := streamRound{Kind: "disk", Name: fmt.Sprintf("disk round %d", read.Round),
 			DirtyPerSec: float64(read.Dirty) / max(prev, 1e-3)}
-		if read.Dirty > 0 {
-			if err := ss.hviRoundBlocks(&r, read.Round, false, read.Dirty); err != nil {
-				return err
-			}
+		if err := ss.hviRoundBlocks(&r, read, false); err != nil {
+			return err
 		}
 		ss.endRound(r, started)
 		prev = time.Since(started).Seconds()
@@ -379,13 +400,17 @@ func (ss *streamSender) diskDirty(since string) (*hviDiskDirtyReply, error) {
 	return read, nil
 }
 
-// hviRoundBlocks sends hvi's blocks of round, which the compare engine
-// then holds as sent.
-func (ss *streamSender) hviRoundBlocks(r *streamRound, round int, final bool, total int64) error {
-	ss.roundTotal = total
+// hviRoundBlocks sends hvi's blocks of the round dirty started, which the
+// compare engine then holds as sent. A round with no blocks is asked for
+// too, so hvi records its sent_sha256 like any other's (disk.json), and a
+// destination can tell it went out.
+func (ss *streamSender) hviRoundBlocks(r *streamRound, dirty *hviDiskDirtyReply, final bool) error {
+	round := dirty.Round
+	ss.roundTotal = dirty.Dirty
 	defer func() { ss.roundTotal = 0 }()
-	send := ss.sendBatch(r, round, final)
-	_, err := hviDiskBlocks(ss.state.ControlSock, round, func(first, count int64, data []byte) error {
+	d := ss.beginDiskRound(round, final, dirty)
+	send := ss.sendBatch(r, d, round, final)
+	sent, err := hviDiskBlocks(ss.state.ControlSock, round, func(first, count int64, data []byte) error {
 		if ss.cmp != nil {
 			for i := int64(0); i < count; i++ {
 				lo := i * diskBlockSize
@@ -402,6 +427,10 @@ func (ss *streamSender) hviRoundBlocks(r *streamRound, round int, final bool, to
 	if err != nil {
 		return fmt.Errorf("hvi's disk-blocks of round %d: %w", round, err)
 	}
+	if got := d.done(); got.SentSHA256 != sent {
+		return fmt.Errorf("round %d went out as batches whose digests make %s, hvi sent %s", round,
+			got.SentSHA256, sent)
+	}
 	return nil
 }
 
@@ -416,13 +445,11 @@ func (ss *streamSender) diskFinal() error {
 			return fmt.Errorf("hvi's disk-dirty after the fence: %w", err)
 		}
 		r.Name = fmt.Sprintf("disk round %d (final)", read.Round)
-		if read.Dirty > 0 {
-			if err := ss.hviRoundBlocks(&r, read.Round, true, read.Dirty); err != nil {
-				return err
-			}
+		if err := ss.hviRoundBlocks(&r, read, true); err != nil {
+			return err
 		}
 	} else {
-		b := newBatcher(ss.size, ss.sendBatch(&r, streamRoundCap, true))
+		b := newBatcher(ss.size, ss.sendBatch(&r, ss.beginDiskRound(streamRoundCap, true, nil), streamRoundCap, true))
 		if err := ss.cmp.diff(ss.disk, b.add); err != nil {
 			return err
 		}
@@ -915,7 +942,7 @@ func (ss *streamSender) send(replay bool) (json.RawMessage, error) {
 		ss.cmp = cmp
 		started := time.Now()
 		r := streamRound{Kind: "disk", Name: "disk round 0 (final)", Final: true}
-		b := newBatcher(ss.size, ss.sendBatch(&r, 0, true))
+		b := newBatcher(ss.size, ss.sendBatch(&r, ss.beginDiskRound(0, true, nil), 0, true))
 		if err := cmp.diff(ss.disk, b.add); err != nil {
 			return nil, err
 		}
@@ -927,7 +954,7 @@ func (ss *streamSender) send(replay bool) (json.RawMessage, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := ss.sw.trailer(reply); err != nil {
+		if err := ss.sw.trailer(reply, ss.diskTrailer()); err != nil {
 			return nil, err
 		}
 		return reply, ss.link.err
@@ -1001,7 +1028,7 @@ func (ss *streamSender) send(replay bool) (json.RawMessage, error) {
 		streamTestHook("recorded")
 	}
 	if sendErr == nil {
-		sendErr = ss.sw.trailer(reply)
+		sendErr = ss.sw.trailer(reply, ss.diskTrailer())
 		ss.stats.step("trailer sent")
 	}
 	ss.sealDone = make(chan error, 1)
