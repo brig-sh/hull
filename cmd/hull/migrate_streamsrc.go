@@ -1032,7 +1032,7 @@ func (ss *streamSender) recordInstanceFence() error {
 	sum := sha256Hex(ss.manifest)
 	if err := writeHviCheckpointRecord(instanceCheckpointDir(m.s, m.name), hviCheckpointRecord{
 		Dir: ss.spoolDir, ManifestSHA256: sum, Then: hviThenFence, Stats: ss.stats.HviReply,
-		SavedAt: time.Now().UTC(), TxID: m.rec.TxID,
+		SavedAt: time.Now().UTC(), TxID: m.rec.TxID, Manifest: ss.manifest,
 	}); err != nil {
 		return fmt.Errorf("the stream is sealed in %s but recording it failed: %w", ss.spoolDir, err)
 	}

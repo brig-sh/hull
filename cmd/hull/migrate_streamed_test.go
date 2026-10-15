@@ -93,6 +93,9 @@ type fakeStreamHvi struct {
 	// pausedAtMs is when its reply says the pause came.
 	fencedNow  chan struct{}
 	pausedAtMs int64
+	// restreamDocs replaces documents in a second stream, as an hvi
+	// that did not keep them would.
+	restreamDocs map[string][]byte
 }
 
 func newFakeStreamHvi(t *testing.T, disk, base string) *fakeStreamHvi {
@@ -287,6 +290,9 @@ func (h *fakeStreamHvi) migrate(req map[string]any, w *bufio.Writer, reply func(
 			int64(n)*diskBlockSize, len(body), gen))
 	}
 	profile := []byte(fmt.Sprintf(`{"profile_version":1,"checkpoint_format":3,"disk_base_sha256":%q}`, h.base))
+	if d, ok := h.restreamDocs["profile.json"]; ok && again {
+		profile = d
+	}
 	emit("profile.json", profile)
 	var docs []string
 	if again {
@@ -332,6 +338,9 @@ func (h *fakeStreamHvi) migrate(req map[string]any, w *bufio.Writer, reply func(
 			if !again {
 				h.docs[name] = doc
 			}
+		}
+		if d, ok := h.restreamDocs[name]; ok && again {
+			doc = d
 		}
 		emit(name, doc)
 	}

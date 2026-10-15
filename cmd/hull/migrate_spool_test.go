@@ -320,6 +320,53 @@ func TestStreamedMoveAbortRefusesAnotherFirstManifest(t *testing.T) {
 	}
 }
 
+// A second stream whose documents are not the first stream's is not the
+// machine the guest was fenced as, whatever hvi's reply says: hull checks
+// the five documents hvi sends again unchanged against the first manifest
+// the instance's record of the fence kept, or, killed before that record,
+// against the documents the cut spool holds whole. The spool is left
+// empty and the fenced hvi alone.
+func TestStreamedMoveRerunRefusesAnotherSecondStream(t *testing.T) {
+	for _, tc := range []struct {
+		stage, doc, from string
+	}{
+		{"recorded", "cpu.json", "the first manifest"},
+		{"relayed", "profile.json", "the frames the cut spool holds"},
+	} {
+		t.Run(tc.stage, func(t *testing.T) {
+			f := newStreamFixture(t)
+			dir := crashMoveAt(t, f, tc.stage)
+			if err := os.Truncate(filepath.Join(dir, spoolStream), 1000); err != nil {
+				t.Fatal(err)
+			}
+			f.hvi.mu.Lock()
+			f.hvi.restreamDocs = map[string][]byte{tc.doc: []byte(`{"another":"machine"}`)}
+			f.hvi.mu.Unlock()
+			err := f.migrate(t, f.srcRecord(t).TxID)
+			if err == nil || !strings.Contains(err.Error(), "has "+tc.doc+" with sha256") ||
+				!strings.Contains(err.Error(), tc.from) || !strings.Contains(err.Error(), "Do not stop that hvi") {
+				t.Fatalf("err = %v", err)
+			}
+			if f.hvi.state != "fenced" || f.hvi.migrations != 2 || syscall.Kill(f.vm.pid, 0) != nil {
+				t.Errorf("hvi %s after %d streams", f.hvi.state, f.hvi.migrations)
+			}
+			if _, err := verifySpool(dir); err == nil || spoolIsSealed(dir) {
+				t.Errorf("the refused stream was left whole in the spool: %v", err)
+			}
+			// The same stream as the first's documents goes through.
+			f.hvi.mu.Lock()
+			f.hvi.restreamDocs = nil
+			f.hvi.mu.Unlock()
+			if err := f.migrate(t, f.srcRecord(t).TxID); err != nil {
+				t.Fatal(err)
+			}
+			if rec := f.srcRecord(t); rec.State != srcCommitted {
+				t.Fatalf("source %s", rec.State)
+			}
+		})
+	}
+}
+
 // The same kill, then the move run again: it records the fence it finds
 // and finishes the move from the spool.
 func TestStreamedMoveRerunAfterAKillInTheSealWindow(t *testing.T) {
