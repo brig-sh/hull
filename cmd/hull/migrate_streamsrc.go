@@ -212,6 +212,9 @@ type streamSender struct {
 	roundTotal int64
 	// link is what sw writes to; its error is the destination's failure.
 	link *softLink
+	// sealDone reports the spool's seal, which runs on behind the move
+	// once the stream is out.
+	sealDone chan error
 }
 
 func (ss *streamSender) progress(format string, args ...any) {
@@ -479,7 +482,7 @@ func (sp *spoolWriter) maybeSync() {
 	sp.inflight.Add(1)
 	go func() {
 		defer sp.inflight.Done()
-		_ = sp.f.Sync()
+		_ = syncFile(sp.f)
 		sp.busy.Store(false)
 	}()
 }
@@ -491,7 +494,7 @@ func (sp *spoolWriter) seal(files map[string][]byte, reply []byte) error {
 		return err
 	}
 	sp.inflight.Wait()
-	if err := sp.f.Sync(); err != nil {
+	if err := syncFile(sp.f); err != nil {
 		return err
 	}
 	if err := sp.f.Close(); err != nil {
@@ -514,6 +517,10 @@ func (sp *spoolWriter) close() {
 		_ = sp.f.Close()
 	}
 }
+
+// syncFile syncs f; a variable so a test can hold a sync and see what
+// waits for it.
+var syncFile = func(f *os.File) error { return f.Sync() }
 
 // writeFileSynced writes data to path and syncs it.
 func writeFileSynced(path string, data []byte) error {
@@ -838,19 +845,19 @@ func (m *moveSource) streamTransfer(ctx context.Context) error {
 	reply, err := m.peer.call(ctx, "migrate-receive", []string{"--stream", "--txid", m.rec.TxID, "--name", m.name}, pr)
 	_ = pr.CloseWithError(errors.New("the destination stopped reading"))
 	res := <-sent
+	m.spoolSealing = ss.sealDone
 	if res.err == nil {
 		stats.Chain = sw.chain.sum()
 		stats.WireBytes = sw.written()
 		stats.Seconds = time.Since(started).Seconds()
 		stats.HviReply = res.hviReply
 	}
-	// What was sent is on record before the reply is looked at: a reply
-	// that is lost leaves a re-run to compare the destination's record
-	// with it.
+	stats.step("destination answered")
+	// What was sent is on record before the move goes on: a reply that is
+	// lost leaves a re-run to compare the destination's record with it.
+	// A step that fails from here records it (stopped), and one that
+	// succeeds records it with the next state, in one write.
 	m.rec.Stream = stats
-	if werr := writeMigrationRecord(m.path, m.rec); werr != nil {
-		return werr
-	}
 	if res.err != nil && !errors.Is(res.err, io.ErrClosedPipe) && err == nil {
 		err = fmt.Errorf("send: %w", res.err)
 	}
@@ -877,6 +884,12 @@ func (m *moveSource) streamTransfer(ctx context.Context) error {
 		humanBytes(stats.WireBytes), stats.Seconds, humanBytes(perSec(stats.WireBytes, stats.Seconds)),
 		humanBytes(stats.DiskBytes), humanBytes(stats.DiskWireBytes), humanBytes(stats.RAMBytes),
 		humanBytes(stats.StateBytes), reply.Record.Verify)
+	if m.destPaused {
+		// The destination holds the guest restored paused: the source's
+		// commit point, recorded with the transfer in one write, as the
+		// prepare step would record it.
+		return m.rec.advanceThrough(m.path, srcTransferred, srcCommitting)
+	}
 	return m.rec.advance(m.path, srcTransferred)
 }
 
@@ -959,33 +972,45 @@ func (ss *streamSender) send(replay bool) (json.RawMessage, error) {
 		streamTestHook("relayed")
 	}
 	ss.stats.HviReply = reply
-	// hvi has fenced the guest, and its whole stream is in the spool, which
-	// is synced and recorded as the instance's checkpoint while the last
-	// disk round and the trailer go out: the destination needs neither, and
-	// the guest is stopped until it has both. A destination that failed
-	// meanwhile is retried from the spool, or the abort restores the guest
-	// here from it.
-	sealed := make(chan error, 1)
+	ss.stats.step("hvi sealed the stream")
+	// hvi has fenced the guest, and every byte of its stream is in the
+	// spool's file. The fence is recorded while the last disk round goes
+	// out, and the trailer, without which the destination verifies
+	// nothing, waits for the record: a destination never holds a verified
+	// move the source has no record of. The spool's sync, which only an
+	// abort or a re-run needs, runs on behind the move and is not part of
+	// the downtime; a hull that dies before it is done leaves a spool that
+	// a re-run or an abort checks whole before using it (verifySpool).
+	recorded := make(chan error, 1)
 	go func() {
-		err := sp.seal(files, reply)
-		sp.close()
-		if err == nil {
-			err = ss.recordFence()
-		}
+		err := ss.recordFence()
 		m.signals.release()
-		unlock()
-		sealed <- err
+		recorded <- err
 	}()
 	sendErr := ss.link.err
 	if sendErr == nil {
 		sendErr = ss.diskFinal()
 	}
-	if sendErr == nil {
-		sendErr = ss.sw.trailer(reply)
-	}
-	if err := <-sealed; err != nil {
+	if err := <-recorded; err != nil {
+		sp.close()
+		unlock()
 		return nil, err
 	}
+	ss.stats.step("fence recorded")
+	if streamTestHook != nil {
+		streamTestHook("recorded")
+	}
+	if sendErr == nil {
+		sendErr = ss.sw.trailer(reply)
+		ss.stats.step("trailer sent")
+	}
+	ss.sealDone = make(chan error, 1)
+	go func() {
+		err := sp.seal(files, reply)
+		sp.close()
+		unlock()
+		ss.sealDone <- err
+	}()
 	if sendErr != nil {
 		return nil, sendErr
 	}
@@ -994,7 +1019,8 @@ func (ss *streamSender) send(replay bool) (json.RawMessage, error) {
 
 // streamTestHook, when set, is called at points of a streamed move a test
 // stops it at: "relayed" is once hvi has sealed its stream and fenced the
-// guest, and hull has read it all, before anything is recorded.
+// guest, and hull has read it all, before anything is recorded; "recorded"
+// is once the fence is recorded, before the spool is sealed.
 var streamTestHook func(stage string)
 
 // softLink is the writer between the stream and the destination. Once a

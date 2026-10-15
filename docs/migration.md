@@ -398,11 +398,13 @@ with a pipe as its stdin once `profile.json` has arrived and matched the
 move's machine profile; that restore runs `hvi restore --from-stream -`,
 which reads the pipe. RAM frames go to hvi as they arrive, so no RAM
 reaches the destination's disk. The machine's documents and the manifest
-are held until the trailer has checked out and the disk is synced; only
-then does hvi get them, check its manifest and build the machine over the
-disk, which is complete by then. The move is `verified`, and the guest
-`restored-paused`, when both hull and hvi are done. The documents are kept
-in the move's checkpoint directory for the record.
+are held until the trailer has checked out and the last disk round is
+written; only then does hvi get them, check its manifest and build the
+machine over the disk, which is complete by then. hvi reads the disk
+through the page cache, so the sync that makes the last round durable runs
+while hvi builds the machine rather than before. The move is `verified`,
+and the guest `restored-paused`, once hull, hvi and that sync are done. The
+documents are kept in the move's checkpoint directory for the record.
 
 ### Failures and the spool
 
@@ -420,10 +422,38 @@ whole copy to restore from. So:
   spool (`"replay": true`) and the disk compared with the base; `--abort`
   restores the guest here from the spool with `hvi restore --from-stream`.
 
-The spool and the destination's disk are synced in the background every
-32 MiB, and the source syncs the spool's tail while the last disk round and
-the trailer go out, so the guest does not wait on a slow disk. The source
-pays for the spool with a write of the guest's touched RAM to its own disk.
+From hvi's `migrate` op until the fence is recorded, the stream hull is
+reading is the guest. In that window:
+
+- `hull migrate` holds SIGINT, SIGTERM and SIGHUP, says so, and stops once
+  the fence is recorded. Outside it they stop the move at its next step.
+  SIGPIPE never ends hull, and ssh runs in its own process group, so a
+  Ctrl-C reaches hull alone.
+- The spool's file gets every byte as soon as hvi's manifest has been
+  relayed. A hull killed before the seal (`kill -9`, a crash) leaves a spool
+  with no `sealed` file. A re-run, an abort and `hull restore` check such a
+  spool frame by frame against the manifest it ends with, and seal it when
+  it is whole.
+- A spool that is not whole (cut short, or never written) is taken again
+  from hvi, which streams a fenced guest again, unchanged, since it has not
+  run since the fence. An abort stops the fenced `hvi` only once the spool
+  is whole. If the spool is not whole and that `hvi` is gone, this host has
+  no copy of the guest; the error says so, and no longer suggests an abort
+  that cannot work. If the destination verified the stream, running the
+  move again commits it there.
+
+The fence is recorded while the last disk round goes out, and the trailer
+waits for that record, so a destination never verifies a move whose source
+has no record of its fence. The spool's sync is not part of the downtime:
+it runs behind the move, and `hull migrate` waits for it only before it
+exits. The destination syncs its disk in the background every 32 MiB and
+once the disk rounds that ran with the guest running are in, so the sync
+after the stream has only the last round to write, and that sync overlaps
+hvi's restore. The record writes the stopped guest waits for are one per
+host: the source records the transfer and its commit point (`committing`)
+together, and the destination `received`, `verified` and `restored-paused`
+together. The source pays for the spool with a write of the guest's touched
+RAM to its own disk.
 
 A destination whose `hvi` refuses the machine stops reading, and the
 refusal is the move's error, with code `restore_refused`.
@@ -443,6 +473,7 @@ refusal is the move's error, with code `restore_refused`.
 | `downtimeMs` | from `pausedAt` to the destination's resume, on two hosts' clocks |
 | `chain` | the trailer's hash, which the destination's record must match |
 | `hviReply` | hvi's reply to `migrate`, with its own rounds, dirty rates and pause |
+| `steps` | when this host reached each step from hvi's seal to the commit, by its own clock; the destination's record has its own (`trailer read`, `hvi restored the guest paused`, `disk synced`) |
 
 Progress goes to stderr, one line per round prefixed `move: `, and every
 two seconds of a long round.
