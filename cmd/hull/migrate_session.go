@@ -63,9 +63,11 @@ const (
 )
 
 // sessionCommitWait bounds how long a destination waits after its verified
-// line for the source's commit, holding the move's lock. A source that
-// never sends it falls back to migrate-commit, which waits for that lock.
-var sessionCommitWait = time.Minute
+// line for the source's commit, holding the move's lock. A source whose
+// session was cut falls back to migrate-commit, and an operator to
+// --abort, each of which waits for that lock for moveLockWait and then
+// answers busy; this wait is the shorter, so they find the lock free.
+var sessionCommitWait = 20 * time.Second
 
 // sessionOut writes a session's lines to the destination's stdout, one
 // whole line at a time. A write that fails (the source is gone and ssh
