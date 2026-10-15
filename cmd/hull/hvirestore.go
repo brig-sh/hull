@@ -639,6 +639,11 @@ func hviRestoreInstance(cmd *cli.Command, s *store.Store, state *store.InstanceS
 	return nil
 }
 
+// restorePoll is how often a restore asks hvi whether the guest is
+// restored. A move's guest is stopped until the answer, so half of this is
+// added to its downtime on average.
+const restorePoll = 20 * time.Millisecond
+
 // awaitRestoredAndResume waits until hvi reports restored-paused on the
 // control socket, then resumes the guest unless opt.paused. It returns the
 // migration state reached, "" for none past restoring, and why it stopped
@@ -690,7 +695,7 @@ func awaitRestoredAndResume(s *store.Store, id, txid, sock string, opt hviRestor
 			return store.MigrationRestored, fmt.Errorf("hvi reported %s before hull resumed the "+
 				"guest; it is recorded as having run", reply.State)
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(restorePoll)
 	}
 	if opt.paused {
 		setRestoreState(s, id, txid, store.MigrationRestoredPaused)
