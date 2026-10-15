@@ -798,13 +798,13 @@ func TestStreamedMoveTimesTheResumeAlone(t *testing.T) {
 	if resume > took.Milliseconds()+1 || commit < resume {
 		t.Errorf("resume %d ms, commit %d ms; the resume itself took %s", resume, commit, took)
 	}
-	var running time.Time
-	for _, h := range dst.History {
-		if h.State == dstRunning {
-			running = h.At
+	var resumed time.Time
+	for _, s := range rec.Stream.DestSteps {
+		if s.Step == "resumed" {
+			resumed = s.At
 		}
 	}
-	if want := running.Sub(rec.Stream.PausedAt).Milliseconds() + resume; rec.Stream.DowntimeMs != want {
+	if want := resumed.Sub(rec.Stream.PausedAt).Milliseconds(); resumed.IsZero() || rec.Stream.DowntimeMs != want {
 		t.Errorf("downtime %d ms, want %d", rec.Stream.DowntimeMs, want)
 	}
 }

@@ -1056,9 +1056,17 @@ func (m *moveSource) commit(ctx context.Context) error {
 	if st := m.rec.Stream; st != nil && !st.PausedAt.IsZero() {
 		for _, h := range reply.Record.History {
 			if h.State == dstRunning {
-				// Recorded just before the resume was sent; the resume's
-				// own time is added.
+				// Stamped as the record of running began to be written, so
+				// that write's sync is not in it; the resume's own time is
+				// added.
 				st.DowntimeMs = h.At.Sub(st.PausedAt).Milliseconds() + reply.Record.Timings["resume"]
+			}
+		}
+		for _, s := range st.DestSteps {
+			if s.Step == "resumed" && s.At.After(st.PausedAt) {
+				// The destination's step once its resume returned: the
+				// record's sync and the resume both in it.
+				st.DowntimeMs = s.At.Sub(st.PausedAt).Milliseconds()
 			}
 		}
 	}
