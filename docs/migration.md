@@ -47,10 +47,11 @@ what can go wrong, and how to recover.
 > the time from hvi's seal, as hull read it, to the resume went from 2.9
 > to 3.0 s to 0.43 to 0.48 s, and the downtime from 4.6 to 4.8 s to 2.2
 > to 2.4 s; on the LAN the idle guest's downtime went from 103 to 164 ms
-> to 49 to 57 ms. Under the
-> O_DIRECT hog the source's pause no longer waits for a vCPU to park; the
-> downtime there is now the destination's disk syncs. See [From the seal
-> to the resume](#from-the-seal-to-the-resume).
+> to 47 to 57 ms. Under the O_DIRECT hog the source's pause no longer
+> waits for a vCPU to park; the downtime there is now the disk syncs on
+> both hosts, and one move of three in the last set failed with the
+> guest running on. See [From the seal to the
+> resume](#from-the-seal-to-the-resume).
 
 ## Usage
 
@@ -936,6 +937,54 @@ On the LAN, hull 612899a and after, rp1 to rp2:
   link) never converged: hvi stopped the rounds at the time cap and took
   the last disk round (66.4 MiB) and RAM round (67.2 MiB) with the guest
   paused, 115.9 s of downtime, of which seal to resume was 615 ms.
+- Against H8b's run under the same hog (`ef78fb6`, see above: 10.98 s
+  down from rp1, 0.66 s from rp2), the downtime is not lower: 2.5 to
+  22.0 s from rp1 and 4.5 and 6.2 s from rp2 in the runs here. The park
+  is gone, and the time went to the destination's restore and the synced
+  writes on both hosts, whose length on these disks varies from run to
+  run.
+
+Again at hull 9cb3440, the code this page describes, with `hvi` ba9b2d2,
+rp1 to rp2, one run each unless said. From the third move under the hog
+on, rp1 also ran another project's guest.
+
+| Guest | Total | Downtime | Seal to resume |
+|---|---|---|---|
+| idle | 2.19 s | 46.8 ms | 37 ms |
+| writer | 4.12 s | 76.8 ms | 43 ms |
+| writer, O_DIRECT hog on both | 83.7, 72.1 s | 6.04, 2.52 s | 5.69, 1.85 s |
+| idle, emulated WAN | 103.3, 98.1 s | 2.71, 2.39 s | 793, 472 ms |
+
+- Under the hog `park_ms` and `gate_ms` were 0 in both moves that went
+  through, and `paused_ms` 357 and 305 ms, of which the sync in the pause
+  took 349 and 300 ms.
+- A third move under the hog failed, and the guest ran on at rp1. Its
+  stream had slowed to 0.3 MiB/s in the last RAM round, taken with the
+  guest paused (`ram-round-2`, 4.6 MiB in 14 s). That run was not
+  sampled. In the next one under the hog, `disk-round-2` ran at 1.7 MiB/s
+  for 5.8 s, and through those seconds a hull thread on rp1 sat in the
+  ext4 journal (`wait_on_buffer`, `do_get_write_access`), most likely
+  writing the spool, which hull writes every byte of the stream to as
+  it relays it. hvi most likely gave up at its bound for that round,
+  10 s plus twice the last round with the guest running, and resumed the
+  guest. hull, part way through that frame, only noticed when its own
+  2 minute bound for a silent hvi ran out: rp2 got the stream cut short
+  in `ram-round-2`, refused it, and the move stopped
+  at `transferring` 173.6 s after it began, with the guest unfenced.
+  `--status` said "The guest still runs here", the counter had no gap
+  and `boot_id`, the blob and the held file were the same, and
+  `--abort` released rp2.
+- On the emulated WAN the 793 ms run spent 348 ms on the source's synced
+  commit point; in the other run it took 4 ms, and seal to resume was
+  472 ms, under the 501 ms of 300 ms plus two round trips. Both runs
+  stopped the RAM rounds at the time cap, as the earlier ones did.
+- SIGKILL of hull at "hvi sealed the stream" (writer, no hog): `--status`
+  said the source is fenced, and rp2 had the guest restored paused. The
+  re-run adopted the fence and committed rp2's copy in 1.59 s. The guest
+  was down 4.69 s: hvi's pause took 1984 ms (1695 ms of it the sync in
+  the pause, on rp1's busy disk), and the rest went from the kill to the
+  re-run's commit, with the test's status checks between. The counter
+  had no gap and `boot_id`, the blob and the held file were the same.
 
 ## Records
 
