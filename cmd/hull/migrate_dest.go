@@ -737,6 +737,9 @@ func destCommit(s *store.Store, txid string, epoch uint64) *migrateReply {
 	if err := rec.advance(path, dstRunning); err != nil {
 		return refuseWith(codeFailed, err, rec)
 	}
+	// The record of running, which the source counts the downtime to,
+	// is written: the resume's own time is counted from here.
+	resumeStarted := time.Now()
 	if err := destResume(s, rec.Name); err != nil {
 		// The move committed, whatever the resume did: the record says
 		// running, and the source, reading that, records the commit too.
@@ -746,7 +749,9 @@ func destCommit(s *store.Store, txid string, epoch uint64) *migrateReply {
 	if rec.Timings == nil {
 		rec.Timings = map[string]int64{}
 	}
-	rec.Timings["resume"] = time.Since(started).Milliseconds()
+	rec.Timings["resume"] = time.Since(resumeStarted).Milliseconds()
+	// The whole commit here, its synced records and the resume.
+	rec.Timings["commit"] = time.Since(started).Milliseconds()
 	_ = writeMigrationRecord(path, rec)
 	return &migrateReply{OK: true, Record: rec, VM: "running"}
 }

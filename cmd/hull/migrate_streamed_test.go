@@ -713,6 +713,40 @@ func TestStreamedMove(t *testing.T) {
 	}
 }
 
+// The destination's resume is timed on its own: the downtime runs to the
+// record of running, written before the resume, plus the resume, so a
+// resume timed from before the commit's synced records counted them
+// twice.
+func TestStreamedMoveTimesTheResumeAlone(t *testing.T) {
+	f := newStreamFixture(t)
+	var took time.Duration
+	prev := destResume
+	destResume = func(s *store.Store, name string) error {
+		started := time.Now()
+		err := prev(s, name)
+		took = time.Since(started)
+		return err
+	}
+	if err := f.migrate(t, ""); err != nil {
+		t.Fatal(err)
+	}
+	rec := f.srcRecord(t)
+	dst := f.dstRecord(t, rec.TxID)
+	resume, commit := dst.Timings["resume"], dst.Timings["commit"]
+	if resume > took.Milliseconds()+1 || commit < resume {
+		t.Errorf("resume %d ms, commit %d ms; the resume itself took %s", resume, commit, took)
+	}
+	var running time.Time
+	for _, h := range dst.History {
+		if h.State == dstRunning {
+			running = h.At
+		}
+	}
+	if want := running.Sub(rec.Stream.PausedAt).Milliseconds() + resume; rec.Stream.DowntimeMs != want {
+		t.Errorf("downtime %d ms, want %d", rec.Stream.DowntimeMs, want)
+	}
+}
+
 // A disk round is bulk data, like a RAM round: relayed, spooled and handed
 // to hvi as it comes, never held whole, so one larger than every document
 // together may be does not fail the move.
