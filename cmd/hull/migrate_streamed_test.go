@@ -1535,6 +1535,15 @@ func TestStreamedMoveLeavesASpareForTheWayBack(t *testing.T) {
 		!strings.Contains(logged, "made a spare copy of base "+digestHead(sum)) {
 		t.Fatalf("the instance's log:\n%s", logged)
 	}
+	for deadline := time.Now().Add(30 * time.Second); !strings.Contains(logged, "checked base") &&
+		time.Now().Before(deadline); {
+		time.Sleep(20 * time.Millisecond)
+		b, _ := os.ReadFile(logPath)
+		logged = string(b)
+	}
+	if !strings.Contains(logged, "checked base "+digestHead(sum)) || !baseCheckStands(f.src.BasePath(sum), sum) {
+		t.Fatalf("the base was not checked; the instance's log:\n%s", logged)
+	}
 	if !spareHeld(f.src, sum) {
 		t.Fatal("no spare on the source")
 	}
