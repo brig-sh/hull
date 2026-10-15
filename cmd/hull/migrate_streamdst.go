@@ -25,7 +25,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -156,28 +155,60 @@ type streamReceiver struct {
 	// profileLine is hvi's header line of profile.json, held with it.
 	profileLine []byte
 	// unsynced is what was written to the disk since the last background
-	// sync was started; syncing waits for the one running.
-	unsynced int64
-	syncing  sync.WaitGroup
-	busy     atomic.Bool
+	// sync was asked for. syncing waits for the syncs in the background;
+	// syncMu guards whether one runs, whether another is asked for, and
+	// the first error one met.
+	unsynced    int64
+	syncing     sync.WaitGroup
+	syncMu      sync.Mutex
+	syncRunning bool
+	syncAgain   bool
+	syncErr     error
+	// filesDone reports the documents written beside the record.
+	filesDone chan error
 }
 
-// maybeSyncDisk starts a sync of the disk in the background once
-// spoolSyncEvery bytes were written to it since the last, unless one is
-// running: the sync after the stream, which the guest waits for, then has
-// only the last rounds to write.
+// maybeSyncDisk asks for a sync of the disk in the background once
+// spoolSyncEvery bytes were written to it since the last: the sync the
+// guest waits for, after the stream, then has only the last round left.
 func (r *streamReceiver) maybeSyncDisk(n int64) {
 	r.unsynced += n
-	if r.unsynced < spoolSyncEvery || r.busy.Load() {
+	if r.unsynced < spoolSyncEvery {
 		return
 	}
+	r.syncDisk()
+}
+
+// syncDisk syncs the disk in the background. One asked for while another
+// runs runs after it, so every write made before the call is covered once
+// syncing is done.
+func (r *streamReceiver) syncDisk() {
 	r.unsynced = 0
-	r.busy.Store(true)
+	r.syncMu.Lock()
+	defer r.syncMu.Unlock()
+	if r.syncRunning {
+		r.syncAgain = true
+		return
+	}
+	r.syncRunning = true
 	r.syncing.Add(1)
+	f := r.diskFile
 	go func() {
 		defer r.syncing.Done()
-		_ = r.diskFile.Sync()
-		r.busy.Store(false)
+		for {
+			err := syncFile(f)
+			r.syncMu.Lock()
+			if err != nil && r.syncErr == nil {
+				r.syncErr = err
+			}
+			if !r.syncAgain {
+				r.syncRunning = false
+				r.syncMu.Unlock()
+				return
+			}
+			r.syncAgain = false
+			r.syncMu.Unlock()
+		}
 	}()
 }
 
@@ -349,6 +380,12 @@ func (r *streamReceiver) componentVerified(hdr hviComponentHeader) error {
 		}
 		r.restore = restore
 		r.stage = 1
+		// The disk rounds that run with the guest running are all in: sync
+		// them while the RAM rounds arrive, so the sync after the stream
+		// has only the last round to write.
+		if r.diskFile != nil {
+			r.syncDisk()
+		}
 		if err := r.toHvi(name, append(append(r.profileLine, '\n'), r.pending.b...)); err != nil {
 			return err
 		}
@@ -372,20 +409,27 @@ func checkStreamProfile(data []byte, want string) error {
 }
 
 // finish hands hvi the state it held, once the stream is verified whole
-// and the disk is on disk, and waits for hvi to report the guest restored
-// paused.
+// and the last disk round is written, and waits for hvi to report the
+// guest restored paused. hvi reads the disk through the page cache, so
+// the sync that makes the last round durable runs while hvi rebuilds the
+// machine rather than before it; finish returns once both are done. The
+// documents kept beside the record are written meanwhile too.
 func (r *streamReceiver) finish() error {
 	if r.restore == nil || r.manifest == nil {
 		return errors.New("the stream carried no hvi checkpoint")
 	}
-	r.syncing.Wait()
-	if err := r.diskFile.Sync(); err != nil {
-		return err
-	}
-	if err := r.diskFile.Close(); err != nil {
-		return err
-	}
-	r.diskFile = nil
+	r.rec.Stream.step("trailer read")
+	r.syncDisk()
+	r.filesDone = make(chan error, 1)
+	go func() {
+		for name, data := range r.files {
+			if err := writeFileSynced(filepath.Join(r.rec.BundleDir, name), data); err != nil {
+				r.filesDone <- err
+				return
+			}
+		}
+		r.filesDone <- nil
+	}()
 	for _, c := range r.held {
 		if err := r.toHvi("the machine's state", c); err != nil {
 			return err
@@ -398,6 +442,21 @@ func (r *streamReceiver) finish() error {
 		r.restoreErr = err
 		return err
 	}
+	r.rec.Stream.step("hvi restored the guest paused")
+	r.syncing.Wait()
+	r.rec.Stream.step("disk synced")
+	if r.syncErr != nil {
+		return fmt.Errorf("sync the disk: %w", r.syncErr)
+	}
+	err := r.diskFile.Close()
+	r.diskFile = nil
+	if err != nil {
+		return err
+	}
+	if err := <-r.filesDone; err != nil {
+		return fmt.Errorf("keep hvi's documents: %w", err)
+	}
+	r.filesDone = nil
 	return nil
 }
 
@@ -405,6 +464,9 @@ func (r *streamReceiver) finish() error {
 // and any hvi it started are stopped.
 func (r *streamReceiver) abandon() {
 	r.syncing.Wait()
+	if r.filesDone != nil {
+		<-r.filesDone
+	}
 	if r.diskFile != nil {
 		_ = r.diskFile.Close()
 	}
@@ -491,6 +553,7 @@ func destReceiveStream(s *store.Store, txid, name string, in io.Reader) *migrate
 	}
 	r := &streamReceiver{s: s, rec: rec, instDir: instDir, root: root, hvi: hvi,
 		diskPath: filepath.Join(instDir, "bundle", "rootfs.ext4"), files: map[string][]byte{}}
+	rec.Stream = &migrateStreamStats{}
 	started := time.Now()
 	res, err := readMoveStream(in, r)
 	if err == nil {
@@ -508,11 +571,6 @@ func destReceiveStream(s *store.Store, txid, name string, in io.Reader) *migrate
 		return refuseWith(codeVerifyFailed, rec.fail(path, fmt.Errorf("receive: %w", err)), rec)
 	}
 	took := time.Since(started)
-	for fname, data := range r.files {
-		if err := writeFileSynced(filepath.Join(rec.BundleDir, fname), data); err != nil {
-			return refuseWith(codeFailed, rec.fail(path, err), rec)
-		}
-	}
 	rec.ManifestSHA256 = sha256Hex(r.manifest)
 	rec.BaseSHA256 = r.base
 	rec.Transport = transportStream
@@ -520,7 +578,7 @@ func destReceiveStream(s *store.Store, txid, name string, in io.Reader) *migrate
 	rec.Transfer = &migrateTransfer{Bytes: res.Bytes, Seconds: took.Seconds(), StartedAt: started.UTC(),
 		BytesPerSec: perSec(res.Bytes, took.Seconds())}
 	rec.Stream = &migrateStreamStats{Chain: res.Trailer.Chain, DiskBytes: res.Disk.Bytes,
-		WireBytes: res.Bytes, Seconds: took.Seconds(), HviReply: res.Trailer.HviReply}
+		WireBytes: res.Bytes, Seconds: took.Seconds(), HviReply: res.Trailer.HviReply, Steps: rec.Stream.Steps}
 	rec.Verify = fmt.Sprintf("stream: %d hvi components and %d disk blocks in %d batches checked; hvi restored "+
 		"the guest paused", len(res.Components), res.Disk.Blocks, res.Disk.Batches)
 	if state, err := s.GetInstance(name); err == nil && state.Migration != nil {
@@ -529,10 +587,10 @@ func destReceiveStream(s *store.Store, txid, name string, in io.Reader) *migrate
 			return refuseWith(codeFailed, rec.fail(path, err), rec)
 		}
 	}
-	for _, to := range []string{dstReceived, dstVerified, dstRestoredPaused} {
-		if err := rec.advance(path, to); err != nil {
-			return refuseWith(codeFailed, err, rec)
-		}
+	// One write for the three: each is true once hvi has restored the
+	// guest from a stream hull checked whole.
+	if err := rec.advanceThrough(path, dstReceived, dstVerified, dstRestoredPaused); err != nil {
+		return refuseWith(codeFailed, err, rec)
 	}
 	return &migrateReply{OK: true, Record: rec, VM: store.MigrationRestoredPaused}
 }

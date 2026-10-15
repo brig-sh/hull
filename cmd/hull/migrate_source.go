@@ -209,7 +209,9 @@ func sourceMigrate(ctx context.Context, s *store.Store, name string, opt migrate
 	}
 	m := &moveSource{s: s, name: name, path: path, rec: rec, peer: peerFor(rec, peer), out: opt.out,
 		fenceTimeout: opt.fenceTimout, probed: probe != nil, probe: probe, signals: opt.signals}
-	return m.run(ctx)
+	err = m.run(ctx)
+	m.waitSpool()
+	return err
 }
 
 // describeRecordError is ", because ..." for a record whose last step
@@ -500,6 +502,26 @@ type moveSource struct {
 	destPaused bool
 	// signals are held while hvi's stream is not on record.
 	signals *moveSignals
+	// spoolSealing reports the seal of a streamed move's spool, which
+	// runs on behind the move.
+	spoolSealing chan error
+}
+
+// waitSpool waits for the seal of the spool a streamed move left running
+// behind it, so the process does not end before its writes are synced.
+func (m *moveSource) waitSpool() {
+	if m.spoolSealing == nil {
+		return
+	}
+	started := time.Now()
+	err := <-m.spoolSealing
+	m.spoolSealing = nil
+	if err != nil {
+		m.logf("warning: the spooled stream of move %s was not sealed (%v); a re-run or an abort checks it "+
+			"frame by frame before using it", m.rec.TxID, err)
+	} else if took := time.Since(started); took > time.Second {
+		m.logf("move: the spool was synced %.1f s after the move ended", took.Seconds())
+	}
 }
 
 func (m *moveSource) logf(format string, args ...any) {
@@ -935,6 +957,9 @@ func (m *moveSource) prepare(ctx context.Context) error {
 // again sends the commit again, which the destination answers the same way.
 func (m *moveSource) commit(ctx context.Context) error {
 	started := time.Now()
+	if st := m.rec.Stream; st != nil && m.rec.Transport == transportStream {
+		st.step("commit sent")
+	}
 	reply, err := m.peer.call(ctx, "migrate-commit",
 		[]string{"--txid", m.rec.TxID, "--epoch", strconv.FormatUint(m.rec.Epoch, 10)}, nil)
 	if reply == nil || reply.Record == nil || reply.Record.State != dstRunning ||

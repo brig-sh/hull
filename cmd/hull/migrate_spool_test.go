@@ -25,6 +25,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/brig-sh/hull/pkg/store"
 )
@@ -105,6 +106,7 @@ const (
 	crashEnvDst  = "HULL_TEST_CRASH_DST"
 	crashEnvName = "HULL_TEST_CRASH_NAME"
 	crashEnvHvi  = "HULL_TEST_CRASH_HVI"
+	crashEnvAt   = "HULL_TEST_CRASH_AT"
 )
 
 // TestStreamedMoveCrashChild is not a test of its own: run by
@@ -127,7 +129,7 @@ func TestStreamedMoveCrashChild(t *testing.T) {
 	}
 	(&fakeDestRestore{}).install(t)
 	streamTestHook = func(stage string) {
-		if stage == "relayed" {
+		if stage == os.Getenv(crashEnvAt) {
 			os.Exit(3)
 		}
 	}
@@ -141,9 +143,16 @@ func TestStreamedMoveCrashChild(t *testing.T) {
 // fenced the guest, and returns the spool the move was writing.
 func crashMoveAfterSeal(t *testing.T, f *streamFixture) string {
 	t.Helper()
+	return crashMoveAt(t, f, "relayed")
+}
+
+// crashMoveAt runs the move of f in a child that dies at stage (see
+// streamTestHook), and returns the spool the move was writing.
+func crashMoveAt(t *testing.T, f *streamFixture, stage string) string {
+	t.Helper()
 	c := exec.Command(os.Args[0], "-test.run=^TestStreamedMoveCrashChild$", "-test.count=1")
 	c.Env = append(os.Environ(), crashEnvSrc+"="+f.src.RootDir(), crashEnvDst+"="+f.dst.RootDir(),
-		crashEnvName+"="+f.name, crashEnvHvi+"="+f.moveFixture.hvi)
+		crashEnvName+"="+f.name, crashEnvHvi+"="+f.moveFixture.hvi, crashEnvAt+"="+stage)
 	out, err := c.CombinedOutput()
 	var exit *exec.ExitError
 	if !errors.As(err, &exit) || exit.ExitCode() != 3 {
@@ -153,8 +162,8 @@ func crashMoveAfterSeal(t *testing.T, f *streamFixture) string {
 		t.Fatalf("hvi is %s after the child died", f.hvi.state)
 	}
 	rec := f.srcRecord(t)
-	if rec.State != srcTransferring || rec.ManifestSHA256 != "" {
-		t.Fatalf("the child recorded the fence: %s %q", rec.State, rec.ManifestSHA256)
+	if recorded := rec.ManifestSHA256 != ""; rec.State != srcTransferring || recorded != (stage == "recorded") {
+		t.Fatalf("the child died at %s with the move %s, manifest %q", stage, rec.State, rec.ManifestSHA256)
 	}
 	root, _ := flagValue(mustInstance(t, f.src, f.name).CmdLine, "--checkpoint-root")
 	return filepath.Join(root, rec.TxID)
@@ -166,10 +175,15 @@ func crashMoveAfterSeal(t *testing.T, f *streamFixture) string {
 // spool was cut short, hvi, which still holds the fenced guest, streams it
 // again first.
 func TestStreamedMoveAbortAfterAKillInTheSealWindow(t *testing.T) {
-	for _, cut := range []bool{false, true} {
-		t.Run(map[bool]string{false: "whole", true: "cut"}[cut], func(t *testing.T) {
+	for _, tc := range []struct {
+		name, stage string
+		cut         bool
+	}{{"whole", "relayed", false}, {"cut", "relayed", true}, {"recorded", "recorded", false},
+		{"recorded-cut", "recorded", true}} {
+		cut := tc.cut
+		t.Run(tc.name, func(t *testing.T) {
 			f := newStreamFixture(t, true, true)
-			dir := crashMoveAfterSeal(t, f)
+			dir := crashMoveAt(t, f, tc.stage)
 			if spoolIsSealed(dir) {
 				t.Fatal("the dead hull sealed its spool")
 			}
@@ -259,5 +273,75 @@ func TestStreamedMoveAbortRefusesWithNoWholeStream(t *testing.T) {
 	err = f.migrate(t, f.srcRecord(t).TxID)
 	if err == nil || !strings.Contains(err.Error(), "Do not stop that hvi") || strings.Contains(err.Error(), "--abort") {
 		t.Fatalf("re-run: %v", err)
+	}
+}
+
+// The spool's sync is not part of the downtime: with the sync of the
+// spooled stream held, the move still commits, and hull waits for the
+// sync only before it exits. The destination's last disk sync runs while
+// hvi restores, and the move waits for it before it is verified.
+func TestStreamedMoveCommitsWhileTheSpoolSyncs(t *testing.T) {
+	f := newStreamFixture(t, true, true)
+	f.hvi.writesAt["ram-round-0"] = []int64{3}
+	release := make(chan struct{})
+	held := make(chan struct{}, 1)
+	prev := syncFile
+	t.Cleanup(func() { syncFile = prev })
+	syncFile = func(file *os.File) error {
+		if filepath.Base(file.Name()) == spoolStream {
+			select {
+			case held <- struct{}{}:
+			default:
+			}
+			<-release
+		}
+		return file.Sync()
+	}
+	done := make(chan error, 1)
+	go func() { done <- f.migrate(t, "") }()
+	<-held
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		rec, err := readMigrationRecord(f.src.InstanceMigrationRecord(f.name))
+		if err == nil && rec.State == srcCommitted {
+			break
+		}
+		if time.Now().After(deadline) {
+			close(release)
+			t.Fatalf("the move did not commit while the spool synced: %+v", rec)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("hull ended before the spool was synced: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	rec := f.srcRecord(t)
+	if !spoolIsSealed(rec.BundleDir) {
+		t.Error("the spool was never sealed")
+	}
+	f.checkArrived(t, rec)
+	steps := map[string]bool{}
+	for _, s := range rec.Stream.Steps {
+		steps[s.Step] = true
+	}
+	for _, want := range []string{"hvi sealed the stream", "fence recorded", "trailer sent", "destination answered",
+		"commit sent"} {
+		if !steps[want] {
+			t.Errorf("no step %q in %+v", want, rec.Stream.Steps)
+		}
+	}
+	dst := f.dstRecord(t, rec.TxID)
+	order := []string{}
+	for _, s := range dst.Stream.Steps {
+		order = append(order, s.Step)
+	}
+	if strings.Join(order, ",") != "trailer read,hvi restored the guest paused,disk synced" {
+		t.Errorf("destination steps %v", order)
 	}
 }

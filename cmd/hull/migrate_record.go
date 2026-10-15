@@ -287,6 +287,20 @@ type migrateStreamStats struct {
 	DowntimeMs int64 `json:"downtimeMs,omitempty"`
 	// HviReply is hvi's reply to the migrate op, as hvi wrote it.
 	HviReply json.RawMessage `json:"hviReply,omitempty"`
+	// Steps are when this host reached each step from the pause on, by
+	// its own clock, so the downtime can be read step by step.
+	Steps []streamStep `json:"steps,omitempty"`
+}
+
+// streamStep is when a host reached one step of a streamed move.
+type streamStep struct {
+	Step string    `json:"step"`
+	At   time.Time `json:"at"`
+}
+
+// step records that this host reached step now.
+func (st *migrateStreamStats) step(name string) {
+	st.Steps = append(st.Steps, streamStep{Step: name, At: time.Now().UTC()})
 }
 
 // streamRound is one round of a streamed move.
@@ -352,6 +366,36 @@ func (rec *migrationRecord) advance(path, to string) error {
 	rec.State = to
 	rec.Error = ""
 	rec.History = append(rec.History, migrateHistory{State: to, At: time.Now().UTC()})
+	return writeMigrationRecord(path, rec)
+}
+
+// advanceThrough moves rec through each of states in turn, as advance
+// would, and records them all in one write: a step whose effects several
+// states promise at once pays for one synced write, not one per state.
+func (rec *migrationRecord) advanceThrough(path string, states ...string) error {
+	moved := false
+	for _, to := range states {
+		if rec.State == to {
+			continue
+		}
+		allowed := false
+		for _, next := range rec.transitions()[rec.State] {
+			if next == to {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return fmt.Errorf("move %s: %s cannot go from %s to %s", rec.TxID, rec.Role, rec.State, to)
+		}
+		rec.State = to
+		rec.Error = ""
+		rec.History = append(rec.History, migrateHistory{State: to, At: time.Now().UTC()})
+		moved = true
+	}
+	if !moved {
+		return nil
+	}
 	return writeMigrationRecord(path, rec)
 }
 
