@@ -25,6 +25,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/brig-sh/hull/pkg/store"
 )
@@ -36,8 +37,13 @@ import (
 // fenced guest whose spool may be whole, cut short, or missing. Nothing
 // here trusts the marker alone: a spool without one is checked frame by
 // frame against the manifest it ends with, and one that does not check out
-// is taken again from hvi, which streams a fenced guest again unchanged
-// (the guest has not run since), for as long as that hvi is alive.
+// is taken again from hvi, for as long as that hvi is alive: hvi streams a
+// fenced guest again for the txid and epoch that fenced it, and only for
+// them (hvi docs/checkpoint.md, "The fence of a live move"). That second
+// stream is the same machine, the guest's RAM and disk at the fence, but
+// not the same bytes: its RAM comes in one round, its disk in one round of
+// every block written since boot, and its manifest is its own. hull keeps
+// the first manifest's sha256 on record and holds hvi's reply to it.
 
 // spoolContents is what a spooled stream holds, once every frame checked.
 type spoolContents struct {
@@ -241,7 +247,8 @@ func (e *lostStreamError) Error() string {
 // the stream hvi fenced the instance's guest with for this move, and
 // returns its manifest. A spool that was never sealed is checked and
 // sealed; one that is not whole is taken again from hvi when hvi still
-// holds the fenced guest.
+// holds the fenced guest, and the move's record and the instance's then
+// name the new stream's manifest.
 func (m *moveSource) ensureStreamSpool(state *store.InstanceState, dir string) ([]byte, error) {
 	if spoolIsSealed(dir) {
 		return os.ReadFile(filepath.Join(dir, "manifest.json"))
@@ -259,35 +266,198 @@ func (m *moveSource) ensureStreamSpool(state *store.InstanceState, dir string) (
 		return nil, lost
 	}
 	lost.hviAlive = true
-	m.logf("The spooled stream %s is not whole (%v); hvi still holds the fenced guest and streams it "+
-		"again, unchanged, into the spool", dir, verr)
-	manifest, err := m.restreamFenced(state, dir)
+	m.logf("The spooled stream %s is not whole (%v); hvi still holds the fenced guest, and streams it "+
+		"again for this move into the spool", dir, verr)
+	manifest, first, err := m.restreamFenced(state, dir)
 	if err != nil {
 		lost.again = err
 		return nil, lost
 	}
+	if err := m.recordRestream(state, sha256Hex(manifest), first); err != nil {
+		return nil, err
+	}
 	return manifest, nil
 }
 
-// restreamFenced has hvi stream the fenced guest again into a fresh spool
-// in dir, and seals it. The guest has not run since hvi fenced it, so this
-// is the same machine as the stream that fenced it.
-func (m *moveSource) restreamFenced(state *store.InstanceState, dir string) ([]byte, error) {
+// recordedFirstManifest is the sha256 of the manifest that fenced the guest
+// for this move, as the instance's record or the move's has it; "" when
+// hull died before it recorded either.
+func (m *moveSource) recordedFirstManifest(state *store.InstanceState) string {
+	if m.rec.FirstManifestSHA256 != "" {
+		return m.rec.FirstManifestSHA256
+	}
+	if mig := state.Migration; mig != nil && mig.TxID == m.rec.TxID && mig.ManifestSHA256 != "" {
+		return mig.ManifestSHA256
+	}
+	return m.rec.ManifestSHA256
+}
+
+// recordRestream puts the second stream's manifest on the instance's
+// record, which a restore from the spool checks the spool against, and on
+// the move's, beside the first stream's.
+func (m *moveSource) recordRestream(state *store.InstanceState, manifest, first string) error {
+	if mig := state.Migration; mig != nil && mig.TxID == m.rec.TxID {
+		mig.ManifestSHA256 = manifest
+		if err := m.s.SaveInstance(state); err != nil {
+			return err
+		}
+	}
+	m.rec.FirstManifestSHA256, m.rec.ManifestSHA256 = first, manifest
+	path := m.path
+	if path == "" {
+		path = m.s.InstanceMigrationRecord(m.name)
+	}
+	return writeMigrationRecord(path, m.rec)
+}
+
+// restreamFenced has hvi stream the fenced guest again, for this move's
+// txid and epoch, into a fresh spool in dir, and seals it. It returns the
+// new stream's manifest and the sha256 of the first one, which hvi's reply
+// names and which must be the one on record, when one is: that is the
+// stream the fence came with, and the guest has not run since. The second
+// stream is the same machine in other bytes, so its own manifest is never
+// the first one's.
+func (m *moveSource) restreamFenced(state *store.InstanceState, dir string) ([]byte, string, error) {
+	// What this host kept of the first stream goes with the spool the
+	// second one replaces.
+	firstDocs, from := m.firstStreamDocs(dir)
 	sp, err := newSpool(dir)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	ss := &streamSender{m: m, state: state, sw: newMoveStreamWriter(io.Discard), link: &softLink{w: io.Discard},
-		stats: &migrateStreamStats{Mode: "restream"}, spoolDir: dir}
+		stats: &migrateStreamStats{Mode: "restream"}, spoolDir: dir, restream: true}
 	reply, files, err := ss.relayHvi(sp)
 	if err != nil {
 		sp.close()
-		return nil, err
+		return nil, "", err
+	}
+	// hvi gives the first manifest in the reply's stats.
+	var rep struct {
+		Stats struct {
+			First string `json:"first_manifest_sha256"`
+		} `json:"stats"`
+	}
+	_ = json.Unmarshal(reply, &rep)
+	r := rep.Stats
+	want := m.recordedFirstManifest(state)
+	switch {
+	case r.First == "":
+		err = errors.New("hvi's second stream of the fenced guest names no first manifest")
+	case want != "" && r.First != want:
+		err = fmt.Errorf("hvi streamed again the guest it fenced with manifest %s, and this move recorded %s",
+			r.First, want)
+	default:
+		err = sameStreamDocs(firstDocs, from, ss.manifest)
+	}
+	if err != nil {
+		// Not left for a later check to find whole and seal.
+		sp.close()
+		emptyDir(dir)
+		return nil, "", err
 	}
 	if err := sp.seal(files, reply); err != nil {
 		sp.close()
-		return nil, err
+		return nil, "", err
 	}
 	sp.close()
-	return ss.manifest, nil
+	m.logf("hvi streamed the fenced guest again: manifest %s, the first %s", digestHead(sha256Hex(ss.manifest)),
+		digestHead(r.First))
+	if len(firstDocs) == 0 {
+		m.logf("warning: this host kept nothing of the first stream to check the second against; it takes "+
+			"hvi's word that the second is the machine it fenced (manifest %s)", digestHead(r.First))
+	}
+	return ss.manifest, r.First, nil
+}
+
+// restreamDocs are the documents a second stream of a fenced guest sends
+// as the first stream sent them, byte for byte (hvi docs/checkpoint.md,
+// "The fence of a live move"). disk.json is written again, so it is not
+// one of them.
+var restreamDocs = []string{"profile.json", "cpu.json", "platform.json", "devices.json", "session.json"}
+
+// firstStreamDocs returns the sha256 of each of restreamDocs as the first
+// stream of this move sent it, and where they come from: the first
+// manifest, which the instance's record of the fence keeps, or else the
+// frames of those documents that the cut spool in dir holds whole. Empty
+// when this host kept neither.
+func (m *moveSource) firstStreamDocs(dir string) (map[string]string, string) {
+	if rec, err := readHviCheckpointRecord(instanceCheckpointDir(m.s, m.name)); err == nil &&
+		rec.TxID == m.rec.TxID && len(rec.Manifest) > 0 && sha256Hex(rec.Manifest) == rec.ManifestSHA256 {
+		var man hviStreamManifest
+		if json.Unmarshal(rec.Manifest, &man) == nil {
+			docs := map[string]string{}
+			for _, c := range man.Components {
+				if slices.Contains(restreamDocs, c.Name) {
+					docs[c.Name] = c.SHA256
+				}
+			}
+			return docs, "the first manifest, " + digestHead(rec.ManifestSHA256)
+		}
+	}
+	return spooledDocs(dir), "the frames the cut spool holds"
+}
+
+// spooledDocs returns the sha256 of each of restreamDocs that the spooled
+// stream in dir holds whole: every frame of it there, each matching its
+// header, and the frame of another component after it.
+func spooledDocs(dir string) map[string]string {
+	docs := map[string]string{}
+	f, err := os.Open(filepath.Join(dir, spoolStream))
+	if err != nil {
+		return docs
+	}
+	defer func() { _ = f.Close() }()
+	br := bufio.NewReaderSize(f, 1<<20)
+	var cur *spoolComponent
+	for {
+		line, err := readHviLine(br, migrateMaxHeader)
+		if err != nil {
+			return docs
+		}
+		hdr, err := parseHviComponentHeader(line)
+		if err != nil {
+			return docs
+		}
+		if cur != nil && cur.name != hdr.Component {
+			if slices.Contains(restreamDocs, cur.name) {
+				docs[cur.name] = hex.EncodeToString(cur.h.Sum(nil))
+			}
+			cur = nil
+		}
+		if cur == nil {
+			cur = &spoolComponent{name: hdr.Component, h: sha256.New()}
+		}
+		frame := sha256.New()
+		n, err := io.Copy(io.MultiWriter(frame, cur.h), io.LimitReader(br, hdr.Size))
+		if err != nil || n != hdr.Size || hex.EncodeToString(frame.Sum(nil)) != hdr.SHA256 {
+			return docs
+		}
+	}
+}
+
+// sameStreamDocs checks that the second stream's manifest lists each of
+// the first stream's documents with the sha256 the first had. hvi reports
+// which of them are the same itself, but its docs call that a report, not
+// a check a mover can rely on.
+func sameStreamDocs(first map[string]string, from string, manifest []byte) error {
+	if len(first) == 0 {
+		return nil
+	}
+	var man hviStreamManifest
+	if err := json.Unmarshal(manifest, &man); err != nil {
+		return fmt.Errorf("the second stream's manifest: %w", err)
+	}
+	got := map[string]string{}
+	for _, c := range man.Components {
+		got[c.Name] = c.SHA256
+	}
+	for _, name := range restreamDocs {
+		want, ok := first[name]
+		if ok && got[name] != want {
+			return fmt.Errorf("hvi's second stream of the fenced guest has %s with sha256 %s, and %s gives %s: "+
+				"it is not the machine the guest was fenced as", name, digestHead(got[name]), from, digestHead(want))
+		}
+	}
+	return nil
 }

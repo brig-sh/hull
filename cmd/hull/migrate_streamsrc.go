@@ -66,6 +66,12 @@ type streamSender struct {
 	ctx      context.Context
 	attempt  string
 	callDone chan struct{}
+	// restream is a second stream of a guest hvi fenced already: one that
+	// ends early leaves it fenced, never running on.
+	restream bool
+	// prev is the record of the stream of this move's earlier attempt,
+	// when there was one.
+	prev *migrateStreamStats
 }
 
 func (ss *streamSender) progress(format string, args ...any) {
@@ -312,6 +318,9 @@ type roundFolder struct {
 	printed time.Time
 	lastRAM time.Time
 	ramSeen bool
+	// replay is a stream relayed from the spool: its frames arrive long
+	// after the pause, which they say nothing of.
+	replay bool
 }
 
 // begin starts the frame of component name, which ends the round before
@@ -329,7 +338,7 @@ func (f *roundFolder) begin(name string) {
 		f.lastRAM, f.ramSeen = now, true
 	case isDiskRound(name):
 		kind = "disk"
-	case f.ramSeen && f.ss.stats.PausedAt.IsZero():
+	case f.ramSeen && !f.replay && f.ss.stats.PausedAt.IsZero():
 		// The first document after the RAM rounds: the round before it
 		// was the last, which hvi takes with the guest paused.
 		f.ss.stats.PausedAt = f.lastRAM.UTC()
@@ -372,21 +381,37 @@ func (ss *streamSender) relayFrame(f *roundFolder, line []byte, hdr hviComponent
 
 // relayHvi runs hvi's migrate op and relays its frames into the stream and
 // the spool. It returns hvi's reply line once hvi has sealed the stream and
-// fenced the guest. A stream that ends before its manifest is an
-// *hviRanOnError: hvi fences only once the manifest is written, so the
-// guest runs on.
+// fenced the guest. A stream that ends before its manifest without a fence
+// is an *hviRanOnError: hvi refused it, or it broke and hvi says the guest
+// is not fenced (fenceAfterBreak).
 func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][]byte, error) {
 	m := ss.m
 	conn, br, err := hviStreamOp(ss.state.ControlSock, map[string]any{"op": "migrate", "then": hviThenFence,
 		"txid": m.rec.TxID, "epoch": m.rec.Epoch}, hviStreamIdle)
 	if err != nil {
+		if ss.restream {
+			return nil, nil, err
+		}
+		// hvi never had the request, so the guest is as it was.
 		return nil, nil, &hviRanOnError{err: err}
 	}
-	defer func() { _ = conn.Close() }()
+	closed := false
+	closeConn := func() {
+		if !closed {
+			closed = true
+			_ = conn.Close()
+		}
+	}
+	defer closeConn()
 	files := map[string][]byte{}
 	var kept int64
 	folder := &roundFolder{ss: ss}
 	reply, line, err := readHviComponents("migrate", br, func(line []byte, hdr hviComponentHeader, body io.Reader) error {
+		if relayFrameTestHook != nil {
+			if err := relayFrameTestHook(hdr.Component); err != nil {
+				return err
+			}
+		}
 		if ss.manifest != nil {
 			return fmt.Errorf("hvi's %s comes after its manifest", hdr.Component)
 		}
@@ -424,9 +449,17 @@ func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][
 		return nil
 	})
 	folder.flush()
+	var refused *hviRefusal
 	switch {
-	case err != nil && ss.manifest == nil:
+	case err != nil && ss.manifest == nil && ss.restream:
+		// The guest was fenced before this stream began, and stays so.
+		return nil, nil, fmt.Errorf("hvi's second stream of the fenced guest ended before its manifest: %w", err)
+	case err != nil && ss.manifest == nil && errors.As(err, &refused):
+		// hvi's own answer, in place of a frame: nothing was fenced.
 		return nil, nil, &hviRanOnError{err: err}
+	case err != nil && ss.manifest == nil:
+		closeConn()
+		return nil, nil, ss.fenceAfterBreak(err)
 	case err != nil:
 		// The manifest came whole, so hvi has fenced the guest: what is
 		// lost is its reply, or the stream broke after it. A re-run or an
@@ -439,11 +472,54 @@ func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][
 	return line, files, nil
 }
 
-// hviRanOnError is a migrate stream that ended before its manifest: a
-// refusal, a capture that failed, a reader hvi cut for stalling, or the
-// connection lost. hvi fences the guest only once its manifest is written,
-// so the guest runs on, unfenced, and the move can be run again or aborted
-// with nothing to restore.
+// hviUnwindWait is how long hull waits for hvi to answer whether it fenced
+// the guest after a migrate stream broke before its manifest. hvi serves
+// one connection at a time, so the answer comes once its migrate op has
+// ended, and it sees the closed connection only at its next write: after
+// a disk sync or a vCPU park that can take seconds on a busy host, and
+// within the 30 s it waits for a stalled reader.
+const hviUnwindWait = time.Minute
+
+// relayFrameTestHook, when set, is called with each component hvi sends
+// before hull relays it; an error it returns is hull failing on that frame.
+var relayFrameTestHook func(component string) error
+
+// fenceAfterBreak asks hvi whether it fenced the guest after hull stopped
+// reading its migrate stream before the manifest, on a failure of its own
+// (a spool write, a document too large to keep, a frame that does not
+// match its sha256) or of the connection. hvi fences once the manifest is
+// in the socket's buffer, which can be before hull has read the frames in
+// front of it: with a small last round, what is left of the stream can sit
+// there whole when hull fails. Only hvi knows which it was, and it has
+// ended the op by the time it answers (hviUnwindWait).
+func (ss *streamSender) fenceAfterBreak(err error) error {
+	reply, qerr := hviControl(ss.state.ControlSock, map[string]any{"op": "status"}, hviUnwindWait)
+	switch {
+	case qerr != nil:
+		return &hviFenceUnknownError{err: err, why: qerr}
+	case reply.State == store.MigrationFenced:
+		return fmt.Errorf("hvi fenced the guest, though hull did not take its whole stream: %w", err)
+	}
+	return &hviRanOnError{err: err}
+}
+
+// hviFenceUnknownError is a migrate stream that broke before its manifest
+// when hvi then did not say whether it had fenced the guest.
+type hviFenceUnknownError struct{ err, why error }
+
+func (e *hviFenceUnknownError) Error() string {
+	return fmt.Sprintf("hvi's stream broke before its manifest (%v), and hvi did not say whether it "+
+		"fenced the guest (%v)", e.err, e.why)
+}
+
+func (e *hviFenceUnknownError) Unwrap() error { return e.err }
+
+// hviRanOnError is a migrate stream that ended before its manifest with
+// the guest not fenced: hvi refused the op, or said, after the stream
+// broke, that the guest is not fenced (a capture that failed, a reader hvi
+// cut for stalling, the connection lost, or hull failing on a frame before
+// hvi had written its manifest). The guest runs on, and the move can be
+// run again or aborted with nothing to restore.
 type hviRanOnError struct{ err error }
 
 func (e *hviRanOnError) Error() string {
@@ -473,7 +549,7 @@ func (ss *streamSender) replayHvi(dir string) (json.RawMessage, error) {
 		return nil, fmt.Errorf("the spooled stream %s was never sealed: %w", dir, err)
 	}
 	br := bufio.NewReaderSize(f, 1<<20)
-	folder := &roundFolder{ss: ss}
+	folder := &roundFolder{ss: ss, replay: true}
 	for {
 		if _, err := br.Peek(1); errors.Is(err, io.EOF) {
 			break
@@ -503,7 +579,64 @@ func (ss *streamSender) replayHvi(dir string) (json.RawMessage, error) {
 	if ss.manifest == nil {
 		return nil, errors.New("the spooled stream has no manifest.json")
 	}
-	return json.RawMessage(strings.TrimSpace(string(reply))), nil
+	line := json.RawMessage(strings.TrimSpace(string(reply)))
+	ss.takeReplayPause(line)
+	return line, nil
+}
+
+// takeReplayPause puts on the record of a replay when hvi paused the
+// guest, which was in an earlier attempt: from the spool's reply when that
+// is hvi's reply to the migrate that fenced the guest, or else from what
+// the instance's record of the fence or the earlier attempt's record of
+// the stream kept of it. A second stream's reply will not do, nor will a
+// reply hull wrote for a spool it checked: hvi stamps the first with its
+// own seal and the second has no stats. With none of them, the pause is
+// left unknown, and so is the downtime, rather than counted from the
+// replay.
+func (ss *streamSender) takeReplayPause(reply json.RawMessage) {
+	if _, _, ok := firstPause(reply); ok {
+		var r hviReply
+		if json.Unmarshal(reply, &r) == nil {
+			ss.takeHviStats(&r)
+			return
+		}
+	}
+	m := ss.m
+	if rec, err := readHviCheckpointRecord(instanceCheckpointDir(m.s, m.name)); err == nil &&
+		rec.TxID == m.rec.TxID {
+		if at, sealed, ok := firstPause(rec.Stats); ok {
+			ss.stats.PausedAt, ss.stats.SealedMs = at, sealed
+			return
+		}
+	}
+	if p := ss.prev; p != nil && !p.PausedAt.IsZero() {
+		ss.stats.PausedAt, ss.stats.SealedMs = p.PausedAt, p.SealedMs
+	}
+}
+
+// firstPause reads when hvi paused the guest, and how long after that it
+// sealed the stream, from hvi's reply to the migrate that fenced the
+// guest. A reply to a second stream of a fenced guest, which names the
+// first manifest, gives that stream's seal as its pause, and does not
+// count.
+func firstPause(line []byte) (time.Time, int64, bool) {
+	var r hviReply
+	if len(line) == 0 || json.Unmarshal(line, &r) != nil || len(r.Stats) == 0 {
+		return time.Time{}, 0, false
+	}
+	var st struct {
+		First      *string `json:"first_manifest_sha256"`
+		PrecopyEnd int64   `json:"precopy_end_unix_ms"`
+		SealedAt   int64   `json:"sealed_at_unix_ms"`
+	}
+	if json.Unmarshal(r.Stats, &st) != nil || st.First != nil || st.PrecopyEnd <= 0 {
+		return time.Time{}, 0, false
+	}
+	var sealed int64
+	if st.SealedAt >= st.PrecopyEnd {
+		sealed = st.SealedAt - st.PrecopyEnd
+	}
+	return time.UnixMilli(st.PrecopyEnd).UTC(), sealed, true
 }
 
 // streamTransfer is transfer for a streamed move. A destination that has
@@ -511,17 +644,21 @@ func (ss *streamSender) replayHvi(dir string) (json.RawMessage, error) {
 // fenced yet is sent live; one whose stream hvi sealed in an earlier
 // attempt is sent from the spool, which holds hvi's disk rounds too.
 func (m *moveSource) streamTransfer(ctx context.Context) (retErr error) {
+	prev := m.rec.Stream
 	if reply, err := m.peer.call(ctx, "migrate-status", []string{"--txid", m.rec.TxID}, nil); err == nil &&
 		reply.Record != nil &&
 		migrateStateOrder(roleDestination, reply.Record.State) >= migrateStateOrder(roleDestination, dstVerified) {
 		if m.rec.Disk == nil || m.rec.Stream == nil {
-			return errors.New("the destination has verified this move, but this host has no record of what it sent")
-		}
-		if err := m.checkDiskUnchanged(); err != nil {
-			return err
-		}
-		if err := m.compareStreamReceived(reply.Record); err != nil {
-			return err
+			if err := m.adoptVerifiedStream(reply.Record); err != nil {
+				return err
+			}
+		} else {
+			if err := m.checkDiskUnchanged(); err != nil {
+				return err
+			}
+			if err := m.compareStreamReceived(reply.Record); err != nil {
+				return err
+			}
 		}
 		m.destPaused = reply.Record.State == dstRestoredPaused
 		return m.rec.advance(m.path, srcTransferred)
@@ -531,7 +668,12 @@ func (m *moveSource) streamTransfer(ctx context.Context) (retErr error) {
 		return err
 	}
 	replay := fencedFor(state, m.rec.TxID)
-	if !replay && hviVMState(state) == store.MigrationFenced {
+	// A fence hvi made for this move that the move's record does not hold:
+	// hull died after hvi's manifest, before it recorded the fence on the
+	// instance, or after that and before the move's record took it (the
+	// commit point writes it). Either way it is taken from the spool, which
+	// is checked whole or streamed again.
+	if (!replay && hviVMState(state) == store.MigrationFenced) || (replay && m.rec.Disk == nil) {
 		if err := m.adoptStreamFence(state); err != nil {
 			return err
 		}
@@ -591,7 +733,8 @@ func (m *moveSource) streamTransfer(ctx context.Context) (retErr error) {
 	}
 	m.sealGate, m.sealGateOnce = make(chan struct{}), sync.Once{}
 	ss := &streamSender{m: m, state: state, sw: sw, link: link, size: info.Size(), stats: stats,
-		spoolDir: spoolDir, ctx: ctx, attempt: attempt, callDone: make(chan struct{}), sealGate: m.sealGate}
+		spoolDir: spoolDir, ctx: ctx, attempt: attempt, callDone: make(chan struct{}), sealGate: m.sealGate,
+		prev: prev}
 	type sendResult struct {
 		hviReply json.RawMessage
 		err      error
@@ -627,6 +770,9 @@ func (m *moveSource) streamTransfer(ctx context.Context) (retErr error) {
 		stats.HviReply = res.hviReply
 	}
 	stats.step("destination answered")
+	if streamTestHook != nil && res.err == nil && err == nil {
+		streamTestHook("answered")
+	}
 	// What was sent is on record before the move goes on: a reply that is
 	// lost leaves a re-run to compare the destination's record with it.
 	// A step that fails from here records it (stopped), and one that
@@ -637,7 +783,7 @@ func (m *moveSource) streamTransfer(ctx context.Context) (retErr error) {
 	}
 	if err != nil {
 		if res.err != nil && !errors.Is(res.err, io.ErrClosedPipe) && !strings.Contains(err.Error(), res.err.Error()) {
-			err = fmt.Errorf("%w (sending: %v)", err, res.err)
+			err = fmt.Errorf("%w (sending: %w)", err, res.err)
 		}
 		return fmt.Errorf("transfer to %s: %w", m.rec.Peer, err)
 	}
@@ -886,7 +1032,7 @@ func (ss *streamSender) recordInstanceFence() error {
 	sum := sha256Hex(ss.manifest)
 	if err := writeHviCheckpointRecord(instanceCheckpointDir(m.s, m.name), hviCheckpointRecord{
 		Dir: ss.spoolDir, ManifestSHA256: sum, Then: hviThenFence, Stats: ss.stats.HviReply,
-		SavedAt: time.Now().UTC(), TxID: m.rec.TxID,
+		SavedAt: time.Now().UTC(), TxID: m.rec.TxID, Manifest: ss.manifest,
 	}); err != nil {
 		return fmt.Errorf("the stream is sealed in %s but recording it failed: %w", ss.spoolDir, err)
 	}
@@ -926,6 +1072,46 @@ func (m *moveSource) adoptStreamFence(state *store.InstanceState) error {
 	m.rec.Disk = &migrateDisk{Path: disk, Size: size, ModNs: mod}
 	m.logf("Adopted the stream hvi fenced the guest with, spooled in %s", dir)
 	return writeMigrationRecord(m.path, m.rec)
+}
+
+// adoptVerifiedStream takes on a destination's verified copy of this move
+// when hull here died after the destination checked the stream and before
+// the move's record took what was sent: the record has no account of the
+// stream to compare with, but the fence does. The fence is adopted from
+// the spool (checked whole, or streamed again by the fenced hvi, whose
+// reply names the first manifest), and the destination's manifest must be
+// the one the guest was fenced with. hvi on the destination checked every
+// byte against that manifest, so its copy is the fenced machine, and it
+// has not run: only the commit resumes it.
+func (m *moveSource) adoptVerifiedStream(dst *migrationRecord) error {
+	state, err := m.s.GetInstance(m.name)
+	if err != nil {
+		return err
+	}
+	if !fencedFor(state, m.rec.TxID) && hviVMState(state) != store.MigrationFenced {
+		return errors.New("the destination has verified this move, but the guest here is not fenced for it")
+	}
+	if err := m.adoptStreamFence(state); err != nil {
+		return err
+	}
+	switch {
+	case dst.TxID != m.rec.TxID || dst.Epoch != m.rec.Epoch:
+		return fmt.Errorf("the destination recorded move %s epoch %d, not %s epoch %d", dst.TxID, dst.Epoch,
+			m.rec.TxID, m.rec.Epoch)
+	case dst.ManifestSHA256 == "" ||
+		(dst.ManifestSHA256 != m.rec.ManifestSHA256 && dst.ManifestSHA256 != m.rec.FirstManifestSHA256):
+		return fmt.Errorf("the destination verified manifest %s, and the guest here was fenced with %s",
+			dst.ManifestSHA256, m.recordedFirstManifest(state))
+	case dst.BaseSHA256 != m.rec.BaseSHA256:
+		return fmt.Errorf("the destination applied the disk to base %s, not %s", dst.BaseSHA256, m.rec.BaseSHA256)
+	}
+	m.rec.Stream = &migrateStreamStats{Mode: "adopted", Rounds: []streamRound{}}
+	if dst.Stream != nil {
+		m.rec.Stream.Chain, m.rec.Stream.HviReply = dst.Stream.Chain, dst.Stream.HviReply
+	}
+	m.logf("%s verified the stream the guest was fenced with (manifest %s) before this host recorded what it "+
+		"sent; the move goes on with that copy", m.rec.Peer, digestHead(dst.ManifestSHA256))
+	return nil
 }
 
 // compareStreamReceived checks the destination's record of a streamed move

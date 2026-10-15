@@ -556,7 +556,8 @@ An `hvi` run on a block rootfs builds its image's ext4 rootfs once per
 image and size, without any instance's own files, and keeps it under
 `<store>/bases/` as a read-only file named by its disk digest. Each
 instance's disk is a copy of it with that instance's files written in, and
-`state.json` records the base as `base`. A streamed move sends only the
+`state.json` records the base as `base` (`sha256`, and `hviWhy` when
+`hull run` could not boot `hvi` against it). A streamed move sends only the
 blocks that differ from it (see [migration.md](migration.md#bases)). On
 APFS each instance's copy is a clone and costs no space until written; on
 ext4 without reflinks it is a copy of the base's data. `hull rm` removes

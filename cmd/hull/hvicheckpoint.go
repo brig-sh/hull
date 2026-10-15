@@ -157,6 +157,10 @@ type hviCheckpointRecord struct {
 	Stats          json.RawMessage `json:"stats,omitempty"`
 	SavedAt        time.Time       `json:"savedAt"`
 	TxID           string          `json:"txid"`
+	// Manifest is a move's streamed manifest as hvi sent it, kept for
+	// the check of a second stream of the fenced guest, which empties the
+	// spool it would otherwise be read from.
+	Manifest []byte `json:"manifest,omitempty"`
 }
 
 // writeHviCheckpointRecord publishes rec as ckptDir/latest.json.

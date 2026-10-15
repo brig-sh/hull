@@ -164,7 +164,8 @@ func crashMoveAt(t *testing.T, f *streamFixture, stage string) string {
 	}
 	rec := f.srcRecord(t)
 	st := mustInstance(t, f.src, f.name)
-	if recorded := fencedFor(st, rec.TxID); rec.State != srcTransferring || recorded != (stage == "recorded") {
+	if recorded := fencedFor(st, rec.TxID); rec.State != srcTransferring ||
+		(stage != "answered" && recorded != (stage == "recorded")) {
 		t.Fatalf("the child died at %s with the move %s, the instance's migration %+v", stage, rec.State, st.Migration)
 	}
 	root, _ := flagValue(mustInstance(t, f.src, f.name).CmdLine, "--checkpoint-root")
@@ -224,6 +225,144 @@ func TestStreamedMoveAbortAfterAKillInTheSealWindow(t *testing.T) {
 			if _, err := verifySpool(dir); err != nil || !spoolIsSealed(dir) {
 				t.Errorf("the spool the guest came back from: sealed %v, %v", spoolIsSealed(dir), err)
 			}
+			// A restore checks the spool against the instance's record of
+			// its manifest, which names the second stream once there is one.
+			man, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := mustInstance(t, f.src, f.name).Migration.ManifestSHA256; got != sha256Hex(man) {
+				t.Errorf("the instance records manifest %s, the spool holds %s", got, sha256Hex(man))
+			}
+			if rec := f.srcRecord(t); cut && (rec.FirstManifestSHA256 != f.hvi.firstManifest ||
+				rec.ManifestSHA256 != sha256Hex(man) || rec.ManifestSHA256 == rec.FirstManifestSHA256) {
+				t.Errorf("the move's record of the two streams: first %s, now %s; hvi's first %s",
+					rec.FirstManifestSHA256, rec.ManifestSHA256, f.hvi.firstManifest)
+			}
+		})
+	}
+}
+
+// The same kill with the spool cut short, then the move run again: hvi
+// streams the fenced guest again for the move's txid and epoch, the
+// destination takes that second stream onto a fresh copy of the base, and
+// the move commits with both manifests on record.
+func TestStreamedMoveRerunRestreamsACutSpool(t *testing.T) {
+	for _, stage := range []string{"relayed", "recorded"} {
+		t.Run(stage, func(t *testing.T) {
+			f := newStreamFixture(t)
+			f.hvi.mu.Lock()
+			f.hvi.writesAt["ram-round-0"] = []int64{4, 800}
+			f.hvi.mu.Unlock()
+			dir := crashMoveAt(t, f, stage)
+			if err := os.Truncate(filepath.Join(dir, spoolStream), 1000); err != nil {
+				t.Fatal(err)
+			}
+			rec := f.srcRecord(t)
+			if err := f.migrate(t, rec.TxID); err != nil {
+				t.Fatal(err)
+			}
+			rec = f.srcRecord(t)
+			if rec.State != srcCommitted || rec.Stream.Mode != "replay" || f.hvi.migrations != 2 {
+				t.Fatalf("source %s %+v, hvi streamed %d times", rec.State, rec.Stream, f.hvi.migrations)
+			}
+			if req := f.hvi.migrateReq; req["txid"] != rec.TxID || req["epoch"] != float64(rec.Epoch) {
+				t.Errorf("the second stream was asked for with %v", req)
+			}
+			if rec.FirstManifestSHA256 != f.hvi.firstManifest || rec.ManifestSHA256 == rec.FirstManifestSHA256 {
+				t.Errorf("first %s, now %s, hvi's first %s", rec.FirstManifestSHA256, rec.ManifestSHA256,
+					f.hvi.firstManifest)
+			}
+			if dst := f.dstRecord(t, rec.TxID); dst.ManifestSHA256 != rec.ManifestSHA256 {
+				t.Errorf("the destination took manifest %s, the source sent %s", dst.ManifestSHA256, rec.ManifestSHA256)
+			}
+			// The second stream's reply stamps its own seal as the pause.
+			// The pause is the first stream's, which the instance's
+			// record of the fence kept; killed before that record, no
+			// record has it, and the downtime is left unknown.
+			st := rec.Stream
+			if stage == "recorded" && (!st.PausedAt.Equal(time.UnixMilli(f.hvi.pausedAtMs)) ||
+				st.DowntimeMs <= 0) {
+				t.Errorf("pause %v (hvi's %d), downtime %d ms", st.PausedAt, f.hvi.pausedAtMs, st.DowntimeMs)
+			}
+			if stage == "relayed" && (!st.PausedAt.IsZero() || st.DowntimeMs != 0) {
+				t.Errorf("an unknown pause recorded as %v, downtime %d ms", st.PausedAt, st.DowntimeMs)
+			}
+			f.checkArrived(t, rec)
+		})
+	}
+}
+
+// A second stream whose reply names another first manifest than the one
+// the instance's record holds is not the fence this move made: it is
+// refused and left nowhere a later check could seal it, and the fenced hvi,
+// the only copy of the guest, is left alone.
+func TestStreamedMoveAbortRefusesAnotherFirstManifest(t *testing.T) {
+	f := newStreamFixture(t)
+	dir := crashMoveAt(t, f, "recorded")
+	if err := os.Truncate(filepath.Join(dir, spoolStream), 1000); err != nil {
+		t.Fatal(err)
+	}
+	f.hvi.mu.Lock()
+	f.hvi.firstManifest = strings.Repeat("0", 64)
+	f.hvi.mu.Unlock()
+	restored := false
+	localRestore = func(*store.Store, string) error { restored = true; return nil }
+	err := sourceAbort(context.Background(), f.src, f.name, io.Discard, f.peer)
+	if err == nil || !strings.Contains(err.Error(), "this move recorded") || !strings.Contains(err.Error(), "Do not stop that hvi") {
+		t.Fatalf("err = %v", err)
+	}
+	if restored || f.hvi.state != "fenced" || syscall.Kill(f.vm.pid, 0) != nil {
+		t.Errorf("restored %v; hvi %s", restored, f.hvi.state)
+	}
+	if _, err := verifySpool(dir); err == nil || spoolIsSealed(dir) {
+		t.Errorf("the refused stream was left whole in the spool: %v", err)
+	}
+}
+
+// A second stream whose documents are not the first stream's is not the
+// machine the guest was fenced as, whatever hvi's reply says: hull checks
+// the five documents hvi sends again unchanged against the first manifest
+// the instance's record of the fence kept, or, killed before that record,
+// against the documents the cut spool holds whole. The spool is left
+// empty and the fenced hvi alone.
+func TestStreamedMoveRerunRefusesAnotherSecondStream(t *testing.T) {
+	for _, tc := range []struct {
+		stage, doc, from string
+	}{
+		{"recorded", "cpu.json", "the first manifest"},
+		{"relayed", "profile.json", "the frames the cut spool holds"},
+	} {
+		t.Run(tc.stage, func(t *testing.T) {
+			f := newStreamFixture(t)
+			dir := crashMoveAt(t, f, tc.stage)
+			if err := os.Truncate(filepath.Join(dir, spoolStream), 1000); err != nil {
+				t.Fatal(err)
+			}
+			f.hvi.mu.Lock()
+			f.hvi.restreamDocs = map[string][]byte{tc.doc: []byte(`{"another":"machine"}`)}
+			f.hvi.mu.Unlock()
+			err := f.migrate(t, f.srcRecord(t).TxID)
+			if err == nil || !strings.Contains(err.Error(), "has "+tc.doc+" with sha256") ||
+				!strings.Contains(err.Error(), tc.from) || !strings.Contains(err.Error(), "Do not stop that hvi") {
+				t.Fatalf("err = %v", err)
+			}
+			if f.hvi.state != "fenced" || f.hvi.migrations != 2 || syscall.Kill(f.vm.pid, 0) != nil {
+				t.Errorf("hvi %s after %d streams", f.hvi.state, f.hvi.migrations)
+			}
+			if _, err := verifySpool(dir); err == nil || spoolIsSealed(dir) {
+				t.Errorf("the refused stream was left whole in the spool: %v", err)
+			}
+			// The same stream as the first's documents goes through.
+			f.hvi.mu.Lock()
+			f.hvi.restreamDocs = nil
+			f.hvi.mu.Unlock()
+			if err := f.migrate(t, f.srcRecord(t).TxID); err != nil {
+				t.Fatal(err)
+			}
+			if rec := f.srcRecord(t); rec.State != srcCommitted {
+				t.Fatalf("source %s", rec.State)
+			}
 		})
 	}
 }
@@ -263,7 +402,8 @@ func TestStreamedMoveAbortRefusesWithNoWholeStream(t *testing.T) {
 	restored := false
 	localRestore = func(*store.Store, string) error { restored = true; return nil }
 	err := sourceAbort(context.Background(), f.src, f.name, io.Discard, f.peer)
-	if err == nil || !strings.Contains(err.Error(), "Do not stop that hvi") || strings.Contains(err.Error(), "--abort") {
+	if err == nil || !strings.Contains(err.Error(), "Do not stop that hvi") || strings.Contains(err.Error(), "--abort") ||
+		strings.Contains(err.Error(), "runs on") {
 		t.Fatalf("err = %v", err)
 	}
 	if restored || syscall.Kill(f.vm.pid, 0) != nil || f.hvi.state != "fenced" {
@@ -274,7 +414,8 @@ func TestStreamedMoveAbortRefusesWithNoWholeStream(t *testing.T) {
 	}
 	// A re-run says the same, and offers no abort either.
 	err = f.migrate(t, f.srcRecord(t).TxID)
-	if err == nil || !strings.Contains(err.Error(), "Do not stop that hvi") || strings.Contains(err.Error(), "--abort") {
+	if err == nil || !strings.Contains(err.Error(), "Do not stop that hvi") || strings.Contains(err.Error(), "--abort") ||
+		strings.Contains(err.Error(), "runs on") || strings.Contains(err.Error(), "still runs here") {
 		t.Fatalf("re-run: %v", err)
 	}
 }
@@ -386,5 +527,76 @@ func TestStreamedMoveAbortAfterHviIsGone(t *testing.T) {
 	}
 	if restoredFrom != filepath.Join(dir, spoolStream) {
 		t.Fatalf("restored from %q\n%s", restoredFrom, out.String())
+	}
+}
+
+// A hull killed once the destination has checked the stream, before the
+// move's record took what was sent: run again, the move finds the
+// destination's verified copy, adopts the fence from the spool (whole, or
+// streamed again by the fenced hvi), holds the destination's manifest to
+// the one the guest was fenced with, and commits that copy without sending
+// the guest again.
+func TestStreamedMoveRerunAdoptsAVerifiedDestination(t *testing.T) {
+	for _, cut := range []bool{false, true} {
+		t.Run(map[bool]string{false: "whole", true: "cut"}[cut], func(t *testing.T) {
+			f := newStreamFixture(t)
+			dir := crashMoveAt(t, f, "answered")
+			if cut {
+				if err := os.Truncate(filepath.Join(dir, spoolStream), 1000); err != nil {
+					t.Fatal(err)
+				}
+			}
+			rec := f.srcRecord(t)
+			if rec.Stream != nil {
+				t.Fatalf("the killed move recorded its stream: %+v", rec.Stream)
+			}
+			first := f.hvi.firstManifest
+			if dst := f.dstRecord(t, rec.TxID); dst.State != dstRestoredPaused || dst.ManifestSHA256 != first {
+				t.Fatalf("destination %s %s", dst.State, dst.ManifestSHA256)
+			}
+			restores := f.dest.restores
+			if err := f.migrate(t, rec.TxID); err != nil {
+				t.Fatal(err)
+			}
+			rec = f.srcRecord(t)
+			if rec.State != srcCommitted || rec.Stream == nil || rec.Stream.Mode != "adopted" {
+				t.Fatalf("source %s %+v", rec.State, rec.Stream)
+			}
+			if want := map[bool]int{false: 1, true: 2}[cut]; f.hvi.migrations != want || f.dest.restores != restores {
+				t.Errorf("hvi streamed %d times (want %d), the destination restored %d more times",
+					f.hvi.migrations, want, f.dest.restores-restores)
+			}
+			if dst := f.dstRecord(t, rec.TxID); dst.State != dstRunning {
+				t.Errorf("destination %s", dst.State)
+			}
+			assertSameContent(t, f.disk, filepath.Join(f.dst.InstanceDir(f.name), "bundle", "rootfs.ext4"))
+		})
+	}
+}
+
+// A destination whose verified copy is not the stream the guest was fenced
+// with is not committed: the re-run stops, the source stays fenced, and
+// nothing resumes there.
+func TestStreamedMoveRerunRefusesAnotherVerifiedCopy(t *testing.T) {
+	f := newStreamFixture(t)
+	crashMoveAt(t, f, "answered")
+	rec := f.srcRecord(t)
+	dst, path, err := findMigrationByTxID(f.dst, rec.TxID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst.ManifestSHA256 = strings.Repeat("1", 64)
+	if err := writeMigrationRecord(path, dst); err != nil {
+		t.Fatal(err)
+	}
+	err = f.migrate(t, rec.TxID)
+	if err == nil || !strings.Contains(err.Error(), "the guest here was fenced with") {
+		t.Fatalf("err = %v", err)
+	}
+	if got := f.dstRecord(t, rec.TxID); got.State != dstRestoredPaused {
+		t.Errorf("destination %s", got.State)
+	}
+	if rec := f.srcRecord(t); rec.State != srcTransferring {
+		t.Errorf("source %s", rec.State)
 	}
 }
