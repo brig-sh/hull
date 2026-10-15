@@ -24,6 +24,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -215,8 +216,11 @@ type streamSender struct {
 	// diskRounds gather each disk round's batches for the trailer.
 	diskRounds []*diskRoundDigest
 	// sealDone reports the spool's seal, which runs on behind the move
-	// once the stream is out.
-	sealDone chan error
+	// once the stream is out; recorded the record of the fence, which the
+	// commit waits for, and recordedAt when it was made.
+	sealDone   chan error
+	recorded   chan error
+	recordedAt time.Time
 	// ctx is the move's; attempt names this attempt, and callDone is
 	// closed once the receive's ssh session has ended.
 	ctx      context.Context
@@ -885,6 +889,15 @@ func (m *moveSource) streamTransfer(ctx context.Context) error {
 	_ = pr.CloseWithError(errors.New("the destination stopped reading"))
 	res := <-sent
 	m.spoolSealing = ss.sealDone
+	if ss.recorded != nil {
+		// Nothing goes on, and nothing reads the move's record, until the
+		// fence hvi made is on it.
+		if rerr := <-ss.recorded; rerr != nil {
+			return fmt.Errorf("hvi fenced %s, but recording it failed: %w", m.name, rerr)
+		}
+		stats.Steps = append(stats.Steps, streamStep{Step: "fence recorded", At: ss.recordedAt})
+		sort.Slice(stats.Steps, func(i, j int) bool { return stats.Steps[i].At.Before(stats.Steps[j].At) })
+	}
 	if res.err == nil {
 		stats.Chain = sw.chain.sum()
 		stats.WireBytes = sw.written()
@@ -1038,31 +1051,30 @@ func (ss *streamSender) send(replay bool) (json.RawMessage, error) {
 	ss.stats.HviReply = reply
 	ss.stats.step("hvi sealed the stream")
 	// hvi has fenced the guest, and every byte of its stream is in the
-	// spool's file. The fence is recorded while the last disk round goes
-	// out, and the trailer, without which the destination verifies
-	// nothing, waits for the record: a destination never holds a verified
-	// move the source has no record of. The spool's sync, which only an
-	// abort or a re-run needs, runs on behind the move and is not part of
-	// the downtime; a hull that dies before it is done leaves a spool that
-	// a re-run or an abort checks whole before using it (verifySpool).
-	recorded := make(chan error, 1)
+	// spool's file. The fence is recorded while the last disk round and the
+	// trailer go out and the destination checks them; the commit waits for
+	// that record (streamTransfer), the stream does not. The spool's sync,
+	// which only an abort or a re-run needs, runs on behind the move and
+	// is not part of the downtime. A hull that dies before either is done
+	// leaves a spool that a re-run or an abort checks whole before using it
+	// (verifySpool), and a destination that verified a stream the source
+	// never recorded is answered by the abort, which restores the guest
+	// here from that spool.
+	ss.recorded = make(chan error, 1)
+	fenceDone := make(chan struct{})
 	go func() {
 		err := ss.recordFence()
+		ss.recordedAt = time.Now().UTC()
 		m.signals.release()
-		recorded <- err
+		close(fenceDone)
+		if err == nil && streamTestHook != nil {
+			streamTestHook("recorded")
+		}
+		ss.recorded <- err
 	}()
 	sendErr := ss.link.err
 	if sendErr == nil {
 		sendErr = ss.diskFinal()
-	}
-	if err := <-recorded; err != nil {
-		sp.close()
-		unlock()
-		return nil, err
-	}
-	ss.stats.step("fence recorded")
-	if streamTestHook != nil {
-		streamTestHook("recorded")
 	}
 	if sendErr == nil {
 		sendErr = ss.sw.trailer(reply, ss.diskTrailer())
@@ -1072,6 +1084,7 @@ func (ss *streamSender) send(replay bool) (json.RawMessage, error) {
 	go func() {
 		err := sp.seal(files, reply)
 		sp.close()
+		<-fenceDone
 		unlock()
 		ss.sealDone <- err
 	}()
@@ -1113,7 +1126,7 @@ func (ss *streamSender) waitAccepted() error {
 // streamTestHook, when set, is called at points of a streamed move a test
 // stops it at: "relayed" is once hvi has sealed its stream and fenced the
 // guest, and hull has read it all, before anything is recorded; "recorded"
-// is once the fence is recorded, before the spool is sealed.
+// is once the fence is recorded, maybe before the spool is sealed.
 var streamTestHook func(stage string)
 
 // softLink is the writer between the stream and the destination. Once a
