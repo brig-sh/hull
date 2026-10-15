@@ -33,6 +33,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -1612,6 +1613,130 @@ func TestEnsureSpareBaseTakesTurns(t *testing.T) {
 		if strings.HasPrefix(e.Name(), ".new-") {
 			t.Errorf("left %s", e.Name())
 		}
+	}
+}
+
+// spareInTheMaking leaves the destination of f holding the base with no
+// spare and no check on record, as the source of a move is left once the
+// move commits, and counts the reads of its base by a check.
+func spareInTheMaking(t *testing.T, f *streamFixture) (string, *atomic.Int32) {
+	t.Helper()
+	sum := mustInstance(t, f.src, f.name).Base.SHA256
+	if _, err := sendBase(t.Context(), f.src, f.peer, sum); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{spareBasePath(f.dst, sum), f.dst.BasePath(sum) + ".checked"} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+	}
+	var hashed atomic.Int32
+	base := f.dst.BasePath(sum)
+	hashBase = func(path string) (string, int64, error) {
+		if path == base {
+			hashed.Add(1)
+		}
+		return diskDigestFile(path)
+	}
+	t.Cleanup(func() { hashBase = diskDigestFile })
+	return sum, &hashed
+}
+
+// A move back that arrives while the source's background step still makes
+// the spare and checks the base waits for it, before it accepts the
+// stream, then takes that spare and that check: it neither copies the base
+// beside the copy at work nor hashes it again, the hash a move waits for
+// with the guest paused.
+func TestStreamedMoveWaitsForTheSpareBeingMade(t *testing.T) {
+	f := newStreamFixture(t)
+	sum, hashed := spareInTheMaking(t, f)
+	copying, busy := make(chan struct{}), make(chan struct{})
+	spareCopy = func(src, dst string) (string, error) {
+		close(copying)
+		<-busy
+		return copyDisk(src, dst)
+	}
+	var once sync.Once
+	spareMakerBusy = func() { once.Do(func() { close(busy) }) }
+	t.Cleanup(func() {
+		spareCopy, spareMakerBusy = copyDisk, func() {}
+		once.Do(func() { close(busy) })
+	})
+	var log bytes.Buffer
+	made := make(chan *migrateReply, 1)
+	go func() { made <- spareAfterMove(f.dst, f.name, sum, &log) }()
+	<-copying
+	if err := f.migrate(t, ""); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case reply := <-made:
+		if !reply.OK || reply.Detail == "held" {
+			t.Errorf("the background step: %+v\n%s", reply, log.String())
+		}
+	case <-time.After(10 * time.Second):
+		// It lets the copy go only once the receive finds it at work.
+		t.Errorf("the background step never went on: the receive did not wait for it")
+	}
+	f.checkArrived(t, f.srcRecord(t))
+	steps := stepNames(f.dstRecord(t, f.srcRecord(t).TxID).Stream.Steps)
+	if i := slices.Index(steps, "waited for the base's spare being made"); i < 0 || i+1 >= len(steps) ||
+		steps[i+1] != "disk made from the base's spare" {
+		t.Errorf("the receive did not wait for the spare and take it: %v", steps)
+	}
+	if n := hashed.Load(); n != 1 {
+		t.Errorf("the base was hashed %d times, want once, by the background step", n)
+	}
+}
+
+// A maker of the spare that holds its lock past spareMakerWait is not
+// waited for any longer: the receive copies the base and the move commits.
+func TestStreamedMoveGivesUpOnAStuckSpareMaker(t *testing.T) {
+	f := newStreamFixture(t)
+	sum, _ := spareInTheMaking(t, f)
+	unlock, err := lockSpare(f.dst, sum)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	spareMakerWait = 200 * time.Millisecond
+	t.Cleanup(func() { spareMakerWait = time.Minute })
+	if err := f.migrate(t, ""); err != nil {
+		t.Fatal(err)
+	}
+	f.checkArrived(t, f.srcRecord(t))
+	steps := stepNames(f.dstRecord(t, f.srcRecord(t).TxID).Stream.Steps)
+	if !slices.Contains(steps, "gave up waiting for the base's spare being made") ||
+		!slices.ContainsFunc(steps, func(s string) bool { return strings.HasSuffix(s, ", with no spare") }) {
+		t.Errorf("steps: %v", steps)
+	}
+}
+
+// Two checks of one base take turns, and the second finds the first's on
+// record rather than reading the base again.
+func TestCheckBaseDigestTakesTurns(t *testing.T) {
+	f := newStreamFixture(t)
+	sum := mustInstance(t, f.src, f.name).Base.SHA256
+	path := f.src.BasePath(sum)
+	_ = os.Remove(path + ".checked")
+	var hashed atomic.Int32
+	hashBase = func(p string) (string, int64, error) {
+		hashed.Add(1)
+		time.Sleep(100 * time.Millisecond)
+		return diskDigestFile(p)
+	}
+	t.Cleanup(func() { hashBase = diskDigestFile })
+	var wg sync.WaitGroup
+	for range 3 {
+		wg.Go(func() {
+			if err := checkBaseDigest(path, sum); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wg.Wait()
+	if n := hashed.Load(); n != 1 {
+		t.Errorf("the base was hashed %d times", n)
 	}
 }
 

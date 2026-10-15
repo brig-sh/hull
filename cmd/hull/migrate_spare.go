@@ -125,6 +125,16 @@ func spareAfterMove(s *store.Store, name, sum string, w io.Writer) *migrateReply
 		line("no spare copy of base %s for a move back of %s: the base is gone from this store", digestHead(sum), name)
 		return &migrateReply{OK: true, Detail: "gone"}
 	}
+	// The lock is held through the check too: a receive here waits for
+	// both, before it accepts the stream, rather than copying the base
+	// beside the copy at work and hashing it beside the hash.
+	unlock, err := lockSpare(s, sum)
+	if err != nil {
+		line("no spare copy of base %s for a move back of %s: %v; a move back copies the base",
+			digestHead(sum), name, err)
+		return refuse(codeFailed, err)
+	}
+	defer unlock()
 	how := "held"
 	if spareHeld(s, sum) {
 		line("base %s already has a spare copy for a move back of %s", digestHead(sum), name)
@@ -132,7 +142,7 @@ func spareAfterMove(s *store.Store, name, sum string, w io.Writer) *migrateReply
 		started := time.Now()
 		line("making a spare copy of base %s for a move back of %s (pid %d)", digestHead(sum), name, os.Getpid())
 		var err error
-		if how, err = ensureSpareBase(s, sum); err != nil {
+		if how, err = makeSpareLocked(s, sum); err != nil {
 			line("no spare copy of base %s for a move back of %s: %v; a move back copies the base",
 				digestHead(sum), name, err)
 			return refuse(codeFailed, err)
