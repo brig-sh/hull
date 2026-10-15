@@ -250,7 +250,9 @@ func TestStreamedMoveRerunRestreamsACutSpool(t *testing.T) {
 	for _, stage := range []string{"relayed", "recorded"} {
 		t.Run(stage, func(t *testing.T) {
 			f := newStreamFixture(t)
+			f.hvi.mu.Lock()
 			f.hvi.writesAt["ram-round-0"] = []int64{4, 800}
+			f.hvi.mu.Unlock()
 			dir := crashMoveAt(t, f, stage)
 			if err := os.Truncate(filepath.Join(dir, spoolStream), 1000); err != nil {
 				t.Fatal(err)
