@@ -15,6 +15,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -155,6 +156,8 @@ type streamReceiver struct {
 	// baseChecked reports the check of the base's digest, which runs while
 	// the stream arrives.
 	baseChecked chan error
+	// out takes a session's lines; nil outside a session.
+	out *sessionOut
 }
 
 // toHvi writes data to hvi's stdin. A write that fails means hvi stopped
@@ -234,6 +237,7 @@ func (r *streamReceiver) header(h moveStreamHeader) error {
 		if err := writeMigrationRecord(r.path, r.rec); err != nil {
 			return err
 		}
+		r.out.event(&migrateReply{OK: true, Event: eventAccepted, Detail: h.Attempt})
 	}
 	return nil
 }
@@ -503,8 +507,13 @@ func writeStreamIncomingInstance(s *store.Store, rec *migrationRecord, hvi, root
 	return s.SaveInstance(state)
 }
 
-// destReceiveStream is `migrate-receive --stream`.
-func destReceiveStream(s *store.Store, txid, name string, in io.Reader) *migrateReply {
+// destReceiveStream is `migrate-receive --stream`, and with out, which
+// takes the lines of a session, `--stream --session`: then it says when it
+// took the header and what it has read, says verified, and waits for the
+// source's commit after the trailer (sessionCommitWait), which it runs as
+// migrate-commit would. Its reply is then the commit's, or, when the source
+// ends the stream or sends nothing, the verified one again.
+func destReceiveStream(s *store.Store, txid, name string, in io.Reader, out *sessionOut) *migrateReply {
 	rec, path, unlock, no := destRecord(s, txid)
 	if no != nil {
 		return no
@@ -536,10 +545,15 @@ func destReceiveStream(s *store.Store, txid, name string, in io.Reader) *migrate
 	}
 	rec.StreamAccepted = ""
 	r := &streamReceiver{s: s, rec: rec, path: path, instDir: instDir, root: root, hvi: hvi,
-		diskPath: filepath.Join(instDir, "bundle", "rootfs.ext4"), files: map[string][]byte{}}
+		diskPath: filepath.Join(instDir, "bundle", "rootfs.ext4"), files: map[string][]byte{}, out: out}
 	rec.Stream = &migrateStreamStats{}
 	started := time.Now()
-	res, err := readMoveStream(in, r)
+	if out != nil {
+		acks := newAckReader(in, out)
+		defer acks.close()
+		in = acks
+	}
+	res, rest, err := readMoveStreamOpen(in, r, out != nil)
 	if err == nil {
 		err = r.finish()
 	}
@@ -568,6 +582,11 @@ func destReceiveStream(s *store.Store, txid, name string, in io.Reader) *migrate
 		"wrote the disk rounds onto base %s and restored the guest paused", len(res.Components), digestHead(r.base))
 	if state, err := s.GetInstance(name); err == nil && state.Migration != nil {
 		state.Migration.ManifestSHA256 = rec.ManifestSHA256
+		// The move's epoch too, which the commit would otherwise save in a
+		// synced write of its own with the guest stopped. Nothing runs the
+		// instance before the commit: its record says incoming, which only
+		// this move's commit turns into running, and an abort removes it.
+		state.OwnerEpoch = rec.Epoch
 		if err := s.SaveInstance(state); err != nil {
 			return refuseWith(codeFailed, rec.fail(path, err), rec)
 		}
@@ -579,7 +598,47 @@ func destReceiveStream(s *store.Store, txid, name string, in io.Reader) *migrate
 	}
 	// On the record with the commit's write; the reply carries it now.
 	rec.Stream.step("verified recorded")
-	return &migrateReply{OK: true, Record: rec, VM: store.MigrationRestoredPaused}
+	verified := &migrateReply{OK: true, Record: rec, VM: store.MigrationRestoredPaused}
+	if out == nil {
+		return verified
+	}
+	out.event(&migrateReply{OK: true, Event: eventVerified, Record: rec, VM: store.MigrationRestoredPaused})
+	return destSessionCommit(s, rec, path, rest, verified)
+}
+
+// destSessionCommit waits, after a session's verified line, for what the
+// source sends after the trailer, and runs the commit it sends.
+func destSessionCommit(s *store.Store, rec *migrationRecord, path string, rest *bufio.Reader,
+	verified *migrateReply) *migrateReply {
+	type read struct {
+		c   *moveStreamCommit
+		err error
+	}
+	got := make(chan read, 1)
+	go func() {
+		c, err := readMoveCommit(rest)
+		got <- read{c, err}
+	}()
+	var k read
+	select {
+	case k = <-got:
+	case <-time.After(sessionCommitWait):
+		log.Warnf("Move %s: no commit came in the session within %s; it stays restored paused here",
+			rec.TxID, sessionCommitWait)
+		return verified
+	}
+	switch {
+	case k.err != nil:
+		// Left verified: the source learns the commit's fate by
+		// migrate-commit, as outside a session.
+		return refuseWith(codeFailed, fmt.Errorf("after the trailer: %w", k.err), rec)
+	case k.c == nil:
+		return verified
+	case k.c.TxID != rec.TxID:
+		return refuseWith(codeFailed, fmt.Errorf("the session of move %s carries the commit of %s", rec.TxID,
+			k.c.TxID), rec)
+	}
+	return destCommitLocked(s, rec, path, k.c.Epoch)
 }
 
 // hviReplyDiskBytes is the bytes of disk blocks hvi's reply to migrate says

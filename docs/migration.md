@@ -39,6 +39,24 @@ what can go wrong, and how to recover.
 > guest moved from this Mac to rp2 through `brig teleport` with 6.8 to
 > 8.0 s of downtime on a 1.0 MiB/s link, sending 71 to 76 MiB where the
 > whole bundle had sent 1.8 GB. See [Measured](#measured).
+>
+> **One session, 2026-10-15.** With the pin at `hvi` ba9b2d2 and a
+> destination that lists `stream-session`, a move holds one ssh session
+> from the stream's header to the resume and keeps two round trips of the
+> stream on its way. On rp1 to rp2 with 100 ms and 10 Mbit/s of netem,
+> the time from hvi's seal to the resume went from 2.9 to 3.9 s to 0.59
+> and 0.60 s at bed4d7d (0.65 to 1.12 s at the hulls before it). That
+> is over the target of 300 ms plus two round trips, 501 ms: about
+> 0.45 s of it is the stream ahead of the manifest at the seal, in
+> hvi's socket and in the window, and 0.1 s the commit's way to the
+> destination. Counted from hull's read of the seal it is 0.44 and
+> 0.53 s. The downtime there went from 4.6 to 4.8 s to 2.2 to 2.7 s. On
+> the LAN the idle guest's downtime went from 103 to 164 ms to 47 to
+> 69 ms. Under the O_DIRECT hog the source's pause no longer waits for a
+> vCPU to park; the downtime there is now the disk syncs on both hosts,
+> 11.0 and 28.8 s in the last two moves. One move of three in the set
+> before them failed with the guest running on. See [From the seal to
+> the resume](#from-the-seal-to-the-resume).
 
 ## Usage
 
@@ -289,6 +307,11 @@ path above and says why on its second line (`Transport: ...`). It needs:
 - the instance's base in this store. The destination need not hold it
   yet: the move sends it before the guest stops.
 
+A destination whose probe also lists `stream-session` takes the move in
+one session, from the stream's header to the resume (see
+[One session](#one-session)); with one that does not, the source polls
+for the header and sends the commit as its own verb, as before.
+
 `--whole-bundle` asks for the old path. A hull from before streamed moves
 lists no capabilities, so the two still move instances the old way. A hull
 that lists only `stream-v1` or `stream-v2` (whose streams carried disk
@@ -390,9 +413,10 @@ it runs there are hidden: `migrate-take-image`, `migrate-take-kernel` and
 
 ### The order on the wire
 
-One ssh session runs `hull migrate-receive --stream --txid T --name N`, and
-its stdin carries hull's header, then hvi's `migrate` stream relayed frame
-by frame as hvi writes it, then hull's trailer. hull drives no disk round
+One ssh session runs `hull migrate-receive --stream --txid T --name N`
+(with `--session` when the destination takes it), and its stdin carries
+hull's header, then hvi's `migrate` stream relayed frame by frame as hvi
+writes it, then hull's trailer and, in a session, the commit. hull drives no disk round
 of its own: hvi's stream holds them (hvi
 [checkpoint.md](../hvi-vmm/docs/checkpoint.md), "Live moves"):
 
@@ -425,6 +449,7 @@ rewriting 10 MiB/s.
 'H' u32 len  {"txid", "name", "epoch", "baseSha256", "diskSize", "replay"?, "attempt"?}
 'C' u32 len  hvi's frame header line, as hvi wrote it, then its bytes
 'T' u32 len  {"records", "chain", "hviReply"}
+'K' u32 len  {"txid", "epoch"}    in a session only, after the trailer
 ```
 
 Integers are big-endian. An hvi frame is relayed with hvi's own header
@@ -434,7 +459,8 @@ of them. `chain` is a running sha256 over every record's kind and header,
 and `records` their number, so a record lost, added, moved or altered
 fails the move even when each payload is intact. The reader holds every
 length and name to limits before it allocates, and refuses a stream
-without its trailer or with bytes after it. `hviReply` is hvi's reply to
+without its trailer or with bytes after it, except, in a session, the one
+`K` record, which is not in the chain. `hviReply` is hvi's reply to
 `migrate`, with its numbers.
 
 hull treats a frame named `ram-round-*` or `disk-round-*` as a round: bulk
@@ -446,8 +472,9 @@ document, and the documents of one stream are held to 64 MiB together.
 `migrate-receive --stream` takes the base's spare copy as the instance's
 disk (or copies the base when there is none), syncs it, and records that
 it took this attempt's header (`streamAccepted`); the source waits for
-that before it asks hvi to `migrate`, so a refusal of the header comes
-while the guest still runs. A copy whose writeback is still under way
+that before it asks hvi to `migrate` (in a session the destination says
+so on its stdout; otherwise the source polls `migrate-status` every
+50 ms), so a refusal of the header comes while the guest still runs. A copy whose writeback is still under way
 would cost the downtime: hvi syncs the disk after the rounds it writes and
 waits for that before the guest may run, and on rp2 an unsynced 64 MiB
 copy made that 4 to 20 s.
@@ -469,7 +496,79 @@ as `<digest>.ext4.bad-<time>` and the move refused with `no_base`, so the
 source sends the base again and goes on from its spool. The move is
 `verified`, and the guest `restored-paused`, once hull has checked the
 trailer, hvi has restored and the base has checked out. The documents are
-kept in the move's checkpoint directory for the record.
+kept in the move's checkpoint directory for the record. The instance's
+record takes the manifest and the move's epoch in one synced write then,
+so the commit does not save the epoch again with the guest stopped;
+nothing runs the instance before the commit, and an abort removes it.
+
+### One session
+
+From the stream's header to the destination's resume a move with a
+destination that lists `stream-session` opens no ssh session but the
+receive's, and polls nothing. The destination writes lines on its stdout
+as the move goes, each a reply object with an `event`:
+
+| `event` | When |
+|---|---|
+| `accepted` | it took this attempt's header and synced its copy of the base (`detail`: the attempt) |
+| `acked` | every 64 KiB it reads of the stream, or 5 ms after the last if it read anything: `bytes`, what it has read so far |
+| `verified` | hvi restored the guest paused from a stream checked whole: `record` and `vm`, as the reply of a receive outside a session |
+
+and a last line with no event. After `verified` the source checks the
+destination's record against what it sent and records its commit point,
+as it would after a receive's reply, and only then sends the commit as
+the `K` record after the trailer; the destination runs it as
+`migrate-commit` would, under the move's lock it already holds, and the
+last line is the commit's reply. A source that ends the stream instead,
+because a check failed, or sends nothing for 20 s, leaves the guest
+restored paused there, and the last line is the verified reply again.
+The 20 s is shorter than the 30 s that `migrate-commit` and `--abort`
+wait for the move's lock, so a source whose session was cut, or an
+operator, finds the lock free once the receive gives up.
+The order is the one the separate verbs keep: the source commits only
+after the destination said verified, and the destination resumes only on
+the commit. A session that ends without the commit's answer (the link
+lost after the commit went) leaves the source in `committing`, and it
+sends the commit again as `migrate-commit` at once, which the destination
+answers from its record; a re-run does the same. So does a refusal in the
+session with code `failed`: a commit that came damaged after the
+trailer, or a step of the commit that failed, is no verdict on the
+move. The receive ignores
+SIGPIPE in a session, so a source that is gone fails a line rather than
+killing the receive half way.
+
+The source holds what it has handed to ssh and the destination has not
+yet said it read to a window: the fastest delivery rate of the last eight
+samples times twice the round trip, or times 20 ms if that is longer,
+between 128 KiB and 64 MiB; the stream's write buffer is 64 KiB in a
+session, against 1 MiB outside one, and so is hull's read of hvi's
+socket. Without the window the source wrote into ssh as fast as ssh took
+it, and ssh's 2 MiB channel window, the kernels' socket buffers and the
+link's queue held about 3 MB on their way when hvi sealed the stream: on
+a link of 1 MiB/s that is 3 s, and the stopped guest waited for it (see
+[Measured](#measured)). The window keeps two round trips' worth on the
+way; on a LAN, where the round trip is a fraction of a millisecond, the
+20 ms keeps the rate at the link's.
+
+The round trip is the shortest the acks showed in the last second, or
+in the last ten round trips if that is longer. Then the window drains to
+half of what the link holds at the latest rate, or 128 KiB if that is
+more, until a write sent into the drained window is read, and that
+write's round trip replaces it, whether longer or shorter. Before
+2d3caa8 the window kept the shortest round trip of the whole move, and
+a round trip that grew during the stream shrank the window with each
+sample down to 128 KiB: with 40 ms of delay added 0.3 s into a move on
+rp1 to rp2, the RAM rounds ran at 2.8 to 3.1 MiB/s and the move took
+28.5 s, against 5.3 s with the delay there from the start. The latest
+round trips alone would not do: while the window is full each write's
+round trip includes the queue the window made, and taken as the link's
+it would double the window with each sample. A drain costs the link
+about half a round trip.
+
+hull reads hvi's socket through a 64 KiB buffer in a session (1 MiB
+before e852118): what hull has read and not yet relayed is behind the
+window, which does not count it, and at the seal the guest waits for it
+too. What hvi's side of the socket holds is not hull's to bound.
 
 ### Failures and the spool
 
@@ -577,10 +676,11 @@ through, so from hvi's seal to the commit the source makes one:
   the move stops. `hull migrate` waits for the seal before it exits.
 - The destination writes hvi's documents beside its record without a sync
   (hvi has the machine from the stream) and records `received`,
-  `verified` and `restored-paused` in one write. Its commit still makes
-  four synced writes before the resume (the instance's epoch, the ledger,
-  the record, and the instance's record of the running guest); on a disk
-  whose 4 KiB `fsync` takes 2 s they cost seconds of downtime (see
+  `verified` and `restored-paused` in one write, after the instance's
+  record with the manifest and the epoch. Its commit still makes three
+  synced writes before the resume (the ledger, the record, and the
+  instance's record of the running guest); on a disk whose 4 KiB `fsync`
+  takes a second or more they cost seconds of downtime (see
   [Measured](#measured)).
 
 A destination whose `hvi` refuses the machine stops reading, and the
@@ -595,13 +695,14 @@ refusal is the move's error, with code `restore_refused`.
 | `mode` | `live`; `replay` for a spool sent again; `adopted` for a destination's copy verified in an earlier attempt and committed without sending |
 | `rounds` | each of hvi's rounds and documents as relayed: `kind` (`disk`, `ram` or `state`), `name` (hvi's component name), `bytes`, `wireBytes`, `seconds`, and from hvi's reply `final` (taken paused) and, for a disk round, `blocks` and `bytes` as raw block bytes |
 | `diskBytes`, `diskWireBytes`, `ramBytes`, `stateBytes`, `wireBytes`, `seconds` | totals: the disk rounds' raw bytes (hvi's `disk_raw_bytes`) and their bytes on the wire, RAM as hvi framed it, documents, the whole stream |
-| `roundsEndAt`, `pausedAt`, `sealedMs` | when hvi's last round with the guest running ended (`rounds_end_unix_ms`), when it paused the guest after the sync that follows (`precopy_end_unix_ms`), and how long from the pause to its seal. A replay takes the pause of the attempt that fenced the guest: from the spool's reply when that is hvi's reply to the first stream, else from `latest.json` or the earlier attempt's record; with none of them `pausedAt` and `downtimeMs` are left out |
+| `roundsEndAt`, `pausedAt`, `sealedMs` | when hvi's last round with the guest running ended (`rounds_end_unix_ms`), when it stopped the guest after the sync that follows and its wait for the I/O threads, which the guest runs through (`precopy_end_unix_ms` plus `gate_ms`), and how long from the pause to its seal. A replay takes the pause of the attempt that fenced the guest: from the spool's reply when that is hvi's reply to the first stream, else from `latest.json` or the earlier attempt's record; with none of them `pausedAt` and `downtimeMs` are left out |
 | `finalDiskMs`, `finalDiskBytes` | `disk-round-final`: hvi's time for it and its raw bytes |
-| `stopReason`, `hviPausedMs`, `diskSyncMs`, `pauseSyncMs` | from hvi's reply: why the running rounds stopped, the source's part of the downtime, the disk's sync before the pause and the one in it |
-| `downtimeMs` | from `pausedAt` to the destination's resume, on two hosts' clocks: to its record of running, plus the resume's own time (the destination's `timingsMs.resume`) |
+| `stopReason`, `hviPausedMs`, `hviGateMs`, `diskSyncMs`, `pauseSyncMs` | from hvi's reply: why the running rounds stopped, the source's part of the downtime, the wait for the I/O threads at the pause, the disk's sync before the pause and the one in it |
+| `downtimeMs` | from `pausedAt` to the destination's `resumed` step, on two hosts' clocks; from a destination without steps, to its record of running plus the resume's own time (the destination's `timingsMs.resume`) |
 | `chain` | the trailer's hash, which the destination's record must match |
 | `hviReply` | hvi's reply to `migrate`, as hvi wrote it |
-| `steps` | when this host reached each step from hvi's seal to the commit, by its own clock; the destination's record has its own (`trailer read`, `hvi restored the guest paused`, `base checked`) |
+| `steps` | when this host reached each step from hvi's seal to the commit, by its own clock: `destination accepted`, `hvi sealed the stream`, `instance's fence recorded`, `trailer sent`, `destination answered`, `commit point recorded`, `commit sent`, `commit answered` |
+| `destSteps` | the destination's steps, by its clock, from its replies: `manifest read`, `trailer read`, `hvi restored the guest paused`, `base checked`, `verified recorded`, `commit received`, `epoch saved` (only when the receive did not save it), `ledger written`, `running recorded`, `resumed`; its own record has them too |
 
 A source that took the spool from hvi again also records
 `firstManifestSha256` beside `manifestSha256`.
@@ -614,7 +715,10 @@ rounds of 5426, 487, 0, 0, 0 blocks (369.6 MiB, 128.5 MiB on the wire);
 paused 8 ms, disk sync 0 ms before the pause and 0 ms in it` from hvi's
 reply, `hvi sealed the stream and fenced NAME (5 ms after the pause)`, and
 the summary after the commit (`...; sealed 5 ms after the pause, last disk
-round 0 bytes in 0 ms; downtime about 102 ms`). A replay whose pause is on
+round 0 bytes in 0 ms; downtime about 102 ms`), and then both hosts'
+steps from the seal in milliseconds (`from the seal, ms (there: the
+destination's clock): trailer sent 0, there manifest read 2, ..., there
+resumed 33, commit answered 41`). A replay whose pause is on
 no record ends its summary `the guest was paused in an earlier attempt, at
 a time not on record`, with no seal and no downtime. A stream that ends
 before the manifest with the guest not fenced prints `hvi did not fence
@@ -680,7 +784,8 @@ writer. Every destination was prepared (`hull migrate-prepare`) first.
   time cap. The RAM round taken paused, 5.4 and 4.4 MiB, took 5.05 and
   3.66 s to send, so hvi sealed 5087 and 3677 ms after the pause. From
   the seal to the destination's resume took 2.9 and 3.1 s, against 55 to
-  90 ms between the Pis; that was not explained. The guest's counter,
+  90 ms between the Pis: the stream still on its way at the seal (see
+  "From the seal to the resume" below). The guest's counter,
   `boot_id`, sum and deleted file held on fd 3 checked out after each
   move, and every exec into the moved guest worked.
 - On the Mac, four sessions of claude-code booted against one base,
@@ -705,7 +810,17 @@ from this Mac to rp2, through `brig teleport`:
 - Until that abort, `hull migrate --status` printed `transferring` with
   "The source is fenced and stays so until the move commits or is
   aborted", although the guest was running: a streamed move's source is
-  fenced only from hvi's seal.
+  fenced only from hvi's seal. Since 10c9106 it asks: a fence on the
+  instance's record or from hvi is a fence, hvi saying running is "The
+  guest still runs here", and hvi giving no status, which it does not
+  while its `migrate` streams, was "The guest still runs here; hvi is
+  streaming it". That was wrong for part of that time: hvi answers
+  nothing from before the pause of its last round to after hull has read
+  the stream's tail, and fences the guest at its seal. Since bed4d7d a
+  silent hvi is "hvi is busy with the move's migrate op and answers
+  nothing else: the guest runs until hvi pauses it for the last round,
+  and is fenced from hvi's seal on", and "fenced" once the move's spool
+  holds hvi's manifest or is sealed. hvi saying paused has its own text.
 
 Under a busy disk, an O_DIRECT writer (`dd oflag=direct`, 4 MiB blocks)
 on both Pis, with the ubuntu writer. A 4 KiB `fsync` took 0.25 to 0.95 s
@@ -764,6 +879,237 @@ rp2, with the guest stopped, a copy of its disk replayed its journal
 (`e2fsck -E journal_only`), passed `e2fsck -fn` (only the free block and
 inode counts differ, as on any disk of a running guest) and held the
 entry.
+
+#### From the seal to the resume
+
+2026-10-15, later. `hvi` ba9b2d2 (the pin since 9886afb) built on each
+Pi with `HVI_GIT_SHA`; hull 7c71ed4 (the steps above, nothing else
+changed) against the session hulls after it. The guest is the ubuntu
+guest above, moved from rp1 to rp2, its downtime the rise in `hvi-time`'s
+`downtime total`; "seal to resume" is from hull reading hvi's seal to the
+destination's `resumed` step, on the two hosts' clocks. Those are not
+within a millisecond of each other: a UDP probe at its lowest round trip
+(0.40 to 0.43 ms) put rp2 3.2 to 4.9 ms behind rp1 that evening, and
+chrony on rp1 gave itself 27 ms of root dispersion. The figures up to the
+bed4d7d set are as the clocks gave them, so a cross-host figure there
+(seal to resume, hull's `downtimeMs`) is about 3 to 5 ms short; the
+bed4d7d set corrects them by the probe run before each move.
+rp1 to rp2 runs over the tailnet (`tailscale0`). For the emulated WAN
+only that traffic was shaped on rp1, and the shaping was removed after
+each set of runs:
+
+```
+sudo tc qdisc add dev tailscale0 root handle 1: prio bands 4 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1
+sudo tc qdisc add dev tailscale0 parent 1:4 handle 40: netem delay 100ms rate 10mbit
+sudo tc filter add dev tailscale0 parent 1: protocol ip prio 1 u32 match ip dst 100.81.202.90/32 flowid 1:4
+```
+
+which made the round trip to rp2 100.7 ms (0.6 ms without it), and the
+stream ran at 1.1 MiB/s.
+
+| Link | hull | Seal to resume | Downtime | Total |
+|---|---|---|---|---|
+| emulated WAN, idle | 7c71ed4, before | 3043, 2898 ms | 4792, 4642 ms | 98.4, 98.2 s |
+| emulated WAN, idle | 1144920 (one session) | 445, 478 ms | 2418, 2449 ms | 99.0, 98.0 s |
+| emulated WAN, idle | 612899a | 434 ms | 2242 ms | 97.9 s |
+| LAN, idle | 7c71ed4, before | 79, 68, 158, 73 ms | 115, 105, 164, 103 ms | 2.21 to 2.52 s |
+| LAN, idle | 612899a | 34, 33 ms | 49.0, 57.4 ms | 2.16, 2.12 s |
+
+Where the time went from the seal, on the WAN:
+
+- Before: the trailer left hull 653 ms after the seal (hull's 1 MiB
+  write buffer and the pipes to ssh), and the destination read the
+  manifest 2566 ms after it (ssh's window, the socket buffers and the
+  link's queue). Its restore took 45 ms more, its verified record 5 ms,
+  the source's commit point 184 ms, and the commit, in a new ssh session,
+  230 ms before the destination had it. From hvi's own seal, which can
+  come before hull reads it with the stream behind hull's buffer in hvi's
+  socket, to the resume took 3.9 and 2.9 s.
+- One session: the manifest arrived 300 to 344 ms after the seal, 100 ms
+  of it the link's one-way delay, then 13 to 19 ms of restore, 5 ms to
+  record verified, 3 to 4 ms for the source's commit point, the link's
+  100 ms for the commit in the session, and 8 to 10 ms for the
+  destination's commit. From hvi's own seal to the resume: 0.65 to
+  0.81 s.
+- From hull's read of the seal that is under 300 ms plus two round
+  trips (501 ms) on that link. From hvi's own seal, the measure the
+  target was set in, it is 0.65 to 0.81 s, over it.
+  The downtime fell by about 2.3 s, the stream on its way at the seal;
+  the rest is hvi's pause (`paused_ms` 1588 to 1644 ms), its last rounds
+  at the link's rate.
+- The session hulls before 612899a held the LAN's RAM rounds to 45.5 to
+  46.5 MiB/s against 52.3 to 58.6 MiB/s without a session: the window of
+  twice the shortest round trip was 128 KiB there. With the 20 ms floor
+  (612899a) they ran at 57.4 and 58.2 MiB/s.
+
+On the LAN, hull 612899a and after, rp1 to rp2:
+
+| Guest | Total | Downtime | Seal to resume | Sent | Rounds |
+|---|---|---|---|---|---|
+| idle | 2.16 s | 49.0 ms | 34 ms | 109.4 MiB at 59.9 MiB/s | disk 4390, 7, 0; 3 RAM (converged) |
+| writer | 4.10 s | 51.4 ms | 48 ms | 299.4 MiB at 78.8 MiB/s | disk 5413, 487, 0, 0; 4 RAM (converged) |
+| 256 MiB dirtier | 27.5 s | 3.37 s | 43 ms | 2.1 GiB at 78.3 MiB/s | disk 5416, 808, 484, 323, 484, 484; 6 RAM (round_cap) |
+| writer, O_DIRECT hog on both | 59.5, 59.1, 53.0, 65.3 s | 6.93, 19.40, 13.60, 22.04 s | 6.92, 19.09, 13.31, 22.02 s | 238 to 280 MiB at 5.9 to 6.9 MiB/s | 2 to 4 RAM (converged) |
+| writer, O_DIRECT hog, rp2 to rp1 | 69.4, 77.8 s | 6.18, 4.45 s | 3.33, 4.13 s | 263, 283 MiB | 3 to 4 RAM (converged) |
+
+- Under the hog the source's pause no longer waits for a park: hvi's
+  `paused_ms` was 10, 313, 291 and 13 ms from rp1 and 2847 and 327 ms from
+  rp2, with `park_ms` and `gate_ms` 0 in the two runs that printed them;
+  the 2847 ms was the sync in the pause (2701 ms). Before ba9b2d2 H8b's
+  run had 3.35 s of `paused_ms`. The downtime is now the destination's
+  disk: in the 22.04 s run, hvi's restore on rp2 ended 15.8 s after the
+  seal (it waits for its sync of the disk rounds it wrote), the verified
+  record took 1.66 s, the source's commit point 1.79 s, and the commit's
+  ledger, running record and resume 1.06, 1.02 and 0.72 s. The spread
+  from 6.9 to 22 s is in the destination's restore (2.6 to 15.8 s) and
+  the synced writes, all on disks the hog keeps busy.
+- In two more idle runs, from rp1, `hvi`'s sync of the guest's disk took
+  6.9 and 7.0 s before the pause and 1.0 and 3.2 s in it, and the RAM
+  round ran at 8.7 and 8.1 MiB/s, with no hog: most likely rp1's disk was
+  still writing out the guest's disk, copied from the base at its boot.
+  The later runs wait for a `sync` after the boot, and none of them saw
+  it again.
+- SIGKILL of hull at "hvi sealed the stream": `--status` then said the
+  source is fenced, as hvi did; rp2 had the guest restored paused, the
+  session's stream having reached it whole, and waited for the commit
+  until the stream ended. The re-run adopted the fence and committed rp2's
+  copy in 0.73 s (the guest was down 1.02 s). In a second run, where rp2
+  was still receiving at the kill, `--abort` released rp2 and restored the
+  guest on rp1 from the spool in 5.2 s, the guest down 5.63 s. Both times
+  the counter had no gap and `boot_id`, the blob and the held file were
+  the same.
+- On the emulated WAN, the writer (10 MiB/s of disk against 1.1 MiB/s of
+  link) never converged: hvi stopped the rounds at the time cap and took
+  the last disk round (66.4 MiB) and RAM round (67.2 MiB) with the guest
+  paused, 115.9 s of downtime, of which seal to resume was 615 ms.
+- Against H8b's run under the same hog (`ef78fb6`, see above: 10.98 s
+  down from rp1, 0.66 s from rp2), the downtime is not lower: 2.5 to
+  22.0 s from rp1 and 4.5 and 6.2 s from rp2 in the runs here. The park
+  is gone, and the time went to the destination's restore and the synced
+  writes on both hosts, whose length on these disks varies from run to
+  run.
+
+Again at hull 9cb3440, the code this page describes, with `hvi` ba9b2d2,
+rp1 to rp2, one run each unless said. From the third move under the hog
+on, rp1 also ran another project's guest.
+
+| Guest | Total | Downtime | Seal to resume |
+|---|---|---|---|
+| idle | 2.19 s | 46.8 ms | 37 ms |
+| writer | 4.12 s | 76.8 ms | 43 ms |
+| writer, O_DIRECT hog on both | 83.7, 72.1 s | 6.04, 2.52 s | 5.69, 1.85 s |
+| idle, emulated WAN | 103.3, 98.1 s | 2.71, 2.39 s | 793, 472 ms |
+
+- Under the hog `park_ms` and `gate_ms` were 0 in both moves that went
+  through, and `paused_ms` 357 and 305 ms, of which the sync in the pause
+  took 349 and 300 ms.
+- A third move under the hog failed, and the guest ran on at rp1. Its
+  stream had slowed to 0.3 MiB/s in the last RAM round, taken with the
+  guest paused (`ram-round-2`, 4.6 MiB in 14 s). That run was not
+  sampled, and why the round slowed was not confirmed. Two causes fit.
+  In the next move under the hog, `disk-round-2` ran at 1.7 MiB/s for
+  5.8 s while a hull thread on rp1 sat in the ext4 journal
+  (`wait_on_buffer`, `do_get_write_access`), maybe writing the spool. And
+  the window of these hulls shrank to its 128 KiB floor when the acks'
+  round trip rose during a stream; 128 KiB per round trip of about 0.4 s
+  is the 0.3 MiB/s seen. 2d3caa8 fixed the window. hvi most likely gave
+  up at its bound for that round,
+  10 s plus twice the last round with the guest running, and resumed the
+  guest. hull, part way through that frame, only noticed when its own
+  2 minute bound for a silent hvi ran out: rp2 got the stream cut short
+  in `ram-round-2`, refused it, and the move stopped
+  at `transferring` 173.6 s after it began, with the guest unfenced.
+  `--status` said "The guest still runs here", the counter had no gap
+  and `boot_id`, the blob and the held file were the same, and
+  `--abort` released rp2.
+- On the emulated WAN the 793 ms run spent 348 ms on the source's synced
+  commit point; in the other run it took 4 ms, and seal to resume was
+  472 ms, under the 501 ms of 300 ms plus two round trips. From hvi's
+  own seal, `pausedAt` plus `sealedMs`, the two runs took 1119 and
+  801 ms: hull read the seal 325 and 328 ms after hvi wrote it, the tail
+  of the stream still in hvi's socket behind the window. Both runs
+  stopped the RAM rounds at the time cap, as the earlier ones did.
+- SIGKILL of hull at "hvi sealed the stream" (writer, no hog): `--status`
+  said the source is fenced, and rp2 had the guest restored paused. The
+  re-run adopted the fence and committed rp2's copy in 1.59 s. The guest
+  was down 4.69 s: hvi's pause took 1984 ms (1695 ms of it the sync in
+  the pause, on rp1's busy disk), and the rest went from the kill to the
+  re-run's commit, with the test's status checks between. The counter
+  had no gap and `boot_id`, the blob and the held file were the same.
+
+Again at hull bed4d7d, after the review of 9cb3440, with `hvi` ba9b2d2,
+rp1 to rp2, one run each unless said. The changes: the window measures
+its round trip again each second (2d3caa8), hull reads hvi's socket
+through 64 KiB in a session (e852118), the destination waits 20 s for
+the commit in a session, and a silent hvi gets its own `--status` text.
+Seal to resume is corrected for rp2's clock, 3.7 to 4.9 ms behind rp1's
+by the UDP probe before each move; "from hvi's seal" counts from
+`pausedAt` plus `sealedMs`.
+
+| Guest, link | Total | Downtime | Seal to resume, from hull's read / hvi's seal |
+|---|---|---|---|
+| idle, LAN | 2.20, 2.31 s | 69.3, 74.0 ms | 47 / 53, 46 / 50 ms |
+| idle, 40 ms delay from the start | 5.08 s | 180 ms | |
+| idle, 40 ms delay added 0.37 s into the stream | 3.57 s | 130 ms | |
+| idle, emulated WAN | 103.7, 103.8 s | 2331, 2242 ms | 436 / 601, 529 / 586 ms |
+| writer, O_DIRECT hog on both | 69.3, 49.9 s | 28.8, 11.0 s | |
+| idle, SIGKILL at the seal, then re-run | re-run 0.41 s | 702 ms | |
+
+- With the delay added during the stream, its RAM round ran at
+  29.4 MiB/s, the same as with the delay there from the start
+  (28.7 MiB/s). The review's run of that shape at 7b3f7b1 ran its RAM
+  rounds at 2.8 to 3.1 MiB/s, took 28.5 s and was down 760 ms. The delay
+  went on during `disk-round-0`, once the window had measured the LAN's
+  round trip.
+- On the emulated WAN, of the 601 and 586 ms from hvi's seal: hull read
+  the seal 165 and 57 ms after hvi wrote it (170 to 328 ms with the
+  1 MiB reader), and the destination read the manifest 468 and 444 ms
+  after the seal. That is the stream ahead of the manifest, in hvi's
+  socket and the window, and the link's 100 ms one-way delay. The rest,
+  in the first run: 13 ms for the restore, 6 ms to record verified, 3 ms
+  for the source's commit point, 101 ms for the commit's way through the
+  link, and 10 ms for the destination's commit and resume; in the second,
+  28, 4, 101 and 8 ms. The window allows twice a round trip of about
+  153 ms: the link's 100 ms, and 52 ms to put one 64 KiB write on a
+  10 Mbit/s link. So 300 ms plus two round trips is not met
+  from hvi's seal: that needs the window under one round trip at the
+  seal, and hvi's side of its socket smaller.
+- `--status` polled every 5 s through the second WAN move said "hvi is
+  busy with the move's migrate op and answers nothing else" each time
+  during the rounds, and `committed` after.
+- Under the hog both moves went through. hvi's `park_ms` was 0; its
+  `paused_ms` was 4503 and 2097 ms, of which its wait for the I/O
+  threads (`gate_ms`) was 2497 and 1249 ms. The rounds taken in the pause
+  ran at 2.3 and 63.1 MiB/s, and 9.5 and 12.1 MiB/s. The downtime was the
+  destination's disk: in the 28.8 s move hvi's restore ended 7.8 s after
+  the seal, the verified record took 5.4 s, the source's commit point
+  1.2 s, and the commit's ledger, running record and resume 4.2, 3.3 and
+  2.5 s; in the 11.0 s move those were 2.7, 1.5, 1.9, 0.9, 1.3 and
+  0.6 s.
+- hull's progress line for the last round before the pause counts until
+  the next frame, so it includes hvi's sync of the disk before the pause
+  and its gate: `ram-round-3` of the 28.8 s move, 6.2 MiB "in 5.72 s,
+  1.1 MiB/s", was 3157 ms of sync and 2497 ms of gate. In the 11.0 s
+  move hull printed 4.50 s for `ram-round-1`, and hvi's own stats give
+  it 128 ms.
+- SIGKILL of hull at "hvi sealed the stream": `--status` said the source
+  is fenced and rp2 held the guest restored paused. The re-run sealed the
+  spool, adopted the fence and committed rp2's copy in 414 ms. The counter
+  had no gap and `boot_id`, the blob and the held file were the same.
+- The writer on the LAN, after the runs under the hog, with this hull
+  and with 7b3f7b1 built the same way, in turn. With both disks quiet
+  this hull took 4.19 to 4.45 s at 74.5 to 77.7 MiB/s (three moves) and
+  7b3f7b1 4.06 s at 80.5 MiB/s, against 4.10 s at 78.8 MiB/s in the
+  612899a set. The other moves of both hulls were slower, and the time
+  went to the disks: this hull took 8.7 to 32.4 s in five, 7b3f7b1 8.3
+  and 22.4 s in two. In the one slow move sampled, rp1's rounds slowed
+  while its page cache had up to 160 MB under writeback, draining at
+  about 8 MB/s. On rp2, hvi's restore took 3.7 and 4.2 s after the seal
+  in one move of each hull, and in one move of this hull rp2 read the
+  stream's tail, what the window had let on, 27.7 s after the seal, and
+  the guest was down 27.9 s. rp2's disk is a DRAM-less 512 GB NVMe. The downtime of the moves that did not wait on
+  rp2 was 37 to 89 ms with this hull and 34 and 38 ms with 7b3f7b1. No
+  move lost a line of its counter.
 
 ## Records
 

@@ -72,6 +72,9 @@ type streamSender struct {
 	// prev is the record of the stream of this move's earlier attempt,
 	// when there was one.
 	prev *migrateStreamStats
+	// accepted is closed when a session's destination says it took this
+	// attempt's header; nil outside a session.
+	accepted chan struct{}
 }
 
 func (ss *streamSender) progress(format string, args ...any) {
@@ -392,8 +395,17 @@ func (ss *streamSender) relayFrame(f *roundFolder, line []byte, hdr hviComponent
 // is not fenced (fenceAfterBreak).
 func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][]byte, error) {
 	m := ss.m
-	conn, br, err := hviStreamOp(ss.state.ControlSock, map[string]any{"op": "migrate", "then": hviThenFence,
-		"txid": m.rec.TxID, "epoch": m.rec.Epoch}, hviStreamIdle)
+	// In a session the window holds back what hull relays, and what hull
+	// has read from hvi and not yet relayed is behind the window, where
+	// the window does not count it: at hvi's seal the guest waits for it
+	// too. A reader no larger than the session's writes keeps that short;
+	// the rest of it is in hvi's side of the socket.
+	size := 1 << 20
+	if ss.link.win != nil {
+		size = sessionWriteBuffer
+	}
+	conn, br, err := hviStreamOpSize(ss.state.ControlSock, map[string]any{"op": "migrate", "then": hviThenFence,
+		"txid": m.rec.TxID, "epoch": m.rec.Epoch}, hviStreamIdle, size)
 	if err != nil {
 		if ss.restream {
 			return nil, nil, err
@@ -734,7 +746,15 @@ func (m *moveSource) streamTransfer(ctx context.Context) (retErr error) {
 	started := time.Now()
 	pr, pw := io.Pipe()
 	link := &softLink{w: pw}
+	sp, session := m.peer.(sessionPeer)
+	session = session && m.rec.Session
 	sw := newMoveStreamWriter(link)
+	if session {
+		// The window bounds what is on its way, and the writer's buffer
+		// would be more of it.
+		link.win = newAckWindow()
+		sw = newMoveStreamWriterSize(link, sessionWriteBuffer)
+	}
 	attempt, err := newMoveTxID()
 	if err != nil {
 		return err
@@ -743,6 +763,9 @@ func (m *moveSource) streamTransfer(ctx context.Context) (retErr error) {
 	ss := &streamSender{m: m, state: state, sw: sw, link: link, size: info.Size(), stats: stats,
 		spoolDir: spoolDir, ctx: ctx, attempt: attempt, callDone: make(chan struct{}), sealGate: m.sealGate,
 		prev: prev}
+	if session {
+		ss.accepted = make(chan struct{})
+	}
 	type sendResult struct {
 		hviReply json.RawMessage
 		err      error
@@ -750,12 +773,29 @@ func (m *moveSource) streamTransfer(ctx context.Context) (retErr error) {
 	sent := make(chan sendResult, 1)
 	go func() {
 		reply, err := ss.send(replay)
-		_ = pw.CloseWithError(err)
+		if err != nil || !session {
+			_ = pw.CloseWithError(err)
+		}
 		sent <- sendResult{reply, err}
 	}()
-	reply, err := m.peer.call(ctx, "migrate-receive", []string{"--stream", "--txid", m.rec.TxID, "--name", m.name}, pr)
-	close(ss.callDone)
-	_ = pr.CloseWithError(errors.New("the destination stopped reading"))
+	args := []string{"--stream", "--txid", m.rec.TxID, "--name", m.name}
+	var reply *migrateReply
+	var open *openSession
+	if session {
+		reply, open, err = ss.runSession(sp, append(args, "--session"), pr, pw)
+	} else {
+		reply, err = m.peer.call(ctx, "migrate-receive", args, pr)
+		close(ss.callDone)
+		_ = pr.CloseWithError(errors.New("the destination stopped reading"))
+	}
+	// A session left open is for the commit; one this attempt does not
+	// get to the commit point is ended, which leaves the guest restored
+	// paused on the destination.
+	defer func() {
+		if open != nil && m.session != open {
+			open.end()
+		}
+	}()
 	res := <-sent
 	m.spoolSealing = ss.sealDone
 	if ss.recorded != nil {
@@ -823,9 +863,61 @@ func (m *moveSource) streamTransfer(ctx context.Context) (retErr error) {
 			return err
 		}
 		stats.step("commit point recorded")
+		// The commit goes in the session, which stays open for it.
+		m.session = open
 		return nil
 	}
 	return m.rec.advance(m.path, srcTransferred)
+}
+
+// sessionWriteBuffer is the stream writer's buffer in a session.
+const sessionWriteBuffer = 64 << 10
+
+// runSession runs the streamed receive as a session: the destination's
+// accepted line lets hvi's migrate begin, its acked lines move the
+// window, and its verified line is the receive's reply, with the session
+// left open for the commit. A session that ends before it says verified
+// gives its last line instead, and no session to commit in.
+func (ss *streamSender) runSession(sp sessionPeer, args []string, pr *io.PipeReader,
+	pw *io.PipeWriter) (*migrateReply, *openSession, error) {
+	win := ss.link.win
+	verified := make(chan *migrateReply, 1)
+	done := make(chan sessionResult, 1)
+	var acceptOnce sync.Once
+	go func() {
+		reply, err := sp.session(ss.ctx, "migrate-receive", args, pr, func(ev *migrateReply) {
+			switch ev.Event {
+			case eventAccepted:
+				if ev.Detail == ss.attempt {
+					acceptOnce.Do(func() { close(ss.accepted) })
+				}
+			case eventAcked:
+				win.ack(ev.Bytes)
+			case eventVerified:
+				select {
+				case verified <- ev:
+				default:
+				}
+			}
+		})
+		win.close()
+		close(ss.callDone)
+		_ = pr.CloseWithError(errors.New("the destination stopped reading"))
+		done <- sessionResult{reply, err}
+	}()
+	select {
+	case v := <-verified:
+		return v, &openSession{sw: ss.sw, pw: pw, win: win, done: done}, nil
+	case r := <-done:
+		select {
+		case v := <-verified:
+			// It said verified, and then ended the session itself: the
+			// commit goes by migrate-commit.
+			return v, nil, nil
+		default:
+		}
+		return r.reply, nil, r.err
+	}
 }
 
 // send writes the whole stream. Live, it ends with hvi having fenced the
@@ -968,6 +1060,25 @@ const acceptPoll = 50 * time.Millisecond
 func (ss *streamSender) waitAccepted() error {
 	m := ss.m
 	started := time.Now()
+	if ss.accepted != nil {
+		// A session says so on its own: no status to poll.
+		select {
+		case <-ss.accepted:
+		case <-ss.callDone:
+			select {
+			case <-ss.accepted:
+			default:
+				return errors.New("the destination refused the stream before hvi's migrate began")
+			}
+		case <-ss.ctx.Done():
+			return ss.ctx.Err()
+		}
+		ss.stats.step("destination accepted")
+		if took := time.Since(started); took > time.Second {
+			ss.progress("the destination took the stream in %.1f s (it copied the base)", took.Seconds())
+		}
+		return nil
+	}
 	for {
 		reply, err := m.peer.call(ss.ctx, "migrate-status", []string{"--txid", m.rec.TxID}, nil)
 		if err == nil && reply.Record != nil && reply.Record.StreamAccepted == ss.attempt {
@@ -1002,19 +1113,29 @@ var streamTestHook func(stage string)
 // buffer, and hvi seals, and fences the guest, once they are written there.
 // A source that left them unread would be fenced with no whole copy of the
 // guest anywhere.
+//
+// In a session its window (win) holds a write back until the destination
+// has read enough of what went before; a session that ends lets every
+// write through.
 type softLink struct {
 	w   io.Writer
 	err error
+	win *ackWindow
 }
 
 func (l *softLink) Write(p []byte) (int, error) {
-	if l.err != nil {
-		return len(p), nil
+	n := len(p)
+	for len(p) > 0 && l.err == nil {
+		piece := p[:min(len(p), sessionWriteBuffer)]
+		if l.win != nil {
+			l.win.wait(int64(len(piece)))
+		}
+		if _, err := l.w.Write(piece); err != nil {
+			l.err = err
+		}
+		p = p[len(piece):]
 	}
-	if _, err := l.w.Write(p); err != nil {
-		l.err = err
-	}
-	return len(p), nil
+	return n, nil
 }
 
 // noteFence puts the fence hvi made on the move's record, in memory: the

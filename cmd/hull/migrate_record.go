@@ -187,6 +187,10 @@ type migrationRecord struct {
 	// move whose header it took and whose base it copied: the source
 	// waits for it before hvi's migrate fences the guest.
 	StreamAccepted string `json:"streamAccepted,omitempty"`
+	// Session is, on the source of a streamed move, whether the
+	// destination's probe said it holds a move in one session
+	// (moveCapSession).
+	Session bool `json:"session,omitempty"`
 
 	// Error is the last step's failure, kept for `hull migrate --status`.
 	Error   string           `json:"error,omitempty"`
