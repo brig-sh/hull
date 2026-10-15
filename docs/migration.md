@@ -1048,7 +1048,7 @@ by the UDP probe before each move; "from hvi's seal" counts from
 
 | Guest, link | Total | Downtime | Seal to resume, from hull's read / hvi's seal |
 |---|---|---|---|
-| idle, LAN | 2.20 s | 69.3 ms | 47 / 53 ms |
+| idle, LAN | 2.20, 2.31 s | 69.3, 74.0 ms | 47 / 53, 46 / 50 ms |
 | idle, 40 ms delay from the start | 5.08 s | 180 ms | |
 | idle, 40 ms delay added 0.37 s into the stream | 3.57 s | 130 ms | |
 | idle, emulated WAN | 103.7, 103.8 s | 2331, 2242 ms | 436 / 601, 529 / 586 ms |
@@ -1096,6 +1096,20 @@ by the UDP probe before each move; "from hvi's seal" counts from
   is fenced and rp2 held the guest restored paused. The re-run sealed the
   spool, adopted the fence and committed rp2's copy in 414 ms. The counter
   had no gap and `boot_id`, the blob and the held file were the same.
+- The writer on the LAN, after the runs under the hog, with this hull
+  and with 7b3f7b1 built the same way, in turn. With both disks quiet
+  this hull took 4.19 to 4.45 s at 74.5 to 77.7 MiB/s (three moves) and
+  7b3f7b1 4.06 s at 80.5 MiB/s, against 4.10 s at 78.8 MiB/s in the
+  612899a set. The other moves of both hulls were slower, and the time
+  went to the disks: this hull took 8.7 to 32.4 s in five, 7b3f7b1 8.3
+  and 22.4 s in two. In the one slow move sampled, rp1's rounds slowed
+  while its page cache had up to 160 MB under writeback, draining at
+  about 8 MB/s. On rp2, hvi's restore took 3.7 and 4.2 s after the seal
+  in one move of each hull, and in one move of this hull rp2 read the
+  stream's tail, what the window had let on, 27.7 s after the seal, and
+  the guest was down 27.9 s. rp2's disk is a DRAM-less 512 GB NVMe. The downtime of the moves that did not wait on
+  rp2 was 37 to 89 ms with this hull and 34 and 38 ms with 7b3f7b1. No
+  move lost a line of its counter.
 
 ## Records
 
