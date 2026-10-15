@@ -746,6 +746,7 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	initrdPath := ""
 	rootfsDir := ""
 	rootfsDiskImage := "" // path to ext4 disk image (block mode)
+	rootfsBase := ""      // digest of the image base the disk was copied from
 	containerRootfsDirect := false
 	containerMetadataRootfs := ""
 	mountRootfs := ociSpec.Annotations["com.urunc.unikernel.mountRootfs"] == "true"
@@ -902,8 +903,21 @@ exec %s "$@"
 				imageSizeMB = 15 * 1024
 			}
 
-			if err := buildBlockRootfs(diskPath, srcDir, injects, imageSizeMB); err != nil {
-				return err
+			if vmmType == hypervisors.HviVmm {
+				// From the image's base, which a move sends once per
+				// destination for every instance of the image.
+				rootfsBase, err = diskFromImageBase(s, imageDigest, diskPath, srcDir, injects, imageSizeMB)
+				if err != nil {
+					log.Warnf("Could not start the disk from the image's base (%v); building it on its own, "+
+						"and a move of this instance will send its whole disk", err)
+					rootfsBase = ""
+					_ = os.Remove(diskPath)
+				}
+			}
+			if rootfsBase == "" {
+				if err := buildBlockRootfs(diskPath, srcDir, injects, imageSizeMB); err != nil {
+					return err
+				}
 			}
 			rootfsDiskImage = diskPath
 			if containerBoot {
@@ -1492,13 +1506,14 @@ exec %s "$@"
 			cmdArgs = append(cmdArgs, "--control-sock", controlSock, "--profile-out", profilePath,
 				"--checkpoint-root", root)
 			// A checkpointable guest on a block rootfs can be moved, and a
-			// move sends only what differs from the image as built when the
-			// destination holds that image: keep it now, before the guest
-			// writes to its copy.
-			if rootfsDiskImage != "" {
-				base, baseArgs := keepRunBase(s, cmdArgs[0], rootfsDiskImage)
-				instanceBase = base
-				cmdArgs = append(cmdArgs, baseArgs...)
+			// move sends only what differs from its image's base when the
+			// destination holds that base. hvi is not given the base's
+			// digest (--disk-base-sha256): that names the disk as hvi
+			// opens it, and this disk has the instance's own files written
+			// over the base, which hvi's since-boot blocks do not cover. A
+			// move finds those by comparing the disk with the base.
+			if rootfsDiskImage != "" && rootfsBase != "" {
+				instanceBase = &store.BaseState{SHA256: rootfsBase}
 			}
 		} else if profile != "" {
 			// A profile exists to be checkpointed and moved, and without

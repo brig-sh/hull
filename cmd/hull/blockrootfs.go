@@ -56,6 +56,15 @@ type blockInject struct {
 // (see ociclient.GuestAttr) and is restored here, straight into the finished
 // filesystem, where ext4's inodes can hold what APFS could not.
 func buildBlockRootfs(diskPath, rootfsDir string, injects []blockInject, sizeMB int) error {
+	if err := makeBlockImage(diskPath, rootfsDir, sizeMB); err != nil {
+		return err
+	}
+	return fixupBlockImage(diskPath, rootfsDir, injects)
+}
+
+// makeBlockImage runs mke2fs over rootfsDir into a new image at diskPath,
+// readable by its owner alone.
+func makeBlockImage(diskPath, rootfsDir string, sizeMB int) error {
 	// All three are needed, and the last two run only after mke2fs has written
 	// a full-size image; finding out that debugfs is missing at that point
 	// leaves a 15 GiB sparse file and an error that names the wrong step.
@@ -87,7 +96,16 @@ func buildBlockRootfs(diskPath, rootfsDir string, injects []blockInject, sizeMB 
 	if err := os.Chmod(diskPath, 0o600); err != nil {
 		return fmt.Errorf("failed to restrict the block image: %w", err)
 	}
+	return nil
+}
 
+// fixupBlockImage writes into the image at diskPath the ownership and modes
+// rootfsDir records, when rootfsDir is given, then the injects, and settles
+// the filesystem. With neither it changes nothing.
+func fixupBlockImage(diskPath, rootfsDir string, injects []blockInject) error {
+	if rootfsDir == "" && len(injects) == 0 {
+		return nil
+	}
 	// The injected files need to exist on the host for debugfs to copy them in.
 	// Three small files beside the image, not a second copy of the rootfs.
 	stage, err := os.MkdirTemp(filepath.Dir(diskPath), "block-inject-")
@@ -101,9 +119,12 @@ func buildBlockRootfs(diskPath, rootfsDir string, injects []blockInject, sizeMB 
 	// image that ships its own /urunit.conf at 0644 would have that mode put
 	// back over the injected 0600 file that carries the guest's credentials.
 	var script bytes.Buffer
-	skipped, err := appendOwnershipScript(&script, rootfsDir)
-	if err != nil {
-		return err
+	skipped := 0
+	if rootfsDir != "" {
+		skipped, err = appendOwnershipScript(&script, rootfsDir)
+		if err != nil {
+			return err
+		}
 	}
 	if skipped > 0 {
 		// Not fatal, but not silent either: those files keep the host's
