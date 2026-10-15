@@ -262,6 +262,7 @@ func startMove(ctx context.Context, s *store.Store, state *store.InstanceState, 
 	rec.Transport, rec.TransportWhy = decideTransport(moveTransportFacts(s, state, probe, opt.wholeBundle))
 	if rec.Transport == transportStream {
 		rec.BaseSHA256 = state.Base.SHA256
+		rec.Session = probe.hasCapability(moveCapSession)
 	}
 	if opt.dryRun {
 		printMovePlan(opt.out, rec, state, probe)
@@ -513,6 +514,9 @@ type moveSource struct {
 	// sealGate holds the spool's sync until releaseSeal.
 	sealGate     chan struct{}
 	sealGateOnce sync.Once
+	// session is the streamed receive's session, held open after the
+	// destination said verified, for the commit to go in.
+	session *openSession
 }
 
 // releaseSeal lets the spool's seal sync it: once the commit is answered,
@@ -545,6 +549,7 @@ func (m *moveSource) waitFenceRecord() error {
 // waitSpool waits for the seal of the spool a streamed move left running
 // behind it, so the process does not end before its writes are synced.
 func (m *moveSource) waitSpool() {
+	m.endSession()
 	m.releaseSeal()
 	if err := m.waitFenceRecord(); err != nil {
 		m.logf("warning: %v", err)
@@ -616,6 +621,7 @@ func (m *moveSource) run(ctx context.Context) error {
 
 // stopped records why the move stopped and says what the operator can do.
 func (m *moveSource) stopped(err error) error {
+	m.endSession()
 	m.releaseSeal()
 	err = m.rec.fail(m.path, err)
 	fenced := migrateStateOrder(roleSource, m.rec.State) >= migrateStateOrder(roleSource, srcFenced)
@@ -665,9 +671,11 @@ func (m *moveSource) reserve(ctx context.Context) error {
 		return err
 	}
 	if !m.probed {
-		if _, err := probeDestination(ctx, m.peer, m.rec, m.s, state); err != nil {
+		p, err := probeDestination(ctx, m.peer, m.rec, m.s, state)
+		if err != nil {
 			return err
 		}
+		m.rec.Session = m.rec.Transport == transportStream && p.hasCapability(moveCapSession)
 	}
 	req, err := json.Marshal(migrateReserveRequest{Epoch: m.rec.Epoch, Spec: *m.rec.Spec})
 	if err != nil {
@@ -1012,8 +1020,21 @@ func (m *moveSource) commit(ctx context.Context) error {
 	if st := m.rec.Stream; st != nil && m.rec.Transport == transportStream {
 		st.step("commit sent")
 	}
-	reply, err := m.peer.call(ctx, "migrate-commit",
-		[]string{"--txid", m.rec.TxID, "--epoch", strconv.FormatUint(m.rec.Epoch, 10)}, nil)
+	var reply *migrateReply
+	var err error
+	inSession := m.session != nil
+	if inSession {
+		reply, err = m.commitInSession()
+	}
+	if reply == nil || (reply.OK && reply.Record != nil && reply.Record.State != dstRunning) {
+		if inSession {
+			// The session ended before the commit's answer, or the
+			// destination did not take the commit in it.
+			m.logf("warning: the commit had no answer in the move's session (%v); sending it again", err)
+		}
+		reply, err = m.peer.call(ctx, "migrate-commit",
+			[]string{"--txid", m.rec.TxID, "--epoch", strconv.FormatUint(m.rec.Epoch, 10)}, nil)
+	}
 	m.releaseSeal()
 	if reply == nil || reply.Record == nil || reply.Record.State != dstRunning ||
 		reply.Record.TxID != m.rec.TxID || reply.Record.Epoch != m.rec.Epoch {

@@ -64,7 +64,7 @@ const probeMaxBases = 512
 // destHolds is what the probe lists of the bases and profile kernels the
 // destination store holds.
 func destHolds(s *store.Store, p *migrateProbe) {
-	p.Capabilities = []string{moveCapStream}
+	p.Capabilities = []string{moveCapStream, moveCapSession}
 	if entries, err := os.ReadDir(s.BasesDir()); err == nil {
 		for _, e := range entries {
 			name, ok := strings.CutSuffix(e.Name(), ".ext4")

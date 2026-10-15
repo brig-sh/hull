@@ -58,6 +58,10 @@ type migrateReply struct {
 	VM string `json:"vm,omitempty"`
 	// Detail says what a verb did, when it says more than ok.
 	Detail string `json:"detail,omitempty"`
+	// Event names a line of a session that is not its last
+	// (migrate_session.go), and Bytes is an acked line's count.
+	Event string `json:"event,omitempty"`
+	Bytes int64  `json:"bytes,omitempty"`
 }
 
 // migrateProbe is what migrate-probe reports about the destination.
