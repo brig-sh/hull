@@ -28,13 +28,15 @@ import (
 
 // After a streamed move commits, its source is the likeliest destination
 // of the next move of the instance: the way back. A receive with no spare
-// of the base copies it first, and on a Pi that took 22 s. So the source
-// makes the spare itself once the move commits, in a process of its own
-// that outlives the `hull migrate` (and the ssh session or brig that ran
-// it), writing what it did to the instance's log. It keeps the base as a
-// prepare's received one is kept, so the `hull rm` of the stale copy that
-// a move back needs first leaves the base and the spare in place, until a
-// `hull prune --bases`.
+// of the base copies it first, and on a Pi that took 22 s; and a base no
+// receive has checked here is hashed whole while the stream arrives, which
+// the move waits for before it is verified, with the guest paused. So the
+// source makes the spare and checks the base itself once the move commits,
+// in a process of its own that outlives the `hull migrate` (and the ssh
+// session or brig that ran it), writing what it did to the instance's
+// log. It keeps the base as a prepare's received one is kept, so the `hull
+// rm` of the stale copy that a move back needs first leaves the base and
+// the spare in place, until a `hull prune --bases`.
 
 // startSpareBase starts the making of the spare of base sum for the move
 // back of instance name, without waiting for it. A variable so tests can
@@ -84,13 +86,13 @@ func (m *moveSource) spareForTheWayBack() {
 		m.logf("move: no spare copy of base %s here for a move back: the base is gone from this store",
 			digestHead(sum))
 		return
-	case spareHeld(m.s, sum):
+	case spareHeld(m.s, sum) && baseCheckStands(m.s.BasePath(sum), sum):
 		m.logf("move: base %s has a spare copy here for a move back", digestHead(sum))
 	}
 	if err := markBaseReceived(m.s, sum); err != nil {
 		m.logf("warning: base %s is not kept for a move back: %v", digestHead(sum), err)
 	}
-	if spareHeld(m.s, sum) {
+	if spareHeld(m.s, sum) && baseCheckStands(m.s.BasePath(sum), sum) {
 		return
 	}
 	if err := startSpareBase(m.s, m.name, sum); err != nil {
@@ -123,23 +125,34 @@ func spareAfterMove(s *store.Store, name, sum string, w io.Writer) *migrateReply
 		line("no spare copy of base %s for a move back of %s: the base is gone from this store", digestHead(sum), name)
 		return &migrateReply{OK: true, Detail: "gone"}
 	}
+	how := "held"
 	if spareHeld(s, sum) {
 		line("base %s already has a spare copy for a move back of %s", digestHead(sum), name)
-		return &migrateReply{OK: true, Detail: "held"}
-	}
-	started := time.Now()
-	line("making a spare copy of base %s for a move back of %s (pid %d)", digestHead(sum), name, os.Getpid())
-	how, err := ensureSpareBase(s, sum)
-	if err != nil {
-		line("no spare copy of base %s for a move back of %s: %v; a move back copies the base",
-			digestHead(sum), name, err)
-		return refuse(codeFailed, err)
-	}
-	if how == "held" {
-		line("base %s already has a spare copy for a move back of %s", digestHead(sum), name)
 	} else {
-		line("made a spare copy of base %s for a move back of %s (%s, %.1f s)", digestHead(sum), name, how,
-			time.Since(started).Seconds())
+		started := time.Now()
+		line("making a spare copy of base %s for a move back of %s (pid %d)", digestHead(sum), name, os.Getpid())
+		var err error
+		if how, err = ensureSpareBase(s, sum); err != nil {
+			line("no spare copy of base %s for a move back of %s: %v; a move back copies the base",
+				digestHead(sum), name, err)
+			return refuse(codeFailed, err)
+		}
+		if how == "held" {
+			line("base %s already has a spare copy for a move back of %s", digestHead(sum), name)
+		} else {
+			line("made a spare copy of base %s for a move back of %s (%s, %.1f s)", digestHead(sum), name, how,
+				time.Since(started).Seconds())
+		}
+	}
+	if path := s.BasePath(sum); !baseCheckStands(path, sum) {
+		started := time.Now()
+		if err := checkBaseDigest(path, sum); err != nil {
+			// The receive of a move back finds the same and has the base
+			// sent again.
+			line("base %s does not check (%v); a move back has it sent again", digestHead(sum), err)
+			return refuse(codeFailed, err)
+		}
+		line("checked base %s for a move back of %s (%.1f s)", digestHead(sum), name, time.Since(started).Seconds())
 	}
 	return &migrateReply{OK: true, Detail: how}
 }

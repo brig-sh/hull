@@ -259,7 +259,7 @@ func checkBaseDigest(path, want string) error {
 		return err
 	}
 	stamp = want + " " + stamp
-	if old, err := os.ReadFile(path + ".checked"); err == nil && string(old) == stamp {
+	if baseCheckStands(path, want) {
 		return nil
 	}
 	got, _, err := diskDigestFile(path)
@@ -271,6 +271,17 @@ func checkBaseDigest(path, want string) error {
 	}
 	_ = os.WriteFile(path+".checked", []byte(stamp), 0o600)
 	return nil
+}
+
+// baseCheckStands reports whether a check that the base at path hashes to
+// want is on record and stands.
+func baseCheckStands(path, want string) bool {
+	stamp, err := baseStamp(path)
+	if err != nil {
+		return false
+	}
+	old, err := os.ReadFile(path + ".checked")
+	return err == nil && string(old) == want+" "+stamp
 }
 
 // baseStamp is what a base's check is recorded against: its size, change
