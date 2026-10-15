@@ -82,3 +82,46 @@ func TestParseMigrateReply(t *testing.T) {
 		t.Errorf("%+v %v", r, err)
 	}
 }
+
+// The ssh mux socket lives in a directory only this user can write: one
+// another user made first, or that others can write, or a link, turns the
+// mux off rather than hand the move's stream to whoever owns the socket.
+func TestSSHControlDirIsPrivate(t *testing.T) {
+	root := t.TempDir()
+	prev := sshControlRoot
+	t.Cleanup(func() { sshControlRoot = prev })
+	sshControlRoot = root
+	dir, err := sshControlDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Lstat(dir); err != nil || info.Mode().Perm() != 0o700 || !info.IsDir() {
+		t.Fatalf("made %s: %v %v", dir, info.Mode(), err)
+	}
+	p := &sshPeer{target: "pm@dest"}
+	if argv := strings.Join(p.sshArgv("migrate-status", nil), " "); !strings.Contains(argv, "ControlPath="+dir+"/%C") {
+		t.Errorf("argv %s", argv)
+	}
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sshControlDir(); err == nil {
+		t.Error("a directory others can write was taken")
+	}
+	if argv := strings.Join(p.sshArgv("migrate-status", nil), " "); strings.Contains(argv, "ControlPath") {
+		t.Errorf("the mux ran from a directory others can write: %s", argv)
+	}
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	other := t.TempDir()
+	if err := os.Symlink(other, dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sshControlDir(); err == nil {
+		t.Error("a link was taken for the directory")
+	}
+	if n := len(filepath.Join(prev, "hull-ssh-4294967295", strings.Repeat("f", 40))) + 17; n > 104 {
+		t.Errorf("a socket path of %d bytes does not fit sun_path", n)
+	}
+}

@@ -358,7 +358,7 @@ See [telemetry.md](telemetry.md).
 | `TERM` | forwarded into the guest for a pty `exec` |
 | `COMPOSE_FILE`, `COMPOSE_PROJECT_NAME`, `COMPOSE_PROFILES`, `COMPOSE_DISABLE_ENV_FILE` | compose equivalents of the flags above |
 | `HULL_MIGRATE_SSH` | a program `hull migrate` runs instead of `ssh`, with the same arguments; for testing a move on one machine (see [migration.md](migration.md#testing-a-move)) |
-| `HULL_MIGRATE_SSH_MUX` | `off` gives every step of a move its own ssh connection. Otherwise the steps share one (`ControlMaster`, socket `/tmp/hull-ssh-%C`), kept a minute after the last, so the commit pays for no handshake |
+| `HULL_MIGRATE_SSH_MUX` | `off` gives every step of a move its own ssh connection. Otherwise the steps share one (`ControlMaster`, socket `/tmp/hull-ssh-<uid>/%C`), kept a minute after the last, so the commit pays for no handshake. The directory is made 0700; one that is not a directory owned by this user and closed to others turns the mux off with a warning, since whoever owns the socket would get the move's stream |
 
 A session counts as interactive only when `CI` is unset **and** both stdin and
 stderr are terminals.
