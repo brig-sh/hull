@@ -347,21 +347,26 @@ func TestAssetsPullProfileReportsATamperedKernel(t *testing.T) {
 	}
 }
 
-// A run on a block rootfs keeps the image as built under the store's bases
-// by its digest before hvi starts, records it, and hands the digest to an
-// hvi that takes --disk-base-sha256; an hvi that does not is not given it.
+// A run on a block rootfs starts its disk from the image's base, kept under
+// the store's bases by its digest, and records it. hvi is not told the
+// base's digest, even an hvi that takes --disk-base-sha256: that names the
+// disk as hvi boots from it, and the instance's own files are written over
+// the base before then.
 func TestRunKeepsTheBase(t *testing.T) {
 	storeDir, bundle, argvFile := runProfileEnv(t, true)
+	if err := os.WriteFile(filepath.Join(filepath.Dir(argvFile), "knows-base"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := hullRun(t, storeDir, "--name", "b1", bundle); err != nil {
 		t.Fatal(err)
 	}
 	argv := recordedArgv(t, argvFile)
 	if slices.Contains(argv, hviDiskBaseFlag) {
-		t.Fatalf("an hvi without %s was given it: %v", hviDiskBaseFlag, argv)
+		t.Fatalf("hvi was given %s: %v", hviDiskBaseFlag, argv)
 	}
 	state := instanceState(t, storeDir, "b1")
-	if state.Base == nil || !state.Base.FromBoot {
-		t.Fatalf("state.json has no base from the boot: %+v", state.Base)
+	if state.Base == nil || state.Base.FromBoot {
+		t.Fatalf("state.json's base: %+v", state.Base)
 	}
 	s, err := store.New(storeDir)
 	if err != nil {
@@ -372,29 +377,18 @@ func TestRunKeepsTheBase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// This image has nothing of the instance's to write in.
 	if sum != state.Base.SHA256 || !baseHeld(s, sum) {
 		t.Fatalf("base %s recorded, the disk hashes %s, held %v", state.Base.SHA256, sum, baseHeld(s, sum))
 	}
 
-	if err := os.WriteFile(filepath.Join(filepath.Dir(argvFile), "knows-base"), nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	_ = os.Remove(argvFile)
-	if err := hullRun(t, storeDir, "--name", "b2", bundle); err != nil {
-		t.Fatal(err)
-	}
-	argv = recordedArgv(t, argvFile)
-	state = instanceState(t, storeDir, "b2")
-	i := slices.Index(argv, hviDiskBaseFlag)
-	if state.Base == nil || i < 0 || i+1 >= len(argv) || argv[i+1] != state.Base.SHA256 {
-		t.Fatalf("the hvi argv does not carry the recorded base %+v: %v", state.Base, argv)
-	}
-	// The restore command line drops the flag: a restored disk has moved
-	// on from the base.
+	// The restore command line drops the flag an older hull recorded: a
+	// restored disk has moved on from the base.
 	if _, err := hviRestoreArgv(argv[:0:0], "", "", ""); err == nil {
 		t.Fatal("an empty command line mapped")
 	}
 	full := append([]string{"hvi"}, argv...)
+	full = append(full, hviDiskBaseFlag, sum)
 	restore, err := hviRestoreArgv(full, "/b", "/c", "/p")
 	if err != nil {
 		t.Fatal(err)

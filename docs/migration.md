@@ -292,15 +292,33 @@ before the fence) gets the whole bundle too.
 
 ### Bases
 
-A base is the disk image exactly as `hull run` built it, before the guest
-first wrote to it. `hull run` keeps one for every `hvi` instance on a block
-rootfs that has a control socket: it clones the new image (APFS
-`clonefile` on macOS, `FICLONE` on Linux, else a copy that keeps the
-holes) into `<store>/bases/`, hashes the copy, makes it read-only and names
-it `<digest>.ext4`. The digest is recorded in `state.json` (`base`) and
-passed to an `hvi` that takes `--disk-base-sha256`, which records it in
-its profile and in `disk.json`. On the Pis keeping the 111 MiB ubuntu base
-took 0.45 s of `hull run` (a copy: ext4 has no reflink).
+A base is the ext4 image `hull run` builds from an OCI image's rootfs, with
+the ownership and modes the image records and nothing of any one
+instance: no `/urunit.conf` (which carries the guest's environment and
+credentials), no init wrapper, no `/etc/hosts` entries. For an `hvi`
+instance on a block rootfs, `hull run` builds it once per image digest and
+size on a host, keeps it read-only under `<store>/bases/<digest>.ext4`, and
+records which base an image has in `<store>/bases/images/<key>.json`. Every
+instance of the image then starts from a copy of that base (APFS
+`clonefile` on macOS, `FICLONE` on Linux, else a copy that keeps the holes)
+with its own files written in by `debugfs`, and `state.json` records the
+base (`base`). A local image, which has no content digest, gets a base of
+its own at every run.
+
+So the instances of one image on a host share one base, and a destination
+that holds it takes a move of any of them by the blocks that differ.
+`mke2fs` writes a fresh UUID, hash seed and timestamps into every image,
+so two hosts build two bases of one image: a base goes to another host
+once per image, host it was built on and destination, and moves back of
+instances born on the source need no base at all.
+
+hull does not give `hvi` the base's digest (`--disk-base-sha256`): hvi
+defines it as the digest of the disk as it boots from it, and the
+instance's own files are written over the base before then, which hvi's
+blocks written since boot would not cover. A move finds every block that
+differs from the base by comparing the disk with it (round 0), then takes
+hvi's rounds. An instance recorded by an older hull, whose base was its
+own boot disk (`fromBoot`), still moves with hvi's blocks since boot.
 
 The disk digest is the sha256 of `HULLDISK1\0`, the image's size and the
 block size (64 KiB, big-endian u64 each), then, for every 64 KiB block on
@@ -311,11 +329,6 @@ one image have one digest. It is not the image's plain sha256, which would
 have to read every hole. hvi's own docs call the value of
 `--disk-base-sha256` the disk's SHA-256; hvi does not read the disk to
 check it, and from hull it is this digest.
-
-`mke2fs` writes a fresh UUID and timestamps into every image it builds, so
-two runs of one OCI image get two bases. A base therefore serves one
-instance and the moves of it, not every instance of an image. Nothing
-removes a base yet: `hull rm` and `hull prune` leave `<store>/bases` alone.
 
 ### Preparing a destination
 
@@ -350,10 +363,10 @@ One ssh session runs `hull migrate-receive --stream --txid T --name N`, and
 its stdin carries, in this order:
 
 1. The disk rounds while the guest runs. Round 0 is every block that
-   differs from the base: hvi's blocks written since boot when the running
-   `hvi` booted from the base or names it in its profile (an `hvi` that
-   does carries those blocks across a restore), otherwise every block of
-   the disk compared with the base. Rounds 1 to 4 are hvi's blocks written
+   differs from the base: every block of the disk compared with the base,
+   or, for an instance whose base was its own boot disk and whose `hvi`
+   booted from it or names it in its profile, hvi's blocks written since
+   boot. Rounds 1 to 4 are hvi's blocks written
    since the round before, read with `disk-dirty` and `disk-blocks`, until
    a round finds at most 32 blocks (2 MiB). Without hvi's rounds there is
    only round 0.
