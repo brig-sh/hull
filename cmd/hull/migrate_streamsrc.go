@@ -515,13 +515,16 @@ func (m *moveSource) streamTransfer(ctx context.Context) (retErr error) {
 		reply.Record != nil &&
 		migrateStateOrder(roleDestination, reply.Record.State) >= migrateStateOrder(roleDestination, dstVerified) {
 		if m.rec.Disk == nil || m.rec.Stream == nil {
-			return errors.New("the destination has verified this move, but this host has no record of what it sent")
-		}
-		if err := m.checkDiskUnchanged(); err != nil {
-			return err
-		}
-		if err := m.compareStreamReceived(reply.Record); err != nil {
-			return err
+			if err := m.adoptVerifiedStream(reply.Record); err != nil {
+				return err
+			}
+		} else {
+			if err := m.checkDiskUnchanged(); err != nil {
+				return err
+			}
+			if err := m.compareStreamReceived(reply.Record); err != nil {
+				return err
+			}
 		}
 		m.destPaused = reply.Record.State == dstRestoredPaused
 		return m.rec.advance(m.path, srcTransferred)
@@ -632,6 +635,9 @@ func (m *moveSource) streamTransfer(ctx context.Context) (retErr error) {
 		stats.HviReply = res.hviReply
 	}
 	stats.step("destination answered")
+	if streamTestHook != nil && res.err == nil && err == nil {
+		streamTestHook("answered")
+	}
 	// What was sent is on record before the move goes on: a reply that is
 	// lost leaves a re-run to compare the destination's record with it.
 	// A step that fails from here records it (stopped), and one that
@@ -931,6 +937,46 @@ func (m *moveSource) adoptStreamFence(state *store.InstanceState) error {
 	m.rec.Disk = &migrateDisk{Path: disk, Size: size, ModNs: mod}
 	m.logf("Adopted the stream hvi fenced the guest with, spooled in %s", dir)
 	return writeMigrationRecord(m.path, m.rec)
+}
+
+// adoptVerifiedStream takes on a destination's verified copy of this move
+// when hull here died after the destination checked the stream and before
+// the move's record took what was sent: the record has no account of the
+// stream to compare with, but the fence does. The fence is adopted from
+// the spool (checked whole, or streamed again by the fenced hvi, whose
+// reply names the first manifest), and the destination's manifest must be
+// the one the guest was fenced with. hvi on the destination checked every
+// byte against that manifest, so its copy is the fenced machine, and it
+// has not run: only the commit resumes it.
+func (m *moveSource) adoptVerifiedStream(dst *migrationRecord) error {
+	state, err := m.s.GetInstance(m.name)
+	if err != nil {
+		return err
+	}
+	if !fencedFor(state, m.rec.TxID) && hviVMState(state) != store.MigrationFenced {
+		return errors.New("the destination has verified this move, but the guest here is not fenced for it")
+	}
+	if err := m.adoptStreamFence(state); err != nil {
+		return err
+	}
+	switch {
+	case dst.TxID != m.rec.TxID || dst.Epoch != m.rec.Epoch:
+		return fmt.Errorf("the destination recorded move %s epoch %d, not %s epoch %d", dst.TxID, dst.Epoch,
+			m.rec.TxID, m.rec.Epoch)
+	case dst.ManifestSHA256 == "" ||
+		(dst.ManifestSHA256 != m.rec.ManifestSHA256 && dst.ManifestSHA256 != m.rec.FirstManifestSHA256):
+		return fmt.Errorf("the destination verified manifest %s, and the guest here was fenced with %s",
+			dst.ManifestSHA256, m.recordedFirstManifest(state))
+	case dst.BaseSHA256 != m.rec.BaseSHA256:
+		return fmt.Errorf("the destination applied the disk to base %s, not %s", dst.BaseSHA256, m.rec.BaseSHA256)
+	}
+	m.rec.Stream = &migrateStreamStats{Mode: "adopted", Rounds: []streamRound{}}
+	if dst.Stream != nil {
+		m.rec.Stream.Chain, m.rec.Stream.HviReply = dst.Stream.Chain, dst.Stream.HviReply
+	}
+	m.logf("%s verified the stream the guest was fenced with (manifest %s) before this host recorded what it "+
+		"sent; the move goes on with that copy", m.rec.Peer, digestHead(dst.ManifestSHA256))
+	return nil
 }
 
 // compareStreamReceived checks the destination's record of a streamed move
