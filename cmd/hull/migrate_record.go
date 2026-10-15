@@ -156,6 +156,11 @@ type migrationRecord struct {
 	// carries, on either side once it is there.
 	BundleDir      string `json:"bundleDir,omitempty"`
 	ManifestSHA256 string `json:"manifestSha256,omitempty"`
+	// FirstManifestSHA256 is, on the source of a streamed move whose
+	// spool was taken again from the fenced hvi (the fence owner's second
+	// stream), the manifest of the stream the fence came with, which hvi's
+	// reply named; ManifestSHA256 is then the second stream's.
+	FirstManifestSHA256 string `json:"firstManifestSha256,omitempty"`
 	// Disk is the guest's disk as fenced (source) or received (destination).
 	Disk *migrateDisk `json:"disk,omitempty"`
 	// Transfer is what the stream carried and how fast.

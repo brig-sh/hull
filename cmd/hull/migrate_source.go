@@ -620,10 +620,12 @@ func (m *moveSource) stopped(err error) error {
 	err = m.rec.fail(m.path, err)
 	fenced := migrateStateOrder(roleSource, m.rec.State) >= migrateStateOrder(roleSource, srcFenced)
 	if m.rec.Transport == transportStream && m.rec.State == srcTransferring {
-		// hvi fences the guest only once it has sealed the stream; a
-		// stream that failed before that left it running.
+		// hvi fences the guest only once it has written its manifest; a
+		// stream that ended before the manifest left it running.
 		state, serr := m.s.GetInstance(m.name)
-		fenced = serr != nil || fencedFor(state, m.rec.TxID) || hviVMState(state) == store.MigrationFenced
+		var ranOn *hviRanOnError
+		fenced = serr != nil || fencedFor(state, m.rec.TxID) ||
+			(!errors.As(err, &ranOn) && hviVMState(state) == store.MigrationFenced)
 	}
 	next := fmt.Sprintf("`hull migrate %s --txid %s` resumes it from here", m.name, m.rec.TxID)
 	if m.rec.State == srcCommitting {

@@ -224,7 +224,84 @@ func TestStreamedMoveAbortAfterAKillInTheSealWindow(t *testing.T) {
 			if _, err := verifySpool(dir); err != nil || !spoolIsSealed(dir) {
 				t.Errorf("the spool the guest came back from: sealed %v, %v", spoolIsSealed(dir), err)
 			}
+			// A restore checks the spool against the instance's record of
+			// its manifest, which names the second stream once there is one.
+			man, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := mustInstance(t, f.src, f.name).Migration.ManifestSHA256; got != sha256Hex(man) {
+				t.Errorf("the instance records manifest %s, the spool holds %s", got, sha256Hex(man))
+			}
+			if rec := f.srcRecord(t); cut && (rec.FirstManifestSHA256 != f.hvi.firstManifest ||
+				rec.ManifestSHA256 != sha256Hex(man) || rec.ManifestSHA256 == rec.FirstManifestSHA256) {
+				t.Errorf("the move's record of the two streams: first %s, now %s; hvi's first %s",
+					rec.FirstManifestSHA256, rec.ManifestSHA256, f.hvi.firstManifest)
+			}
 		})
+	}
+}
+
+// The same kill with the spool cut short, then the move run again: hvi
+// streams the fenced guest again for the move's txid and epoch, the
+// destination takes that second stream onto a fresh copy of the base, and
+// the move commits with both manifests on record.
+func TestStreamedMoveRerunRestreamsACutSpool(t *testing.T) {
+	for _, stage := range []string{"relayed", "recorded"} {
+		t.Run(stage, func(t *testing.T) {
+			f := newStreamFixture(t)
+			f.hvi.writesAt["ram-round-0"] = []int64{4, 800}
+			dir := crashMoveAt(t, f, stage)
+			if err := os.Truncate(filepath.Join(dir, spoolStream), 1000); err != nil {
+				t.Fatal(err)
+			}
+			rec := f.srcRecord(t)
+			if err := f.migrate(t, rec.TxID); err != nil {
+				t.Fatal(err)
+			}
+			rec = f.srcRecord(t)
+			if rec.State != srcCommitted || rec.Stream.Mode != "replay" || f.hvi.migrations != 2 {
+				t.Fatalf("source %s %+v, hvi streamed %d times", rec.State, rec.Stream, f.hvi.migrations)
+			}
+			if req := f.hvi.migrateReq; req["txid"] != rec.TxID || req["epoch"] != float64(rec.Epoch) {
+				t.Errorf("the second stream was asked for with %v", req)
+			}
+			if rec.FirstManifestSHA256 != f.hvi.firstManifest || rec.ManifestSHA256 == rec.FirstManifestSHA256 {
+				t.Errorf("first %s, now %s, hvi's first %s", rec.FirstManifestSHA256, rec.ManifestSHA256,
+					f.hvi.firstManifest)
+			}
+			if dst := f.dstRecord(t, rec.TxID); dst.ManifestSHA256 != rec.ManifestSHA256 {
+				t.Errorf("the destination took manifest %s, the source sent %s", dst.ManifestSHA256, rec.ManifestSHA256)
+			}
+			f.checkArrived(t, rec)
+		})
+	}
+}
+
+// A second stream whose reply names another first manifest than the one
+// the instance's record holds is not the fence this move made: it is
+// refused and left nowhere a later check could seal it, and the fenced hvi,
+// the only copy of the guest, is left alone.
+func TestStreamedMoveAbortRefusesAnotherFirstManifest(t *testing.T) {
+	f := newStreamFixture(t)
+	dir := crashMoveAt(t, f, "recorded")
+	if err := os.Truncate(filepath.Join(dir, spoolStream), 1000); err != nil {
+		t.Fatal(err)
+	}
+	f.hvi.mu.Lock()
+	f.hvi.firstManifest = strings.Repeat("0", 64)
+	f.hvi.mu.Unlock()
+	restored := false
+	localRestore = func(*store.Store, string) error { restored = true; return nil }
+	err := sourceAbort(context.Background(), f.src, f.name, io.Discard, f.peer)
+	if err == nil || !strings.Contains(err.Error(), "this move recorded") || !strings.Contains(err.Error(), "Do not stop that hvi") {
+		t.Fatalf("err = %v", err)
+	}
+	if restored || f.hvi.state != "fenced" || syscall.Kill(f.vm.pid, 0) != nil {
+		t.Errorf("restored %v; hvi %s", restored, f.hvi.state)
+	}
+	if _, err := verifySpool(dir); err == nil || spoolIsSealed(dir) {
+		t.Errorf("the refused stream was left whole in the spool: %v", err)
 	}
 }
 

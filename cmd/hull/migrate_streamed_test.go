@@ -730,6 +730,9 @@ func TestStreamedMoveCaptureFailsBeforeTheSeal(t *testing.T) {
 	if rec.State != srcTransferring || fencedFor(mustInstance(t, f.src, f.name), rec.TxID) {
 		t.Fatalf("after the failed capture: %s", rec.State)
 	}
+	if !strings.Contains(rec.Error, "ended before its manifest, so the guest runs on here") {
+		t.Errorf("the record does not say the guest runs on: %q", rec.Error)
+	}
 	if dst := f.dstRecord(t, rec.TxID); dst.State != dstReceiving || dst.Error == "" {
 		t.Errorf("destination %s %q", dst.State, dst.Error)
 	}
