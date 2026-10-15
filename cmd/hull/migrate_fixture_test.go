@@ -280,7 +280,7 @@ type localPeer struct {
 	// mangle, when set, stands between a verb and its stdin, to damage or
 	// cut what crosses the link.
 	mangle func(verb string, args []string, in io.Reader) io.Reader
-	// cutSession ends the next session's lines after its verified line.
+	// cutSession loses the next session's lines after its verified line.
 	cutSession bool
 }
 
@@ -382,8 +382,9 @@ func (p *localPeer) call(_ context.Context, verb string, args []string, stdin io
 
 // session is the streamed receive in a session, its lines through a pipe
 // as JSON, as over ssh. noSession makes the peer one that has none;
-// cutSession ends the next session's lines after its verified line, as a
-// link lost there would, with the destination running on.
+// cutSession loses the next session's lines after its verified line, as a
+// link that carries the source's commit to the destination and loses the
+// answer would: the destination commits, and the source never hears it.
 func (p *localPeer) session(ctx context.Context, verb string, args []string, stdin io.Reader,
 	event func(*migrateReply)) (*migrateReply, error) {
 	p.mu.Lock()
@@ -428,7 +429,7 @@ func (p *localPeer) session(ctx context.Context, verb string, args []string, std
 }
 
 // cutAfterVerified passes a session's lines until its verified line, and
-// none after it.
+// none after it; the session itself goes on to its end.
 type cutAfterVerified struct {
 	w   io.Writer
 	cut bool
@@ -438,16 +439,7 @@ func (c *cutAfterVerified) Write(b []byte) (int, error) {
 	if c.cut {
 		return len(b), nil
 	}
-	if bytes.Contains(b, []byte(`"event":"verified"`)) {
-		c.cut = true
-		if _, err := c.w.Write(b); err != nil {
-			return 0, err
-		}
-		if pw, ok := c.w.(*io.PipeWriter); ok {
-			_ = pw.Close()
-		}
-		return len(b), nil
-	}
+	c.cut = bytes.Contains(b, []byte(`"event":"verified"`))
 	return c.w.Write(b)
 }
 

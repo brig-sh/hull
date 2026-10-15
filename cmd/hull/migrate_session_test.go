@@ -95,16 +95,38 @@ func TestStreamedMoveWithoutASession(t *testing.T) {
 	f.checkArrived(t, rec)
 }
 
-// A session cut after the destination said verified, with the commit sent
-// into it, leaves the source no answer: it sends the commit again as its
-// own verb, which the destination answers from its record.
+// watchPeer notes the destination's record of a move as each
+// migrate-commit reaches it, before it runs.
+type watchPeer struct {
+	*localPeer
+	f      *streamFixture
+	before []string
+}
+
+func (p *watchPeer) call(ctx context.Context, verb string, args []string, stdin io.Reader) (*migrateReply, error) {
+	if verb == "migrate-commit" {
+		rec, _, err := findMigrationByTxID(p.f.dst, args[1])
+		state := "none"
+		if err == nil {
+			state = rec.State
+		}
+		p.before = append(p.before, state)
+	}
+	return p.localPeer.call(ctx, verb, args, stdin)
+}
+
+// A session that carries the commit to the destination and loses its
+// answer leaves the source no answer: it sends the commit again as its own
+// verb, which the destination, already running the guest, answers from
+// its record.
 func TestStreamedMoveCommitsAfterTheSessionIsCut(t *testing.T) {
 	f := newStreamFixture(t)
 	f.peer.cutSession = true
+	peer := &watchPeer{localPeer: f.peer, f: f}
 	opt := f.options(false)
 	var out bytes.Buffer
 	opt.out = &out
-	if err := sourceMigrate(context.Background(), f.src, f.name, opt, f.peer); err != nil {
+	if err := sourceMigrate(context.Background(), f.src, f.name, opt, peer); err != nil {
 		t.Fatalf("%v\n%s", err, out.String())
 	}
 	rec := f.srcRecord(t)
@@ -114,8 +136,51 @@ func TestStreamedMoveCommitsAfterTheSessionIsCut(t *testing.T) {
 	if f.peer.called("migrate-commit") != 1 || !strings.Contains(out.String(), "the commit had no answer in the move's session") {
 		t.Errorf("calls %v\n%s", f.peer.calls, out.String())
 	}
+	if len(peer.before) != 1 || peer.before[0] != dstRunning {
+		t.Errorf("the destination before migrate-commit: %v, want it running from the session's commit", peer.before)
+	}
 	if dst := f.dstRecord(t, rec.TxID); dst.State != dstRunning {
 		t.Errorf("destination %s", dst.State)
+	}
+}
+
+// A source that fails a check after the destination said verified, before
+// its commit point, ends the session with no commit: the destination keeps
+// the guest restored paused, for the re-run or the abort.
+func TestStreamedMoveEndsTheSessionWithoutACommit(t *testing.T) {
+	f := newStreamFixture(t)
+	prev := streamTestHook
+	streamTestHook = func(stage string) {
+		if stage == "answered" {
+			// Something wrote the disk after the fence.
+			at := time.Now().Add(time.Hour)
+			if err := os.Chtimes(f.disk, at, at); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	t.Cleanup(func() { streamTestHook = prev })
+	err := f.migrate(t, "")
+	if err == nil || !strings.Contains(err.Error(), "changed after the fence") {
+		t.Fatalf("the move: %v", err)
+	}
+	rec := f.srcRecord(t)
+	if migrateStateOrder(roleSource, rec.State) >= migrateStateOrder(roleSource, srcCommitting) {
+		t.Errorf("source %s: it passed its commit point", rec.State)
+	}
+	if f.peer.called("migrate-commit") != 0 {
+		t.Errorf("calls %v", f.peer.calls)
+	}
+	dst := f.dstRecord(t, rec.TxID)
+	if dst.State != dstRestoredPaused {
+		t.Errorf("destination %s, want %s", dst.State, dstRestoredPaused)
+	}
+	if dst.Stream != nil {
+		for _, s := range dst.Stream.Steps {
+			if s.Step == "commit received" {
+				t.Errorf("the destination received a commit: %v", dst.Stream.Steps)
+			}
+		}
 	}
 }
 
