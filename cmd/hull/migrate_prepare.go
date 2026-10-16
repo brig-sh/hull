@@ -58,13 +58,19 @@ import (
 // side gets the whole bundle.
 const moveCapStream = "stream-v3"
 
+// moveCapKernelReplace is the capability a destination's probe lists when
+// its migrate-take-kernel takes --replace, which installs a profile kernel
+// over another one. A source asks for that only when its operator named the
+// kernel the destination is to hold (migrate-prepare --kernel-sha256).
+const moveCapKernelReplace = "kernel-replace"
+
 // probeMaxBases bounds the bases a probe lists.
 const probeMaxBases = 512
 
 // destHolds is what the probe lists of the bases and profile kernels the
 // destination store holds.
 func destHolds(s *store.Store, p *migrateProbe) {
-	p.Capabilities = []string{moveCapStream, moveCapSession}
+	p.Capabilities = []string{moveCapStream, moveCapSession, moveCapKernelReplace}
 	if entries, err := os.ReadDir(s.BasesDir()); err == nil {
 		for _, e := range entries {
 			name, ok := strings.CutSuffix(e.Name(), ".ext4")
@@ -375,11 +381,13 @@ func receivedKernelDir(s *store.Store) string {
 
 // destTakeKernel is migrate-take-kernel: it installs the kernel on in as the
 // kernel of profile, if it has sha256 sum and size bytes, and only when the
-// store has none. A store that holds another kernel of the profile keeps
-// it: a profile run boots only the kernel installed, and whoever installed
-// that one, brig's BRIG_PORTABLE_KERNEL among them, expects those bytes. A
-// move does not need the kernel at all.
-func destTakeKernel(s *store.Store, profile, sum string, size int64, in io.Reader) *migrateReply {
+// store has none, unless replace. A store that holds another kernel of the
+// profile keeps it otherwise: a profile run boots only the kernel
+// installed, and whoever installed that one, brig's BRIG_PORTABLE_KERNEL
+// among them, expects those bytes. replace is that party saying which
+// kernel it now expects (migrate-prepare --kernel-sha256). A move does not
+// need the kernel at all.
+func destTakeKernel(s *store.Store, profile, sum string, size int64, replace bool, in io.Reader) *migrateReply {
 	if _, err := bootassets.NormalizeProfile(profile); err != nil || profile == "" {
 		return refuse(codeFailed, fmt.Errorf("profile %q: %v", profile, err))
 	}
@@ -396,7 +404,7 @@ func destTakeKernel(s *store.Store, profile, sum string, size int64, in io.Reade
 	}
 	if installed := installedProfileKernel(s.RootDir(), profile); installed == sum {
 		return reply()
-	} else if bootassets.ProfileKernelPresent(s.RootDir(), profile) {
+	} else if bootassets.ProfileKernelPresent(s.RootDir(), profile) && !replace {
 		held := "one that does not match its install record"
 		if installed != "" {
 			held = "sha256 " + installed
@@ -483,6 +491,9 @@ type prepareOptions struct {
 	remote migrateRemote
 	out    io.Writer
 	json   bool
+	// kernel is --kernel-sha256: the profile kernel the destination is to
+	// hold, by its sha256.
+	kernel string
 }
 
 // prepareStep is one line of what a prepare did.
@@ -512,6 +523,10 @@ func sourcePrepare(ctx context.Context, s *store.Store, name string, opt prepare
 	if err := checkSSHTarget(opt.remote.Target); err != nil {
 		return err
 	}
+	opt.kernel = strings.TrimPrefix(opt.kernel, "sha256:")
+	if opt.kernel != "" && !diskDigestPattern.MatchString(opt.kernel) {
+		return fmt.Errorf("--kernel-sha256 %q is not a sha256", opt.kernel)
+	}
 	state, err := s.GetInstance(name)
 	if err != nil {
 		return fmt.Errorf("instance not found: %s", name)
@@ -521,7 +536,7 @@ func sourcePrepare(ctx context.Context, s *store.Store, name string, opt prepare
 	}
 	rec := &migrationRecord{Name: name, Peer: opt.remote.Target, Remote: &opt.remote}
 	p := peerFor(rec, peer)
-	res, err := prepareDestination(ctx, s, state, p, opt.remote, opt.out)
+	res, err := prepareDestination(ctx, s, state, p, opt.remote, opt.kernel, opt.out)
 	if res != nil && opt.json {
 		_ = json.NewEncoder(os.Stdout).Encode(res)
 	}
@@ -531,8 +546,16 @@ func sourcePrepare(ctx context.Context, s *store.Store, name string, opt prepare
 // prepareDestination makes the destination hold what a streamed move of
 // state needs and reports each step. It fails only when a step the move
 // needs failed: the base. The image and the kernel are reported.
+//
+// pin, when not "", is the sha256 of the profile kernel the destination is
+// to hold. A destination that holds another one keeps it unless this host's
+// kernel is the pin, in which case it is replaced: whoever pins a kernel,
+// brig with its PortableKernelDigest, refuses to boot any other, so the one
+// there is of no use to it. Without a pin, or with this host's kernel not
+// the pin, nothing is replaced, so a prepare never moves a host off the
+// kernel it was given.
 func prepareDestination(ctx context.Context, s *store.Store, state *store.InstanceState, p movePeer,
-	remote migrateRemote, w io.Writer) (*prepareResult, error) {
+	remote migrateRemote, pin string, w io.Writer) (*prepareResult, error) {
 	res := &prepareResult{Name: state.ID, To: remote.Target}
 	logf := func(format string, args ...any) { _, _ = fmt.Fprintf(w, format+"\n", args...) }
 	reply, err := p.call(ctx, "migrate-probe", probeArgs(remote, ""), nil)
@@ -586,14 +609,29 @@ func prepareDestination(ctx context.Context, s *store.Store, state *store.Instan
 			step(prepareStep{What: what, Result: "skipped", Detail: "none is installed here to send"})
 		case held == want:
 			step(prepareStep{What: what, Result: "held", Detail: digestHead(want)})
-		case held != "":
+		case held != "" && pin != want:
+			detail := fmt.Sprintf("it holds another one (%s), which is not replaced; this host's is %s",
+				digestHead(held), digestHead(want))
+			if pin != "" {
+				detail += ", not " + digestHead(pin) + " either"
+			}
+			step(prepareStep{What: what, Result: "skipped", Detail: detail})
+		case held != "" && !probe.hasCapability(moveCapKernelReplace):
 			step(prepareStep{What: what, Result: "skipped", Detail: fmt.Sprintf("it holds another one (%s), "+
-				"which is not replaced; this host's is %s", digestHead(held), digestHead(want))})
+				"and its hull (%s) cannot replace it; `hull assets pull --profile %s --force` there can",
+				digestHead(held), probe.HullVersion, state.Profile)})
 		default:
-			st, err := sendProfileKernel(ctx, s, p, state.Profile, want)
-			if err != nil {
+			// A kernel there that its record does not describe is replaced
+			// too, when this one is the pin.
+			replace := pin == want && probe.hasCapability(moveCapKernelReplace)
+			st, err := sendProfileKernel(ctx, s, p, state.Profile, want, replace)
+			switch {
+			case err != nil:
 				step(prepareStep{What: what, Result: "failed", Detail: refusalDetail(err)})
-			} else {
+			case held != "":
+				st.Detail += ", in place of " + digestHead(held)
+				step(st)
+			default:
 				step(st)
 			}
 		}
@@ -718,7 +756,7 @@ func sendBase(ctx context.Context, s *store.Store, p movePeer, sum string) (prep
 
 // sendProfileKernel sends this store's kernel of profile, whose record says
 // sha256 sum, to be installed there.
-func sendProfileKernel(ctx context.Context, s *store.Store, p movePeer, profile, sum string) (prepareStep, error) {
+func sendProfileKernel(ctx context.Context, s *store.Store, p movePeer, profile, sum string, replace bool) (prepareStep, error) {
 	started := time.Now()
 	kernel, _, err := bootassets.ProfilePaths(s.RootDir(), profile)
 	if err != nil {
@@ -733,8 +771,11 @@ func sendProfileKernel(ctx context.Context, s *store.Store, p movePeer, profile,
 	if err != nil {
 		return prepareStep{}, err
 	}
-	_, err = p.call(ctx, "migrate-take-kernel", []string{"--profile", profile, "--sha256", sum,
-		"--size", strconv.FormatInt(info.Size(), 10)}, f)
+	args := []string{"--profile", profile, "--sha256", sum, "--size", strconv.FormatInt(info.Size(), 10)}
+	if replace {
+		args = append(args, "--replace")
+	}
+	_, err = p.call(ctx, "migrate-take-kernel", args, f)
 	if err != nil {
 		return prepareStep{}, err
 	}
@@ -762,6 +803,8 @@ func migratePrepareCommand() *cli.Command {
 			&cli.StringFlag{Name: "remote-hvi", Usage: "path of hvi on the destination (default: the one its hull would run)"},
 			&cli.StringFlag{Name: "remote-gateway-sock", Usage: "a network gateway on the destination to check"},
 			&cli.BoolFlag{Name: "json", Usage: "print what was done and what the destination holds as JSON on stdout"},
+			&cli.StringFlag{Name: "kernel-sha256", Usage: "the sha256 of the profile kernel the destination is to " +
+				"hold: when this host's is that one, it replaces another one there"},
 			&cli.StringFlag{Name: "txid", Hidden: true, Usage: "a move's txid (the destination's step of a move)"},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
@@ -782,7 +825,7 @@ func migratePrepareCommand() *cli.Command {
 				remote: migrateRemote{Target: cmd.String("to"), Store: cmd.String("remote-store"),
 					Hull: cmd.String("remote-hull"), Hvi: cmd.String("remote-hvi"),
 					GatewaySock: cmd.String("remote-gateway-sock")},
-				out: os.Stderr, json: cmd.Bool("json"),
+				out: os.Stderr, json: cmd.Bool("json"), kernel: cmd.String("kernel-sha256"),
 			}, nil)
 		},
 	}
@@ -808,9 +851,11 @@ func migratePrepareRemoteCommands() []*cli.Command {
 			}),
 		migrateRemoteVerb("migrate-take-kernel", "install the profile kernel on stdin",
 			[]cli.Flag{&cli.StringFlag{Name: "profile", Required: true}, &cli.StringFlag{Name: "sha256", Required: true},
-				&cli.Int64Flag{Name: "size", Required: true}},
+				&cli.Int64Flag{Name: "size", Required: true},
+				&cli.BoolFlag{Name: "replace", Usage: "install it over another kernel of the profile"}},
 			func(cmd *cli.Command, s *store.Store) *migrateReply {
-				return destTakeKernel(s, cmd.String("profile"), cmd.String("sha256"), cmd.Int64("size"), os.Stdin)
+				return destTakeKernel(s, cmd.String("profile"), cmd.String("sha256"), cmd.Int64("size"),
+					cmd.Bool("replace"), os.Stdin)
 			}),
 		migrateRemoteVerb("migrate-take-image", "pull an image unless the store has it",
 			[]cli.Flag{&cli.StringFlag{Name: "digest", Required: true}, &cli.StringFlag{Name: "ref"}},
