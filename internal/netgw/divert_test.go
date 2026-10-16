@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	gvntypes "github.com/containers/gvisor-tap-vsock/pkg/types"
 	"github.com/miekg/dns"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 )
@@ -470,5 +471,72 @@ func TestDivertPropagatesHalfClose(t *testing.T) {
 	}
 	if data != response {
 		t.Fatalf("the guest received %q, want %q", data, response)
+	}
+}
+
+// brig.internal, as brig asks for it: a --host record of the gateway's own
+// address, and a divert of its port 443. The name is answered under
+// deny-default, port 443 of the address goes to the socket, and every other
+// port of it is reset and never dialed, with or without a policy. UDP to it
+// is dropped.
+func TestTheGatewayAddressAnswersOnlyWhatItServes(t *testing.T) {
+	for name, policy := range map[string]*Policy{
+		"no policy":    nil,
+		"allow":        mustPolicy(t, "allow", nil, nil),
+		"deny default": mustPolicy(t, "deny", nil, nil),
+	} {
+		t.Run(name, func(t *testing.T) {
+			inj := newInjector(t)
+			parsed, err := ParseDiverts([]string{testGatewayIP + ":443=" + inj.path})
+			if err != nil {
+				t.Fatal(err)
+			}
+			dials := make(chan dialed, 16)
+			n, err := New(Config{
+				MTU:               1500,
+				Subnet:            testSubnet,
+				GatewayIP:         testGatewayIP,
+				GatewayMacAddress: testGatewayMA,
+				Egress:            policy,
+				Diverts:           parsed,
+				DNSZones: []gvntypes.Zone{{Name: ".", Records: []gvntypes.Record{
+					{Name: "brig.internal", IP: net.ParseIP(testGatewayIP)}}}},
+				resolve: newFakeResolver(nil),
+				dial: func(network, address string) (net.Conn, error) {
+					select {
+					case dials <- dialed{network, address}:
+					default:
+					}
+					return nil, errors.New("test dialer never connects")
+				},
+			})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			m := join(t, n)
+
+			m.send(t, dnsQueryFrame(t, m, "brig.internal", dns.TypeA))
+			if got := answerIPs(dnsReply(t, m)); len(got) != 1 || got[0] != testGatewayIP {
+				t.Fatalf("A brig.internal = %v", got)
+			}
+
+			client := newTCPClient(m, testGatewayIP, 443, 40301)
+			if !client.connect(t) {
+				t.Fatal("port 443 of the gateway was not diverted")
+			}
+			if got := inj.next(t); got.preamble != preambleFor(testGatewayIP, 443, 40301) {
+				t.Fatalf("preamble %q", got.preamble)
+			}
+
+			for i, port := range []uint16{80, 8443, 22} {
+				if newTCPClient(m, testGatewayIP, port, 40302+uint16(i)).connect(t) {
+					t.Errorf("port %d of the gateway completed a handshake", port)
+				}
+			}
+			m.send(t, udpDatagram4(t, m, testGatewayIP, 443))
+			m.send(t, udpDatagram4(t, m, testGatewayIP, 123))
+			expectNoDial(t, dials)
+			inj.expectNone(t)
+		})
 	}
 }
