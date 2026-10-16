@@ -258,8 +258,9 @@ func addServices(cfg Config, s *stack.Stack, ipPool *tap.IPPool, divs *diverts) 
 		dial = net.Dial
 	}
 	rejects := newRejectLog()
-	s.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpForwarder(s, cfg.Egress, divs, dial, rejects).HandlePacket)
-	s.SetTransportProtocolHandler(udp.ProtocolNumber, udpForwarder(s, cfg.Egress, divs, dial, rejects).HandlePacket)
+	gateway := tcpip.AddrFrom4Slice(net.ParseIP(cfg.GatewayIP).To4())
+	s.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpForwarder(s, cfg.Egress, divs, gateway, dial, rejects).HandlePacket)
+	s.SetTransportProtocolHandler(udp.ProtocolNumber, udpForwarder(s, cfg.Egress, divs, gateway, dial, rejects).HandlePacket)
 
 	if err := dnsServer(cfg, s, divs); err != nil {
 		return nil, err
