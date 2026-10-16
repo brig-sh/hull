@@ -69,9 +69,10 @@ what can go wrong, and how to recover.
 > an idle guest moved in 2.20 s with 57.8 ms of downtime and back in
 > 3.12 s with 67.6 ms, and the writer in 4.12 s with 90.9 ms on quiet
 > disks. A destination stopped with SIGSTOP in the paused part made hvi
-> give up and close the stream, and hull reported hvi's refusal within
-> 20 ms of the SIGCONT, with the guest running on. See [With hvi
-> 94faf8f](#with-hvi-94faf8f).
+> give up and close the stream; hull now cuts such a destination off
+> once hvi's bound for the stalled reader has passed (30 s in the run),
+> asks hvi's `status`, and reports the guest running on, without
+> waiting for the destination. See [With hvi 94faf8f](#with-hvi-94faf8f).
 
 ## Usage
 
@@ -1379,6 +1380,39 @@ rp2's clock 1.3 ms behind rp1's.
   budget, from the rounds as hull timed them, gives about 19 s.
 - After every move the guest's counter had no gap, and its `boot_id`, the
   blob and the held file were the same.
+
+The stalled reader again, 2026-10-16, with hull at 2cec0ca (the source
+cuts off a destination that takes none of the stream, and asks hvi's
+`status` after every close), built on rp1 and copied to rp2, and `hvi`
+94faf8f built on rp1 and copied to rp2. rp2's `migrate-receive` hull
+was stopped with SIGSTOP 0.9 s after `disk-round-final`, and held 60 s
+this time:
+
+- Exactly 30.0 s after the SIGSTOP, and 30 s before the SIGCONT, hull
+  printed "the destination took none of the stream for 30.0 s, and hull
+  cut it off; it reads the rest of hvi's stream into the spool". The
+  bound was the paused part's (10 s, twice the last running round of
+  7.50 s, and 5 s), shorter than the 35 s of hvi's stall bound. hvi had
+  given up at its budget and closed the stream with no room left for its
+  refusal: "hvi closed its migrate stream, as it does when the stream
+  fails, and hull read no refusal (hvi's ram-round-3 ended at 781312 of
+  its 1305399 bytes)". hvi's `status` then said the guest was not
+  fenced, and hull printed "hvi did not fence fxstall2: ... the guest
+  runs on here" 3 ms after the cut.
+- The move ended 5 s later, the time `ssh` is given to close its output
+  once killed, with "no answer from the destination to migrate-receive
+  ...: signal: killed (sending: ...)", in 128.1 s in all; RAM round 0
+  ran at 9.4 MiB/s again. rp2's record, once continued, said "the stream
+  ended in hvi's ram-round-3: unexpected EOF", and `--abort` said the
+  guest never stopped running here. The counter had no gap, and the
+  `boot_id`, blob and held file were unchanged.
+- The same run at 6774eff, with the paused bound alone (86.7 s after a
+  35.7 s running round), held the relay until the SIGCONT 60 s later;
+  hvi had failed the stream after 30 s with "the reader took nothing for
+  30000 ms". That is what 2cec0ca fixed.
+- An idle move at 6774eff took 2.24 s at 56.7 MiB/s with 66.5 ms of
+  downtime (hull said 67 ms), against 2.20 s and 58.8 MiB/s before: the
+  timer on each 64 KiB write to the destination costs nothing visible.
 
 ## Records
 
