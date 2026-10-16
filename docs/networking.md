@@ -262,6 +262,62 @@ on one address admits all of them once the guest holds it.
 precedence, address rotation, direct-IP behavior, and the four things the filter
 does not cover.
 
+## Diverting a destination to a socket
+
+`--divert host:port=socket` hands a guest's TCP connections to one destination
+to a local Unix socket. The gateway does not dial that destination. The
+process listening on the socket handles the connection.
+
+```bash
+hull network-gateway --socket /tmp/gw.sock \
+  --divert example.internal:443=/run/example/divert.sock
+```
+
+`host` is a DNS name or an IP literal. The socket path must be absolute, the
+port must be 1-65535, and a `host:port` may appear once. The flag repeats. The
+gateway refuses to start on a value it cannot parse.
+
+For each diverted connection, the gateway connects to the socket and writes one
+line:
+
+```text
+BRIG-DIVERT/1 <dst-ip> <dst-port> <src-ip> <src-port>
+```
+
+`dst` is where the guest was connecting to, and `src` is the guest's end. After
+the newline, the guest's bytes go through unchanged in both directions. EOF on
+either side reaches the other as a half-close.
+
+A connection is diverted when its port matches and its address is one of the
+host's addresses. For a name, those are every address this gateway has
+resolved the name to: once at start, every `--egress-refresh`, and on each
+guest query for it. Addresses are never dropped from the set. A connection
+diverted by mistake reaches the socket owner, which can relay it. A connection
+dialed by mistake would go out without it.
+
+How it interacts with the egress policy:
+
+- A diverted connection is not checked against the policy. The socket owner
+  applies its own binding to what it receives.
+- The gateway answers a query for a diverted name even under
+  `--egress-default deny`. The addresses are not pinned for the guest, so the
+  other ports on them stay under the policy.
+
+It fails closed. If the socket cannot be connected, the guest connection is
+reset and the gateway logs one line, without payload. If the socket owner
+closes the connection without writing anything, the guest gets a reset too.
+
+What it does not do:
+
+- It reads no payload. TLS, SNI and credentials are the socket owner's
+  concern.
+- It does not cover IPv6, which the gateway does not forward at all.
+- It does not divert UDP. UDP to a diverted address and port is dropped, so a
+  client that tries QUIC falls back to TCP, which is diverted.
+
+With `--api`, `GET /diverts` lists each divert with the number of addresses it
+matches and the connections it diverted or reset.
+
 ## What hull does not do
 
 - No bridged networking. `vz-runner` has no bridged code path, and the

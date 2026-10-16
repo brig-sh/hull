@@ -100,10 +100,21 @@ and local as query parameters. This is the only part of a running gateway
 that can change; the network and the rules are read once at startup.
 
 IPv6 is dropped outright. The netstack does not forward IPv6 yet, so no
-guest reaches the outside world over it, with or without a policy.`),
+guest reaches the outside world over it, with or without a policy.
+
+--divert host:port=socket hands every guest TCP connection to one of the
+host's addresses on that port to the Unix socket, and never dials it. The
+gateway writes one line first,
+"BRIG-DIVERT/1 <dst-ip> <dst-port> <src-ip> <src-port>", then relays the
+guest's bytes both ways unchanged. The host's addresses are every address
+this gateway resolved it to: at start, every --egress-refresh, and on each
+guest query. A diverted connection skips the egress policy, and a diverted
+name is answered even under --egress-default deny. If the socket cannot be
+connected, the guest connection is reset. UDP to a diverted destination is
+dropped. With --api, GET /diverts lists the diverts and their counters.`),
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "socket", Required: true, Usage: "control socket path (required)"},
-			&cli.StringFlag{Name: "api", Usage: "HTTP API socket path (probe, leases and the /forwards endpoint)"},
+			&cli.StringFlag{Name: "api", Usage: "HTTP API socket path (probe, leases, /forwards and /diverts)"},
 			&cli.StringFlag{Name: "qemu-socket", Usage: "unix socket for the QEMU stream netdev, used by both the QEMU and HVI backends (default: --socket plus .qemu)"},
 			&cli.StringFlag{Name: "subnet", Value: "10.87.0.0/24", Usage: "virtual subnet CIDR"},
 			&cli.StringFlag{Name: "gateway-ip", Value: "10.87.0.1", Usage: "gateway IP on the subnet"},
@@ -113,6 +124,7 @@ guest reaches the outside world over it, with or without a policy.`),
 			&cli.StringSliceFlag{Name: "egress-allow", Usage: "egress allow rule, host=<glob> or cidr=<cidr> (repeatable)"},
 			&cli.StringSliceFlag{Name: "egress-deny", Usage: "egress deny rule, host=<glob> or cidr=<cidr> (repeatable)"},
 			&cli.DurationFlag{Name: "egress-refresh", Value: egressRefreshDefault, Usage: "how often to re-resolve the named hosts in the egress rules, so a name whose addresses rotate keeps working; 0 disables"},
+			&cli.StringSliceFlag{Name: "divert", Usage: "hand guest TCP connections to host:port to a unix socket instead of dialing them, host:port=/abs/socket (repeatable)"},
 			&cli.StringFlag{Name: "project", Usage: "compose project to supervise (enables restart policies)"},
 			&cli.DurationFlag{Name: "supervise-interval", Value: supervisorPollInterval, Usage: "liveness poll interval of the supervision loop"},
 		},
@@ -122,6 +134,15 @@ guest reaches the outside world over it, with or without a policy.`),
 			policy, err := netgw.ParseEgressPolicy(cmd.String("egress-default"), cmd.StringSlice("egress-allow"), cmd.StringSlice("egress-deny"))
 			if err != nil {
 				return err
+			}
+			diverts, err := netgw.ParseDiverts(cmd.StringSlice("divert"))
+			if err != nil {
+				return err
+			}
+			for _, d := range diverts {
+				if err := checkUnixSocketPathRemedy("--divert", d.Socket, "pass a shorter --divert socket path"); err != nil {
+					return err
+				}
 			}
 			var forwards []netgw.Forward
 			for _, f := range cmd.StringSlice("forward") {
@@ -148,7 +169,7 @@ guest reaches the outside world over it, with or without a policy.`),
 			if qemuSock == "" {
 				qemuSock = qemuGatewaySock(cmd.String("socket"))
 			}
-			return runGateway(ctx, cmd.String("socket"), cmd.String("api"), qemuSock, cmd.String("subnet"), cmd.String("gateway-ip"), forwards, cmd.StringSlice("host"), policy, cmd.Duration("egress-refresh"), sup)
+			return runGateway(ctx, cmd.String("socket"), cmd.String("api"), qemuSock, cmd.String("subnet"), cmd.String("gateway-ip"), forwards, cmd.StringSlice("host"), policy, cmd.Duration("egress-refresh"), diverts, sup)
 		},
 	}
 }
@@ -165,7 +186,7 @@ const gatewayShutdownGrace = 20 * time.Second
 // handful of rules is not a source of DNS traffic worth noticing.
 const egressRefreshDefault = 30 * time.Second
 
-func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, gatewayIP string, forwards []netgw.Forward, hosts []string, policy *netgw.Policy, egressRefresh time.Duration, sup *supervisor) error {
+func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, gatewayIP string, forwards []netgw.Forward, hosts []string, policy *netgw.Policy, egressRefresh time.Duration, diverts []netgw.Divert, sup *supervisor) error {
 	// Serve service names from the gateway's DNS in addition to the
 	// /etc/hosts injection, so images that bypass /etc/hosts keep working.
 	// Non-matching queries fall through to the host resolver.
@@ -202,6 +223,7 @@ func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, ga
 		DNSZones:          dns,
 		Egress:            policy,
 		EgressRefresh:     egressRefresh,
+		Diverts:           diverts,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create virtual network: %w", err)
@@ -218,7 +240,7 @@ func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, ga
 		return err
 	}
 	defer func() { _ = l.Close(); _ = os.Remove(sockPath) }()
-	log.Infof("network-gateway on %s (subnet %s, gw %s, %d forwards, %s)", sockPath, subnet, gatewayIP, len(forwards), policy.Summary())
+	log.Infof("network-gateway on %s (subnet %s, gw %s, %d forwards, %d diverts, %s)", sockPath, subnet, gatewayIP, len(forwards), len(diverts), policy.Summary())
 
 	// Probe API: the gateway is the only process that can dial into the
 	// virtual network, so TCP healthchecks run here.
@@ -253,6 +275,10 @@ func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, ga
 			_ = json.NewEncoder(w).Encode(vn.Leases())
 		})
 		mux.Handle("/forwards", forwardsHandler(vn))
+		mux.HandleFunc("/diverts", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(vn.Diverts())
+		})
 		srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 		go func() { _ = srv.Serve(apiL) }()
 	}
