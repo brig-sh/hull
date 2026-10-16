@@ -891,8 +891,10 @@ writer. Every destination was prepared (`hull migrate-prepare`) first.
 | rp1 to rp2 | ubuntu, 256 MiB dirtier | 65.0 s | 3.49 s | 1.7 GiB: disk 449.8 MiB as 208.6 MiB, RAM 1.5 GiB | 5419, 487, 324, 483, 484 | 5 (time_cap), the last 294 MiB |
 | rp2 to rp1 | ubuntu, 256 MiB dirtier | 43.2 s | 3.40 s | 2.1 GiB: disk 500.2 MiB as 258.6 MiB, RAM 1.8 GiB | 5425, 804, 324, 483, 484, 484 | 6 (round_cap), the last 293 MiB |
 | this Mac to rp1, a 1 MB/s link | claude-code, light | 129 s | 6.45 s | 122.7 MiB: disk 284.5 MiB as 34.7 MiB, RAM 87.9 MiB | 4523, 29 | 2 (time_cap) |
-| this Mac to rp2, a 1 MB/s link, through `brig teleport` | claude-code, brig's demo | 70.1 s | 7.96 s | 70.9 MiB: disk 245.9 MiB as 2.6 MiB, RAM 68.2 MiB | 3834, 101 | 2 (time_cap) |
-| the same, again | claude-code, brig's demo | 73.1 s | 6.82 s | 75.9 MiB: disk 246.8 MiB as 2.6 MiB, RAM 73.2 MiB | 3839, 102, 7 | 3 (time_cap) |
+| this Mac to rp2, a 1 MB/s link, through `brig teleport` (superseded by the LAN rows below) | claude-code, brig's demo | 70.1 s | 7.96 s | 70.9 MiB: disk 245.9 MiB as 2.6 MiB, RAM 68.2 MiB | 3834, 101 | 2 (time_cap) |
+| the same, again (superseded) | claude-code, brig's demo | 73.1 s | 6.82 s | 75.9 MiB: disk 246.8 MiB as 2.6 MiB, RAM 73.2 MiB | 3839, 102, 7 | 3 (time_cap) |
+| this Mac to rp2 on the LAN, through `brig teleport`; hull 251e226, `hvi` 94faf8f | claude-code, brig's demo with a Claude Code task | 8.2 s | 345.7 ms | 213.5 MiB: disk 250.9 MiB as 2.9 MiB, RAM 210.6 MiB | 3999, 11, 4, 1 | 4 (converged) |
+| the same, again | claude-code, brig's demo with a Claude Code task | 8.8 s | 387.1 ms | 260.5 MiB: disk 245.4 MiB as 2.8 MiB, RAM 257.6 MiB | 3914, 8, 3, 1, 1, 0 | 6 (round_cap) |
 
 - The writer's final disk round was empty, and the dirtier's 484 blocks
   (30.2 MiB) took 0.29 to 0.33 s to read and send inside the pause: the
@@ -928,6 +930,33 @@ writer. Every destination was prepared (`hull migrate-prepare`) first.
   "From the seal to the resume" below). The guest's counter,
   `boot_id`, sum and deleted file held on fd 3 checked out after each
   move, and every exec into the moved guest worked.
+- The two LAN rows ran on 2026-10-16 through brig's
+  `script/teleport-demo-claude.sh --claude --prepare` (brig 7d0a000),
+  with hull 251e226 and `hvi` 94faf8f built with `HVI_GIT_SHA` on each
+  host, and the Mac on the Pis' LAN: 32 MiB went through ssh in 1.1 to
+  1.7 s, and `rp2` resolved over Tailscale direct to its LAN address.
+  The first prepare sent the base, 1.5 GiB as 740.8 MiB in 48.2 s.
+  RAM round 0 sent 188 and 206 MiB in 6.3 and 6.2 s, and the round
+  taken paused was 2.4 and 4.0 MiB. hvi sealed 50 and 183 ms after the
+  pause, and hull's summary said the guest was paused about 349 and
+  388 ms; from the seal to the destination's resume took 0.41 and 0.30 s
+  as brig printed hull's lines on the Mac, against 2.9 and 3.1 s on the
+  1 MB/s link. `brig teleport` took 9.65 and 9.89 s in all. Four more
+  moves that day with the same builds: two of the same demo, 6.9 and
+  7.9 s with 188 and 195 ms; two whose guest ran a Claude Code task that
+  was thinking, with RAM rounds at about 17 MiB/s and hvi's round cap,
+  18.9 and 23.9 s with 864 and 663 ms. The guest's counter, `boot_id`,
+  sum and held file checked out after every move.
+- Five moves of brig's recorded demo, the same day and builds, the guest
+  running a feed writer and a Claude Code turn that waited on `vmstat`,
+  took 7.2, 21.6, 8.3, 17.3 and 6.6 s, with 239 ms, 13.0 s, 480 ms,
+  6.25 s and 192 ms of downtime. In the 21.6 s move hvi's
+  rounds converged and it sealed 36 ms after the pause, but rp2 read the
+  manifest 12.5 s after the seal (the two hosts' clocks), with 253.9 MiB
+  relayed in 20.8 s: the stream was still on its way. In the 17.3 s move
+  rp2 read the manifest 0.1 s after the seal and recorded `hvi restored
+  the guest paused` 6.1 s later. Neither was explained. rp2's kernel had
+  logged NVMe write timeouts earlier that morning, during a prepare.
 - On the Mac, four sessions of claude-code booted against one base,
   9890a88a4845. The first `migrate-prepare` of rp2 sent it, 1.5 GiB as
   742.8 MiB in 733.8 s; the prepares after it found it held, in 12.1 and
