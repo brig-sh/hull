@@ -406,7 +406,7 @@ From hull it is this digest.
 ### Preparing a destination
 
 ```bash
-hull migrate-prepare vm1 --to pm@rp2 [--remote-store DIR] [--remote-hull PATH] [--json]
+hull migrate-prepare vm1 --to pm@rp2 [--remote-store DIR] [--remote-hull PATH] [--kernel-sha256 SUM] [--json]
 ```
 
 puts on the destination, while the guest keeps running, what a streamed
@@ -415,7 +415,7 @@ move then does not carry:
 | Step | What it does |
 |---|---|
 | image | `hull pull REF` there by the reference this store pulled it by, unless that store has the digest. The move does not need it; a later `hull run` there does. A failure is reported and fails nothing |
-| profile kernel | for a `--profile` instance, this store's kernel of that profile, when the destination has none. It is checked against the sha256 and installed through the same import as `HULL_PORTABLE_KERNEL`, from a copy kept under `bases/kernels/`. A destination that holds another kernel of the profile keeps it, and the step says so: a profile run there boots only its installed kernel, and whoever installed it expects those bytes. The move does not need the kernel |
+| profile kernel | for a `--profile` instance, this store's kernel of that profile, when the destination has none. It is checked against the sha256 and installed through the same import as `HULL_PORTABLE_KERNEL`, from a copy kept under `bases/kernels/`. A destination that holds another kernel of the profile keeps it, and the step says so: a profile run there boots only its installed kernel, and whoever installed it expects those bytes. The exception is `--kernel-sha256 SUM`, the kernel the destination is to hold, which brig passes as the portable kernel it pins: when this store's kernel is SUM, the destination's other one is replaced, and the step says `sent (..., in place of ...)`. A destination whose hull lists no `kernel-replace` capability is not asked, and when this store's kernel is not SUM nothing is replaced either, so a prepare never moves a host off the kernel it was given for another. The move does not need the kernel |
 | base | the base, as lz4-compressed non-zero blocks (`HULLBAS1`); the destination writes it to a temporary file, keeps it only if what arrived has the base's digest, and makes it read-only. It also keeps a spare copy (`bases/spare/<digest>.ext4`), made again by every prepare after a move took it, and by the source of a move once it commits ([The way back](#the-way-back)), which a streamed receive takes as the instance's disk: on the Pis, without clones, copying the 1.6 GB claude-code base took 22 s, all of it before the stream could start. The copy is synced before it is kept, and two makers of one spare take turns on its lock (`bases/spare/<digest>.lock`), so the second finds it made; a streamed receive waits on that lock for a maker at work, for at most a minute, and takes its spare |
 | gateway | with `--remote-gateway-sock`, whether it answers. hull does not start one: brig starts the gateway with the session's policy |
 
