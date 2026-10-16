@@ -19,6 +19,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -573,5 +575,129 @@ func TestMigrateReceiveSessionWritesItsReplyOnStdout(t *testing.T) {
 	}
 	if reply.OK || reply.Code != codeUnknownTxID || reply.Protocol != migrateProtocol {
 		t.Errorf("reply %+v", reply)
+	}
+}
+
+// stoppedPeer is a destination whose hull stops, as SIGSTOP stops it, once
+// it has read after bytes of the stream: it reads and acks nothing more,
+// and its session stays open until the source ends the call, as ssh's
+// does. buffered is what the link takes on its behalf meanwhile, as ssh's
+// window and the sockets would: 0 holds the source's write in the pipe,
+// more lets it fill its window and wait there.
+type stoppedPeer struct {
+	*localPeer
+	after, buffered int64
+}
+
+func (p *stoppedPeer) session(ctx context.Context, verb string, args []string, stdin io.Reader,
+	event func(*migrateReply)) (*migrateReply, error) {
+	if verb != "migrate-receive" {
+		return p.localPeer.session(ctx, verb, args, stdin, event)
+	}
+	stopped := &stopReader{r: stdin, left: p.after, buffered: p.buffered, ctx: ctx}
+	reply, err := p.localPeer.session(ctx, verb, args, stopped, event)
+	if ctx.Err() != nil {
+		return nil, fmt.Errorf("%w to %s: signal: killed", errMoveNoAnswer, verb)
+	}
+	return reply, err
+}
+
+// stopReader reads left bytes of r, and then nothing until ctx ends.
+type stopReader struct {
+	r              io.Reader
+	left, buffered int64
+	ctx            context.Context
+	stopped        bool
+}
+
+func (s *stopReader) Read(b []byte) (int, error) {
+	if s.left <= 0 {
+		if !s.stopped && s.buffered > 0 {
+			go func() { _, _ = io.CopyN(io.Discard, s.r, s.buffered) }()
+		}
+		s.stopped = true
+		<-s.ctx.Done()
+		return 0, errors.New("the destination's hull was killed")
+	}
+	n, err := s.r.Read(b[:min(int64(len(b)), s.left)])
+	s.left -= int64(n)
+	return n, err
+}
+
+// A destination whose hull stops, its ssh session open, takes none of the
+// stream: the window or the pipe holds the source's relay, and with it
+// its reads of hvi's socket. The source cuts it off after the link's idle
+// bound and reads the rest of hvi's stream into its spool. hvi, which
+// gave up on the stalled reader and closed the stream, has the guest
+// running on, as its status says; an hvi still writing seals the stream,
+// and the source holds it whole, fenced, for a re-run. Either way the
+// move ends without the destination.
+func TestStreamedMoveDestinationStopsReading(t *testing.T) {
+	prev := linkIdle
+	linkIdle = time.Second
+	t.Cleanup(func() { linkIdle = prev })
+	for _, tc := range []struct {
+		name     string
+		buffered int64
+		hviGives bool
+	}{
+		{"in the window, hvi gives up", 8 << 20, true},
+		{"in the pipe, hvi gives up", 0, true},
+		{"in the window, hvi seals", 8 << 20, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newStreamFixture(t)
+			// 1.5 MiB more in disk round 0, more than the socket and
+			// hull's reader hold, so hvi waits on the stopped reader.
+			f.hvi.bigDiskRound = 24
+			if tc.hviGives {
+				f.hvi.readerIdle = 200 * time.Millisecond
+			}
+			peer := &stoppedPeer{localPeer: f.peer, after: 64 << 10, buffered: tc.buffered}
+			opt := f.options(false)
+			var out bytes.Buffer
+			opt.out = &out
+			started := time.Now()
+			err := sourceMigrate(context.Background(), f.src, f.name, opt, peer)
+			took := time.Since(started)
+			if err == nil || !strings.Contains(err.Error(), "the destination took none of the stream for 1.0 s") {
+				t.Fatalf("err = %v\n%s", err, out.String())
+			}
+			if took > 10*time.Second {
+				t.Errorf("the stopped destination held the move for %s", took)
+			}
+			rec := f.srcRecord(t)
+			if rec.State != srcTransferring {
+				t.Fatalf("the move is %s", rec.State)
+			}
+			f.hvi.mu.Lock()
+			ops := slices.Clone(f.hvi.ops)
+			f.hvi.mu.Unlock()
+			at := slices.Index(ops, "migrate")
+			if tc.hviGives {
+				if !strings.Contains(err.Error(), "runs on here") || !strings.Contains(rec.Error, "runs on here") {
+					t.Fatalf("err %v; record %q", err, rec.Error)
+				}
+				if at < 0 || slices.Index(ops[at:], "status") != 1 {
+					t.Errorf("hull did not ask hvi's status once the stream ended: %v", ops)
+				}
+			} else if !strings.Contains(out.String(), "hvi sealed the stream and fenced") {
+				t.Fatalf("hvi did not seal:\n%s", out.String())
+			}
+			if err := f.migrate(t, rec.TxID); err != nil {
+				t.Fatal(err)
+			}
+			rec = f.srcRecord(t)
+			want := "live"
+			if !tc.hviGives {
+				want = "replay"
+			}
+			if rec.State != srcCommitted || rec.Stream.Mode != want {
+				t.Fatalf("the re-run: %s %s, want %s", rec.State, rec.Stream.Mode, want)
+			}
+			if tc.hviGives {
+				f.checkArrived(t, rec)
+			}
+		})
 	}
 }

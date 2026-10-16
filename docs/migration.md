@@ -720,6 +720,20 @@ copy to restore from. So:
   hvi, so the 2 minutes stand for it. Before this bound, one move under
   the hog waited out the 2 minutes after `ram-round-2` stalled (see
   [From the seal to the resume](#from-the-seal-to-the-resume));
+- a destination that takes none of the stream, such as a hull stopped
+  with SIGSTOP whose ssh session stays open, acks nothing and reads
+  nothing, so the source's window, or the pipe to ssh, holds the relay
+  and hull reads nothing of hvi's socket. A write to the destination that
+  waits longer than the bound hull gives hvi at that point (2 minutes
+  while the guest runs, the paused part's budget plus 5 s after it)
+  ends the link: hull prints `the destination took none of the stream
+  for B s, and hull cut it off`, ends the destination's ssh session, and
+  reads the rest of hvi's stream into the spool. hvi has given up on the
+  stalled stream by then and closed it, so hull asks hvi's `status` and
+  the guest runs on here, as above; an hvi still writing seals the
+  stream, and the guest is fenced with a whole spool, for a re-run or
+  `--abort` as below. A send that fails for another reason gives the
+  destination 30 s to answer before hull ends its session;
 - one that fails after the manifest leaves the guest fenced with its spool
   recorded as the instance's checkpoint (`migrating`). Running the move
   again sends the spool (`"replay": true`) to a fresh copy of the base
