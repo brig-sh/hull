@@ -114,10 +114,12 @@ type fakeStreamHvi struct {
 	// once a stream has begun; the guest runs on. cutWith is what it
 	// writes before the close: "" nothing more, "refusal" its refusal
 	// among the frame's bytes, "short" the start of it there, "header"
-	// the start of it in place of the frame's header line.
-	cutIn   string
-	cutWith string
-	conn    net.Conn
+	// the start of it in place of the frame's header line. cutState,
+	// when set, is the guest's state after the close in place of running.
+	cutIn    string
+	cutWith  string
+	cutState string
+	conn     net.Conn
 }
 
 func newFakeStreamHvi(t *testing.T, disk, base string) *fakeStreamHvi {
@@ -286,6 +288,9 @@ func (h *fakeStreamHvi) migrate(req map[string]any, w *bufio.Writer, reply func(
 			}
 			_ = w.Flush()
 			_ = h.conn.Close()
+			if h.cutState != "" {
+				h.state = h.cutState
+			}
 			lost = true
 			return
 		}
@@ -1093,8 +1098,10 @@ func TestStreamedMoveStallInThePausedPart(t *testing.T) {
 // hvi fails a stream that has begun by closing the connection, its refusal
 // first when the socket has room for it, among a frame's bytes or where a
 // header was due, whole or cut short. hull takes the end as hvi's failure
-// at once, says what hvi said, and still asks hvi's status, which says the
-// guest runs on; it does not wait out the paused part's bound.
+// at once, says what hvi said, and asks hvi's status, which says whether
+// the guest runs on or is fenced, whatever the end of the stream says: a
+// refusal among a frame's bytes may be bytes the guest wrote. It does not
+// wait out the paused part's bound.
 func TestStreamedMoveHviClosesTheStream(t *testing.T) {
 	for _, tc := range []struct {
 		name, in, with, want string
@@ -1108,45 +1115,53 @@ func TestStreamedMoveHviClosesTheStream(t *testing.T) {
 		{"with its refusal cut short at a header", "cpu.json", "header",
 			`its refusal, cut short: "{\"v\":1,\"ok\":false`},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := newStreamFixture(t)
-			f.hvi.writesAt["ram-round-1"] = []int64{5}
-			f.hvi.cutIn, f.hvi.cutWith = tc.in, tc.with
-			started := time.Now()
-			err := f.migrate(t, "")
-			took := time.Since(started)
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("err = %v, want %q", err, tc.want)
-			}
-			if strings.Contains(err.Error(), "hvi sent nothing for") {
-				t.Errorf("hvi's close taken for a stall: %v", err)
-			}
-			if took > hviPausedFloor/2 {
-				t.Errorf("the close took %s to report", took)
-			}
-			f.hvi.mu.Lock()
-			ops := slices.Clone(f.hvi.ops)
-			f.hvi.mu.Unlock()
-			if i := slices.Index(ops, "migrate"); i < 0 || !slices.Contains(ops[i:], "status") {
-				t.Errorf("hull did not ask hvi's status after the close: %v", ops)
-			}
-			rec := f.srcRecord(t)
-			if rec.State != srcTransferring || !strings.Contains(err.Error(), "runs on here") ||
-				!strings.Contains(rec.Error, "runs on here") {
-				t.Fatalf("the move is %s; err %v; record %q", rec.State, err, rec.Error)
-			}
-			if tc.with == "refusal" && !strings.Contains(err.Error(), "hvi refused migrate: the reader did not "+
-				"take the stream within the time the guest may stay paused (capture_failed)") {
-				t.Errorf("hvi's refusal is not in the error: %v", err)
-			}
-			if err := f.migrate(t, rec.TxID); err != nil {
-				t.Fatal(err)
-			}
-			if rec := f.srcRecord(t); rec.State != srcCommitted || rec.Stream.Mode != "live" {
-				t.Fatalf("the re-run: %s %s", rec.State, rec.Stream.Mode)
-			}
-			f.checkArrived(t, f.srcRecord(t))
-		})
+		for _, state := range []string{"running", "fenced"} {
+			t.Run(tc.name+", "+state, func(t *testing.T) {
+				f := newStreamFixture(t)
+				f.hvi.writesAt["ram-round-1"] = []int64{5}
+				f.hvi.cutIn, f.hvi.cutWith = tc.in, tc.with
+				if state == "fenced" {
+					f.hvi.cutState = state
+				}
+				started := time.Now()
+				err := f.migrate(t, "")
+				took := time.Since(started)
+				if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("err = %v, want %q", err, tc.want)
+				}
+				if strings.Contains(err.Error(), "hvi sent nothing for") {
+					t.Errorf("hvi's close taken for a stall: %v", err)
+				}
+				if took > hviPausedFloor/2 {
+					t.Errorf("the close took %s to report", took)
+				}
+				if tc.with == "refusal" && !strings.Contains(err.Error(), "hvi refused migrate: the reader did "+
+					"not take the stream within the time the guest may stay paused (capture_failed)") {
+					t.Errorf("hvi's refusal is not in the error: %v", err)
+				}
+				rec := f.srcRecord(t)
+				if rec.State != srcTransferring {
+					t.Fatalf("the move is %s", rec.State)
+				}
+				if state == "fenced" {
+					if !strings.Contains(err.Error(), "hvi fenced the guest, though hull did not take its whole "+
+						"stream") || strings.Contains(err.Error(), "runs on here") {
+						t.Fatalf("a guest hvi fenced reported as %v", err)
+					}
+					return
+				}
+				if !strings.Contains(err.Error(), "runs on here") || !strings.Contains(rec.Error, "runs on here") {
+					t.Fatalf("err %v; record %q", err, rec.Error)
+				}
+				if err := f.migrate(t, rec.TxID); err != nil {
+					t.Fatal(err)
+				}
+				if rec := f.srcRecord(t); rec.State != srcCommitted || rec.Stream.Mode != "live" {
+					t.Fatalf("the re-run: %s %s", rec.State, rec.Stream.Mode)
+				}
+				f.checkArrived(t, f.srcRecord(t))
+			})
+		}
 	}
 }
 

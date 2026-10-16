@@ -681,8 +681,10 @@ copy to restore from. So:
   hull found it at the end of the stream, whole or as it arrived, or
   "hvi closed its migrate stream, as it does when the stream fails, and
   hull read no refusal". hull then asks hvi's `status` as below, and says
-  what hvi says. A whole refusal where a header was due is taken as
-  "runs on" without asking, as before;
+  what hvi says, even when it found hvi's refusal whole: the end of the
+  stream may be a frame's bytes, which the guest wrote, and they must not
+  decide whether the guest is fenced. Only a whole refusal read where a
+  frame header was due is taken as "runs on" without asking, as before;
 - a stream hull stops reading before the manifest on a failure of its own
   (a spool write on a full disk, a document too large to keep, a frame
   that does not match its sha256) may still have fenced the guest: hvi
@@ -1349,8 +1351,10 @@ rp2's clock 1.3 ms behind rp1's.
   (hvi's ram-round-3 ended at 439669 of its 1048672 bytes): hvi refused
   migrate: the reader did not take the stream within the time the guest
   may stay paused; the stream is not sealed, and the VM is as it was
-  (capture_failed)", and, after hvi's `status`, "hvi did not fence h12d:
-  its stream ended before the manifest, and the guest runs on here". The
+  (capture_failed)", and then, without asking hvi's `status` (hull at
+  68c8bc1 took a whole refusal at the end of the stream as hvi's answer;
+  it now asks), "hvi did not fence h12d: its stream ended before the
+  manifest, and the guest runs on here". The
   move took 87.2 s, most of it RAM round 0 at 10 MiB/s. rp2's record said
   "the stream ended in hvi's ram-round-3: unexpected EOF", `--status`
   said the guest still runs here, and `--abort` said it never stopped
