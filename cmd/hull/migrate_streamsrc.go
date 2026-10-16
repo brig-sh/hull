@@ -1165,8 +1165,12 @@ func (ss *streamSender) send(replay bool) (json.RawMessage, error) {
 	ss.progress("hvi sealed the stream and fenced %s (%d ms after the pause)", m.name, ss.stats.SealedMs)
 	ss.recorded = make(chan error, 1)
 	fenceDone := make(chan struct{})
+	// The record takes hvi's reply as it is now: the transfer sets the
+	// move's stats again once the destination answers, which can be
+	// before this write is done.
+	hviStats := ss.stats.HviReply
 	go func() {
-		err := ss.recordInstanceFence()
+		err := ss.recordInstanceFence(hviStats)
 		ss.recordedAt = time.Now().UTC()
 		m.signals.release()
 		close(fenceDone)
@@ -1368,12 +1372,13 @@ func (ss *streamSender) noteFence() error {
 // checkpoint, taken over by this move. latest.json goes first, as a
 // checkpoint writes it: a restore that finds it naming a checkpoint the
 // record never took in refuses rather than rewinding past it. It runs
-// beside the end of the move; the commit does not wait for it.
-func (ss *streamSender) recordInstanceFence() error {
+// beside the end of the move; the commit does not wait for it, so it
+// takes hvi's reply as an argument rather than read the move's stats.
+func (ss *streamSender) recordInstanceFence(hviStats json.RawMessage) error {
 	m := ss.m
 	sum := sha256Hex(ss.manifest)
 	if err := writeHviCheckpointRecord(instanceCheckpointDir(m.s, m.name), hviCheckpointRecord{
-		Dir: ss.spoolDir, ManifestSHA256: sum, Then: hviThenFence, Stats: ss.stats.HviReply,
+		Dir: ss.spoolDir, ManifestSHA256: sum, Then: hviThenFence, Stats: hviStats,
 		SavedAt: time.Now().UTC(), TxID: m.rec.TxID, Manifest: ss.manifest,
 	}); err != nil {
 		return fmt.Errorf("the stream is sealed in %s but recording it failed: %w", ss.spoolDir, err)
