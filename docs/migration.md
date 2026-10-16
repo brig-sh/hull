@@ -723,10 +723,12 @@ copy to restore from. So:
 - a destination that takes none of the stream, such as a hull stopped
   with SIGSTOP whose ssh session stays open, acks nothing and reads
   nothing, so the source's window, or the pipe to ssh, holds the relay
-  and hull reads nothing of hvi's socket. A write to the destination that
-  waits longer than the bound hull gives hvi at that point (2 minutes
-  while the guest runs, the paused part's budget plus 5 s after it)
-  ends the link: hull prints `the destination took none of the stream
+  and hull reads nothing of hvi's socket. hvi fails a stream whose reader
+  takes nothing for 30 s, or past the paused part's budget. A write to
+  the destination that waits longer than that, plus 5 s (35 s, or the
+  paused part's budget plus 5 s when that is shorter; 2 minutes in a
+  replay from the spool, which hvi has no part in), ends the link: hull
+  prints `the destination took none of the stream
   for B s, and hull cut it off`, ends the destination's ssh session, and
   reads the rest of hvi's stream into the spool. hvi has given up on the
   stalled stream by then and closed it, so hull asks hvi's `status` and
