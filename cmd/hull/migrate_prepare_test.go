@@ -146,7 +146,7 @@ func TestPrepareIsIdempotent(t *testing.T) {
 	peer := newLocalPeer(f.dst)
 	remote := migrateRemote{Target: "pm@dest", Hvi: f.hvi}
 	var out bytes.Buffer
-	res, err := prepareDestination(context.Background(), f.src, state, peer, remote, &out)
+	res, err := prepareDestination(context.Background(), f.src, state, peer, remote, "", &out)
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out.String())
 	}
@@ -172,7 +172,7 @@ func TestPrepareIsIdempotent(t *testing.T) {
 
 	sent := peer.called("migrate-take-base") + peer.called("migrate-take-kernel")
 	out.Reset()
-	res, err = prepareDestination(context.Background(), f.src, state, peer, remote, &out)
+	res, err = prepareDestination(context.Background(), f.src, state, peer, remote, "", &out)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +194,7 @@ func TestPrepareOfAnOldDestination(t *testing.T) {
 	peer.answer["migrate-probe"] = &migrateReply{OK: true, Probe: &migrateProbe{HullVersion: "old"}}
 	var out bytes.Buffer
 	res, err := prepareDestination(context.Background(), f.src, state, peer,
-		migrateRemote{Target: "pm@dest"}, &out)
+		migrateRemote{Target: "pm@dest"}, "", &out)
 	if err != nil || res.Stream || len(res.Steps) != 0 || !strings.Contains(out.String(), "whole checkpoint") {
 		t.Fatalf("err %v res %+v out %s", err, res, out.String())
 	}
@@ -252,17 +252,12 @@ func TestPrepareKeepsAnotherKernel(t *testing.T) {
 	peer := newLocalPeer(f.dst)
 	var out bytes.Buffer
 	res, err := prepareDestination(context.Background(), f.src, state, peer,
-		migrateRemote{Target: "pm@dest", Hvi: f.hvi}, &out)
+		migrateRemote{Target: "pm@dest", Hvi: f.hvi}, "", &out)
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out.String())
 	}
-	var kernel *prepareStep
-	for i, st := range res.Steps {
-		if strings.HasPrefix(st.What, bootassets.PortableArm64V1) {
-			kernel = &res.Steps[i]
-		}
-	}
-	if kernel == nil || kernel.Result != "skipped" || !strings.Contains(kernel.Detail, "not replaced") {
+	if kernel := kernelStepOf(t, res, bootassets.PortableArm64V1); kernel.Result != "skipped" ||
+		!strings.Contains(kernel.Detail, "not replaced") {
 		t.Fatalf("kernel step %+v", kernel)
 	}
 	if peer.called("migrate-take-kernel") != 0 {
@@ -270,12 +265,116 @@ func TestPrepareKeepsAnotherKernel(t *testing.T) {
 	}
 	sum := installedProfileKernel(f.src.RootDir(), bootassets.PortableArm64V1)
 	kernelBytes := []byte("the portable kernel")
-	if r := destTakeKernel(f.dst, bootassets.PortableArm64V1, sum, int64(len(kernelBytes)),
+	if r := destTakeKernel(f.dst, bootassets.PortableArm64V1, sum, int64(len(kernelBytes)), false,
 		bytes.NewReader(kernelBytes)); r.OK || !strings.Contains(r.Error, "not replaced") {
 		t.Fatalf("take-kernel over another: %+v", r)
 	}
 	after, err := os.ReadFile(filepath.Join(dstKernels, bootassets.ProfileKernelName))
 	if err != nil || !bytes.Equal(before, after) {
 		t.Fatalf("the destination's kernel changed: %q %v", after, err)
+	}
+}
+
+// With the pin (brig's --kernel-sha256) naming this host's kernel, the
+// prepare replaces the other kernel the destination holds, and a second
+// prepare finds it held. A pin this host's kernel is not replaces nothing.
+func TestPrepareReplacesAnotherKernelWithThePinnedOne(t *testing.T) {
+	f, state := prepareFixture(t)
+	dstKernels := filepath.Join(f.dst.RootDir(), "assets", bootassets.PortableArm64V1)
+	seedAssetDir(t, dstKernels, map[string]string{bootassets.ProfileKernelName: "the destination's own kernel"})
+	held := installedProfileKernel(f.dst.RootDir(), bootassets.PortableArm64V1)
+	sum := installedProfileKernel(f.src.RootDir(), bootassets.PortableArm64V1)
+	if held == "" || sum == "" || held == sum {
+		t.Fatalf("kernels %q here and %q there; want two that differ", sum, held)
+	}
+	remote := migrateRemote{Target: "pm@dest", Hvi: f.hvi}
+	profile := bootassets.PortableArm64V1
+
+	// A pin that is neither kernel: nothing sent.
+	peer := newLocalPeer(f.dst)
+	var out bytes.Buffer
+	res, err := prepareDestination(context.Background(), f.src, state, peer, remote, strings.Repeat("ab", 32), &out)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if st := kernelStepOf(t, res, profile); st.Result != "skipped" ||
+		!strings.Contains(st.Detail, "the pin is abababababab") ||
+		peer.called("migrate-take-kernel") != 0 {
+		t.Fatalf("kernel step %+v, %d sends", st, peer.called("migrate-take-kernel"))
+	}
+
+	// The pin is this host's kernel: sent, over the other one.
+	res, err = prepareDestination(context.Background(), f.src, state, peer, remote, sum, &out)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if st := kernelStepOf(t, res, profile); st.Result != "sent" ||
+		!strings.Contains(st.Detail, "in place of "+digestHead(held)) {
+		t.Fatalf("kernel step %+v\n%s", st, out.String())
+	}
+	if got := installedProfileKernel(f.dst.RootDir(), bootassets.PortableArm64V1); got != sum {
+		t.Fatalf("the destination's kernel is %s, want %s", got, sum)
+	}
+	if res.Holds.ProfileKernels[bootassets.PortableArm64V1] != sum {
+		t.Fatalf("the probe after the prepare lists %v", res.Holds.ProfileKernels)
+	}
+	got, err := os.ReadFile(filepath.Join(dstKernels, bootassets.ProfileKernelName))
+	if err != nil || string(got) != "the portable kernel" {
+		t.Fatalf("the destination's kernel file holds %q, %v", got, err)
+	}
+
+	// Again: held, and nothing sent.
+	sends := peer.called("migrate-take-kernel")
+	res, err = prepareDestination(context.Background(), f.src, state, peer, remote, sum, &out)
+	if err != nil || kernelStepOf(t, res, profile).Result != "held" || peer.called("migrate-take-kernel") != sends {
+		t.Fatalf("second prepare: %v, kernel step %+v", err, kernelStepOf(t, res, profile))
+	}
+}
+
+// A destination whose hull lists no kernel-replace capability is not asked
+// to replace its kernel, and the step says what to run there instead.
+func TestPrepareAsksNoOlderHullToReplaceAKernel(t *testing.T) {
+	f, state := prepareFixture(t)
+	seedAssetDir(t, filepath.Join(f.dst.RootDir(), "assets", bootassets.PortableArm64V1),
+		map[string]string{bootassets.ProfileKernelName: "the destination's own kernel"})
+	probe := destProbe(f.dst, "", f.hvi, "")
+	probe.Probe.Capabilities = []string{moveCapStream, moveCapSession}
+	peer := newLocalPeer(f.dst)
+	peer.answer["migrate-probe"] = probe
+	sum := installedProfileKernel(f.src.RootDir(), bootassets.PortableArm64V1)
+	var out bytes.Buffer
+	res, err := prepareDestination(context.Background(), f.src, state, peer,
+		migrateRemote{Target: "pm@dest", Hvi: f.hvi}, sum, &out)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if st := kernelStepOf(t, res, bootassets.PortableArm64V1); st.Result != "skipped" ||
+		!strings.Contains(st.Detail, "cannot replace it") {
+		t.Fatalf("kernel step %+v", st)
+	}
+	if peer.called("migrate-take-kernel") != 0 {
+		t.Fatal("the prepare sent a kernel to a hull that cannot replace one")
+	}
+}
+
+// kernelStepOf is the prepare's step for the kernel of profile.
+func kernelStepOf(t *testing.T, res *prepareResult, profile string) *prepareStep {
+	t.Helper()
+	for i, st := range res.Steps {
+		if strings.HasPrefix(st.What, profile) {
+			return &res.Steps[i]
+		}
+	}
+	t.Fatalf("no %s kernel step in %+v", profile, res.Steps)
+	return nil
+}
+
+func TestPrepareRefusesAPinThatIsNoSha256(t *testing.T) {
+	f, _ := prepareFixture(t)
+	err := sourcePrepare(context.Background(), f.src, f.name, prepareOptions{
+		remote: migrateRemote{Target: "pm@dest"}, out: io.Discard, kernel: "sha256:1234",
+	}, newLocalPeer(f.dst))
+	if err == nil || !strings.Contains(err.Error(), "is not a sha256") {
+		t.Fatalf("err %v", err)
 	}
 }

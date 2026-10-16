@@ -288,6 +288,9 @@ func newLocalPeer(s *store.Store) *localPeer {
 	return &localPeer{s: s, drop: map[string]int{}, answer: map[string]*migrateReply{}}
 }
 
+// localPeerBoolFlags are the verbs' flags that take no value.
+var localPeerBoolFlags = map[string]bool{"--reserve": true, "--stream": true, "--session": true, "--replace": true}
+
 func (p *localPeer) call(_ context.Context, verb string, args []string, stdin io.Reader) (*migrateReply, error) {
 	p.mu.Lock()
 	p.calls = append(p.calls, verb)
@@ -315,7 +318,7 @@ func (p *localPeer) call(_ context.Context, verb string, args []string, stdin io
 	}
 	flags := map[string]string{}
 	for i := 0; i < len(args); i++ {
-		if i+1 < len(args) && args[i] != "--reserve" && args[i] != "--stream" && args[i] != "--session" {
+		if i+1 < len(args) && !localPeerBoolFlags[args[i]] {
 			flags[args[i]] = args[i+1]
 			i++
 		} else {
@@ -351,7 +354,7 @@ func (p *localPeer) call(_ context.Context, verb string, args []string, stdin io
 		reply = destSpareBase(p.s, flags["--sha256"])
 	case "migrate-take-kernel":
 		size, _ := strconv.ParseInt(flags["--size"], 10, 64)
-		reply = destTakeKernel(p.s, flags["--profile"], flags["--sha256"], size, stdin)
+		reply = destTakeKernel(p.s, flags["--profile"], flags["--sha256"], size, flags["--replace"] == "true", stdin)
 	case "migrate-take-image":
 		reply = destTakeImage(p.s, flags["--ref"], flags["--digest"])
 	case "migrate-commit":

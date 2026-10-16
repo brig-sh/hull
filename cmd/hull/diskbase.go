@@ -58,6 +58,15 @@ func checkDiskDigest(sum string) error {
 	return nil
 }
 
+// checkSha256 refuses a string that is not a sha256 in hex, naming it as
+// noun.
+func checkSha256(noun, sum string) error {
+	if !diskDigestPattern.MatchString(sum) {
+		return fmt.Errorf("%s %q is not a sha256", noun, sum)
+	}
+	return nil
+}
+
 // diskDigest hashes a disk image by its content alone: the magic, the size
 // and the block size, then, for every 64 KiB block on an absolute boundary
 // that is not all zeros, its index and its bytes (the last block may be
