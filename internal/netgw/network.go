@@ -77,6 +77,9 @@ type Config struct {
 	// EgressRefresh is how often the literal host rules are re-resolved so
 	// the policy follows a name whose addresses rotate. Zero turns it off.
 	EgressRefresh time.Duration
+	// Diverts are the destinations whose guest connections go to a Unix
+	// socket instead of being dialed. See divert.go.
+	Diverts []Divert
 
 	// dial opens the host-side connection. Tests replace it; nil means
 	// net.Dial.
@@ -96,6 +99,7 @@ type Network struct {
 	egress        *Policy
 	resolver      resolver
 	egressRefresh time.Duration
+	diverts       *diverts
 }
 
 func New(cfg Config) (*Network, error) {
@@ -122,7 +126,8 @@ func New(cfg Config) (*Network, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot create network stack: %w", err)
 	}
-	fwd, err := addServices(cfg, s, ipPool)
+	divs := newDiverts(cfg.Diverts)
+	fwd, err := addServices(cfg, s, ipPool, divs)
 	if err != nil {
 		return nil, fmt.Errorf("cannot add network services: %w", err)
 	}
@@ -135,6 +140,7 @@ func New(cfg Config) (*Network, error) {
 		egress:        cfg.Egress,
 		resolver:      upstreamResolver(cfg),
 		egressRefresh: cfg.EgressRefresh,
+		diverts:       divs,
 	}, nil
 }
 
@@ -148,10 +154,23 @@ func (n *Network) Leases() map[string]string {
 }
 
 // Start runs the network's background work until ctx is done. It is separate
-// from New so the caller owns the lifetime, and returns having started
-// nothing when the policy has no literal host rule to keep current.
+// from New so the caller owns the lifetime, and starts nothing when no literal
+// host rule or named divert needs to be kept current.
+//
+// The named diverts are resolved before Start returns. A guest that joins
+// later and connects to a cached address is diverted without asking the
+// gateway's resolver first.
 func (n *Network) Start(ctx context.Context) {
+	resolveCtx, cancel := context.WithTimeout(ctx, divertResolveTimeout)
+	n.diverts.resolve(resolveCtx, n.resolver)
+	cancel()
+	go n.diverts.watch(ctx, n.resolver, n.egressRefresh)
 	go n.egress.WatchHosts(ctx, n.resolver, n.egressRefresh)
+}
+
+// Diverts returns every divert with its counters.
+func (n *Network) Diverts() []DivertStatus {
+	return n.diverts.status()
 }
 
 // AcceptVfkit serves a member that speaks the vfkit protocol: one Ethernet
@@ -233,16 +252,16 @@ func createStack(cfg Config, endpoint stack.LinkEndpoint) (*stack.Stack, error) 
 	return s, nil
 }
 
-func addServices(cfg Config, s *stack.Stack, ipPool *tap.IPPool) (*forwards, error) {
+func addServices(cfg Config, s *stack.Stack, ipPool *tap.IPPool, divs *diverts) (*forwards, error) {
 	dial := cfg.dial
 	if dial == nil {
 		dial = net.Dial
 	}
 	rejects := newRejectLog()
-	s.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpForwarder(s, cfg.Egress, dial, rejects).HandlePacket)
-	s.SetTransportProtocolHandler(udp.ProtocolNumber, udpForwarder(s, cfg.Egress, dial, rejects).HandlePacket)
+	s.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpForwarder(s, cfg.Egress, divs, dial, rejects).HandlePacket)
+	s.SetTransportProtocolHandler(udp.ProtocolNumber, udpForwarder(s, cfg.Egress, divs, dial, rejects).HandlePacket)
 
-	if err := dnsServer(cfg, s); err != nil {
+	if err := dnsServer(cfg, s, divs); err != nil {
 		return nil, err
 	}
 	if err := dhcpServer(cfg, s, ipPool); err != nil {
@@ -251,7 +270,7 @@ func addServices(cfg Config, s *stack.Stack, ipPool *tap.IPPool) (*forwards, err
 	return forwardHostVM(cfg, s)
 }
 
-func dnsServer(cfg Config, s *stack.Stack) error {
+func dnsServer(cfg Config, s *stack.Stack, divs *diverts) error {
 	gatewayAddr := tcpip.AddrFrom4Slice(net.ParseIP(cfg.GatewayIP).To4())
 	udpConn, err := gonet.DialUDP(s, &tcpip.FullAddress{NIC: nicID, Addr: gatewayAddr, Port: 53}, nil, ipv4.ProtocolNumber)
 	if err != nil {
@@ -262,7 +281,7 @@ func dnsServer(cfg Config, s *stack.Stack) error {
 		return err
 	}
 
-	handler := &dnsHandler{zones: cfg.DNSZones, upstream: upstreamResolver(cfg), policy: cfg.Egress}
+	handler := &dnsHandler{zones: cfg.DNSZones, upstream: upstreamResolver(cfg), policy: cfg.Egress, diverts: divs}
 	serve := func(srv *dns.Server, maxSize int) {
 		mux := dns.NewServeMux()
 		mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) { handler.handle(w, r, maxSize) })
