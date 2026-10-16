@@ -97,7 +97,9 @@ func (l *rejectLog) report(protocol string, guest netip.Addr, dst netip.Addr, po
 
 // tcpForwarder handles every TCP segment that matches no endpoint on the
 // stack, which is every connection a guest opens to the outside world.
-func tcpForwarder(s *stack.Stack, policy *Policy, dial dialFunc, rejects *rejectLog) *tcp.Forwarder {
+//
+// A diverted destination is matched before the policy, and is never dialed.
+func tcpForwarder(s *stack.Stack, policy *Policy, divs *diverts, dial dialFunc, rejects *rejectLog) *tcp.Forwarder {
 	linkLocal := linkLocal()
 	return tcp.NewForwarder(s, 0, 10, func(r *tcp.ForwarderRequest) {
 		dst, port := r.ID().LocalAddress, r.ID().LocalPort
@@ -105,6 +107,10 @@ func tcpForwarder(s *stack.Stack, policy *Policy, dial dialFunc, rejects *reject
 
 		if linkLocal.Contains(dst) {
 			r.Complete(true)
+			return
+		}
+		if rule := divs.match(toNetip(dst), port); rule != nil {
+			rule.serve(r)
 			return
 		}
 		if !policy.AllowsConnection(toNetip(guest), toNetip(dst)) {
@@ -143,13 +149,19 @@ func tcpForwarder(s *stack.Stack, policy *Policy, dial dialFunc, rejects *reject
 // udpForwarder does for datagrams what tcpForwarder does for connections. The
 // policy is applied per forwarder request, which is once per flow rather than
 // once per datagram.
-func udpForwarder(s *stack.Stack, policy *Policy, dial dialFunc, rejects *rejectLog) *udp.Forwarder {
+//
+// UDP to a diverted destination is dropped. A client that tries QUIC then
+// falls back to TCP, which is diverted.
+func udpForwarder(s *stack.Stack, policy *Policy, divs *diverts, dial dialFunc, rejects *rejectLog) *udp.Forwarder {
 	linkLocal := linkLocal()
 	return udp.NewForwarder(s, func(r *udp.ForwarderRequest) {
 		dst, port := r.ID().LocalAddress, r.ID().LocalPort
 		guest := r.ID().RemoteAddress
 
 		if linkLocal.Contains(dst) || dst == header.IPv4Broadcast {
+			return
+		}
+		if divs.match(toNetip(dst), port) != nil {
 			return
 		}
 		if !policy.AllowsConnection(toNetip(guest), toNetip(dst)) {
