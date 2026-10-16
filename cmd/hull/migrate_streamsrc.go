@@ -391,8 +391,11 @@ func (ss *streamSender) relayFrame(f *roundFolder, line []byte, hdr hviComponent
 // relayHvi runs hvi's migrate op and relays its frames into the stream and
 // the spool. It returns hvi's reply line once hvi has sealed the stream and
 // fenced the guest. A stream that ends before its manifest without a fence
-// is an *hviRanOnError: hvi refused it, or it broke and hvi says the guest
-// is not fenced (fenceAfterBreak).
+// is an *hviRanOnError: hvi refused it where a frame header was due, or it
+// broke and hvi says the guest is not fenced (fenceAfterBreak). hvi closing
+// the connection is it failing the stream (an *hviStreamEndError, with its
+// refusal when hull found it); hvi's status still says how it left the
+// guest.
 func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][]byte, error) {
 	m := ss.m
 	// In a session the window holds back what hull relays, and what hull
@@ -487,6 +490,11 @@ func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][
 			hviPausedFloor.Seconds(), lastRun.Seconds(), err)
 	}
 	var refused *hviRefusal
+	if err != nil && ss.manifest == nil && ic != nil && !errors.As(err, &refused) {
+		// hvi closes a stream that failed once it began, its refusal
+		// first when the socket has room for it, wherever it lands.
+		err = ic.hviEnded("migrate", err)
+	}
 	switch {
 	case err != nil && ss.manifest == nil && ss.restream:
 		// The guest was fenced before this stream began, and stays so.
@@ -514,10 +522,12 @@ func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][
 // twice the last round taken with the guest running, its RAM round and the
 // disk round before it (hvi src/checkpoint/server.rs, paused_budget). Past
 // it every write fails, and the guest runs on. hvi cannot say so in the
-// middle of a frame, and it leaves the connection open, so hull, waiting
-// for the rest of the frame, waited out the whole hviStreamIdle of 2
-// minutes before it asked hvi whether the guest runs. Once the paused part
-// begins hull waits for a byte only as long as that budget, with a margin.
+// middle of a frame. Before 2e7fb90 it left the connection open, so hull,
+// waiting for the rest of the frame, waited out the whole hviStreamIdle of
+// 2 minutes before it asked hvi whether the guest runs. hvi now closes the
+// connection, and hull sees the end once it has read what was sent. Once
+// the paused part begins hull still waits for a byte only as long as that
+// budget, with a margin, for an hvi that stops writing and does not close.
 
 // hviPausedFloor is hvi's STREAM_PAUSED_FLOOR. A variable so a test need
 // not wait it out.
@@ -585,11 +595,14 @@ var relayFrameTestHook func(component string) error
 // fenceAfterBreak asks hvi whether it fenced the guest after hull stopped
 // reading its migrate stream before the manifest, on a failure of its own
 // (a spool write, a document too large to keep, a frame that does not
-// match its sha256) or of the connection. hvi fences once the manifest is
-// in the socket's buffer, which can be before hull has read the frames in
-// front of it: with a small last round, what is left of the stream can sit
-// there whole when hull fails. Only hvi knows which it was, and it has
-// ended the op by the time it answers (hviUnwindWait).
+// match its sha256), of the connection, or of hvi, which closed the
+// stream. hvi fences once the manifest is in the socket's buffer, which
+// can be before hull has read the frames in front of it: with a small last
+// round, what is left of the stream can sit there whole when hull fails.
+// Only hvi knows which it was, and it has ended the op by the time it
+// answers (hviUnwindWait). When hvi closed the stream, an end before the
+// manifest means a first stream did not fence the guest (hvi docs/cli.md);
+// hull asks all the same, and reports what hvi says.
 func (ss *streamSender) fenceAfterBreak(err error) error {
 	reply, qerr := hviControl(ss.state.ControlSock, map[string]any{"op": "status"}, hviUnwindWait)
 	switch {

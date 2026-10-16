@@ -650,6 +650,18 @@ copy to restore from. So:
   move's error and its record say "hvi's stream ended before its manifest,
   so the guest runs on here", `--abort` leaves it running, and running the
   move again streams it from the start;
+- hvi fails a stream that has begun by closing the connection (since hvi
+  2e7fb90). It writes its refusal first if the socket has room for it at
+  once, so the refusal may come where a frame header was due, among a
+  frame's bytes when the failure came part way through one, or cut short.
+  hull reads the end of the stream, or `ECONNRESET` on Linux when hvi
+  closed with bytes of hull's unread, as hvi's failure: the error says
+  "hvi failed its migrate stream and closed it" with hvi's refusal when
+  hull found it at the end of the stream, whole or as it arrived, or
+  "hvi closed its migrate stream, as it does when the stream fails, and
+  hull read no refusal". hull then asks hvi's `status` as below, and says
+  what hvi says. A whole refusal where a header was due is taken as
+  "runs on" without asking, as before;
 - a stream hull stops reading before the manifest on a failure of its own
   (a spool write on a full disk, a document too large to keep, a frame
   that does not match its sha256) may still have fenced the guest: hvi
@@ -665,14 +677,15 @@ copy to restore from. So:
 - hvi gives the part of the stream it writes with the guest paused, from
   `disk-round-final` to the manifest, 10 s plus twice the last round with
   the guest running (its RAM round and the disk round before it). Past
-  that every write of hvi's fails and the guest runs on, but in the
-  middle of a frame hvi cannot say so: its refusal lands among the
-  frame's bytes, and it then waits for the next request on the open
-  connection. hull waits up to 2 minutes for a byte from hvi while the
-  guest runs.
+  that every write of hvi's fails and the guest runs on. In the middle of
+  a frame hvi cannot say so: its refusal lands among the frame's bytes.
+  Before 2e7fb90 it then waited for the next request on the open
+  connection; it now closes it, as above. hull waits up to 2 minutes for
+  a byte from hvi while the guest runs.
   Once it has the first frame of `disk-round-final` (in a stream with no
   disk rounds, the first document after the RAM rounds) it waits only as
-  long as that budget, from the rounds as it timed them, plus 5 s. hull
+  long as that budget, from the rounds as it timed them, plus 5 s, for an
+  hvi that stops writing without closing. hull
   times a round by its frames' arrival, so the last running round
   includes hvi's sync and pause before `disk-round-final`, and the bound
   is at least hvi's. A stall past it fails with `hvi sent nothing for
@@ -1315,7 +1328,7 @@ destination before the commit), and two fields, `moveTxid` and `peer`.
 | `hvi checkpoint-verify` fails | fenced, `transferring` | `received` with the error | `--abort` |
 | restore refused | fenced, `transferred` | `verified` with the error | fix the destination and run it again, or `--abort` |
 | the commit's reply is lost | fenced, `committing` | `restored-paused` or `running` | run it again: it learns the commit |
-| streamed: hvi's stream ends before its manifest (a refusal, a failed capture or park, a reader hvi cut for stalling, the paused part past hvi's budget, which hull reports within that budget plus 5 s and then asks hvi's `status`) | running, unfenced, `transferring`; the error says the guest runs on here | `receiving` with the error | run it again: it streams from the start; or `--abort`, which leaves the guest running |
+| streamed: hvi's stream ends before its manifest (a refusal, a failed capture or park, a reader hvi cut for stalling, the paused part past hvi's budget; hvi closes the connection and hull asks hvi's `status`, or, with an hvi that does not close, reports the stall within that budget plus 5 s and then asks) | running, unfenced, `transferring`; the error says the guest runs on here | `receiving` with the error | run it again: it streams from the start; or `--abort`, which leaves the guest running |
 | streamed: hull fails on one of hvi's frames before the manifest (a full spool disk, a document too large, a frame whose sha256 is wrong) | as hvi's `status` says: running and unfenced (the error says the guest runs on here), or fenced with the spool cut short (the error says hvi fenced the guest); `transferring` | `receiving` with the error | running: as above. Fenced: run it again or `--abort`: hvi streams the fenced guest again first |
 | streamed: the stream fails after hvi's manifest | fenced, with the whole stream in its spool, `transferring` | `receiving` with the error | run it again: it sends the spool, disk rounds and all; or `--abort`, which restores the guest here from the spool |
 | streamed: hull is killed after hvi's manifest, before its own seal | fenced, `transferring`, the spool without `sealed` | `receiving` | run it again or `--abort`: each checks the spool frame by frame and seals it, or has hvi stream the fenced guest again for the move's txid and epoch; with neither possible the error says no copy is left here |

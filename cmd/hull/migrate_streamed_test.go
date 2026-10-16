@@ -109,7 +109,15 @@ type fakeStreamHvi struct {
 	stallIn      string
 	stallState   string
 	stallRefusal bool
-	conn         net.Conn
+	// cutIn makes hvi fail partway through the first frame of that
+	// component and close the connection, as hvi does since 2e7fb90
+	// once a stream has begun; the guest runs on. cutWith is what it
+	// writes before the close: "" nothing more, "refusal" its refusal
+	// among the frame's bytes, "short" the start of it there, "header"
+	// the start of it in place of the frame's header line.
+	cutIn   string
+	cutWith string
+	conn    net.Conn
 }
 
 func newFakeStreamHvi(t *testing.T, disk, base string) *fakeStreamHvi {
@@ -259,6 +267,28 @@ func (h *fakeStreamHvi) migrate(req map[string]any, w *bufio.Writer, reply func(
 		}
 		sum := sha256.Sum256(body)
 		frame := fmt.Sprintf(`{"component":%q,"size":%d,"sha256":"%s"}`+"\n", name, len(body), hex.EncodeToString(sum[:]))
+		if name == h.cutIn && !again {
+			h.cutIn = ""
+			refusal := `{"v":1,"ok":false,"code":"capture_failed","error":"the reader did not take the ` +
+				`stream within the time the guest may stay paused"}` + "\n"
+			switch h.cutWith {
+			case "header":
+				_, _ = w.WriteString(refusal[:40])
+			default:
+				_, _ = w.WriteString(frame)
+				_, _ = w.Write(body[:len(body)/2])
+			}
+			switch h.cutWith {
+			case "refusal":
+				_, _ = w.WriteString(refusal)
+			case "short":
+				_, _ = w.WriteString(refusal[:40])
+			}
+			_ = w.Flush()
+			_ = h.conn.Close()
+			lost = true
+			return
+		}
 		if name == h.stallIn && !again {
 			h.stallIn = ""
 			_, _ = w.WriteString(frame)
@@ -1056,6 +1086,132 @@ func TestStreamedMoveStallInThePausedPart(t *testing.T) {
 				t.Fatalf("the re-run: %s %s", rec.State, rec.Stream.Mode)
 			}
 			f.checkArrived(t, f.srcRecord(t))
+		})
+	}
+}
+
+// hvi fails a stream that has begun by closing the connection, its refusal
+// first when the socket has room for it, among a frame's bytes or where a
+// header was due, whole or cut short. hull takes the end as hvi's failure
+// at once, says what hvi said, and still asks hvi's status, which says the
+// guest runs on; it does not wait out the paused part's bound.
+func TestStreamedMoveHviClosesTheStream(t *testing.T) {
+	for _, tc := range []struct {
+		name, in, with, want string
+	}{
+		{"in a running round", "ram-round-1", "", "hvi closed its migrate stream, as it does when the stream fails"},
+		{"in the paused part", "ram-round-2", "", "hvi closed its migrate stream, as it does when the stream fails"},
+		{"with its refusal", "disk-round-final", "refusal",
+			"hvi failed its migrate stream and closed it (hvi's disk-round-final ended at "},
+		{"with its refusal cut short", "ram-round-2", "short",
+			`its refusal, cut short: "{\"v\":1,\"ok\":false`},
+		{"with its refusal cut short at a header", "cpu.json", "header",
+			`its refusal, cut short: "{\"v\":1,\"ok\":false`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newStreamFixture(t)
+			f.hvi.writesAt["ram-round-1"] = []int64{5}
+			f.hvi.cutIn, f.hvi.cutWith = tc.in, tc.with
+			started := time.Now()
+			err := f.migrate(t, "")
+			took := time.Since(started)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want %q", err, tc.want)
+			}
+			if strings.Contains(err.Error(), "hvi sent nothing for") {
+				t.Errorf("hvi's close taken for a stall: %v", err)
+			}
+			if took > hviPausedFloor/2 {
+				t.Errorf("the close took %s to report", took)
+			}
+			f.hvi.mu.Lock()
+			ops := slices.Clone(f.hvi.ops)
+			f.hvi.mu.Unlock()
+			if i := slices.Index(ops, "migrate"); i < 0 || !slices.Contains(ops[i:], "status") {
+				t.Errorf("hull did not ask hvi's status after the close: %v", ops)
+			}
+			rec := f.srcRecord(t)
+			if rec.State != srcTransferring || !strings.Contains(err.Error(), "runs on here") ||
+				!strings.Contains(rec.Error, "runs on here") {
+				t.Fatalf("the move is %s; err %v; record %q", rec.State, err, rec.Error)
+			}
+			if tc.with == "refusal" && !strings.Contains(err.Error(), "hvi refused migrate: the reader did not "+
+				"take the stream within the time the guest may stay paused (capture_failed)") {
+				t.Errorf("hvi's refusal is not in the error: %v", err)
+			}
+			if err := f.migrate(t, rec.TxID); err != nil {
+				t.Fatal(err)
+			}
+			if rec := f.srcRecord(t); rec.State != srcCommitted || rec.Stream.Mode != "live" {
+				t.Fatalf("the re-run: %s %s", rec.State, rec.Stream.Mode)
+			}
+			f.checkArrived(t, f.srcRecord(t))
+		})
+	}
+}
+
+// readsThenConn gives data in reads of at most 1000 bytes, then fails every
+// read with end.
+type readsThenConn struct {
+	net.Conn
+	data []byte
+	end  error
+}
+
+func (c *readsThenConn) Read(p []byte) (int, error) {
+	if len(c.data) == 0 {
+		return 0, c.end
+	}
+	n := copy(p[:min(len(p), 1000)], c.data)
+	c.data = c.data[n:]
+	return n, nil
+}
+
+func (c *readsThenConn) SetDeadline(time.Time) error { return nil }
+
+// The reads of hvi's stream end in its close: the end of the stream, or on
+// Linux a reset, when hvi closes with bytes of hull's unread. Either is
+// hvi's failure, with the refusal at the end of the stream when it came;
+// any other end, a deadline here, is not.
+func TestHviEndedTakesTheEndOrAResetAsHvisClose(t *testing.T) {
+	refusal := `{"v":1,"ok":false,"code":"capture_failed","error":"the capture failed"}` + "\n"
+	frame := bytes.Repeat([]byte{0xab, 0}, 5000)
+	reset := &net.OpError{Op: "read", Net: "unix", Err: os.NewSyscallError("read", syscall.ECONNRESET)}
+	cat := func(a []byte, b string) []byte { return append(slices.Clone(a), b...) }
+	for _, tc := range []struct {
+		name, want, code string
+		data             []byte
+		end              error
+	}{
+		{"a reset after a refusal among a frame's bytes", "(cause): hvi refused migrate: the capture failed " +
+			"(capture_failed)", "capture_failed", cat(frame, refusal), reset},
+		{"the end after a refusal cut short", `its refusal, cut short: "{\"v\":1,\"ok\":false,\"code\":\"capt"`, "",
+			cat(frame, refusal[:30]), io.EOF},
+		{"a reset after a frame's bytes", "and hull read no refusal (cause)", "", frame, reset},
+		{"a refusal with bytes after it", "and hull read no refusal", "", cat([]byte(refusal), "\x01\x02"), io.EOF},
+		{"a refusal-like line of a frame's bytes", "and hull read no refusal", "", cat(frame, `{"v":1,`+"\x00\x01"),
+			io.EOF},
+		{"a deadline", "", "", cat(frame, refusal), os.ErrDeadlineExceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newIdleConn(&readsThenConn{data: tc.data, end: tc.end}, time.Minute)
+			if n, _ := io.Copy(io.Discard, struct{ io.Reader }{c}); n != int64(len(tc.data)) {
+				t.Fatalf("read %d of %d bytes", n, len(tc.data))
+			}
+			cause := errors.New("cause")
+			got := c.hviEnded("migrate", cause)
+			if tc.want == "" {
+				if got != cause {
+					t.Errorf("a read that ended in %v taken for hvi's close: %v", tc.end, got)
+				}
+				return
+			}
+			if !strings.Contains(got.Error(), tc.want) || !errors.Is(got, cause) {
+				t.Errorf("got %v, want %q around the cause", got, tc.want)
+			}
+			if code := hviRefusalCode(got); code != tc.code {
+				t.Errorf("code %q, want %q", code, tc.code)
+			}
 		})
 	}
 }
