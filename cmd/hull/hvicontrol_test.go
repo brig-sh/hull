@@ -144,10 +144,21 @@ func TestHviControlSlowPauseTimesOut(t *testing.T) {
 	}
 }
 
-// hvi's default client budget must stay at or above the 3 s hvi documents.
+// shortenControlTimeout sets hviControlTimeout to 2 s for the test, for one
+// that waits it out.
+func shortenControlTimeout(t *testing.T) {
+	t.Helper()
+	was := hviControlTimeout
+	hviControlTimeout = 2 * time.Second
+	t.Cleanup(func() { hviControlTimeout = was })
+}
+
+// hvi's default client budget must stay at or above the 13 s hvi documents
+// for a pause, and for a status or resume that may wait behind one: 10 s for
+// the I/O threads and 2 s for the vCPUs.
 func TestHviControlTimeoutCoversHvisPauseDeadline(t *testing.T) {
-	if hviControlTimeout < 3*time.Second {
-		t.Errorf("hviControlTimeout = %s, hvi asks for at least 3s", hviControlTimeout)
+	if hviControlTimeout < 13*time.Second {
+		t.Errorf("hviControlTimeout = %s, hvi asks for at least 13s", hviControlTimeout)
 	}
 }
 

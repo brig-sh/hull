@@ -30,14 +30,34 @@ import (
 // unsupported_version, so it is never optional here.
 const hviControlVersion = 1
 
-// hviControlTimeout bounds every control op except checkpoint.
+// hviControlTimeout bounds the control ops that change or report the VM's
+// run state for a person or a move: pause, resume, status, profile, and the
+// floor of a checkpoint's wait.
 //
-// hvi gives a pause one 2 s deadline for the I/O gate and the vCPUs together
-// and asks clients for a reply timeout of at least 3 s (hvi docs/cli.md, "The
-// control socket"). A shorter one gives up on a pause that then succeeds,
-// leaving a VM paused that hull reported as not paused. 5 s leaves room for a
-// loaded host without letting a wedged VMM hang the CLI.
-const hviControlTimeout = 5 * time.Second
+// hvi waits up to 10 s for its I/O threads at a pause, then up to 2 s for
+// the vCPUs, and serves one connection at a time, so any request on another
+// connection waits behind a pause for as long. It asks a client that may
+// meet a pause, its own or another's, for a reply timeout of at least 13 s
+// (hvi docs/cli.md, "The control socket"). A shorter one gives up on a pause
+// that then succeeds, leaving a VM paused that hull reported as not paused,
+// or on a resume that then runs the guest. 15 s leaves room for a loaded
+// host, as 5 s did over the 3 s asked before, without letting a wedged VMM
+// hang the CLI for long.
+//
+// Calls whose failure is safe keep a shorter bound: the status ps, exec and
+// a move's checks ask (hviVMStateTimeout), and the stop and the restore's
+// polls (hviShortTimeout).
+//
+// A variable so a test need not wait it out.
+var hviControlTimeout = 15 * time.Second
+
+// hviShortTimeout bounds the control ops whose failure hull handles without
+// harm: the stop, which falls back to signals, and the status a restore
+// polls, in a loop that checks its own deadline and whether the VMM died
+// only between calls. It is the 5 s every op had before a pause could take
+// 12 s; behind another client's pause such a call gives up, and the signals
+// or the next poll take over.
+const hviShortTimeout = 5 * time.Second
 
 // hviControlMaxReply bounds a reply line. The largest is the profile, a few
 // KiB; the bound keeps a misbehaving peer from growing hull's buffer without

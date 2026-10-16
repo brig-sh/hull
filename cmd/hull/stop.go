@@ -265,7 +265,7 @@ func stopInstanceIn(s *store.Store, instanceID string, timeoutSecs int) error {
 // within wait. Any failure to deliver it is logged and reported as "not
 // stopped", so the caller goes on to the signals.
 func hviStopBySocket(state *store.InstanceState, wait time.Duration) bool {
-	timeout := min(hviControlTimeout, max(wait, time.Second))
+	timeout := min(hviShortTimeout, max(wait, time.Second))
 	if _, err := hviControl(state.ControlSock, map[string]any{"op": "stop"}, timeout); err != nil {
 		log.Debugf("instance %s: stop over the control socket: %v", state.ID, err)
 		return false
