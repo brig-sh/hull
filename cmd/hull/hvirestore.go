@@ -687,7 +687,7 @@ func awaitRestoredAndResume(s *store.Store, id, txid, sock string, opt hviRestor
 			}
 			ours = true
 		}
-		reply, err := hviOp(sock, "status")
+		reply, err := hviControl(sock, map[string]any{"op": "status"}, hviShortTimeout)
 		if err == nil && reply.State == store.MigrationRestoredPaused && ours {
 			break
 		}

@@ -118,6 +118,7 @@ func TestResumeLeavesAFencedRecord(t *testing.T) {
 // The restore's own resume: no reply, or a hangup, still records the guest
 // as having run.
 func TestRestoreResumeWithoutReplyIsRecordedAsRun(t *testing.T) {
+	shortenControlTimeout(t)
 	for _, tc := range []struct {
 		name   string
 		answer stubAnswer
@@ -225,6 +226,7 @@ func TestCheckpointMarksARestoredGuestRun(t *testing.T) {
 // A checkpoint that gets no reply may still be written by hvi: the
 // directory stays, and the record is left as it was.
 func TestHviCheckpointWithoutReplyKeepsTheDirectory(t *testing.T) {
+	shortenControlTimeout(t)
 	stub := newStubHvi(t, func(map[string]any) stubAnswer {
 		return stubAnswer{reply: `{"v":1,"ok":true,"manifest_sha256":"m"}`, delay: hviControlTimeout + 2*time.Second}
 	})
