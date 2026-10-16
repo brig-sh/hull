@@ -394,8 +394,8 @@ func (ss *streamSender) relayFrame(f *roundFolder, line []byte, hdr hviComponent
 // is an *hviRanOnError: hvi refused it where a frame header was due, or it
 // broke and hvi says the guest is not fenced (fenceAfterBreak). hvi closing
 // the connection is it failing the stream (an *hviStreamEndError, with its
-// refusal when hull found it); hvi's status still says how it left the
-// guest.
+// refusal when hull found it); hvi's status says how it left the guest,
+// whatever the end of the stream says.
 func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][]byte, error) {
 	m := ss.m
 	// In a session the window holds back what hull relays, and what hull
@@ -495,12 +495,20 @@ func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][
 		// first when the socket has room for it, wherever it lands.
 		err = ic.hviEnded("migrate", err)
 	}
+	var ended *hviStreamEndError
 	switch {
 	case err != nil && ss.manifest == nil && ss.restream:
 		// The guest was fenced before this stream began, and stays so.
 		return nil, nil, fmt.Errorf("hvi's second stream of the fenced guest ended before its manifest: %w", err)
+	case err != nil && ss.manifest == nil && errors.As(err, &ended):
+		// hvi closed the stream. A refusal found at its end may be a
+		// frame's bytes, which the guest wrote, so it says nothing of the
+		// fence: only hvi's status does.
+		closeConn()
+		return nil, nil, ss.fenceAfterBreak(err)
 	case err != nil && ss.manifest == nil && errors.As(err, &refused):
-		// hvi's own answer, in place of a frame: nothing was fenced.
+		// hvi's own answer, in place of a frame header: nothing was
+		// fenced.
 		return nil, nil, &hviRanOnError{err: err}
 	case err != nil && ss.manifest == nil:
 		closeConn()
