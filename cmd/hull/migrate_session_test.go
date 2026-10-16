@@ -626,16 +626,17 @@ func (s *stopReader) Read(b []byte) (int, error) {
 
 // A destination whose hull stops, its ssh session open, takes none of the
 // stream: the window or the pipe holds the source's relay, and with it
-// its reads of hvi's socket. The source cuts it off after the link's idle
-// bound and reads the rest of hvi's stream into its spool. hvi, which
+// its reads of hvi's socket. The source cuts it off once hvi's own bound
+// for a reader that takes nothing has passed, and the margin, and reads
+// the rest of hvi's stream into its spool. hvi, which
 // gave up on the stalled reader and closed the stream, has the guest
 // running on, as its status says; an hvi still writing seals the stream,
 // and the source holds it whole, fenced, for a re-run. Either way the
 // move ends without the destination.
 func TestStreamedMoveDestinationStopsReading(t *testing.T) {
-	prev := linkIdle
-	linkIdle = time.Second
-	t.Cleanup(func() { linkIdle = prev })
+	stall, margin := hviStreamStall, hviPausedMargin
+	hviStreamStall, hviPausedMargin = 500*time.Millisecond, 500*time.Millisecond
+	t.Cleanup(func() { hviStreamStall, hviPausedMargin = stall, margin })
 	for _, tc := range []struct {
 		name     string
 		buffered int64

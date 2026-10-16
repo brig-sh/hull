@@ -432,6 +432,12 @@ func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][
 	// (hviPausedBound); 0 until then.
 	var pausedBound, lastRun time.Duration
 	ic, _ := conn.(*idleConn)
+	// hvi gives up on a reader that takes nothing for hviStreamStall, so
+	// a destination that holds the relay longer has cost the stream
+	// already; the link waits that long and the margin, and then less
+	// once the paused part's own bound is shorter.
+	ss.link.setIdle(hviStreamStall + hviPausedMargin)
+	defer ss.link.setIdle(linkIdle)
 	reply, line, err := readHviComponents("migrate", br, func(line []byte, hdr hviComponentHeader, body io.Reader) error {
 		if relayFrameTestHook != nil {
 			if err := relayFrameTestHook(hdr.Component); err != nil {
@@ -451,7 +457,7 @@ func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][
 			ic.setIdle(pausedBound)
 			// A destination that stops reading now holds the paused
 			// guest: hull cuts it once hvi has given up on the stream.
-			ss.link.setIdle(pausedBound)
+			ss.link.setIdle(min(pausedBound, hviStreamStall+hviPausedMargin))
 		}
 		if _, err := sp.bw.Write(append(append([]byte{}, line...), '\n')); err != nil {
 			return err
@@ -544,6 +550,12 @@ func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][
 // hviPausedFloor is hvi's STREAM_PAUSED_FLOOR. A variable so a test need
 // not wait it out.
 var hviPausedFloor = 10 * time.Second
+
+// hviStreamStall is hvi's STREAM_STALL: how long a migrate waits for its
+// reader to take a byte, with the guest running or paused, before it
+// fails the stream and closes it. A variable so a test need not wait it
+// out.
+var hviStreamStall = 30 * time.Second
 
 // hviPausedMargin is what hull adds to hvi's budget for the paused part.
 // hull times a round from its first frame to the next round's, as the
@@ -1260,10 +1272,12 @@ var streamTestHook func(stage string)
 // ssh session stays open acks nothing and reads nothing, and would hold
 // the relay, and with it hull's reads of hvi's socket, for as long as it
 // is stopped. cut then ends the link from another goroutine, so the write
-// returns. The bound is never shorter than the one hvi gives the reader
-// at that point (hviStreamIdle, then hviPausedBound): hvi gives up on the
+// returns. While hvi's migrate runs the bound is what hvi gives a reader
+// that takes nothing (hviStreamStall), or the paused part's budget when
+// that is shorter (hviPausedBound), with a margin: hvi gives up on the
 // stalled stream first and resumes the guest, and hull, reading on, sees
-// it close the stream.
+// it close the stream. Otherwise, as in a replay from the spool, it is
+// linkIdle.
 type softLink struct {
 	w   io.Writer
 	err error
@@ -1279,8 +1293,8 @@ type softLink struct {
 	stalled atomic.Bool
 }
 
-// linkIdle is the link's idle bound while the guest runs. A variable so a
-// test need not wait it out.
+// linkIdle is the link's idle bound outside hvi's migrate op. A variable
+// so a test need not wait it out.
 var linkIdle = hviStreamIdle
 
 // newSoftLink is a link to w with the idle bound linkIdle.
