@@ -44,6 +44,7 @@ type dnsHandler struct {
 	zones    []gvntypes.Zone
 	upstream resolver
 	policy   *Policy
+	diverts  *diverts
 }
 
 func (h *dnsHandler) handle(w dns.ResponseWriter, r *dns.Msg, maxSize int) {
@@ -64,18 +65,23 @@ func (h *dnsHandler) handle(w dns.ResponseWriter, r *dns.Msg, maxSize int) {
 // glob covers is refused outright: an address the guest never learns is an
 // address it cannot reach, which is what makes direct-to-IP, DNS-over-HTTPS
 // and DNS-over-TLS dead ends rather than cases to special-case.
+//
+// The host of a divert is answered even when the policy would refuse it. Its
+// addresses are not pinned then, so only the diverted port is reachable on
+// them.
 func (h *dnsHandler) addAnswers(m *dns.Msg, guest netip.Addr) {
 	for _, q := range m.Question {
 		if h.addLocalAnswers(m, q) {
 			continue
 		}
-		if !h.policy.AllowsQuery(q.Name) {
+		allowed := h.policy.AllowsQuery(q.Name)
+		if !allowed && !h.diverts.coversName(q.Name) {
 			log.Warnf("egress: refused the query %s from %s", q.Name, guest)
 			m.Answer = nil
 			m.Rcode = dns.RcodeRefused
 			return
 		}
-		h.addUpstreamAnswers(m, q, guest)
+		h.addUpstreamAnswers(m, q, guest, allowed)
 	}
 }
 
@@ -152,6 +158,9 @@ func (h *dnsHandler) addLocalAnswers(m *dns.Msg, q dns.Question) bool {
 			// gateway rather than asked of the host.
 			if q.Qtype == dns.TypeA {
 				m.Answer = append(m.Answer, &dns.A{Hdr: rrHeader(q.Name, dns.TypeA, 0), A: record.IP})
+				if addr, ok := netip.AddrFromSlice(record.IP); ok {
+					h.diverts.learn(q.Name, []netip.Addr{addr})
+				}
 			}
 			return true
 		}
@@ -171,7 +180,9 @@ func (h *dnsHandler) addLocalAnswers(m *dns.Msg, q dns.Question) bool {
 	return false
 }
 
-func (h *dnsHandler) addUpstreamAnswers(m *dns.Msg, q dns.Question, guest netip.Addr) {
+// addUpstreamAnswers asks the host's resolver. pin says whether the addresses
+// of an A answer are pinned for the guest.
+func (h *dnsHandler) addUpstreamAnswers(m *dns.Msg, q dns.Question, guest netip.Addr, pin bool) {
 	ctx := context.TODO()
 	ttl := h.answerTTL()
 	switch q.Qtype {
@@ -182,7 +193,11 @@ func (h *dnsHandler) addUpstreamAnswers(m *dns.Msg, q dns.Question, guest netip.
 			return
 		}
 		var pinned []net.IP
+		learned := make([]netip.Addr, 0, len(addrs))
 		for _, a := range addrs {
+			if addr, ok := netip.AddrFromSlice(a.IP); ok {
+				learned = append(learned, addr)
+			}
 			v4 := a.IP.To4()
 			if v4 == nil {
 				continue
@@ -190,7 +205,10 @@ func (h *dnsHandler) addUpstreamAnswers(m *dns.Msg, q dns.Question, guest netip.
 			pinned = append(pinned, v4)
 			m.Answer = append(m.Answer, &dns.A{Hdr: rrHeader(q.Name, dns.TypeA, ttl), A: v4})
 		}
-		h.pin(guest, q.Name, pinned)
+		h.diverts.learn(q.Name, learned)
+		if pin {
+			h.pin(guest, q.Name, pinned)
+		}
 	case dns.TypeCNAME:
 		cname, err := h.upstream.LookupCNAME(ctx, q.Name)
 		if err != nil {
