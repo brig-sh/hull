@@ -322,6 +322,27 @@ What it does not do:
 With `--api`, `GET /diverts` lists each divert with the number of addresses it
 matches and the connections it diverted or reset.
 
+### The gateway's own address
+
+The gateway never dials its own address (`--gateway-ip`). It serves DNS on
+port 53 there, and a port that a `--divert` names goes to its socket. Every
+other TCP connection to the address is reset, and UDP to it is dropped, with
+or without a policy. Before, such a connection was dialed from the host, and
+reached whatever answered that address on the host's network.
+
+brig serves `brig.internal` to a sandbox this way. It starts the sandbox's
+gateway with a `--host` record of the gateway's address and a divert of its
+port 443 to its broker:
+
+```bash
+hull network-gateway ... --gateway-ip 198.18.1.1 \
+  --host brig.internal=198.18.1.1 \
+  --divert 198.18.1.1:443=/path/to/broker/divert/0123456789ab.sock
+```
+
+The guest resolves `brig.internal` to the gateway, its port 443 reaches the
+broker, and nothing else answers on the address.
+
 ## What hull does not do
 
 - No bridged networking. `vz-runner` has no bridged code path, and the

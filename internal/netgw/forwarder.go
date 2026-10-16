@@ -99,7 +99,14 @@ func (l *rejectLog) report(protocol string, guest netip.Addr, dst netip.Addr, po
 // stack, which is every connection a guest opens to the outside world.
 //
 // A diverted destination is matched before the policy, and is never dialed.
-func tcpForwarder(s *stack.Stack, policy *Policy, divs *diverts, dial dialFunc, rejects *rejectLog) *tcp.Forwarder {
+//
+// The gateway's own address is never dialed either. It names this gateway,
+// not a host: dialing it sent the guest's connection to whatever answers that
+// address on the host's network. Its DNS port is an endpoint on the stack, a
+// diverted port goes to its socket, and every other port is reset. brig
+// answers brig.internal with this address and diverts its port 443, so
+// nothing else answers on it.
+func tcpForwarder(s *stack.Stack, policy *Policy, divs *diverts, gateway tcpip.Address, dial dialFunc, rejects *rejectLog) *tcp.Forwarder {
 	linkLocal := linkLocal()
 	return tcp.NewForwarder(s, 0, 10, func(r *tcp.ForwarderRequest) {
 		dst, port := r.ID().LocalAddress, r.ID().LocalPort
@@ -111,6 +118,10 @@ func tcpForwarder(s *stack.Stack, policy *Policy, divs *diverts, dial dialFunc, 
 		}
 		if rule := divs.match(toNetip(dst), port); rule != nil {
 			rule.serve(r)
+			return
+		}
+		if dst == gateway {
+			r.Complete(true)
 			return
 		}
 		if !policy.AllowsConnection(toNetip(guest), toNetip(dst)) {
@@ -152,7 +163,11 @@ func tcpForwarder(s *stack.Stack, policy *Policy, divs *diverts, dial dialFunc, 
 //
 // UDP to a diverted destination is dropped. A client that tries QUIC then
 // falls back to TCP, which is diverted.
-func udpForwarder(s *stack.Stack, policy *Policy, divs *diverts, dial dialFunc, rejects *rejectLog) *udp.Forwarder {
+//
+// UDP to the gateway's own address is dropped, for the reason tcpForwarder
+// resets TCP to it. Its DNS port is an endpoint on the stack, which this
+// never sees.
+func udpForwarder(s *stack.Stack, policy *Policy, divs *diverts, gateway tcpip.Address, dial dialFunc, rejects *rejectLog) *udp.Forwarder {
 	linkLocal := linkLocal()
 	return udp.NewForwarder(s, func(r *udp.ForwarderRequest) {
 		dst, port := r.ID().LocalAddress, r.ID().LocalPort
@@ -161,7 +176,7 @@ func udpForwarder(s *stack.Stack, policy *Policy, divs *diverts, dial dialFunc, 
 		if linkLocal.Contains(dst) || dst == header.IPv4Broadcast {
 			return
 		}
-		if divs.match(toNetip(dst), port) != nil {
+		if divs.match(toNetip(dst), port) != nil || dst == gateway {
 			return
 		}
 		if !policy.AllowsConnection(toNetip(guest), toNetip(dst)) {

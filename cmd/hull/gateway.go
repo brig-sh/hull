@@ -113,7 +113,11 @@ this gateway resolved it to: at start, every --egress-refresh, and on each
 guest query. A diverted connection skips the egress policy, and a diverted
 name is answered even under --egress-default deny. If the socket cannot be
 connected, the guest connection is reset. UDP to a diverted destination is
-dropped. With --api, GET /diverts lists the diverts and their counters.`),
+dropped. With --api, GET /diverts lists the diverts and their counters.
+
+The gateway's own address (--gateway-ip) is never dialed. Its DNS port and
+the ports a --divert names are served, and every other connection to it is
+reset (TCP) or dropped (UDP).`),
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "socket", Required: true, Usage: "control socket path (required)"},
 			&cli.StringFlag{Name: "api", Usage: "HTTP API socket path (probe, leases, /forwards and /diverts)"},
