@@ -433,6 +433,9 @@ type openSession struct {
 	pw   *io.PipeWriter
 	win  *ackWindow
 	done chan sessionResult
+	// cancel ends the session's call once it has ended; a nil one is
+	// not called.
+	cancel context.CancelFunc
 }
 
 // sessionResult is how a session ended: its last line, or why there was
@@ -447,7 +450,16 @@ type sessionResult struct {
 func (o *openSession) end() sessionResult {
 	o.win.close()
 	_ = o.pw.Close()
-	return <-o.done
+	res := <-o.done
+	o.release()
+	return res
+}
+
+// release ends the session's call, which has ended.
+func (o *openSession) release() {
+	if o.cancel != nil {
+		o.cancel()
+	}
 }
 
 // commitInSession sends the commit in the open session and returns its
@@ -459,6 +471,7 @@ func (m *moveSource) commitInSession() (*migrateReply, error) {
 	werr := o.sw.commit(moveStreamCommit{TxID: m.rec.TxID, Epoch: m.rec.Epoch})
 	_ = o.pw.Close()
 	res := <-o.done
+	o.release()
 	if res.reply == nil && res.err == nil {
 		res.err = werr
 	}

@@ -69,9 +69,10 @@ what can go wrong, and how to recover.
 > an idle guest moved in 2.20 s with 57.8 ms of downtime and back in
 > 3.12 s with 67.6 ms, and the writer in 4.12 s with 90.9 ms on quiet
 > disks. A destination stopped with SIGSTOP in the paused part made hvi
-> give up and close the stream, and hull reported hvi's refusal within
-> 20 ms of the SIGCONT, with the guest running on. See [With hvi
-> 94faf8f](#with-hvi-94faf8f).
+> give up and close the stream; hull now cuts such a destination off
+> once hvi's bound for the stalled reader has passed (30 s in the run),
+> asks hvi's `status`, and reports the guest running on, without
+> waiting for the destination. See [With hvi 94faf8f](#with-hvi-94faf8f).
 
 ## Usage
 
@@ -720,6 +721,22 @@ copy to restore from. So:
   hvi, so the 2 minutes stand for it. Before this bound, one move under
   the hog waited out the 2 minutes after `ram-round-2` stalled (see
   [From the seal to the resume](#from-the-seal-to-the-resume));
+- a destination that takes none of the stream, such as a hull stopped
+  with SIGSTOP whose ssh session stays open, acks nothing and reads
+  nothing, so the source's window, or the pipe to ssh, holds the relay
+  and hull reads nothing of hvi's socket. hvi fails a stream whose reader
+  takes nothing for 30 s, or past the paused part's budget. A write to
+  the destination that waits longer than that, plus 5 s (35 s, or the
+  paused part's budget plus 5 s when that is shorter; 2 minutes in a
+  replay from the spool, which hvi has no part in), ends the link: hull
+  prints `the destination took none of the stream
+  for B s, and hull cut it off`, ends the destination's ssh session, and
+  reads the rest of hvi's stream into the spool. hvi has given up on the
+  stalled stream by then and closed it, so hull asks hvi's `status` and
+  the guest runs on here, as above; an hvi still writing seals the
+  stream, and the guest is fenced with a whole spool, for a re-run or
+  `--abort` as below. A send that fails for another reason gives the
+  destination 30 s to answer before hull ends its session;
 - one that fails after the manifest leaves the guest fenced with its spool
   recorded as the instance's checkpoint (`migrating`). Running the move
   again sends the spool (`"replay": true`) to a fresh copy of the base
@@ -874,8 +891,10 @@ writer. Every destination was prepared (`hull migrate-prepare`) first.
 | rp1 to rp2 | ubuntu, 256 MiB dirtier | 65.0 s | 3.49 s | 1.7 GiB: disk 449.8 MiB as 208.6 MiB, RAM 1.5 GiB | 5419, 487, 324, 483, 484 | 5 (time_cap), the last 294 MiB |
 | rp2 to rp1 | ubuntu, 256 MiB dirtier | 43.2 s | 3.40 s | 2.1 GiB: disk 500.2 MiB as 258.6 MiB, RAM 1.8 GiB | 5425, 804, 324, 483, 484, 484 | 6 (round_cap), the last 293 MiB |
 | this Mac to rp1, a 1 MB/s link | claude-code, light | 129 s | 6.45 s | 122.7 MiB: disk 284.5 MiB as 34.7 MiB, RAM 87.9 MiB | 4523, 29 | 2 (time_cap) |
-| this Mac to rp2, a 1 MB/s link, through `brig teleport` | claude-code, brig's demo | 70.1 s | 7.96 s | 70.9 MiB: disk 245.9 MiB as 2.6 MiB, RAM 68.2 MiB | 3834, 101 | 2 (time_cap) |
-| the same, again | claude-code, brig's demo | 73.1 s | 6.82 s | 75.9 MiB: disk 246.8 MiB as 2.6 MiB, RAM 73.2 MiB | 3839, 102, 7 | 3 (time_cap) |
+| this Mac to rp2, a 1 MB/s link, through `brig teleport` (superseded by the LAN rows below) | claude-code, brig's demo | 70.1 s | 7.96 s | 70.9 MiB: disk 245.9 MiB as 2.6 MiB, RAM 68.2 MiB | 3834, 101 | 2 (time_cap) |
+| the same, again (superseded) | claude-code, brig's demo | 73.1 s | 6.82 s | 75.9 MiB: disk 246.8 MiB as 2.6 MiB, RAM 73.2 MiB | 3839, 102, 7 | 3 (time_cap) |
+| this Mac to rp2 on the LAN, through `brig teleport`; hull 251e226, `hvi` 94faf8f | claude-code, brig's demo with a Claude Code task | 8.2 s | 345.7 ms | 213.5 MiB: disk 250.9 MiB as 2.9 MiB, RAM 210.6 MiB | 3999, 11, 4, 1 | 4 (converged) |
+| the same, again | claude-code, brig's demo with a Claude Code task | 8.8 s | 387.1 ms | 260.5 MiB: disk 245.4 MiB as 2.8 MiB, RAM 257.6 MiB | 3914, 8, 3, 1, 1, 0 | 6 (round_cap) |
 
 - The writer's final disk round was empty, and the dirtier's 484 blocks
   (30.2 MiB) took 0.29 to 0.33 s to read and send inside the pause: the
@@ -911,6 +930,33 @@ writer. Every destination was prepared (`hull migrate-prepare`) first.
   "From the seal to the resume" below). The guest's counter,
   `boot_id`, sum and deleted file held on fd 3 checked out after each
   move, and every exec into the moved guest worked.
+- The two LAN rows ran on 2026-10-16 through brig's
+  `script/teleport-demo-claude.sh --claude --prepare` (brig 7d0a000),
+  with hull 251e226 and `hvi` 94faf8f built with `HVI_GIT_SHA` on each
+  host, and the Mac on the Pis' LAN: 32 MiB went through ssh in 1.1 to
+  1.7 s, and `rp2` resolved over Tailscale direct to its LAN address.
+  The first prepare sent the base, 1.5 GiB as 740.8 MiB in 48.2 s.
+  RAM round 0 sent 188 and 206 MiB in 6.3 and 6.2 s, and the round
+  taken paused was 2.4 and 4.0 MiB. hvi sealed 50 and 183 ms after the
+  pause, and hull's summary said the guest was paused about 349 and
+  388 ms; from the seal to the destination's resume took 0.41 and 0.30 s
+  as brig printed hull's lines on the Mac, against 2.9 and 3.1 s on the
+  1 MB/s link. `brig teleport` took 9.65 and 9.89 s in all. Four more
+  moves that day with the same builds: two of the same demo, 6.9 and
+  7.9 s with 188 and 195 ms; two whose guest ran a Claude Code task that
+  was thinking, with RAM rounds at about 17 MiB/s and hvi's round cap,
+  18.9 and 23.9 s with 864 and 663 ms. The guest's counter, `boot_id`,
+  sum and held file checked out after every move.
+- Five moves of brig's recorded demo, the same day and builds, the guest
+  running a feed writer and a Claude Code turn that waited on `vmstat`,
+  took 7.2, 21.6, 8.3, 17.3 and 6.6 s, with 239 ms, 13.0 s, 480 ms,
+  6.25 s and 192 ms of downtime. In the 21.6 s move hvi's
+  rounds converged and it sealed 36 ms after the pause, but rp2 read the
+  manifest 12.5 s after the seal (the two hosts' clocks), with 253.9 MiB
+  relayed in 20.8 s: the stream was still on its way. In the 17.3 s move
+  rp2 read the manifest 0.1 s after the seal and recorded `hvi restored
+  the guest paused` 6.1 s later. Neither was explained. rp2's kernel had
+  logged NVMe write timeouts earlier that morning, during a prepare.
 - On the Mac, four sessions of claude-code booted against one base,
   9890a88a4845. The first `migrate-prepare` of rp2 sent it, 1.5 GiB as
   742.8 MiB in 733.8 s; the prepares after it found it held, in 12.1 and
@@ -1363,6 +1409,39 @@ rp2's clock 1.3 ms behind rp1's.
   budget, from the rounds as hull timed them, gives about 19 s.
 - After every move the guest's counter had no gap, and its `boot_id`, the
   blob and the held file were the same.
+
+The stalled reader again, 2026-10-16, with hull at 2cec0ca (the source
+cuts off a destination that takes none of the stream, and asks hvi's
+`status` after every close), built on rp1 and copied to rp2, and `hvi`
+94faf8f built on rp1 and copied to rp2. rp2's `migrate-receive` hull
+was stopped with SIGSTOP 0.9 s after `disk-round-final`, and held 60 s
+this time:
+
+- Exactly 30.0 s after the SIGSTOP, and 30 s before the SIGCONT, hull
+  printed "the destination took none of the stream for 30.0 s, and hull
+  cut it off; it reads the rest of hvi's stream into the spool". The
+  bound was the paused part's (10 s, twice the last running round of
+  7.50 s, and 5 s), shorter than the 35 s of hvi's stall bound. hvi had
+  given up at its budget and closed the stream with no room left for its
+  refusal: "hvi closed its migrate stream, as it does when the stream
+  fails, and hull read no refusal (hvi's ram-round-3 ended at 781312 of
+  its 1305399 bytes)". hvi's `status` then said the guest was not
+  fenced, and hull printed "hvi did not fence fxstall2: ... the guest
+  runs on here" 3 ms after the cut.
+- The move ended 5 s later, the time `ssh` is given to close its output
+  once killed, with "no answer from the destination to migrate-receive
+  ...: signal: killed (sending: ...)", in 128.1 s in all; RAM round 0
+  ran at 9.4 MiB/s again. rp2's record, once continued, said "the stream
+  ended in hvi's ram-round-3: unexpected EOF", and `--abort` said the
+  guest never stopped running here. The counter had no gap, and the
+  `boot_id`, blob and held file were unchanged.
+- The same run at 6774eff, with the paused bound alone (86.7 s after a
+  35.7 s running round), held the relay until the SIGCONT 60 s later;
+  hvi had failed the stream after 30 s with "the reader took nothing for
+  30000 ms". That is what 2cec0ca fixed.
+- An idle move at 6774eff took 2.24 s at 56.7 MiB/s with 66.5 ms of
+  downtime (hull said 67 ms), against 2.20 s and 58.8 MiB/s before: the
+  timer on each 64 KiB write to the destination costs nothing visible.
 
 ## Records
 

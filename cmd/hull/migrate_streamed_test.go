@@ -119,7 +119,12 @@ type fakeStreamHvi struct {
 	cutIn    string
 	cutWith  string
 	cutState string
-	conn     net.Conn
+	// readerIdle, when set, is how long hvi waits on a write the reader
+	// does not take before it fails the stream and closes the
+	// connection, the guest running on, as hvi does with a stalled
+	// reader.
+	readerIdle time.Duration
+	conn       net.Conn
 }
 
 func newFakeStreamHvi(t *testing.T, disk, base string) *fakeStreamHvi {
@@ -266,6 +271,9 @@ func (h *fakeStreamHvi) migrate(req map[string]any, w *bufio.Writer, reply func(
 	emit := func(name string, body []byte) {
 		if lost {
 			return
+		}
+		if h.readerIdle > 0 {
+			_ = h.conn.SetWriteDeadline(time.Now().Add(h.readerIdle))
 		}
 		sum := sha256.Sum256(body)
 		frame := fmt.Sprintf(`{"component":%q,"size":%d,"sha256":"%s"}`+"\n", name, len(body), hex.EncodeToString(sum[:]))

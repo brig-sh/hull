@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/brig-sh/hull/pkg/store"
@@ -431,6 +432,12 @@ func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][
 	// (hviPausedBound); 0 until then.
 	var pausedBound, lastRun time.Duration
 	ic, _ := conn.(*idleConn)
+	// hvi gives up on a reader that takes nothing for hviStreamStall, so
+	// a destination that holds the relay longer has cost the stream
+	// already; the link waits that long and the margin, and then less
+	// once the paused part's own bound is shorter.
+	ss.link.setIdle(hviStreamStall + hviPausedMargin)
+	defer ss.link.setIdle(linkIdle)
 	reply, line, err := readHviComponents("migrate", br, func(line []byte, hdr hviComponentHeader, body io.Reader) error {
 		if relayFrameTestHook != nil {
 			if err := relayFrameTestHook(hdr.Component); err != nil {
@@ -448,6 +455,9 @@ func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][
 			lastRun = lastRunningRound(ss.stats.Rounds, !isRound(hdr.Component))
 			pausedBound = hviPausedBound(lastRun)
 			ic.setIdle(pausedBound)
+			// A destination that stops reading now holds the paused
+			// guest: hull cuts it once hvi has given up on the stream.
+			ss.link.setIdle(min(pausedBound, hviStreamStall+hviPausedMargin))
 		}
 		if _, err := sp.bw.Write(append(append([]byte{}, line...), '\n')); err != nil {
 			return err
@@ -540,6 +550,12 @@ func (ss *streamSender) relayHvi(sp *spoolWriter) (json.RawMessage, map[string][
 // hviPausedFloor is hvi's STREAM_PAUSED_FLOOR. A variable so a test need
 // not wait it out.
 var hviPausedFloor = 10 * time.Second
+
+// hviStreamStall is hvi's STREAM_STALL: how long a migrate waits for its
+// reader to take a byte, with the guest running or paused, before it
+// fails the stream and closes it. A variable so a test need not wait it
+// out.
+var hviStreamStall = 30 * time.Second
 
 // hviPausedMargin is what hull adds to hvi's budget for the paused part.
 // hull times a round from its first frame to the next round's, as the
@@ -846,7 +862,7 @@ func (m *moveSource) streamTransfer(ctx context.Context) (retErr error) {
 	m.logf("Streaming %s to %s (%s)", m.name, m.rec.Peer, mode)
 	started := time.Now()
 	pr, pw := io.Pipe()
-	link := &softLink{w: pw}
+	link := newSoftLink(pw)
 	sp, session := m.peer.(sessionPeer)
 	session = session && m.rec.Session
 	sw := newMoveStreamWriter(link)
@@ -872,20 +888,44 @@ func (m *moveSource) streamTransfer(ctx context.Context) (retErr error) {
 		err      error
 	}
 	sent := make(chan sendResult, 1)
+	// The destination's call, the session or the receive, ends with the
+	// remote hull, and a stopped one whose ssh session stays open never
+	// ends it: closing the pipe does not reach it. A link cut for a
+	// stall ends the call at once, and a send that fails gives the
+	// destination linkEndWait to answer before the call is ended.
+	callCtx, cancelCall := context.WithCancel(ctx)
+	link.note = func(err error) { ss.progress("%v; it reads the rest of hvi's stream into the spool", err) }
+	link.cut = func() {
+		if link.win != nil {
+			link.win.close()
+		}
+		_ = pw.CloseWithError(errors.New("the source cut the link: the destination took none of the stream " +
+			"for its bound"))
+		cancelCall()
+	}
 	go func() {
 		reply, err := ss.send(replay)
 		if err != nil || !session {
 			_ = pw.CloseWithError(err)
+		}
+		if err != nil {
+			time.AfterFunc(linkEndWait, cancelCall)
 		}
 		sent <- sendResult{reply, err}
 	}()
 	args := []string{"--stream", "--txid", m.rec.TxID, "--name", m.name}
 	var reply *migrateReply
 	var open *openSession
+	// A session left open for the commit ends the call itself.
+	defer func() {
+		if open == nil || m.session != open {
+			cancelCall()
+		}
+	}()
 	if session {
-		reply, open, err = ss.runSession(sp, append(args, "--session"), pr, pw)
+		reply, open, err = ss.runSession(callCtx, sp, append(args, "--session"), pr, pw, cancelCall)
 	} else {
-		reply, err = m.peer.call(ctx, "migrate-receive", args, pr)
+		reply, err = m.peer.call(callCtx, "migrate-receive", args, pr)
 		close(ss.callDone)
 		_ = pr.CloseWithError(errors.New("the destination stopped reading"))
 	}
@@ -974,19 +1014,24 @@ func (m *moveSource) streamTransfer(ctx context.Context) (retErr error) {
 // sessionWriteBuffer is the stream writer's buffer in a session.
 const sessionWriteBuffer = 64 << 10
 
+// linkEndWait is how long the destination's call may go on once the
+// stream's send failed: the destination sees its stdin end and answers
+// with why it stopped, unless it is stopped itself.
+const linkEndWait = 30 * time.Second
+
 // runSession runs the streamed receive as a session: the destination's
 // accepted line lets hvi's migrate begin, its acked lines move the
 // window, and its verified line is the receive's reply, with the session
 // left open for the commit. A session that ends before it says verified
 // gives its last line instead, and no session to commit in.
-func (ss *streamSender) runSession(sp sessionPeer, args []string, pr *io.PipeReader,
-	pw *io.PipeWriter) (*migrateReply, *openSession, error) {
+func (ss *streamSender) runSession(ctx context.Context, sp sessionPeer, args []string, pr *io.PipeReader,
+	pw *io.PipeWriter, cancel context.CancelFunc) (*migrateReply, *openSession, error) {
 	win := ss.link.win
 	verified := make(chan *migrateReply, 1)
 	done := make(chan sessionResult, 1)
 	var acceptOnce sync.Once
 	go func() {
-		reply, err := sp.session(ss.ctx, "migrate-receive", args, pr, func(ev *migrateReply) {
+		reply, err := sp.session(ctx, "migrate-receive", args, pr, func(ev *migrateReply) {
 			switch ev.Event {
 			case eventAccepted:
 				if ev.Detail == ss.attempt {
@@ -1008,7 +1053,7 @@ func (ss *streamSender) runSession(sp sessionPeer, args []string, pr *io.PipeRea
 	}()
 	select {
 	case v := <-verified:
-		return v, &openSession{sw: ss.sw, pw: pw, win: win, done: done}, nil
+		return v, &openSession{sw: ss.sw, pw: pw, win: win, done: done, cancel: cancel}, nil
 	case r := <-done:
 		select {
 		case v := <-verified:
@@ -1091,6 +1136,9 @@ func (ss *streamSender) send(replay bool) (json.RawMessage, error) {
 		if errors.As(err, &ranOn) {
 			ss.progress("hvi did not fence %s: its stream ended before the manifest, and the guest runs on here",
 				m.name)
+		}
+		if ss.link.stalled.Load() {
+			err = fmt.Errorf("%w (before it ended, %v)", err, ss.link.err)
 		}
 		return nil, err
 	}
@@ -1218,25 +1266,82 @@ var streamTestHook func(stage string)
 // In a session its window (win) holds a write back until the destination
 // has read enough of what went before; a session that ends lets every
 // write through.
+//
+// A destination that takes none of a write for the link's idle bound, in
+// the window or in the pipe to ssh, has failed too: a stopped hull whose
+// ssh session stays open acks nothing and reads nothing, and would hold
+// the relay, and with it hull's reads of hvi's socket, for as long as it
+// is stopped. cut then ends the link from another goroutine, so the write
+// returns. While hvi's migrate runs the bound is what hvi gives a reader
+// that takes nothing (hviStreamStall), or the paused part's budget when
+// that is shorter (hviPausedBound), with a margin: hvi gives up on the
+// stalled stream first and resumes the guest, and hull, reading on, sees
+// it close the stream. Otherwise, as in a replay from the spool, it is
+// linkIdle.
 type softLink struct {
 	w   io.Writer
 	err error
 	win *ackWindow
+	// cut, when set, closes the window and the pipe to the destination
+	// and ends the destination's call; note says so, from the writer.
+	cut  func()
+	note func(error)
+	// idle is the bound in nanoseconds; cutOnce makes cut run once, and
+	// stalled says it did.
+	idle    atomic.Int64
+	cutOnce sync.Once
+	stalled atomic.Bool
 }
+
+// linkIdle is the link's idle bound outside hvi's migrate op. A variable
+// so a test need not wait it out.
+var linkIdle = hviStreamIdle
+
+// newSoftLink is a link to w with the idle bound linkIdle.
+func newSoftLink(w io.Writer) *softLink {
+	l := &softLink{w: w}
+	l.idle.Store(int64(linkIdle))
+	return l
+}
+
+// setIdle changes the idle bound from the next write on.
+func (l *softLink) setIdle(idle time.Duration) { l.idle.Store(int64(idle)) }
 
 func (l *softLink) Write(p []byte) (int, error) {
 	n := len(p)
 	for len(p) > 0 && l.err == nil {
 		piece := p[:min(len(p), sessionWriteBuffer)]
-		if l.win != nil {
-			l.win.wait(int64(len(piece)))
-		}
-		if _, err := l.w.Write(piece); err != nil {
-			l.err = err
-		}
+		l.err = l.send(piece)
 		p = p[len(piece):]
 	}
 	return n, nil
+}
+
+// send hands piece to the destination, after the window lets it through,
+// and cuts the link if that takes longer than the idle bound.
+func (l *softLink) send(piece []byte) error {
+	idle := time.Duration(l.idle.Load())
+	if l.cut != nil && idle > 0 {
+		t := time.AfterFunc(idle, func() {
+			l.cutOnce.Do(func() {
+				l.stalled.Store(true)
+				l.cut()
+			})
+		})
+		defer t.Stop()
+	}
+	if l.win != nil {
+		l.win.wait(int64(len(piece)))
+	}
+	_, err := l.w.Write(piece)
+	if l.stalled.Load() {
+		err := fmt.Errorf("the destination took none of the stream for %.1f s, and hull cut it off", idle.Seconds())
+		if l.note != nil {
+			l.note(err)
+		}
+		return err
+	}
+	return err
 }
 
 // noteFence puts the fence hvi made on the move's record, in memory: the
