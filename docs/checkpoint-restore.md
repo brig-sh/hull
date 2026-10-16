@@ -224,7 +224,8 @@ for its I/O threads at a pause and then 2 s for the vCPUs, and serves one
 connection at a time, so a request from another client waits behind a pause
 as long. It asks clients for at least 13 s; one that gives up sooner reports
 "not paused" for a VM that then pauses. hull waits 15 s for the reply to
-`pause`, `resume`, `status` and `profile`. `hull ps`, `hull exec` and a move's
+`pause`, `resume`, `status` and `profile`, and 5 s for each status a
+restore polls. `hull ps`, `hull exec` and a move's
 checks ask `status` with 0.5 s, and read an hvi busy with a pause as `?`; `hull
 stop` waits 5 s for its reply before the signals. If a pause times out anyway,
 hull says the VM may now be paused, and `hull resume` is harmless when it is

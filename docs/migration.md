@@ -57,6 +57,21 @@ what can go wrong, and how to recover.
 > 11.0 and 28.8 s in the last two moves. One move of three in the set
 > before them failed with the guest running on. See [From the seal to
 > the resume](#from-the-seal-to-the-resume).
+>
+> **hvi 94faf8f, 2026-10-16.** The pin is at `hvi` 94faf8f. Its pause
+> waits up to 10 s for the I/O threads and 2 s for the vCPUs, and a
+> request on another connection waits behind it, so hull now waits 15 s
+> for the reply to `pause`, `resume`, `status` and `profile`. A migrate
+> that fails once its stream has begun closes the connection, which hull
+> takes as hvi's failure, with hvi's refusal when it finds it. With disk
+> rounds hvi no longer syncs the source's disk in the pause
+> (`pause_sync_ms` 0, `disk.json` says `synced: false`). Between the Pis
+> an idle guest moved in 2.20 s with 57.8 ms of downtime and back in
+> 3.12 s with 67.6 ms, and the writer in 4.12 s with 90.9 ms on quiet
+> disks. A destination stopped with SIGSTOP in the paused part made hvi
+> give up and close the stream, and hull reported hvi's refusal within
+> 20 ms of the SIGCONT, with the guest running on. See [With hvi
+> 94faf8f](#with-hvi-94faf8f).
 
 ## Usage
 
@@ -492,6 +507,12 @@ of its own: hvi's stream holds them (hvi
    is small (`converged`), after 5 rounds (`round_cap`) or 60 s
    (`time_cap`).
 3. hvi syncs the guest's disk with the guest still running, then pauses it.
+   Since 65a929f it does not sync it again in the pause when the stream
+   carries disk rounds: the destination holds every block and syncs its
+   own copy, so `pause_sync_ms` is 0 and `disk.json` says `synced: false`.
+   An `--abort` that takes the guest back restores the spool, sealed and
+   synced first, onto the source's disk, whose rounds rewrite every block
+   written since the boot.
 4. With the guest paused: `disk-round-final`, the blocks written since the
    last disk round, then the last RAM round, the machine's documents
    (`cpu.json`, `platform.json`, `devices.json`, `disk.json`,
@@ -797,7 +818,7 @@ refusal is the move's error, with code `restore_refused`.
 | `diskBytes`, `diskWireBytes`, `ramBytes`, `stateBytes`, `wireBytes`, `seconds` | totals: the disk rounds' raw bytes (hvi's `disk_raw_bytes`) and their bytes on the wire, RAM as hvi framed it, documents, the whole stream |
 | `roundsEndAt`, `pausedAt`, `sealedMs` | when hvi's last round with the guest running ended (`rounds_end_unix_ms`), when it stopped the guest after the sync that follows and its wait for the I/O threads, which the guest runs through (`precopy_end_unix_ms` plus `gate_ms`), and how long from the pause to its seal. A replay takes the pause of the attempt that fenced the guest: from the spool's reply when that is hvi's reply to the first stream, else from `latest.json` or the earlier attempt's record; with none of them `pausedAt` and `downtimeMs` are left out |
 | `finalDiskMs`, `finalDiskBytes` | `disk-round-final`: hvi's time for it and its raw bytes |
-| `stopReason`, `hviPausedMs`, `hviGateMs`, `diskSyncMs`, `pauseSyncMs` | from hvi's reply: why the running rounds stopped, the source's part of the downtime, the wait for the I/O threads at the pause, the disk's sync before the pause and the one in it |
+| `stopReason`, `hviPausedMs`, `hviGateMs`, `diskSyncMs`, `pauseSyncMs` | from hvi's reply: why the running rounds stopped, the source's part of the downtime, the wait for the I/O threads at the pause, the disk's sync before the pause and the one in it (0 when the stream carries disk rounds, since hvi 65a929f) |
 | `downtimeMs` | from `pausedAt` to the destination's `resumed` step, on two hosts' clocks; from a destination without steps, to its record of running plus the resume's own time (the destination's `timingsMs.resume`) |
 | `chain` | the trailer's hash, which the destination's record must match |
 | `hviReply` | hvi's reply to `migrate`, as hvi wrote it |
@@ -1278,6 +1299,66 @@ are not counted against the target.
   after the manifest), and the holder had let go before it committed.
   The step then finished before the move back came, and the move back
   took the spare, with 70.1 ms of downtime by hvi-time.
+
+#### With hvi 94faf8f
+
+2026-10-16, hull at fe874fb (this page's code before these numbers),
+built on rp1 and copied to rp2, with `hvi` 94faf8f built on each Pi
+(`HVI_GIT_SHA` set; the two builds have the same sha256, and each host's
+instance record shows it ran that hvi). rp1 to
+rp2 unless said, the guests and workloads above, every destination
+prepared first. Downtime is the rise in the guest's `hvi-time` `downtime
+total`; hull's own figure (`downtimeMs`) is beside it. A UDP probe put
+rp2's clock 1.3 ms behind rp1's.
+
+| Guest | Total | Downtime | hull said | hvi `paused_ms`, `pause_sync_ms` |
+|---|---|---|---|---|
+| idle | 2.20 s | 57.8 ms | 58 ms | 20, 0 ms |
+| idle, back from rp2 with no prepare | 3.12 s | 67.6 ms | 69 ms | 27, 0 ms |
+| writer | 10.10 s | 156.5 ms | 157 ms | 56, 0 ms |
+| writer | 25.69 s | 223.7 ms | 227 ms | 187, 0 ms |
+| writer, both disks quiet | 4.12 s | 90.9 ms | 91 ms | 49, 0 ms |
+| idle, SIGKILL at the seal, then re-run | re-run 0.42 s | 380.2 ms | | 4, 0 ms |
+
+- The move back took the spare rp1 made after the move away (`disk made
+  from the base's spare`), and from hvi's seal to the destination's
+  resume the move away took 37 ms, corrected for the clocks.
+- `pause_sync_ms` was 0 in every move, so the source's pause is the
+  final rounds: in the 25.69 s writer move the final disk round, 10.1 MiB
+  in 103 ms, and the RAM round after it. In the 10.10 s move the source's
+  synced commit point took 69 ms of the downtime (`destination answered`
+  23 ms after the seal, `commit point recorded` 92 ms).
+- The first two writer moves were slow while the stream ran: RAM round 0
+  at 15 and 11 MiB/s, disk round 0 at 13 MiB/s in the second, and in
+  that move hvi's sync of the disk before the pause took 3528 ms, with
+  the guest running. After it a 4 KiB `dd oflag=dsync` took 1.5 to
+  1.7 ms on both Pis, and the third move ran at 77.6 MiB/s. What held up
+  the first two was not found.
+- SIGKILL of hull at "hvi sealed the stream", 2278 ms into the move:
+  `--status` said the source is fenced and rp2 had the guest restored
+  paused. The re-run sealed the spool, adopted the fence and committed
+  rp2's copy in 424 ms.
+- A stalled reader: the 256 MiB dirtier, and rp2's `migrate-receive` hull
+  for the move stopped with SIGSTOP 0.8 s after the source printed
+  `disk-round-final`, then sent SIGCONT 25.3 s later. With no acks the
+  source's window held back the relay, so hull did not read hvi's socket
+  meanwhile; hvi's budget for the paused part, 10 s plus twice the last
+  running round (4.46 s as hull timed it), ran out, and hvi failed the
+  stream and closed it. 19 ms after the SIGCONT, on the two clocks, hull
+  read the end and reported "hvi failed its migrate stream and closed it
+  (hvi's ram-round-3 ended at 439669 of its 1048672 bytes): hvi refused
+  migrate: the reader did not take the stream within the time the guest
+  may stay paused; the stream is not sealed, and the VM is as it was
+  (capture_failed)", and, after hvi's `status`, "hvi did not fence h12d:
+  its stream ended before the manifest, and the guest runs on here". The
+  move took 87.2 s, most of it RAM round 0 at 10 MiB/s. rp2's record said
+  "the stream ended in hvi's ram-round-3: unexpected EOF", `--status`
+  said the guest still runs here, and `--abort` said it never stopped
+  running here. hvi resumed the guest in place, and `hvi-time` logged no
+  downtime for it, so how long it was paused was not measured; hvi's
+  budget, from the rounds as hull timed them, gives about 19 s.
+- After every move the guest's counter had no gap, and its `boot_id`, the
+  blob and the held file were the same.
 
 ## Records
 
