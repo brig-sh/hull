@@ -52,17 +52,11 @@ func newStubHvi(t *testing.T, handle func(req map[string]any) stubAnswer) *stubH
 	// The cleanup waits for every goroutine the stub started, so none is
 	// still in the handler when the cleanups the test registered before
 	// this one run (shortenControlTimeout's, which the handler may read).
+	// Closing done also closes every connection the stub accepted.
 	var wg sync.WaitGroup
-	var connMu sync.Mutex
-	conns := map[net.Conn]struct{}{}
 	t.Cleanup(func() {
 		close(done)
 		_ = ln.Close()
-		connMu.Lock()
-		for c := range conns {
-			_ = c.Close()
-		}
-		connMu.Unlock()
 		wg.Wait()
 	})
 	wg.Add(1)
@@ -73,25 +67,15 @@ func newStubHvi(t *testing.T, handle func(req map[string]any) stubAnswer) *stubH
 			if err != nil {
 				return
 			}
-			connMu.Lock()
-			select {
-			case <-done:
-				connMu.Unlock()
-				_ = conn.Close()
-				return
-			default:
-			}
-			conns[conn] = struct{}{}
-			connMu.Unlock()
-			wg.Add(1)
+			wg.Add(2)
 			go func() {
 				defer wg.Done()
-				defer func() {
-					connMu.Lock()
-					delete(conns, conn)
-					connMu.Unlock()
-					_ = conn.Close()
-				}()
+				<-done
+				_ = conn.Close()
+			}()
+			go func() {
+				defer wg.Done()
+				defer func() { _ = conn.Close() }()
 				line, err := bufio.NewReader(conn).ReadBytes('\n')
 				if err != nil {
 					return
