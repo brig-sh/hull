@@ -391,8 +391,8 @@ func destTakeKernel(s *store.Store, profile, sum string, size int64, replace boo
 	if _, err := bootassets.NormalizeProfile(profile); err != nil || profile == "" {
 		return refuse(codeFailed, fmt.Errorf("profile %q: %v", profile, err))
 	}
-	if !diskDigestPattern.MatchString(sum) {
-		return refuse(codeFailed, fmt.Errorf("%q is not a sha256", sum))
+	if err := checkSha256("kernel", sum); err != nil {
+		return refuse(codeFailed, err)
 	}
 	if size <= 0 || size > 256<<20 {
 		return refuse(codeFailed, fmt.Errorf("a kernel of %d bytes", size))
@@ -524,8 +524,10 @@ func sourcePrepare(ctx context.Context, s *store.Store, name string, opt prepare
 		return err
 	}
 	opt.kernel = strings.TrimPrefix(opt.kernel, "sha256:")
-	if opt.kernel != "" && !diskDigestPattern.MatchString(opt.kernel) {
-		return fmt.Errorf("--kernel-sha256 %q is not a sha256", opt.kernel)
+	if opt.kernel != "" {
+		if err := checkSha256("--kernel-sha256", opt.kernel); err != nil {
+			return err
+		}
 	}
 	state, err := s.GetInstance(name)
 	if err != nil {
