@@ -256,13 +256,8 @@ func TestPrepareKeepsAnotherKernel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out.String())
 	}
-	var kernel *prepareStep
-	for i, st := range res.Steps {
-		if strings.HasPrefix(st.What, bootassets.PortableArm64V1) {
-			kernel = &res.Steps[i]
-		}
-	}
-	if kernel == nil || kernel.Result != "skipped" || !strings.Contains(kernel.Detail, "not replaced") {
+	if kernel := kernelStepOf(t, res, bootassets.PortableArm64V1); kernel.Result != "skipped" ||
+		!strings.Contains(kernel.Detail, "not replaced") {
 		t.Fatalf("kernel step %+v", kernel)
 	}
 	if peer.called("migrate-take-kernel") != 0 {
@@ -293,15 +288,7 @@ func TestPrepareReplacesAnotherKernelWithThePinnedOne(t *testing.T) {
 		t.Fatalf("kernels %q here and %q there; want two that differ", sum, held)
 	}
 	remote := migrateRemote{Target: "pm@dest", Hvi: f.hvi}
-	kernelStep := func(res *prepareResult) *prepareStep {
-		for i, st := range res.Steps {
-			if strings.HasPrefix(st.What, bootassets.PortableArm64V1) {
-				return &res.Steps[i]
-			}
-		}
-		t.Fatalf("no kernel step in %+v", res.Steps)
-		return nil
-	}
+	profile := bootassets.PortableArm64V1
 
 	// A pin that is neither kernel: nothing sent.
 	peer := newLocalPeer(f.dst)
@@ -310,7 +297,8 @@ func TestPrepareReplacesAnotherKernelWithThePinnedOne(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out.String())
 	}
-	if st := kernelStep(res); st.Result != "skipped" || !strings.Contains(st.Detail, "the pin is abababababab") ||
+	if st := kernelStepOf(t, res, profile); st.Result != "skipped" ||
+		!strings.Contains(st.Detail, "the pin is abababababab") ||
 		peer.called("migrate-take-kernel") != 0 {
 		t.Fatalf("kernel step %+v, %d sends", st, peer.called("migrate-take-kernel"))
 	}
@@ -320,7 +308,8 @@ func TestPrepareReplacesAnotherKernelWithThePinnedOne(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out.String())
 	}
-	if st := kernelStep(res); st.Result != "sent" || !strings.Contains(st.Detail, "in place of "+digestHead(held)) {
+	if st := kernelStepOf(t, res, profile); st.Result != "sent" ||
+		!strings.Contains(st.Detail, "in place of "+digestHead(held)) {
 		t.Fatalf("kernel step %+v\n%s", st, out.String())
 	}
 	if got := installedProfileKernel(f.dst.RootDir(), bootassets.PortableArm64V1); got != sum {
@@ -337,8 +326,8 @@ func TestPrepareReplacesAnotherKernelWithThePinnedOne(t *testing.T) {
 	// Again: held, and nothing sent.
 	sends := peer.called("migrate-take-kernel")
 	res, err = prepareDestination(context.Background(), f.src, state, peer, remote, sum, &out)
-	if err != nil || kernelStep(res).Result != "held" || peer.called("migrate-take-kernel") != sends {
-		t.Fatalf("second prepare: %v, kernel step %+v", err, kernelStep(res))
+	if err != nil || kernelStepOf(t, res, profile).Result != "held" || peer.called("migrate-take-kernel") != sends {
+		t.Fatalf("second prepare: %v, kernel step %+v", err, kernelStepOf(t, res, profile))
 	}
 }
 
@@ -359,15 +348,25 @@ func TestPrepareAsksNoOlderHullToReplaceAKernel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out.String())
 	}
-	for _, st := range res.Steps {
-		if strings.HasPrefix(st.What, bootassets.PortableArm64V1) &&
-			(st.Result != "skipped" || !strings.Contains(st.Detail, "cannot replace it")) {
-			t.Fatalf("kernel step %+v", st)
-		}
+	if st := kernelStepOf(t, res, bootassets.PortableArm64V1); st.Result != "skipped" ||
+		!strings.Contains(st.Detail, "cannot replace it") {
+		t.Fatalf("kernel step %+v", st)
 	}
 	if peer.called("migrate-take-kernel") != 0 {
 		t.Fatal("the prepare sent a kernel to a hull that cannot replace one")
 	}
+}
+
+// kernelStepOf is the prepare's step for the kernel of profile.
+func kernelStepOf(t *testing.T, res *prepareResult, profile string) *prepareStep {
+	t.Helper()
+	for i, st := range res.Steps {
+		if strings.HasPrefix(st.What, profile) {
+			return &res.Steps[i]
+		}
+	}
+	t.Fatalf("no %s kernel step in %+v", profile, res.Steps)
+	return nil
 }
 
 func TestPrepareRefusesAPinThatIsNoSha256(t *testing.T) {
