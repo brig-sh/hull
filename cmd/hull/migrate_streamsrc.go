@@ -883,11 +883,7 @@ func (m *moveSource) streamTransfer(ctx context.Context) (retErr error) {
 	if session {
 		ss.accepted = make(chan struct{})
 	}
-	type sendResult struct {
-		hviReply json.RawMessage
-		err      error
-	}
-	sent := make(chan sendResult, 1)
+	sent := make(chan error, 1)
 	// The destination's call, the session or the receive, ends with the
 	// remote hull, and a stopped one whose ssh session stays open never
 	// ends it: closing the pipe does not reach it. A link cut for a
@@ -904,14 +900,14 @@ func (m *moveSource) streamTransfer(ctx context.Context) (retErr error) {
 		cancelCall()
 	}
 	go func() {
-		reply, err := ss.send(replay)
+		err := ss.send(replay)
 		if err != nil || !session {
 			_ = pw.CloseWithError(err)
 		}
 		if err != nil {
 			time.AfterFunc(linkEndWait, cancelCall)
 		}
-		sent <- sendResult{reply, err}
+		sent <- err
 	}()
 	args := []string{"--stream", "--txid", m.rec.TxID, "--name", m.name}
 	var reply *migrateReply
@@ -937,7 +933,7 @@ func (m *moveSource) streamTransfer(ctx context.Context) (retErr error) {
 			open.end()
 		}
 	}()
-	res := <-sent
+	sendErr := <-sent
 	m.spoolSealing = ss.sealDone
 	if ss.recorded != nil {
 		m.fenceRecord, m.fenceRecordedAt = ss.recorded, &ss.recordedAt
@@ -952,14 +948,13 @@ func (m *moveSource) streamTransfer(ctx context.Context) (retErr error) {
 			}
 		}()
 	}
-	if res.err == nil {
+	if sendErr == nil {
 		stats.Chain = sw.chain.sum()
 		stats.WireBytes = sw.written()
 		stats.Seconds = time.Since(started).Seconds()
-		stats.HviReply = res.hviReply
 	}
 	stats.step("destination answered")
-	if streamTestHook != nil && res.err == nil && err == nil {
+	if streamTestHook != nil && sendErr == nil && err == nil {
 		streamTestHook("answered")
 	}
 	// What was sent is on record before the move goes on: a reply that is
@@ -967,12 +962,12 @@ func (m *moveSource) streamTransfer(ctx context.Context) (retErr error) {
 	// A step that fails from here records it (stopped), and one that
 	// succeeds records it with the next state, in one write.
 	m.rec.Stream = stats
-	if res.err != nil && !errors.Is(res.err, io.ErrClosedPipe) && err == nil {
-		err = fmt.Errorf("send: %w", res.err)
+	if sendErr != nil && !errors.Is(sendErr, io.ErrClosedPipe) && err == nil {
+		err = fmt.Errorf("send: %w", sendErr)
 	}
 	if err != nil {
-		if res.err != nil && !errors.Is(res.err, io.ErrClosedPipe) && !strings.Contains(err.Error(), res.err.Error()) {
-			err = fmt.Errorf("%w (sending: %w)", err, res.err)
+		if sendErr != nil && !errors.Is(sendErr, io.ErrClosedPipe) && !strings.Contains(err.Error(), sendErr.Error()) {
+			err = fmt.Errorf("%w (sending: %w)", err, sendErr)
 		}
 		return fmt.Errorf("transfer to %s: %w", m.rec.Peer, err)
 	}
@@ -1068,14 +1063,14 @@ func (ss *streamSender) runSession(ctx context.Context, sp sessionPeer, args []s
 
 // send writes the whole stream. Live, it ends with hvi having fenced the
 // guest, the fence recorded on the instance and in the move's record.
-func (ss *streamSender) send(replay bool) (json.RawMessage, error) {
+func (ss *streamSender) send(replay bool) error {
 	m := ss.m
 	if err := ss.sw.header(moveStreamHeader{TxID: m.rec.TxID, Name: m.name, Epoch: m.rec.Epoch,
 		BaseSHA256: m.rec.BaseSHA256, DiskSize: ss.size, Replay: replay, Attempt: ss.attempt}); err != nil {
-		return nil, err
+		return err
 	}
 	if err := ss.sw.flush(); err != nil {
-		return nil, err
+		return err
 	}
 	if replay {
 		// The guest is fenced, and the spool holds hvi's whole stream,
@@ -1083,27 +1078,28 @@ func (ss *streamSender) send(replay bool) (json.RawMessage, error) {
 		// fresh copy of the base.
 		reply, err := ss.replayHvi(ss.spoolDir)
 		if err != nil {
-			return nil, err
+			return err
 		}
+		ss.stats.HviReply = reply
 		if err := ss.sw.trailer(reply); err != nil {
-			return nil, err
+			return err
 		}
-		return reply, ss.link.err
+		return ss.link.err
 	}
 	// A refusal of the header (no base, another profile, no room for the
 	// base's copy) must come while the guest still runs: once hvi's
 	// migrate has begun, hull reads it to the end.
 	if err := ss.waitAccepted(); err != nil {
-		return nil, err
+		return err
 	}
 	unlock, err := lockInstanceMigration(m.s, m.name)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	sp, err := newSpool(ss.spoolDir)
 	if err != nil {
 		unlock()
-		return nil, err
+		return err
 	}
 	select {
 	case <-ss.callDone:
@@ -1111,7 +1107,7 @@ func (ss *streamSender) send(replay bool) (json.RawMessage, error) {
 		// which it never does unless it failed: its reply says why.
 		sp.close()
 		unlock()
-		return nil, errors.New("the destination stopped receiving before hvi's migrate began")
+		return errors.New("the destination stopped receiving before hvi's migrate began")
 	default:
 	}
 	// A restored guest that was never resumed may be resumed by the
@@ -1140,7 +1136,7 @@ func (ss *streamSender) send(replay bool) (json.RawMessage, error) {
 		if ss.link.stalled.Load() {
 			err = fmt.Errorf("%w (before it ended, %v)", err, ss.link.err)
 		}
-		return nil, err
+		return err
 	}
 	if streamTestHook != nil {
 		streamTestHook("relayed")
@@ -1160,17 +1156,13 @@ func (ss *streamSender) send(replay bool) (json.RawMessage, error) {
 		m.signals.release()
 		sp.close()
 		unlock()
-		return nil, err
+		return err
 	}
 	ss.progress("hvi sealed the stream and fenced %s (%d ms after the pause)", m.name, ss.stats.SealedMs)
 	ss.recorded = make(chan error, 1)
 	fenceDone := make(chan struct{})
-	// The record takes hvi's reply as it is now: the transfer sets the
-	// move's stats again once the destination answers, which can be
-	// before this write is done.
-	hviStats := ss.stats.HviReply
 	go func() {
-		err := ss.recordInstanceFence(hviStats)
+		err := ss.recordInstanceFence()
 		ss.recordedAt = time.Now().UTC()
 		m.signals.release()
 		close(fenceDone)
@@ -1198,9 +1190,9 @@ func (ss *streamSender) send(replay bool) (json.RawMessage, error) {
 		ss.sealDone <- err
 	}()
 	if sendErr != nil {
-		return nil, sendErr
+		return sendErr
 	}
-	return reply, ss.link.err
+	return ss.link.err
 }
 
 // acceptPoll is how often the source asks whether the destination took the
@@ -1372,13 +1364,12 @@ func (ss *streamSender) noteFence() error {
 // checkpoint, taken over by this move. latest.json goes first, as a
 // checkpoint writes it: a restore that finds it naming a checkpoint the
 // record never took in refuses rather than rewinding past it. It runs
-// beside the end of the move; the commit does not wait for it, so it
-// takes hvi's reply as an argument rather than read the move's stats.
-func (ss *streamSender) recordInstanceFence(hviStats json.RawMessage) error {
+// beside the end of the move; the commit does not wait for it.
+func (ss *streamSender) recordInstanceFence() error {
 	m := ss.m
 	sum := sha256Hex(ss.manifest)
 	if err := writeHviCheckpointRecord(instanceCheckpointDir(m.s, m.name), hviCheckpointRecord{
-		Dir: ss.spoolDir, ManifestSHA256: sum, Then: hviThenFence, Stats: hviStats,
+		Dir: ss.spoolDir, ManifestSHA256: sum, Then: hviThenFence, Stats: ss.stats.HviReply,
 		SavedAt: time.Now().UTC(), TxID: m.rec.TxID, Manifest: ss.manifest,
 	}); err != nil {
 		return fmt.Errorf("the stream is sealed in %s but recording it failed: %w", ss.spoolDir, err)
