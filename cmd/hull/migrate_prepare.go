@@ -604,36 +604,36 @@ func prepareDestination(ctx context.Context, s *store.Store, state *store.Instan
 	if state.Profile != "" {
 		want := installedProfileKernel(s.RootDir(), state.Profile)
 		what := state.Profile + " kernel"
-		switch held := probe.ProfileKernels[state.Profile]; {
+		held := probe.ProfileKernels[state.Profile]
+		// Another kernel there, described by its record or not, is
+		// replaced only by the pin, and only by a hull that can.
+		replace := pin == want && probe.hasCapability(moveCapKernelReplace)
+		kept := func(why string) {
+			step(prepareStep{What: what, Result: "skipped",
+				Detail: fmt.Sprintf("it holds another one (%s), which is not replaced: %s", digestHead(held), why)})
+		}
+		switch {
 		case want == "":
 			step(prepareStep{What: what, Result: "skipped", Detail: "none is installed here to send"})
 		case held == want:
 			step(prepareStep{What: what, Result: "held", Detail: digestHead(want)})
 		case held != "" && pin != want:
-			detail := fmt.Sprintf("it holds another one (%s), which is not replaced; this host's is %s",
-				digestHead(held), digestHead(want))
+			why := fmt.Sprintf("no pin names this host's (%s)", digestHead(want))
 			if pin != "" {
-				detail += ", not " + digestHead(pin) + " either"
+				why = fmt.Sprintf("the pin is %s, not this host's (%s)", digestHead(pin), digestHead(want))
 			}
-			step(prepareStep{What: what, Result: "skipped", Detail: detail})
-		case held != "" && !probe.hasCapability(moveCapKernelReplace):
-			step(prepareStep{What: what, Result: "skipped", Detail: fmt.Sprintf("it holds another one (%s), "+
-				"and its hull (%s) cannot replace it; `hull assets pull --profile %s --force` there can",
-				digestHead(held), probe.HullVersion, state.Profile)})
+			kept(why)
+		case held != "" && !replace:
+			kept(fmt.Sprintf("its hull (%s) cannot replace it; `hull assets pull --profile %s --force` there can",
+				probe.HullVersion, state.Profile))
 		default:
-			// A kernel there that its record does not describe is replaced
-			// too, when this one is the pin.
-			replace := pin == want && probe.hasCapability(moveCapKernelReplace)
 			st, err := sendProfileKernel(ctx, s, p, state.Profile, want, replace)
-			switch {
-			case err != nil:
-				step(prepareStep{What: what, Result: "failed", Detail: refusalDetail(err)})
-			case held != "":
+			if err != nil {
+				st = prepareStep{What: what, Result: "failed", Detail: refusalDetail(err)}
+			} else if held != "" {
 				st.Detail += ", in place of " + digestHead(held)
-				step(st)
-			default:
-				step(st)
 			}
+			step(st)
 		}
 	}
 

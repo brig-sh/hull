@@ -310,7 +310,7 @@ func TestPrepareReplacesAnotherKernelWithThePinnedOne(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out.String())
 	}
-	if st := kernelStep(res); st.Result != "skipped" || !strings.Contains(st.Detail, "not abababababab either") ||
+	if st := kernelStep(res); st.Result != "skipped" || !strings.Contains(st.Detail, "the pin is abababababab") ||
 		peer.called("migrate-take-kernel") != 0 {
 		t.Fatalf("kernel step %+v, %d sends", st, peer.called("migrate-take-kernel"))
 	}
