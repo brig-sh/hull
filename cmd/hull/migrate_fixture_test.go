@@ -288,6 +288,9 @@ func newLocalPeer(s *store.Store) *localPeer {
 	return &localPeer{s: s, drop: map[string]int{}, answer: map[string]*migrateReply{}}
 }
 
+// localPeerBoolFlags are the verbs' flags that take no value.
+var localPeerBoolFlags = map[string]bool{"--reserve": true, "--stream": true, "--session": true, "--replace": true}
+
 func (p *localPeer) call(_ context.Context, verb string, args []string, stdin io.Reader) (*migrateReply, error) {
 	p.mu.Lock()
 	p.calls = append(p.calls, verb)
@@ -315,8 +318,7 @@ func (p *localPeer) call(_ context.Context, verb string, args []string, stdin io
 	}
 	flags := map[string]string{}
 	for i := 0; i < len(args); i++ {
-		if i+1 < len(args) && args[i] != "--reserve" && args[i] != "--stream" && args[i] != "--session" &&
-			args[i] != "--replace" {
+		if i+1 < len(args) && !localPeerBoolFlags[args[i]] {
 			flags[args[i]] = args[i+1]
 			i++
 		} else {
