@@ -159,6 +159,13 @@ func crashMoveAt(t *testing.T, f *streamFixture, stage string) string {
 	if !errors.As(err, &exit) || exit.ExitCode() != 3 {
 		t.Fatalf("the child did not die in the window: %v\n%s", err, out)
 	}
+	// The child's flock on the move goes when the kernel has torn the
+	// process down, which on macOS is a few ms after its exit was reaped.
+	unlock, err := lockMove(f.src.InstanceDir(f.name), 2*time.Second)
+	if err != nil {
+		t.Fatalf("the dead child's move lock: %v", err)
+	}
+	unlock()
 	if f.hvi.state != "fenced" {
 		t.Fatalf("hvi is %s after the child died", f.hvi.state)
 	}
