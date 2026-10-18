@@ -439,10 +439,16 @@ func requireNoDescriptorShare(cmdLine []string) error {
 }
 
 func requireBlockRootfs(cmdLine []string) error {
-	if !slices.Contains(cmdLine, "--rootfs") {
-		return errors.New("checkpoint/restore needs a block rootfs: start the instance with `run --rootfs-type block` (a virtiofs root goes stale across restore)")
+	if slices.Contains(cmdLine, "--rootfs") {
+		return nil
 	}
-	return nil
+	// vz-runner's --disk flags come only from HULL_ROOTFS_MODE=overlay-block,
+	// which refuses --rootfs-type block, so the generic advice would point at
+	// a combination the mode rejects.
+	if slices.Contains(cmdLine, "--disk") || slices.Contains(cmdLine, "--disk-ro") {
+		return errors.New("an overlay-block root (HULL_ROOTFS_MODE=overlay-block) cannot be checkpointed in this cut; run with the variable unset and --rootfs-type block")
+	}
+	return errors.New("checkpoint/restore needs a block rootfs: start the instance with `run --rootfs-type block` (a virtiofs root goes stale across restore)")
 }
 
 // vzRunnerProcess reports whether pid's argv looks like vz-runner, guarding
