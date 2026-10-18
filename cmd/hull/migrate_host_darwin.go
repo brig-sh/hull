@@ -16,11 +16,11 @@ package main
 
 import "golang.org/x/sys/unix"
 
-// hypervisorAvailable reports whether this Mac can run hvi guests:
+// hostHypervisorAvailable reports whether this Mac can run hvi guests:
 // Hypervisor.framework answers kern.hv_support with 1 when the CPU and the
 // OS support it. Whether this hull may use it is a matter of hvi's
 // entitlement, which the restore itself will find out.
-func hypervisorAvailable() (bool, string) {
+func hostHypervisorAvailable() (bool, string) {
 	v, err := unix.SysctlUint32("kern.hv_support")
 	if err != nil {
 		return false, "kern.hv_support: " + err.Error()

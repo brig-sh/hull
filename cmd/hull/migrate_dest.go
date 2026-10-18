@@ -112,6 +112,11 @@ func storeFreeBytes(dir string) int64 {
 	return int64(st.Bavail) * int64(st.Bsize) //nolint:gosec,unconvert // block counts fit; Bsize's type differs by OS
 }
 
+// hypervisorAvailable answers the probe's hypervisor question. It is a
+// variable so the unit tests, whose destination runs inside the test
+// binary, can answer yes on a host without one, as the CI runners are.
+var hypervisorAvailable = hostHypervisorAvailable
+
 // destProbe reports what a source needs to know before it fences anything.
 // It changes nothing.
 func destProbe(s *store.Store, name, hviOverride, gatewaySock string) *migrateReply {

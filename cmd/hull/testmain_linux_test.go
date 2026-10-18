@@ -25,6 +25,10 @@ import (
 // compose tests that only build there; both let the move tests run this
 // binary as ssh and as hull.
 func TestMain(m *testing.M) {
+	// The unit tests boot nothing, and the CI runners have no /dev/kvm:
+	// the destination answers the probe as a host that can, whether it
+	// runs inside the test binary or in the hull the fake ssh runs.
+	hypervisorAvailable = func() (bool, string) { return true, "test stand-in" }
 	testBinaryAsHull()
 	code := m.Run()
 	removeFakeHvi()

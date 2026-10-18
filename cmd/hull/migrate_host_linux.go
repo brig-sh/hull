@@ -16,10 +16,10 @@ package main
 
 import "os"
 
-// hypervisorAvailable reports whether this user can open /dev/kvm read-write,
+// hostHypervisorAvailable reports whether this user can open /dev/kvm read-write,
 // which is what hvi does first. A user not in the kvm group finds out here,
 // before the source fences anything, rather than at the restore.
-func hypervisorAvailable() (bool, string) {
+func hostHypervisorAvailable() (bool, string) {
 	f, err := os.OpenFile("/dev/kvm", os.O_RDWR, 0)
 	if err != nil {
 		return false, "/dev/kvm: " + err.Error()
