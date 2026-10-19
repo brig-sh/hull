@@ -31,9 +31,6 @@ BUILD_DIR      ?= ${CURDIR}/dist
 #? PREFIX Directory to install binaries (default: /usr/local/bin)
 PREFIX         ?= /usr/local/bin
 
-# Architecture (Apple Silicon only for now)
-ARCH           ?= arm64
-
 # Binary variables
 HULL_BIN := $(BUILD_DIR)/hull
 VZ_RUNNER_DIR   := $(CURDIR)/vz-runner
@@ -49,6 +46,20 @@ CARGO           ?= cargo
 
 # Golang variables
 GO             ?= go
+
+# Host detection
+#
+# GOHOSTOS/GOHOSTARCH name the machine the toolchain runs on, and unlike
+# GOOS/GOARCH they ignore a cross-compile exported in the environment.
+HOST_OS        := $(shell $(GO) env GOHOSTOS 2>/dev/null)
+HOST_ARCH      := $(shell $(GO) env GOHOSTARCH 2>/dev/null)
+
+# The macOS targets are Apple Silicon only, so ARCH stays arm64 whatever the
+# host says, including an x86 Go under Rosetta or a cross-build from Linux.
+# The Linux build targets the host unless told otherwise.
+ARCH           ?= arm64
+#? LINUX_ARCH Architecture of the `linux` build (default: the host's)
+LINUX_ARCH     ?= $(HOST_ARCH)
 LDFLAGS        := $(GITFLAGS) -s -w
 # Telemetry ingestion endpoint. Left empty (dev builds), the client never
 # sends anything.
@@ -90,16 +101,23 @@ RELEASE_TAG       := $(shell git describe --tags --abbrev=0 --match 'v[0-9]*' 2>
 RELEASE_VERSION   := $(or $(patsubst v%,%,$(RELEASE_TAG)),0.0.0)
 TARBALL           := $(BUILD_DIR)/hull-$(RELEASE_VERSION)-arm64.tar.gz
 
-## default Build and sign hull + vz-runner.
+## default Build for the host: `macos` on a Mac, `linux` on Linux.
 .PHONY: default
-default: macos
+default: $(if $(filter darwin,$(HOST_OS)),macos,linux)
 
-## urunc_macos Build the hull CLI.
+## urunc_macos Build the hull CLI for macOS.
 .PHONY: urunc_macos
 urunc_macos:
 	mkdir -p $(BUILD_DIR)
-	GOARCH=$(ARCH) $(GO) build -ldflags "$(LDFLAGS)" \
+	GOOS=darwin GOARCH=$(ARCH) $(GO) build -ldflags "$(LDFLAGS)" \
 		-o $(HULL_BIN)_$(ARCH) $(CURDIR)/cmd/hull
+
+## linux Build the hull CLI for Linux. No runners, no signing.
+.PHONY: linux
+linux:
+	mkdir -p $(BUILD_DIR)
+	GOOS=linux GOARCH=$(LINUX_ARCH) $(GO) build -ldflags "$(LDFLAGS)" \
+		-o $(HULL_BIN)_linux_$(LINUX_ARCH) $(CURDIR)/cmd/hull
 
 ## vz_runner Build the Swift Virtualization.framework runner.
 .PHONY: vz_runner

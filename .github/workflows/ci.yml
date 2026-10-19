@@ -147,6 +147,17 @@ jobs:
       - name: Check the cask renderer
         run: python3 scripts/render-cask-test.py
 
+      # Everything above type-checks for darwin, and the unit job runs on a
+      # Mac, so a cmd/hull file that uses a darwin-only symbol without the
+      # build tag would break the Linux build with every check still green.
+      # The recipe sets GOOS=linux itself. The vet step overrides the job's
+      # GOOS inline so it also type-checks the test files for Linux.
+      - name: Build the Linux CLI
+        run: make linux
+
+      - name: Vet for Linux
+        run: GOOS=linux GOARCH=amd64 go vet ./...
+
   telemetry:
     name: telemetry module (linux)
     # pkg/telemetry is a module of its own, so `go test ./...` and the lint
