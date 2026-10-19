@@ -27,6 +27,8 @@
 //     guest target passes through unchanged;
 //   - mem_limit: a value validateProject accepts never renders --mem <= 0.
 
+//go:build darwin
+
 package main
 
 import (

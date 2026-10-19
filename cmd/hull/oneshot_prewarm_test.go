@@ -19,6 +19,8 @@
 // window: early EOFs are absorbed by the pre-warm, and a listener that
 // never answers fails loudly without ever running the command.
 
+//go:build darwin
+
 package main
 
 import (
