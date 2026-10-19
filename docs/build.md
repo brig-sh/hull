@@ -14,7 +14,8 @@ two runners must be signed before they can start a VM.
 
 ## Prerequisites
 
-- An Apple Silicon Mac. There is no other build target.
+- An Apple Silicon Mac. Linux builds only a stub of the CLI so far; see
+  [Building on Linux](#building-on-linux).
 - **Go** 1.26 or later. `go.mod` declares 1.26.4.
 - **Xcode command line tools**, which supply Swift. `vz-runner` declares
   `swift-tools-version:5.9` and a macOS 14 deployment target.
@@ -64,11 +65,15 @@ make macos
 That runs four steps: build `hull`, build `vz-runner`, build `hvi`, then sign
 all three ad-hoc and strip the quarantine attribute.
 
+A plain `make` picks the build for the host: `macos` on a Mac, `linux`
+anywhere else.
+
 Individual targets:
 
 | Target | What it does |
 |---|---|
-| `make urunc_macos` | build the Go CLI to `dist/hull_arm64` |
+| `make urunc_macos` | build the Go CLI for macOS to `dist/hull_arm64` |
+| `make linux` | build the Go CLI for Linux to `dist/hull_linux_<arch>` |
 | `make vz_runner` | `swift build -c release` in `vz-runner/` |
 | `make hvi_vmm` | `cargo build --release` in `hvi-vmm/` |
 | `make sign` | sign all three and strip quarantine |
@@ -92,6 +97,21 @@ there is then nothing to fall back to, and cargo refuses to choose.
 
 `cargo` and `swift build` both parallelize by default. On a machine running
 other work, cap them rather than letting each build assume it owns the box.
+
+### Building on Linux
+
+A Linux port has started, and it does not run anything yet. `make linux`, or
+plain `make` on a Linux host, builds a stub `hull` that prints a greeting and
+exits. It builds no runners and signs nothing.
+
+```bash
+make                        # dist/hull_linux_<host arch>
+make linux LINUX_ARCH=amd64 # cross-build for another architecture
+```
+
+`make test` runs on Linux too. The `internal/` and `pkg/` packages build and
+test natively. Of `cmd/hull`, only the files with no darwin dependency compile
+there; the rest carry `//go:build darwin`.
 
 ## Sibling discovery, and what it means for PATH
 
