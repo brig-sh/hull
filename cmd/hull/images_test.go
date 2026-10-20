@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build darwin
-
 package main
 
 import (
@@ -24,6 +22,16 @@ import (
 	"time"
 
 	"github.com/brig-sh/hull/pkg/store"
+)
+
+// The test image the image-store tests share. The tests that use them run on
+// every OS, so the constants live here rather than beside the darwin-only
+// cache tests.
+const (
+	cacheTestRef         = "ghcr.io/nofireai/urunc-ubuntu:aarch64"
+	cacheTestRepo        = "ghcr.io/nofireai/urunc-ubuntu"
+	cacheTestDigest      = "sha256:c408baae42f5c74c0661fbc20a289fd23d4322988e52c88cd54108e5c4c74893"
+	cacheTestIndexDigest = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
 )
 
 // The JSON form from #14: what the store knows, with nothing cut. The table
