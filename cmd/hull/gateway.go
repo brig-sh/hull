@@ -206,6 +206,9 @@ func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, ga
 	if err != nil {
 		return fmt.Errorf("failed to create virtual network: %w", err)
 	}
+	// Deferred first, so it runs last: the stack goes once the sockets that
+	// feed it are closed.
+	defer vn.Close()
 
 	// Keep the named hosts in the rules resolved for as long as the gateway
 	// runs, so the policy follows a name whose addresses rotate.
