@@ -219,6 +219,10 @@ jobs:
     # cmd/hull, and the linux-tagged ones. Like `unit`, it is cheap and runs
     # on every diff.
     runs-on: ubuntu-latest
+    env:
+      # A test that needs a containerd daemon fails without one, instead of
+      # skipping, so this job cannot pass without having run them.
+      HULL_TEST_REQUIRE_CONTAINERD: "1"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -226,8 +230,54 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # On Linux hull is a containerd client, and some of its tests talk to a
+      # daemon. Run the release the brig-standalone-linux bundle ships, as
+      # root, on a socket of its own that this job's user owns: the tests need
+      # no sudo, and the runner's own containerd, which Docker uses, is never
+      # touched. The checksum is the one containerd publishes beside the
+      # tarball.
+      - name: Start containerd
+        env:
+          CONTAINERD_VERSION: 2.3.5
+          CONTAINERD_SHA256: 2f0a095a71e3262d0d91ff0e50e2e4ae73c3866c4d1ff6a15f341097fba3dd44
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/containerd"
+          mkdir -p "$dir"
+          curl -fsSL -o "$dir/containerd.tar.gz" \
+            "https://github.com/containerd/containerd/releases/download/v${CONTAINERD_VERSION}/containerd-${CONTAINERD_VERSION}-linux-amd64.tar.gz"
+          echo "${CONTAINERD_SHA256}  $dir/containerd.tar.gz" | sha256sum -c -
+          tar -C "$dir" -xzf "$dir/containerd.tar.gz"
+          cat > "$dir/config.toml" <<EOF
+          version = 3
+          root = "$dir/root"
+          state = "$dir/state"
+          disabled_plugins = ["io.containerd.grpc.v1.cri"]
+          [grpc]
+            address = "$dir/containerd.sock"
+            uid = $(id -u)
+            gid = $(id -g)
+          [ttrpc]
+            address = "$dir/containerd.sock.ttrpc"
+            uid = $(id -u)
+            gid = $(id -g)
+          [debug]
+            address = ""
+          EOF
+          sudo nohup "$dir/bin/containerd" --config "$dir/config.toml" > "$dir/containerd.log" 2>&1 &
+          for _ in $(seq 100); do
+            [ -S "$dir/containerd.sock" ] && break
+            sleep 0.1
+          done
+          "$dir/bin/ctr" --address "$dir/containerd.sock" version
+          echo "HULL_TEST_CONTAINERD_ADDRESS=$dir/containerd.sock" >> "$GITHUB_ENV"
+
       - name: Unit tests
         run: go test -count=1 -race ./...
+
+      - name: containerd log
+        if: failure()
+        run: cat "$RUNNER_TEMP/containerd/containerd.log" || true
 
   build:
     name: build (go + swift, ad-hoc signed)
