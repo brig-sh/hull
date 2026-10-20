@@ -16,10 +16,55 @@
 
 package main
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+	"os"
 
-// The Linux port starts here. Nothing in the darwin CLI is wired up yet; this
-// entry point only proves the command builds and runs on a Linux host.
+	"github.com/brig-sh/hull/internal/buildinfo"
+	"github.com/sirupsen/logrus"
+	"github.com/urfave/cli/v3"
+)
+
+// On Linux, hull will be a containerd client: images, containers and tasks
+// will live in containerd, not in a store directory as on macOS. A verb
+// registered here before it works on Linux refuses with a reason.
+
+var build = buildinfo.Read()
+
 func main() {
-	fmt.Println("hello from hull on linux")
+	err := newApp().Run(context.Background(), os.Args)
+	if err != nil {
+		fatal(err)
+	}
+}
+
+// newApp builds the command tree. It is separate from main so tests can run
+// the commands as a user would, flags included.
+func newApp() *cli.Command {
+	return &cli.Command{
+		Name:    "hull",
+		Usage:   "run OCI images as VMs through containerd and urunc",
+		Version: build.String(),
+		Flags: []cli.Flag{
+			&cli.BoolFlag{
+				Name:  "debug",
+				Usage: "enable debug logging",
+			},
+		},
+		Before: func(_ context.Context, cmd *cli.Command) (context.Context, error) {
+			if cmd.Bool("debug") {
+				logrus.SetLevel(logrus.DebugLevel)
+			}
+			return nil, nil
+		},
+		Commands: []*cli.Command{
+			imagesCommand(),
+		},
+	}
+}
+
+func fatal(err error) {
+	fmt.Fprintf(os.Stderr, "error: %v\n", err)
+	os.Exit(1)
 }
