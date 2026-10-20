@@ -14,7 +14,7 @@ two runners must be signed before they can start a VM.
 
 ## Prerequisites
 
-- An Apple Silicon Mac. Linux builds only a stub of the CLI so far; see
+- An Apple Silicon Mac. Linux builds only the start of the CLI so far; see
   [Building on Linux](#building-on-linux).
 - **Go** 1.26 or later. `go.mod` declares 1.26.4.
 - **Xcode command line tools**, which supply Swift. `vz-runner` declares
@@ -101,8 +101,9 @@ other work, cap them rather than letting each build assume it owns the box.
 ### Building on Linux
 
 A Linux port has started, and it does not run anything yet. `make linux`, or
-plain `make` on a Linux host, builds a stub `hull` that prints a greeting and
-exits. It builds no runners and signs nothing.
+plain `make` on a Linux host, builds a `hull` with the start of the Linux
+command tree. Its one verb, `hull images`, refuses with an explanation for
+now. It builds no runners and signs nothing.
 
 ```bash
 make                        # dist/hull_linux_<host arch>

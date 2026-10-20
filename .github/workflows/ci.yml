@@ -25,6 +25,10 @@ name: CI
 # on runner.environment == 'self-hosted', so parking `e2e` back on macos-15
 # degrades its VM-boot steps to no-ops there -- `unit` needs no self-hosted
 # capability at all, so it keeps running the suite either way.
+#
+# The Linux port is the exception to all of the above. `unit-linux` runs the
+# root module's tests natively on a Linux runner, which is the only place the
+# linux-tagged files in cmd/hull are tested.
 
 on:
   push:
@@ -150,13 +154,21 @@ jobs:
       # Everything above type-checks for darwin, and the unit job runs on a
       # Mac, so a cmd/hull file that uses a darwin-only symbol without the
       # build tag would break the Linux build with every check still green.
-      # The recipe sets GOOS=linux itself. The vet step overrides the job's
-      # GOOS inline so it also type-checks the test files for Linux.
+      # The recipe sets GOOS=linux itself.
       - name: Build the Linux CLI
         run: make linux
 
-      - name: Vet for Linux
-        run: GOOS=linux GOARCH=amd64 go vet ./...
+      # The golangci-lint step above lints for darwin, the job's GOOS, where
+      # the linux-tagged files in cmd/hull do not build. This lints them for
+      # Linux, test files included. Its govet runs every analyzer `go vet`
+      # does, so there is no separate vet step.
+      - name: golangci-lint (linux)
+        uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9 # v8
+        env:
+          GOOS: linux
+          GOARCH: amd64
+        with:
+          version: v2.12.2
 
   telemetry:
     name: telemetry module (linux)
@@ -197,6 +209,25 @@ jobs:
         with:
           version: v2.12.2
           working-directory: pkg/telemetry
+
+  unit-linux:
+    name: unit tests (linux)
+    # `unit` runs the Go suite on a Mac, where the linux-tagged files in
+    # cmd/hull do not build, and `lint` only builds and lints for Linux.
+    # This runs the root module's suite natively on Linux, under the race
+    # detector: the internal/ and pkg/ packages, the untagged files in
+    # cmd/hull, and the linux-tagged ones. Like `unit`, it is cheap and runs
+    # on every diff.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+
+      - name: Unit tests
+        run: go test -count=1 -race ./...
 
   build:
     name: build (go + swift, ad-hoc signed)
