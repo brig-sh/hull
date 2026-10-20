@@ -28,11 +28,6 @@ import (
 	"github.com/brig-sh/hull/pkg/store"
 )
 
-const (
-	cacheTestRef    = "ghcr.io/nofireai/urunc-ubuntu:aarch64"
-	cacheTestDigest = "sha256:c408baae42f5c74c0661fbc20a289fd23d4322988e52c88cd54108e5c4c74893"
-)
-
 // seedImage writes the default test image into the store. withRootfs=false
 // reproduces what an interrupted pull leaves behind: metadata present, rootfs
 // gone.
@@ -316,11 +311,6 @@ func TestCachedDigestHonorsPlatform(t *testing.T) {
 		t.Fatalf("default lookup = %q,%v; must still resolve the arm64 record", digest, ok)
 	}
 }
-
-const (
-	cacheTestRepo        = "ghcr.io/nofireai/urunc-ubuntu"
-	cacheTestIndexDigest = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
-)
 
 // seedMetadata writes one image record into the store, with the rootfs and the
 // layout stamp a good pull leaves behind unless withRootfs says otherwise.
