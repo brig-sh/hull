@@ -22,13 +22,15 @@ import (
 	"os"
 
 	"github.com/brig-sh/hull/internal/buildinfo"
+	"github.com/brig-sh/hull/internal/containerd"
+	"github.com/containerd/containerd/v2/client"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v3"
 )
 
-// On Linux, hull will be a containerd client: images, containers and tasks
-// will live in containerd, not in a store directory as on macOS. A verb
-// registered here before it works on Linux refuses with a reason.
+// On Linux, hull is a containerd client: images, containers and tasks live in
+// containerd, in the namespace --namespace names, not in a store directory as
+// on macOS. Only the verbs that work on Linux are registered.
 
 var build = buildinfo.Read()
 
@@ -51,6 +53,16 @@ func newApp() *cli.Command {
 				Name:  "debug",
 				Usage: "enable debug logging",
 			},
+			&cli.StringFlag{
+				Name: "namespace",
+				Usage: "containerd namespace for hull's images and instances; another namespace sees none of them " +
+					"(default: $" + containerd.NamespaceEnv + ", else " + containerd.DefaultNamespace + ")",
+			},
+			&cli.StringFlag{
+				Name: "containerd-address",
+				Usage: "containerd socket (default: $" + containerd.AddressEnv +
+					", else the system socket for root and $XDG_RUNTIME_DIR/containerd/containerd.sock for other users)",
+			},
 		},
 		Before: func(_ context.Context, cmd *cli.Command) (context.Context, error) {
 			if cmd.Bool("debug") {
@@ -62,6 +74,14 @@ func newApp() *cli.Command {
 			imagesCommand(),
 		},
 	}
+}
+
+// connectContainerd opens a client to the containerd daemon the global flags
+// name, scoped to hull's namespace. The caller closes it.
+func connectContainerd(ctx context.Context, cmd *cli.Command) (*client.Client, error) {
+	address := containerd.ResolveAddress(cmd.String("containerd-address"))
+	namespace := containerd.ResolveNamespace(cmd.String("namespace"))
+	return containerd.Connect(ctx, address, namespace)
 }
 
 func fatal(err error) {

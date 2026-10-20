@@ -7,11 +7,15 @@ require (
 	github.com/compose-spec/compose-go/v2 v2.14.0
 	github.com/containerd/containerd v1.7.36
 	github.com/containerd/containerd/v2 v2.3.5
+	github.com/containerd/errdefs v1.0.0
+	github.com/containerd/platforms v1.0.0-rc.5
 	github.com/containers/gvisor-tap-vsock v0.8.9
 	github.com/google/go-containerregistry v0.20.6
 	github.com/hashicorp/go-version v1.9.0
 	github.com/inetaf/tcpproxy v0.0.0-20250222171855-c4b9df066048
 	github.com/miekg/dns v1.1.72
+	github.com/opencontainers/go-digest v1.0.0
+	github.com/opencontainers/image-spec v1.1.1
 	github.com/opencontainers/runtime-spec v1.3.0
 	github.com/sirupsen/logrus v1.9.4
 	github.com/urfave/cli/v3 v3.10.1
@@ -36,11 +40,9 @@ require (
 	github.com/containerd/console v1.0.5 // indirect
 	github.com/containerd/containerd/api v1.11.1 // indirect
 	github.com/containerd/continuity v0.5.0 // indirect
-	github.com/containerd/errdefs v1.0.0 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
 	github.com/containerd/fifo v1.1.0 // indirect
 	github.com/containerd/log v0.1.0 // indirect
-	github.com/containerd/platforms v1.0.0-rc.5 // indirect
 	github.com/containerd/plugin v1.1.0 // indirect
 	github.com/containerd/stargz-snapshotter/estargz v0.16.3 // indirect
 	github.com/containerd/ttrpc v1.2.9 // indirect
@@ -79,8 +81,6 @@ require (
 	github.com/mrunalp/fileutils v0.5.1 // indirect
 	github.com/nubificus/hedge_cli v0.0.3 // indirect
 	github.com/opencontainers/cgroups v0.0.4 // indirect
-	github.com/opencontainers/go-digest v1.0.0 // indirect
-	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/opencontainers/runc v1.3.6 // indirect
 	github.com/opencontainers/selinux v1.13.1 // indirect
 	github.com/pierrec/lz4/v4 v4.1.14 // indirect
