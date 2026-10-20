@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build darwin
-
 package main
 
 import (
@@ -31,6 +29,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -105,6 +104,13 @@ func runCommand() *cli.Command {
 				Name:  "qemu-path",
 				Value: "",
 				Usage: "path to qemu-system-aarch64 binary (default: auto-detect, prefers signed copy)",
+			},
+			&cli.StringFlag{
+				Name: "profile",
+				Usage: "hvi machine profile: 'native' (default) or 'portable-arm64-v1', a machine whose " +
+					"checkpoints restore on an Apple host and a Linux arm64 host alike (hvi only; needs " +
+					"--rootfs-type block and the profile's kernel, see `hull assets pull --profile`). " +
+					"Also the annotation com.nofire.hvi.profile",
 			},
 			&cli.StringFlag{
 				Name:  "rootfs-type",
@@ -248,6 +254,29 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	if guiTitle != "" && !gui {
 		return errors.New("--gui-title requires --gui")
 	}
+	// Before the store is opened and the image pulled: a host that cannot run
+	// this combination should say so before it has downloaded anything.
+	preflight, err := platformRunPreflight(runRequest{
+		hypervisor:   hypervisorOverride,
+		rootfsType:   rootfsTypeOverride,
+		netMode:      netMode,
+		gatewaySock:  gatewaySock,
+		sharedDirs:   len(sharedDirs),
+		sharedDirFds: len(sharedDirFds),
+		gui:          gui,
+		rosetta:      cmd.Bool("rosetta"),
+	})
+	if err != nil {
+		return err
+	}
+	hypervisorOverride, rootfsTypeOverride = preflight.hypervisor, preflight.rootfsType
+	profile, err := resolveRunProfile(cmd.String("profile"), annotationOverrides)
+	if err != nil {
+		return err
+	}
+	if err := checkProfileRun(profile, preflight); err != nil {
+		return err
+	}
 
 	// Generate instance ID if not provided
 	if instanceName == "" {
@@ -317,6 +346,17 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	}
 	if err := checkUnixSocketPath("agent", s.InstanceAgentSocket(instanceName)); err != nil {
 		return err
+	}
+	// hvi's control socket is two bytes longer than the agent's, so a name
+	// that passes the check above can still fail it, and checked only where
+	// it is added, that failure comes after the pull, the unpack and the
+	// block disk. The backend is only certain once the image's annotation
+	// is read; checked here when the flag or the platform default already
+	// says hvi, and again where the socket is added.
+	if early, _ := selectHypervisor(hypervisorOverride, nil, defaultHypervisor); early == string(hypervisors.HviVmm) {
+		if err := checkUnixSocketPath("control", s.InstanceControlSocket(instanceName)); err != nil {
+			return err
+		}
 	}
 
 	// Track image digest (will be set based on whether we use local bundle or pull from registry)
@@ -500,32 +540,25 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	}
 
 	// Determine VMM and unikernel types from annotations or CLI override
-	// Default to QEMU for backward compatibility
-	var vmmType hypervisors.VmmType
-	vmmName := ""
-
-	// CLI override takes precedence
-	vmmSource := "default"
-	if hypervisorOverride != "" {
-		vmmName = hypervisorOverride
-		vmmSource = "flag"
-		log.Debugf("Using hypervisor from --hypervisor flag: %s", vmmName)
-	} else if annotation, ok := ociSpec.Annotations["com.urunc.unikernel.hypervisor"]; ok {
-		vmmName = annotation
-		vmmSource = "annotation"
-		log.Debugf("Using hypervisor from annotation: %s", vmmName)
-	} else {
-		vmmName = "qemu"
-		log.Debugf("No hypervisor override or annotation, using default: qemu")
-	}
+	vmmName, vmmSource := selectHypervisor(hypervisorOverride, ociSpec.Annotations, defaultHypervisor)
+	log.Debugf("Using hypervisor %s (from %s)", vmmName, vmmSource)
 
 	vmmName = normalizeVmmName(vmmName)
-	vmmType = hypervisors.VmmType(vmmName)
+	// The flag was checked before the pull; an annotation can only be checked
+	// now that the image is here.
+	if err := platformCheckHypervisor(vmmName, vmmSource); err != nil {
+		return err
+	}
+	if err := checkProfileBackend(profile, vmmName, vmmSource); err != nil {
+		return err
+	}
+
+	vmmType := hypervisors.VmmType(vmmName)
 	telemetryBackendSource = vmmSource
 	telemetryBackend = vmmName
 	// Graphics is only supported on the Vz backend; the QEMU darwin builder
 	// never emits window flags.
-	if gui && vmmType != hypervisors.VzVmm {
+	if gui && vmmType != vzVmm {
 		return fmt.Errorf("--gui is only supported with the Vz hypervisor (got %q)", vmmName)
 	}
 
@@ -533,7 +566,7 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	// from Virtualization.framework, which the QEMU backend cannot provide.
 	// The annotation lets an image opt in; the flag covers everything else.
 	rosetta := cmd.Bool("rosetta") || ociSpec.Annotations["com.urunc.darwin.rosetta"] == "true"
-	if rosetta && vmmType != hypervisors.VzVmm {
+	if rosetta && vmmType != vzVmm {
 		return fmt.Errorf("--rosetta is only supported with the Vz hypervisor (got %q)", vmmName)
 	}
 
@@ -552,9 +585,16 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	if !cmd.Bool("no-boot-assets") &&
 		annotationOverrides["com.urunc.unikernel.bootKernel"] == "" &&
 		annotationOverrides["com.urunc.unikernel.bootInitrd"] == "" &&
-		(vmmType == hypervisors.VzVmm || vmmType == hypervisors.HviVmm) &&
+		(vmmType == vzVmm || vmmType == hypervisors.HviVmm) &&
 		!imageCarriesKernel(ociSpec.Annotations) {
-		kernel, initrdFile, assetErr := bootassets.Ensure(ctx, cmd.String("store-dir"))
+		ensure := bootassets.Ensure
+		if profile != "" {
+			// The profile boots its own kernel with the default initrd.
+			ensure = func(ctx context.Context, storeDir string) (string, string, error) {
+				return bootassets.EnsureProfile(ctx, storeDir, profile)
+			}
+		}
+		kernel, initrdFile, assetErr := ensure(ctx, cmd.String("store-dir"))
 		if assetErr != nil {
 			return fmt.Errorf("this image carries no kernel, so it needs the generic boot assets: %w", assetErr)
 		}
@@ -577,7 +617,7 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	unikernelType, unikernelTypeDeclared := unikernelFamily(ociSpec.Annotations, containerBoot)
 
 	// Create VMM instance
-	vmm, err := hypervisors.NewVMM(vmmType, uruncCfg.Monitors)
+	vmm, err := newVMM(vmmType, uruncCfg.Monitors)
 	if err != nil {
 		return fmt.Errorf("failed to create VMM: %w", err)
 	}
@@ -593,9 +633,7 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	if qemuD, ok := vmm.(*hypervisors.Qemu); ok {
 		qemuD.SetQMPSocket(qmpSocket)
 	}
-	if vzD, ok := vmm.(*hypervisors.VzDarwin); ok {
-		vzD.SetQMPSocket(qmpSocket)
-	}
+	setVzQMPSocket(vmm, qmpSocket)
 
 	// Create unikernel instance
 	unikernel, err := unikernels.New(unikernelType)
@@ -680,7 +718,7 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	if err := verifyContainerBootAssets(bootKernel, bootInitrd); err != nil {
 		return err
 	}
-	if containerBoot && vmmType != hypervisors.VzVmm && vmmType != hypervisors.HviVmm {
+	if containerBoot && vmmType != vzVmm && vmmType != hypervisors.HviVmm {
 		return fmt.Errorf("generic virtiofs container boot requires the vz or hvi backend (got %q)", vmmName)
 	}
 	if bootKernel != "" {
@@ -712,7 +750,7 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 		if err != nil {
 			return fmt.Errorf("boot kernel from image annotation: %w", err)
 		}
-	} else if vmmType == hypervisors.VzVmm || vmmType == hypervisors.HviVmm {
+	} else if vmmType == vzVmm || vmmType == hypervisors.HviVmm {
 		// For native arm64 backends, look for common kernel locations in rootfs.
 		//
 		// The names are hull's, but the files are the image's, and an image
@@ -748,10 +786,22 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 		}
 	}
 
+	// Before the disk is built: a profile boots its own kernel, whichever
+	// way the run arrived at one.
+	profileKernelWhy := "takes its kernel from the image"
+	if cmd.Bool("no-boot-assets") {
+		profileKernelWhy = "has --no-boot-assets, so its kernel comes from the image"
+	}
+	if err := checkProfileKernel(cmd.String("store-dir"), profile, bootKernel, kernelPath,
+		profileKernelWhy); err != nil {
+		return err
+	}
+
 	// Determine rootfs mode: initrd file vs directory (virtiofs/9pfs/block)
 	initrdPath := ""
 	rootfsDir := ""
 	rootfsDiskImage := "" // path to ext4 disk image (block mode)
+	rootfsBase := ""      // digest of the image base the disk was copied from
 	containerRootfsDirect := false
 	containerMetadataRootfs := ""
 	mountRootfs := ociSpec.Annotations["com.urunc.unikernel.mountRootfs"] == "true"
@@ -800,7 +850,7 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 		// Determine rootfs sharing mode
 		rootfsType := rootfsTypeOverride
 		if rootfsType == "" {
-			if vmmType == hypervisors.VzVmm || vmmType == hypervisors.HviVmm {
+			if vmmType == vzVmm || vmmType == hypervisors.HviVmm {
 				rootfsType = "virtiofs"
 			} else {
 				rootfsType = "9pfs"
@@ -908,8 +958,21 @@ exec %s "$@"
 				imageSizeMB = 15 * 1024
 			}
 
-			if err := buildBlockRootfs(ctx, diskPath, srcDir, injects, imageSizeMB); err != nil {
-				return err
+			if vmmType == hypervisors.HviVmm {
+				// From the image's base, which a move sends once per
+				// destination for every instance of the image.
+				rootfsBase, err = diskFromImageBase(ctx, s, imageDigest, diskPath, srcDir, injects, imageSizeMB)
+				if err != nil {
+					log.Warnf("Could not start the disk from the image's base (%v); building it on its own, "+
+						"and a move of this instance will send its whole disk", err)
+					rootfsBase = ""
+					_ = os.Remove(diskPath)
+				}
+			}
+			if rootfsBase == "" {
+				if err := buildBlockRootfs(ctx, diskPath, srcDir, injects, imageSizeMB); err != nil {
+					return err
+				}
 			}
 			rootfsDiskImage = diskPath
 			if containerBoot {
@@ -982,7 +1045,7 @@ exec %s "$@"
 	shareMounts := ""
 	var containerMounts strings.Builder
 	for _, sh := range shares {
-		if vmmType == hypervisors.VzVmm || vmmType == hypervisors.HviVmm {
+		if vmmType == vzVmm || vmmType == hypervisors.HviVmm {
 			mountOpts := ""
 			if sh.readOnly {
 				mountOpts = "-o ro "
@@ -1057,7 +1120,7 @@ exec %s "$@"
 	// Console device depends on VMM backend
 	consoleDev := "ttyS0"
 	if runtime.GOARCH == "arm64" {
-		if vmmType == hypervisors.VzVmm {
+		if vmmType == vzVmm {
 			consoleDev = "hvc0"
 		} else {
 			consoleDev = "ttyAMA0"
@@ -1090,7 +1153,7 @@ exec %s "$@"
 			initrdEntry = "/init"
 		}
 		kernelCmdline = fmt.Sprintf("rdinit=%s console=%s", initrdEntry, consoleDev) + ipArg
-	} else if rootfsDir != "" && vmmType == hypervisors.VzVmm {
+	} else if rootfsDir != "" && vmmType == vzVmm {
 		// Vz: virtiofs rootfs boot (no initramfs)
 		kernelCmdline = fmt.Sprintf("root=rootfs rootfstype=virtiofs rw console=%s", consoleDev) + ipArg
 
@@ -1443,7 +1506,7 @@ exec %s "$@"
 	// Join the user-mode gateway: the datagram end backs the guest's single
 	// NIC (fd 3 in the child); the control connection (fd 4) stays open for
 	// the VMM's lifetime and its closure removes the gateway member.
-	if gatewaySock != "" && vmmType == hypervisors.VzVmm {
+	if gatewaySock != "" && vmmType == vzVmm {
 		dataF, ctlConn, err := joinGateway(gatewaySock)
 		if err != nil {
 			return err
@@ -1458,7 +1521,7 @@ exec %s "$@"
 		gatewayFiles = []*os.File{dataF, ctlF}
 		cmdArgs = append(cmdArgs, "--net-fd", "3")
 	}
-	if vmmType == hypervisors.VzVmm {
+	if vmmType == vzVmm {
 		cmdArgs = append(cmdArgs, vzNetArgs(netMode)...)
 		cmdArgs = append(cmdArgs, "--stop-grace", strconv.Itoa(int(cmd.Int("stop-grace"))))
 		// Every Vz instance is checkpoint-ready: the state dir persists the
@@ -1474,6 +1537,88 @@ exec %s "$@"
 		}
 	}
 
+	// Every hvi instance gets a control socket and a machine profile, the
+	// way every Vz instance gets a state dir: pause, checkpoint and a
+	// graceful stop all go through the socket, and a run started without one
+	// can only be signalled. Both live in the 0700 instance directory, since
+	// the socket answers anyone who can connect to it. An hvi that predates
+	// the flags would refuse to boot with them, so it runs without: it can
+	// still be stopped, and pause and checkpoint say why they cannot.
+	var controlSock, profilePath string
+	var instanceBase *store.BaseState
+	if vmmType == hypervisors.HviVmm && len(cmdArgs) > 0 {
+		takesFlags, err := hviBootTakesControlFlags(cmdArgs[0])
+		if err != nil {
+			return err
+		}
+		if takesFlags {
+			controlSock = s.InstanceControlSocket(instanceName)
+			profilePath = s.InstanceProfilePath(instanceName)
+			if err := checkUnixSocketPath("control", controlSock); err != nil {
+				return err
+			}
+			root, err := hviCheckpointRoot(instanceDir)
+			if err != nil {
+				return err
+			}
+			cmdArgs = append(cmdArgs, "--control-sock", controlSock, "--profile-out", profilePath,
+				"--checkpoint-root", root)
+			// A checkpointable guest on a block rootfs can be moved, and a
+			// move sends only what differs from its image's base when the
+			// destination holds that base. hvi is given the base's digest
+			// and the blocks this run wrote over it (the instance's own
+			// files), so its blocks written since boot are every block that
+			// differs from the base, and its migrate stream carries them. An
+			// hvi without --disk-written runs without both, and a move of
+			// this instance sends the whole bundle.
+			if rootfsDiskImage != "" && rootfsBase != "" && slices.Contains(cmdArgs, "--disk") {
+				instanceBase = &store.BaseState{SHA256: rootfsBase}
+				knows, err := hviBootKnowsFlag(cmdArgs[0], hviDiskWrittenFlag)
+				switch {
+				case err != nil:
+					instanceBase.HviWhy = fmt.Sprintf("hull could not ask %s about %s (%v)", cmdArgs[0],
+						hviDiskWrittenFlag, err)
+				case !knows:
+					instanceBase.HviWhy = fmt.Sprintf("%s takes no %s", cmdArgs[0], hviDiskWrittenFlag)
+				default:
+					args, err := hviBaseArgs(s, instanceDir, rootfsBase, rootfsDiskImage)
+					if err != nil {
+						instanceBase.HviWhy = err.Error()
+					} else {
+						cmdArgs = append(cmdArgs, args...)
+					}
+				}
+				if instanceBase.HviWhy != "" {
+					log.Warnf("%s; a move of %s will send its whole disk", instanceBase.HviWhy, instanceName)
+				}
+			}
+		} else if profile != "" {
+			// A profile exists to be checkpointed and moved, and without
+			// the control socket the instance never can be.
+			return fmt.Errorf("--profile %s needs an hvi with a control socket (--control-sock), "+
+				"and %s takes none: the instance could never be checkpointed or moved", profile, cmdArgs[0])
+		} else {
+			// Debug, not a warning: this is every run on the hvi hull
+			// ships with until that one has the socket, and nobody asked
+			// for a pause yet. requireRunningHvi says it when one does.
+			log.Debugf("%s takes no --control-sock; instance %s will not be pausable",
+				cmdArgs[0], instanceName)
+		}
+	}
+	if profile != "" {
+		// The image may have booted from its own initrd rather than the
+		// block rootfs the flags asked for; the profile needs the disk.
+		if rootfsDiskImage == "" {
+			return fmt.Errorf("--profile %s needs a block rootfs, and this image boots from its own "+
+				"initrd", profile)
+		}
+		profileArgs, err := hviProfileArgs(cmdArgs[0], profile)
+		if err != nil {
+			return err
+		}
+		cmdArgs = append(cmdArgs, profileArgs...)
+	}
+
 	state := &store.InstanceState{
 		ID:          instanceName,
 		ImageDigest: imageDigest,
@@ -1482,8 +1627,13 @@ exec %s "$@"
 		BundleDir:   bundleDir,
 		MAC:         mac,
 		Backend:     string(vmmType),
+		ControlSock: controlSock,
+		ProfilePath: profilePath,
+		Profile:     profile,
+		Base:        instanceBase,
 	}
-	started, err := launchVMM(ctx, cmd, s, state, cmdArgs, append(gatewayFiles, shareFiles...), vmmType, detach, netMode, gatewayIP)
+	started, err := launchVMM(ctx, cmd, s, state, cmdArgs, append(gatewayFiles, shareFiles...), vmmType, detach, netMode,
+		gatewayIP, nil)
 	instanceStarted = started
 	return err
 }
@@ -1779,31 +1929,6 @@ func cloneRootfsAPFS(ctx context.Context, source, rootfsLink string) error {
 	return nil
 }
 
-func requireSameAPFSVolume(source, destinationParent string) error {
-	var sourceFS, destinationFS unix.Statfs_t
-	if err := unix.Statfs(source, &sourceFS); err != nil {
-		return fmt.Errorf("inspect source filesystem for APFS clone: %w", err)
-	}
-	if err := unix.Statfs(destinationParent, &destinationFS); err != nil {
-		return fmt.Errorf("inspect destination filesystem for APFS clone: %w", err)
-	}
-	fsName := func(raw [16]byte) string {
-		for i, value := range raw {
-			if value == 0 {
-				return string(raw[:i])
-			}
-		}
-		return string(raw[:])
-	}
-	if fsName(sourceFS.Fstypename) != "apfs" || fsName(destinationFS.Fstypename) != "apfs" {
-		return fmt.Errorf("HVI writable rootfs requires an APFS image store and instance directory")
-	}
-	if sourceFS.Fsid.Val != destinationFS.Fsid.Val {
-		return fmt.Errorf("HVI writable rootfs requires the image store and instance directory on the same APFS volume")
-	}
-	return nil
-}
-
 func restoreClonedHardlinks(source, destination string) error {
 	type inodeKey struct {
 		device uint64
@@ -1968,14 +2093,15 @@ func verifyStagedBootAsset(storeDir, original, staged string) error {
 		if bootassets.VerifyModeFromEnv() == bootassets.VerifyRequire {
 			return fmt.Errorf("refusing to boot %s: %s=require and it has no provenance "+
 				"record beside it, so nothing vouches for its contents. Run "+
-				"`hull assets pull --force` to fetch and record them again",
-				original, bootassets.VerifyModeEnv)
+				"%s to fetch and record them again",
+				original, bootassets.VerifyModeEnv, bootassets.ReinstallCommand(filepath.Dir(original)))
 		}
 		if dirErr == nil && inOurs {
 			log.Warnf("%s is in hull's own boot-asset directory but has no provenance "+
 				"record beside it, so nothing vouches for its contents. Fetch writes one; "+
-				"`hull assets pull --force` will record them. Booting as given "+
-				"(%s=require refuses instead)", original, bootassets.VerifyModeEnv)
+				"%s will record them. Booting as given "+
+				"(%s=require refuses instead)", original,
+				bootassets.ReinstallCommand(filepath.Dir(original)), bootassets.VerifyModeEnv)
 			return nil
 		}
 		log.Warnf("%s has no provenance record beside it, so nothing vouches for its "+
@@ -2430,7 +2556,13 @@ func containerHosts(rootfsDir string, entries []string) (string, error) {
 // until the VMM exits. Shared by run and restore. The returned bool reports
 // whether the VMM process was started — once it was, the caller must keep
 // the instance directory even on error.
-func launchVMM(ctx context.Context, cmd *cli.Command, s *store.Store, state *store.InstanceState, cmdArgs []string, gatewayFiles []*os.File, vmmType hypervisors.VmmType, detach bool, netMode, gatewayIP string) (bool, error) {
+//
+// stdin is what a detached VMM reads on its standard input: nil, /dev/null,
+// for every VMM but hvi restoring from a stream (`restore --from-stream -`),
+// which reads the checkpoint there.
+func launchVMM(ctx context.Context, cmd *cli.Command, s *store.Store, state *store.InstanceState, cmdArgs []string,
+	gatewayFiles []*os.File, vmmType hypervisors.VmmType, detach bool, netMode, gatewayIP string,
+	stdin *os.File) (bool, error) {
 	// Register before spawning, including when called by restore. A canceled
 	// preparation cannot start a VMM; a signal racing the spawn must stop the
 	// child through the same graceful shutdown path as a foreground signal.
@@ -2461,7 +2593,7 @@ func launchVMM(ctx context.Context, cmd *cli.Command, s *store.Store, state *sto
 		origTermios, _ = getTermios(int(os.Stdin.Fd()))
 		defer restoreTerminal(origTermios)
 		defer claimForeground()
-		if vmmType == hypervisors.VzVmm && origTermios != nil {
+		if vmmType == vzVmm && origTermios != nil {
 			raw := *origTermios
 			raw.Lflag &^= syscall.ECHO | syscall.ICANON | syscall.IEXTEN
 			raw.Iflag &^= syscall.ICRNL
@@ -2509,6 +2641,9 @@ func launchVMM(ctx context.Context, cmd *cli.Command, s *store.Store, state *sto
 		}
 		vmmCmd.Stdout = logFd
 		vmmCmd.Stderr = logFd
+		if stdin != nil {
+			vmmCmd.Stdin = stdin
+		}
 	}
 
 	// Publish the record BEFORE the spawn, not after it.
@@ -2567,6 +2702,7 @@ func launchVMM(ctx context.Context, cmd *cli.Command, s *store.Store, state *sto
 	state.PID = vmmCmd.Process.Pid
 	state.Status = "running"
 
+	keepRecordedMigration(s, state)
 	if err := s.SaveInstance(state); err != nil {
 		log.WithError(err).Warn("failed to save instance state")
 	}
@@ -2644,6 +2780,7 @@ func launchVMM(ctx context.Context, cmd *cli.Command, s *store.Store, state *sto
 		if state.ExitedAt.IsZero() {
 			state.ExitedAt = time.Now()
 		}
+		keepRecordedMigration(s, state)
 		_ = s.SaveInstance(state)
 		sendEndOnce(s, state)
 		if detach {

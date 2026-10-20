@@ -147,13 +147,43 @@ jobs:
       - name: Check the cask renderer
         run: python3 scripts/render-cask-test.py
 
+  linux:
+    name: linux (build, vet, lint, unit)
+    # hull builds for arm64 Linux as the hvi runtime on KVM (docs/backends.md,
+    # "hvi on Linux"). Nothing else in this file compiles it for Linux: lint
+    # above type-checks GOOS=darwin and every test lane is a Mac. A darwin-only
+    # symbol reaching a shared file would break the Linux binary with every
+    # gate green -- which is how cmd/hull stopped compiling for Linux in the
+    # first place. The unit tests need no /dev/kvm; no guest boots here.
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build -o /dev/null ./cmd/hull
+
+      - name: Vet
+        run: go vet ./...
+
+      - uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9 # v8
+        with:
+          version: v2.12.2
+
+      # -p 2 for the same reason as everywhere else in this file. -count=1 so
+      # a cached result cannot stand in for a run.
+      - name: Unit tests
+        run: go test -count=1 -p 2 -timeout=10m ./...
+
   telemetry:
     name: telemetry module (linux)
     # pkg/telemetry is a module of its own, so `go test ./...` and the lint
-    # above, both run from the root module, never reach it. It is also the
-    # one part of this repository that builds for Linux, because brig links
-    # it there: this job is where that is checked, natively rather than with
-    # GOOS set.
+    # above, both run from the root module, never reach it. brig links it on
+    # Linux, so this job checks it there as its own module, natively rather
+    # than with GOOS set.
     runs-on: ubuntu-latest
     defaults:
       run:

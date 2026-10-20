@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build darwin
+
 package main
 
 import (
@@ -67,7 +69,10 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
-	os.Exit(m.Run())
+	testBinaryAsHull()
+	code := m.Run()
+	removeFakeHvi()
+	os.Exit(code)
 }
 
 // ReadSelfExecTrace reads back the argv of every intercepted selfExec call,

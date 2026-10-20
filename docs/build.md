@@ -14,7 +14,8 @@ two runners must be signed before they can start a VM.
 
 ## Prerequisites
 
-- An Apple Silicon Mac. There is no other build target.
+- An Apple Silicon Mac for the macOS build. The Linux build (`make linux`,
+  arm64 only) is described under [Linux](#linux).
 - **Go** 1.26 or later. `go.mod` declares 1.26.4.
 - **Xcode command line tools**, which supply Swift. `vz-runner` declares
   `swift-tools-version:5.9` and a macOS 14 deployment target.
@@ -112,6 +113,61 @@ entitlement.
 
 Putting only `hull` on your PATH is the most common local-build mistake. The
 `vz` and `hvi` backends then fail with a message about not finding the runner.
+
+## Linux
+
+hull also builds for arm64 Linux, as the runtime for `hvi` sandboxes on KVM.
+What it runs there, and what it refuses, is in
+[backends.md](backends.md#hvi-on-linux).
+
+There is no release archive for Linux yet. Build both halves yourself:
+
+```bash
+make linux                          # dist/hull_linux_arm64, cross-built from any host
+```
+
+Build `hvi` on the Linux host itself, from the `hvi-vmm` submodule commit
+hull pins. That is the tested path: the Raspberry Pi 5 runs that reviewed
+and then checked hull on Linux, gateway mode included, used `hvi` built on the
+Pi from the pin, `890f9e0`. hvi-vmm's own CI does not build or test
+aarch64 Linux at that commit. It builds and tests x86_64 Linux, boots it on an
+x86 KVM runner, and only lints the `aarch64-unknown-linux-gnu` target, from an
+x86 runner.
+
+```bash
+cd hvi-vmm && cargo build --release  # target/release/hvi
+```
+
+Install the two side by side. hull finds `hvi` next to its own executable
+before it looks on `PATH`, exactly as on macOS:
+
+```bash
+mkdir -p ~/hull-bin
+cp dist/hull_linux_arm64 ~/hull-bin/hull
+cp hvi-vmm/target/release/hvi ~/hull-bin/hvi
+```
+
+The host needs:
+
+- **KVM**, with `/dev/kvm` readable and writable by the user running hull.
+  On Debian-family systems: `sudo usermod -aG kvm "$USER"`, then log in again.
+- **e2fsprogs** (`mke2fs`, `debugfs`, `e2fsck`) for the block rootfs. hull
+  looks in `/usr/sbin` and `/sbin` before `PATH`.
+- A filesystem with user xattrs for the store (ext4, xfs, btrfs; tmpfs from
+  Linux 6.6), when hull runs as an ordinary user. See "Image ownership" in
+  [backends.md](backends.md#hvi-on-linux).
+
+Then fetch the boot assets and run:
+
+```bash
+~/hull-bin/hull assets pull                   # ghcr.io/nofireai/hull-assets:linux-arm64
+~/hull-bin/hull run --detach --name t1 alpine:latest
+~/hull-bin/hull exec t1 -- uname -a
+```
+
+`go test ./...` runs on Linux too. Tests that need macOS (hdiutil, APFS,
+xattrs in the macOS namespace, the vz and compose paths) are tagged
+`//go:build darwin` and skipped there.
 
 ## Signing
 

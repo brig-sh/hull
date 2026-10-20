@@ -15,8 +15,11 @@
 package store
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -239,5 +242,65 @@ func TestInstanceStateExitStatusRoundTrip(t *testing.T) {
 	}
 	if plain.ExitCode != nil {
 		t.Errorf("ExitCode = %v, want nil for a record without a status", plain.ExitCode)
+	}
+}
+
+// The migration fields are read by brig and by a remote hull over ssh, so their
+// JSON names are part of the record's contract: lowerCamel like the rest, and
+// absent from a record that never had them.
+func TestInstanceStateMigrationFieldsRoundTrip(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.CreateInstance("vm1"); err != nil {
+		t.Fatal(err)
+	}
+	want := &InstanceState{
+		ID:          "vm1",
+		Status:      "running",
+		ControlSock: s.InstanceControlSocket("vm1"),
+		ProfilePath: s.InstanceProfilePath("vm1"),
+		Migration:   &MigrationState{State: MigrationFenced, BundleDir: "/b", TxID: "t1"},
+	}
+	if err := s.SaveInstance(want); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(s.InstanceDir("vm1"), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc["controlSock"] != want.ControlSock || doc["profilePath"] != want.ProfilePath {
+		t.Errorf("state.json lacks controlSock or profilePath: %s", raw)
+	}
+	wantMigration := map[string]any{"state": "fenced", "bundleDir": "/b", "txid": "t1"}
+	if !reflect.DeepEqual(doc["migration"], wantMigration) {
+		t.Errorf("migration = %v, want %v", doc["migration"], wantMigration)
+	}
+	got, err := s.GetInstance("vm1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ControlSock != want.ControlSock || got.ProfilePath != want.ProfilePath ||
+		got.Migration == nil || *got.Migration != *want.Migration {
+		t.Errorf("round trip = %+v, want %+v", got, want)
+	}
+	if filepath.Dir(got.ControlSock) != s.InstanceDir("vm1") || filepath.Dir(got.ProfilePath) != s.InstanceDir("vm1") {
+		t.Errorf("control socket %s and profile %s must sit in the instance dir %s",
+			got.ControlSock, got.ProfilePath, s.InstanceDir("vm1"))
+	}
+
+	if err := s.SaveInstance(&InstanceState{ID: "vm1", Status: "stopped"}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = os.ReadFile(filepath.Join(s.InstanceDir("vm1"), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"controlSock", "profilePath", "migration"} {
+		if strings.Contains(string(raw), key) {
+			t.Errorf("a record without %s still writes it: %s", key, raw)
+		}
 	}
 }

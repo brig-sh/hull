@@ -41,6 +41,10 @@ Kubernetes integration, and it implements a subset of Compose. See
   `vz-runner` declares a macOS 14 floor in `vz-runner/Package.swift`, so
   earlier versions can work. Nothing blocks them, and nothing tests them.
 - About 2 GB of free disk space for the store, plus each image you pull.
+- On Linux, hull builds from source for arm64 with KVM and runs only the
+  `hvi` backend with a block rootfs. A sandbox cannot be moved there from a
+  Mac. See [docs/backends.md](docs/backends.md#hvi-on-linux) and
+  [docs/build.md](docs/build.md#linux).
 
 ## Install
 
@@ -121,7 +125,8 @@ Three backends exist. They are not equivalent, and the gaps are real:
 | `--net shared` | NAT, works with no extra privilege | **refused**, see below | vmnet, needs root or a QEMU signed for `com.apple.vm.networking` |
 | `--gateway-sock` | yes | yes | yes |
 | `exec` | yes | yes | yes |
-| Checkpoint and restore | yes, with a block rootfs | no | no |
+| Checkpoint and restore | yes, with a block rootfs | checkpoint with a block rootfs and no shares, into a partial bundle; no restore yet ([why](docs/checkpoint-restore.md#what-a-bundle-holds)) | no |
+| Pause and resume | no | yes | no |
 | GUI window, Rosetta | yes | no | no |
 
 **The `hvi` networking gap is the one to know.** hvi's built-in stack answers
@@ -160,8 +165,9 @@ instance. [docs/architecture.md](docs/architecture.md) explains the seams.
   with a warning on stderr. A clean `compose config` does not mean every key in
   the file is honored at runtime. [docs/compose.md](docs/compose.md) lists what
   works.
-- Checkpoint and restore are `vz` only, need a block rootfs, and make no
-  promise about application-level consistency. They do not move a VM to another
+- Checkpoint and restore work on `vz`. `hvi` checkpoints into a bundle that
+  cannot be resumed yet, and its restore waits for `hvi`'s. Both need a block
+  rootfs, and they make no promise about application-level consistency. They do not move a VM to another
   host, and they cannot undo an effect the guest already sent to the outside
   world. See [docs/checkpoint-restore.md](docs/checkpoint-restore.md).
 - The `vz` and `hvi` backends need a code-signing entitlement. The Homebrew

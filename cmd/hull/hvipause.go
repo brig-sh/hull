@@ -1,0 +1,184 @@
+// Copyright (c) 2026, NOFire AI
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"path/filepath"
+	"time"
+
+	"github.com/urfave/cli/v3"
+
+	"github.com/brig-sh/hull/pkg/store"
+)
+
+// isHviInstance reports whether the record's VMM is hvi, by the base name of
+// the program it ran, as processIsAVMM matches it.
+func isHviInstance(state *store.InstanceState) bool {
+	return len(state.CmdLine) > 0 && filepath.Base(state.CmdLine[0]) == "hvi"
+}
+
+// requireRunningHvi refuses a verb that needs a live hvi instance with a
+// control socket, saying which of the three it is not.
+func requireRunningHvi(state *store.InstanceState, verb string) error {
+	if !isHviInstance(state) {
+		return fmt.Errorf("%s needs an hvi instance; %s runs under %s", verb, state.ID, backendName(state))
+	}
+	if state.Status != "running" || state.PID <= 0 || !processIsAVMM(state.PID, state) {
+		return fmt.Errorf("instance %s is not running", state.ID)
+	}
+	if state.ControlSock == "" {
+		return fmt.Errorf("instance %s has no control socket, so it can only be stopped: the hvi "+
+			"it runs (%s) predates the socket, or an older hull started it. Run it again with an "+
+			"hvi that takes --control-sock", state.ID, state.CmdLine[0])
+	}
+	return nil
+}
+
+// hviVMStateTimeout bounds the status ask that ps, inspect, exec and a
+// move's checks make. Short: brig runs `hull ps` often, hvi serves one
+// connection at a time, and an hvi busy with a pause or a checkpoint should
+// cost a listing half a second, not hviControlTimeout per instance. Such an
+// hvi reads as "?": ps shows it, exec goes on as with no socket, and a move
+// refuses a VM it cannot see running.
+const hviVMStateTimeout = 500 * time.Millisecond
+
+// hviVMState asks a running hvi instance what its VM is doing, as hvi names
+// it: running, paused, fenced, restored-paused. "" when the record is not a
+// running hvi with a control socket; "?" when hvi did not answer in time.
+//
+// The record's status says only that the VMM process is alive. A paused or
+// fenced VM is alive and runs nothing, and an agent connection to it waits
+// for a guest that never answers, so anything about to talk to the guest
+// asks here first.
+func hviVMState(state *store.InstanceState) string {
+	if !isHviInstance(state) || state.ControlSock == "" || state.Status != "running" || state.PID <= 0 {
+		return ""
+	}
+	reply, err := hviControl(state.ControlSock, map[string]any{"op": "status"}, hviVMStateTimeout)
+	if err != nil {
+		return "?"
+	}
+	return reply.State
+}
+
+// refuseIfGuestHalted refuses to talk to the guest of an hvi instance whose
+// VM is paused or fenced, saying how to get it running. An hvi that does not
+// answer, or has no socket, is let through: an exec then behaves as it did
+// before the socket existed.
+func refuseIfGuestHalted(state *store.InstanceState) error {
+	id := state.ID
+	switch hviVMState(state) {
+	case "paused":
+		return fmt.Errorf("instance %s is paused, so its guest cannot answer; `hull resume %s` first", id, id)
+	case store.MigrationRestoredPaused:
+		return fmt.Errorf("instance %s was restored and is still paused; `hull resume %s` starts it", id, id)
+	case store.MigrationFenced:
+		return fmt.Errorf("instance %s was fenced by `hull checkpoint --then fence` and its guest "+
+			"will not run again in this process; `hull stop %s`, then `hull restore %s`", id, id, id)
+	}
+	return nil
+}
+
+// backendName names the VMM a record ran, for refusals.
+func backendName(state *store.InstanceState) string {
+	if state.Backend != "" {
+		return state.Backend
+	}
+	if len(state.CmdLine) > 0 {
+		return filepath.Base(state.CmdLine[0])
+	}
+	return "an unknown VMM"
+}
+
+func pauseCommand() *cli.Command {
+	return &cli.Command{
+		Name:      "pause",
+		Usage:     "pause a running hvi instance: its I/O threads and every vCPU stop",
+		ArgsUsage: "NAME",
+		Action: func(_ context.Context, cmd *cli.Command) error {
+			return hviPauseResume(cmd, "pause")
+		},
+	}
+}
+
+func resumeCommand() *cli.Command {
+	return &cli.Command{
+		Name:      "resume",
+		Usage:     "resume an hvi instance paused by `hull pause`",
+		ArgsUsage: "NAME",
+		Action: func(_ context.Context, cmd *cli.Command) error {
+			return hviPauseResume(cmd, "resume")
+		},
+	}
+}
+
+func hviPauseResume(cmd *cli.Command, op string) error {
+	if cmd.Args().Len() == 0 {
+		return errors.New("instance ID required")
+	}
+	s, err := globalStore(cmd)
+	if err != nil {
+		return err
+	}
+	return hviPauseResumeIn(s, cmd.Args().First(), op)
+}
+
+// hviPauseResumeIn sends op, pause or resume, to instance id's hvi.
+func hviPauseResumeIn(s *store.Store, id, op string) error {
+	state, err := s.GetInstance(id)
+	if err != nil {
+		return fmt.Errorf("instance not found: %s", id)
+	}
+	if err := requireRunningHvi(state, op); err != nil {
+		return err
+	}
+	if op == "resume" {
+		if err := refuseDuringMove(s, id, "resume"); err != nil {
+			return err
+		}
+		if err := markRestoredGuestRunning(s, id); err != nil {
+			return err
+		}
+	}
+	reply, err := hviOp(state.ControlSock, op)
+	switch {
+	case errors.Is(err, errHviNoReply) && op == "pause":
+		// hvi keeps working on a pause the client gave up on, so the VM may
+		// be paused now. Saying only "timed out" leaves a frozen sandbox
+		// nobody knows to resume.
+		return fmt.Errorf("%w; the VM may have paused after hull gave up, and `hull resume %s` "+
+			"is harmless if it did not", err, id)
+	case hviRefusalCode(err) == "fenced":
+		return fmt.Errorf("instance %s was fenced by `hull checkpoint --then fence` and will not run "+
+			"again in this process; stop it and `hull restore %s` from its checkpoint", id, id)
+	case err != nil:
+		return err
+	}
+	if op != "pause" {
+		fmt.Printf("Instance %s resumed\n", id)
+		return nil
+	}
+	// pause answers with the state alone; status has the vCPU counts. Best
+	// effort: the pause has happened whether or not this second ask works.
+	if st, err := hviOp(state.ControlSock, "status"); err == nil && st.Vcpus > 0 {
+		fmt.Printf("Instance %s %s (%d of %d vCPUs parked)\n", id, st.State, st.VcpusParked, st.Vcpus)
+		return nil
+	}
+	fmt.Printf("Instance %s %s\n", id, reply.State)
+	return nil
+}

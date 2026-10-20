@@ -322,7 +322,6 @@ func repoOf(ref string) string {
 	return parsed.Context().Name()
 }
 
-
 // verifyLookPath and verifyRun are variables so the decision table can be
 // driven in tests on a host that has no cosign, or one that has a working one.
 var verifyLookPath = exec.LookPath

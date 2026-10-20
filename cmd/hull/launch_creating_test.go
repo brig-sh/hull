@@ -132,7 +132,7 @@ func TestLaunchCreatingPublishesRunningAndStops(t *testing.T) {
 	wantMetadata := *state
 	before := time.Now()
 	started, launchErr := launchVMM(context.Background(), &cli.Command{}, s, state, args,
-		[]*os.File{readyWrite, controlRead}, hypervisors.VzVmm, true, "none", "")
+		[]*os.File{readyWrite, controlRead}, hypervisors.VzVmm, true, "none", "", nil)
 	after := time.Now()
 	// Establish safe cleanup before deadline/scanner operations can fail.
 	// The readiness pipe below remains independent evidence of the actual PID.
@@ -238,7 +238,7 @@ func TestFailedLaunchRestoresCreatingRecord(t *testing.T) {
 	}
 	state := &store.InstanceState{ID: id, ImageDigest: "sha256:failed-launch-test", LogFile: s.InstanceLogFile(id), BundleDir: s.InstanceBundleDir(id)}
 	started, err := launchVMM(context.Background(), &cli.Command{}, s, state,
-		[]string{filepath.Join(t.TempDir(), "no-such-vmm")}, nil, hypervisors.VzVmm, true, "none", "")
+		[]string{filepath.Join(t.TempDir(), "no-such-vmm")}, nil, hypervisors.VzVmm, true, "none", "", nil)
 	if started || err == nil || !strings.Contains(err.Error(), "failed to start VMM:") || !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("missing executable: started=%v, err=%v", started, err)
 	}

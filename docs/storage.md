@@ -189,11 +189,22 @@ in the name only keeps two pulls' directories apart.
 │   └── provenance.json
 ├── volumes/<project>_<name>/     compose named volumes
 ├── compose/<project>.json        compose project state, plus its gateway sockets and log
+├── migrations/<txid>.json       the ledger of moves that committed or aborted here as their destination
+├── bases/<digest>.ext4          0400: an image's block rootfs, before any instance's files, by disk digest
+├── bases/images/<key>.json      which base an image's instances start from on this host
+├── bases/received/<digest>      a base a prepare received ahead of a move
+├── bases/kernels/<sha256>.Image a profile kernel a prepare sent here, which its install record names
 └── instances/<id>/
     ├── state.json               0600
     ├── bundle/                  config.json plus the rootfs symlink or image
     ├── log                      0600, detached runs only
-    ├── checkpoint/              machine-id, vm.vzstate, rootfs.img, latest.json
+    ├── checkpoint/              vz: machine-id, vm.vzstate, rootfs.img, latest.json
+    │                            hvi: latest.json, <txid>/ (the bundle, or a streamed move's spool); hvi's --checkpoint-root
+    ├── control.sock             hvi only: the control socket (pause, checkpoint, stop)
+    ├── profile.json             hvi only: the machine profile hvi writes at boot
+    ├── migration.lock           hvi only: held by one checkpoint or restore at a time
+    ├── migration.json           hvi only: the record of a move to or from another host
+    ├── migrate.lock             hvi only: held by one step of a move at a time
     └── (QMP socket, agent socket, staged boot files)
 ```
 
@@ -500,8 +511,21 @@ renamed over `state.json`, so a reader never sees a half-written record.
 
 ## Checkpoints
 
-Checkpoint artifacts live in `<store>/instances/<id>/checkpoint/` as
-`machine-id`, `vm.vzstate`, `rootfs.img`, `latest.json` and a failure marker.
+Checkpoint artifacts live in `<store>/instances/<id>/checkpoint/`. For a `vz`
+instance they are `machine-id`, `vm.vzstate`, `rootfs.img`, `latest.json` and
+a failure marker.
+
+For an `hvi` instance they are `latest.json`, 0600, which names the latest
+bundle (`dir`, `manifestSha256`, `then`, `stats`, `savedAt`, `txid`), and the
+bundle itself in a 0700 directory named by its txid, or by `--dir`. hvi is
+started with this directory as its `--checkpoint-root`, created 0700 at run
+time: its confinement lets it write below it and nowhere else. hull writes `latest.json` through a temp file and a rename, and
+keeps one bundle of its own per instance. The record's `migration` field
+(`state`, `bundleDir`, `txid`, `manifestSha256`) says which checkpoint is
+current, whether it was fenced, and which manifest a restore must find. Every `hvi` instance also has `control.sock` and `profile.json`
+beside `state.json`, recorded as `controlSock` and `profilePath`. The socket
+has no authentication, so the 0700 instance directory is what keeps other
+accounts away from it.
 
 Every `vz` instance is started with a checkpoint state directory, because that
 directory holds the machine identifier a later restore needs. So
@@ -512,3 +536,33 @@ refused: Virtualization.framework does not rehydrate the guest's FUSE state in
 a new VMM process, so every inode would go stale at restore.
 
 See [checkpoint-restore.md](checkpoint-restore.md).
+
+## Moves
+
+`hull migrate` keeps `<instance>/migration.json` (0600) on both hosts of a
+move: its txid, role, owner epoch, state, the other host, the fenced bundle,
+the disk's size, sha256 and modification time at the fence, the stream's
+bytes and rate, the time each step took, the last error and the history of
+states. It is written through a temp file, an fsync, a rename and an fsync of
+the directory, because each state is a promise to the other host. The
+instance record's `migration` field gains `moveTxid` and `peer`, and three
+states (`migrating`, `migrated`, `incoming`); `state.json` gains
+`ownerEpoch`. A destination keeps the record of every move that committed
+or aborted on it as `<store>/migrations/<txid>.json`, which neither `hull rm`
+nor a later move removes; an abort removes the instance directory. See
+[migration.md](migration.md#records).
+
+An `hvi` run on a block rootfs builds its image's ext4 rootfs once per
+image and size, without any instance's own files, and keeps it under
+`<store>/bases/` as a read-only file named by its disk digest. Each
+instance's disk is a copy of it with that instance's files written in, and
+`state.json` records the base as `base` (`sha256`, and `hviWhy` when
+`hull run` could not boot `hvi` against it). A streamed move sends only the
+blocks that differ from it (see [migration.md](migration.md#bases)). On
+APFS each instance's copy is a clone and costs no space until written; on
+ext4 without reflinks it is a copy of the base's data. `hull rm` removes
+an instance's base once nothing else needs it, `hull prune` removes the
+bases nothing needs, and `hull prune --bases` also those kept for images
+and received ahead of a move. A streamed move keeps hvi's stream on the
+source in `<instance>/checkpoint/<txid>/`, as large as the guest's touched
+RAM, for an abort to restore from.

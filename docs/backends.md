@@ -10,7 +10,7 @@ hull resolves the backend in this order:
 
 1. the `--hypervisor` flag
 2. the image's `com.urunc.unikernel.hypervisor` annotation
-3. `qemu`
+3. `qemu` on macOS, `hvi` on Linux
 
 That last step is worth knowing. If you pass no flag and the image carries no
 annotation, hull runs `qemu`, which hull does not install and which cannot boot
@@ -30,29 +30,34 @@ Start with `vz`. Move to another backend only for a reason on this list.
 
 | Choose | When |
 |---|---|
-| `vz` | the default. You want NAT with no setup, a GUI window, Rosetta, or checkpoint and restore |
-| `hvi` | you want a persistent writable root without a disk image, correct Linux file modes over a share, or the same device model hull's guests get on Linux |
+| `vz` | the default. You want NAT with no setup, a GUI window, Rosetta, or a checkpoint you can restore any number of times |
+| `hvi` | you want a persistent writable root without a disk image, correct Linux file modes over a share, the same device model hull's guests get on Linux, or pause and a checkpoint bundle |
 | `qemu` | you need a device or a machine option only QEMU has |
 
 ## Capability comparison
 
-| | `vz` | `hvi` | `qemu` |
-|---|---|---|---|
-| Interface | Virtualization.framework | Hypervisor.framework, called directly | Hypervisor.framework, via QEMU's `-accel hvf` |
-| Entitlement the runner needs | `com.apple.security.virtualization` | `com.apple.security.hypervisor` | `com.apple.vm.networking`, and only for `--net shared` |
-| Ships with hull | yes, as `vz-runner` | yes, as `hvi` | no, `brew install qemu` |
-| Guest architecture | arm64 | arm64 | arm64 |
-| Device transport | Virtualization.framework's | virtio-mmio, no PCI | QEMU's |
-| Rootfs: shared directory | virtiofs | virtiofs | 9pfs |
-| Rootfs: block | ext4 image | ext4 image | ext4 image |
-| Boots a plain image carrying no kernel | yes | yes | **no** |
-| Read-only `--shared-dir` | yes | yes | **refused** |
-| `--net shared` | Apple NAT, no extra privilege | **refused**, see below | vmnet, needs root or a signed QEMU |
-| `--gateway-sock` | yes | yes | yes |
-| `exec` | yes | yes | yes |
-| Checkpoint and restore | yes, with a block rootfs | **no** | **no** |
-| `--gui`, `--gui-title` | yes | no | no |
-| `--rosetta` | yes | no | no |
+| | `vz` | `hvi` | `qemu` | Linux `hvi` |
+|---|---|---|---|---|
+| Interface | Virtualization.framework | Hypervisor.framework, called directly | Hypervisor.framework, via QEMU's `-accel hvf` | KVM |
+| Entitlement the runner needs | `com.apple.security.virtualization` | `com.apple.security.hypervisor` | `com.apple.vm.networking`, and only for `--net shared` | none; read-write `/dev/kvm` |
+| Ships with hull | yes, as `vz-runner` | yes, as `hvi` | no, `brew install qemu` | no release yet, see [build.md](build.md#linux) |
+| Guest architecture | arm64 | arm64 | arm64 | arm64 |
+| Device transport | Virtualization.framework's | virtio-mmio, no PCI | QEMU's | virtio-mmio, no PCI |
+| Rootfs: shared directory | virtiofs | virtiofs | 9pfs | **refused** |
+| Rootfs: block | ext4 image | ext4 image | ext4 image | ext4 image, the only mode |
+| Boots a plain image carrying no kernel | yes | yes | **no** | yes |
+| Read-only `--shared-dir` | yes | yes | **refused** | **refused** |
+| `--net shared` | Apple NAT, no extra privilege | **refused**, see below | vmnet, needs root or a signed QEMU | **refused** without `--gateway-sock` |
+| `--gateway-sock` | yes | yes | yes | yes |
+| `exec` | yes | yes | yes | yes |
+| Checkpoint and restore | yes, with a block rootfs | checkpoint with a block rootfs and no shares, into a [partial bundle](checkpoint-restore.md#what-a-bundle-holds); **no restore yet** | **no** | as on macOS |
+| Pause and resume | **no** | yes | **no** | yes |
+| Machine profile (`--profile`) | **refused** | `native`, or `portable-arm64-v1` with a block rootfs, no shares and the [profile's kernel](images.md#a-profiles-kernel); needs an `hvi` that takes `--profile` | **refused** | as on macOS |
+| `--gui`, `--gui-title` | yes | no | no | no |
+| `--rosetta` | yes | no | no | no |
+
+The last column is hull built for Linux, which runs only `hvi`; see
+[`hvi` on Linux](#hvi-on-linux).
 
 Read the gaps as gaps. Three backends existing does not make them
 interchangeable, and hull does not emulate a missing feature on a backend that
@@ -111,8 +116,9 @@ pull platform, because the platform is decided before the image is pulled.
 to shut down and forces a stop after `--stop-grace` seconds, 10 by default. A
 second signal forces the stop at once.
 
-**Checkpoint and restore.** Only here, and only with a block rootfs. A virtiofs
-root goes stale across a restore, so hull refuses the combination. See
+**Checkpoint and restore.** Only with a block rootfs. A virtiofs root goes
+stale across a restore, so hull refuses the combination. `hvi` checkpoints
+too, by a different mechanism and with different rules. See
 [checkpoint-restore.md](checkpoint-restore.md).
 
 One operational note, recorded from CI rather than derived from code: machine
@@ -202,12 +208,73 @@ refused with an error naming the gateway flag, and the MAC flag has no effect.
 **Exec** works. `hvi` stands up a host Unix listener and bridges it over
 virtio-vsock to an in-guest agent, and hull wires that up on every run.
 
-**No checkpoint or restore.** `hvi` has no code that saves or reloads VM state
-at this pin. Its subcommands are `boot`, `dump-fdt`, `smoke`,
-`smoke-shm-verify`, `sandbox-selftest`, `seccomp-selftest` and `version`. The
-`Quiesce::checkpoint` name inside `hvi` is a vCPU park primitive used so a
-plugin can read registers consistently, not a VM snapshot. hull's `checkpoint`
-and `restore` commands refuse any backend but `vz`.
+**Pause, checkpoint and restore** go through the control socket hull gives
+every `hvi` run (`--control-sock`, with the machine profile at
+`--profile-out`). `hull pause` and `hull resume` stop and restart the I/O
+threads and every vCPU. `hull checkpoint` writes a bundle, then continues or
+fences the guest. Today that bundle is partial: RAM and device state, without
+the vCPU, interrupt controller and timer state a resume needs. `hull restore`
+would restore a fenced bundle onto the disk the guest stopped with, and
+refuses until `hvi` has a `restore` subcommand, which none has yet. `hull
+stop` asks over the socket before it signals. The `hvi` at hull's submodule
+pin predates the socket; hull asks each `hvi` before a run and leaves the
+flags off one that does not take them, so it boots without pause or
+checkpoint. See [checkpoint-restore.md](checkpoint-restore.md#hvi).
+
+### Machine profiles
+
+`hvi` boots one of two machines. `native`, the default, shows the guest the
+host's own interrupt controller, timer and CPU, so a checkpoint of it
+restores only on the same kind of host. `portable-arm64-v1` shows the guest
+the same machine on an Apple host (Hypervisor.framework) and on a Linux
+arm64 host (KVM): a GICv2, a Cortex-A76 identity with a reduced feature
+set, and the `hvi-time` device for its clocks and timers in place of the
+architected timer, whose rate differs between the two (24 MHz on Apple,
+54 MHz on a Raspberry Pi 5). `hvi`'s `docs/portable-profile.md` is the
+contract.
+
+```bash
+HULL_PORTABLE_KERNEL=/path/to/Image hull assets pull --profile portable-arm64-v1
+hull run --hypervisor hvi --profile portable-arm64-v1 --rootfs-type block IMAGE
+```
+
+hull records the profile in `state.json` (`profile`), passes `--profile` to
+`hvi`, and boots the profile's kernel with the default initrd; `hvi` adds
+the kernel arguments the profile needs. A native run passes nothing new, so
+an `hvi` from before profiles still boots it.
+
+The kernel is checked by its contents, whatever names it. When hull finds
+the kernel itself, it takes the profile's. When a
+`com.urunc.unikernel.bootKernel` annotation names it (as brig does), that
+file must hash to the kernel recorded in `hull assets dir --profile
+portable-arm64-v1`, so a copy of that kernel at another path boots and any
+other kernel is refused. The check runs before the disk is built.
+
+hull refuses the profile:
+
+- on `vz` and `qemu`;
+- without `--rootfs-type block` (on macOS an unset `--rootfs-type` is
+  virtiofs for `hvi`, and is refused rather than switched);
+- with `--shared-dir` or `--shared-dir-fd`, and for an image that boots from
+  its own initrd: none of these lives on the disk a checkpoint carries;
+- with an `hvi` that does not take `--profile` (hull asks it, as it asks
+  about the control flags). That `hvi` would boot the native machine;
+- with an `hvi` that takes `--profile` but has no control socket
+  (`--control-sock`): that instance could never be checkpointed or moved;
+- with a kernel that is not the profile's: a bootKernel annotation that
+  hashes to another kernel, a kernel from the image, or `--no-boot-assets`,
+  which leaves the image to supply one.
+
+The annotation `com.nofire.hvi.profile` selects the profile too, but only
+from `--annotation`, never from the image: like the boot kernel, the
+profile decides what host kernel boots. `hull restore` and a move take the
+machine from the checkpoint's own profile, so `hvi restore` gets no
+`--profile`. A move carries the profile to the destination's record, and a
+portable instance may move between macOS and Linux (see
+[migration.md](migration.md), and its runs in [The portable profile on this
+Mac](migration.md#the-portable-profile-on-this-mac) and [on the Linux
+pair](migration.md#the-portable-profile-on-the-linux-pair)); a native one
+only to the same OS.
 
 **Other limits `hvi` states about itself.** Eight vCPUs on a GICv2 arm64 Linux
 host, which does not apply on macOS because Apple's in-kernel GIC is a GICv3.
@@ -219,6 +286,81 @@ or against CPU side channels.
 **No clock device.** `hvi` has no emulated RTC on macOS, so hull seeds the
 guest clock once at boot by writing the host epoch into the boot initrd. A
 long-running `hvi` guest has no host time source to correct drift against.
+
+## `hvi` on Linux
+
+hull also builds for arm64 Linux, where it runs `hvi` on KVM and nothing else:
+`hvi`, a block rootfs, and either no network or a gateway. That is the
+configuration a sandbox needs to be moved between two KVM hosts. `pause`,
+`resume` and `checkpoint` work as on macOS, and `restore` is refused as on
+macOS until `hvi` has one (see
+[checkpoint-restore.md](checkpoint-restore.md#hvi)); moving a sandbox to
+another host is planned and not built yet. brig drives it with the same verbs
+it uses on macOS: `run`, `exec`, `ps`, `inspect`, `logs`, `stop`, `rm`,
+`assets dir` and `network-gateway`. `pull`, `images`, `rmi`, `prune`, `telemetry` and `version`
+work too.
+
+A sandbox started on a Mac cannot be moved to Linux, and none of the planned
+work changes that. A guest reads its counter frequency once, at boot, and
+KVM cannot change the one a host gives it: 24 MHz on Apple silicon, 54 MHz on
+a Raspberry Pi 5. The interrupt controllers differ too (GICv3 under
+Hypervisor.framework, a GICv2 on the Pi), and so do the CPU ID registers.
+
+What is different from macOS:
+
+- **The backend is always `hvi`.** With no `--hypervisor` flag and no
+  annotation, hull on Linux picks `hvi`, not `qemu`, because nothing else is
+  offered. Any other `--hypervisor` is refused before the image is pulled. An
+  image whose `com.urunc.unikernel.hypervisor` annotation names another
+  backend is refused once it is pulled; `--hypervisor hvi` runs it on `hvi`
+  regardless.
+- **The rootfs is always a block image.** `--rootfs-type` defaults to `block`;
+  `virtiofs` and `9pfs` are refused, and so are `--shared-dir` and
+  `--shared-dir-fd`. `hvi`'s KVM backend has no virtio-fs server: it accepts
+  the share flags and serves nothing, so a guest would boot without them.
+- **The network is the gateway or nothing.** `--net none`, or `--net shared`
+  with `--gateway-sock` and `--gateway-cidr`. A bare `--net shared` is refused:
+  on macOS it means vmnet, and on Linux it would be `hvi`'s stub NIC, which
+  forwards nothing. `hull network-gateway` is the same gvisor gateway as on
+  macOS, with the same egress rules.
+- **The `hvi` command line is hull's own.** urunc's Linux `hvi` monitor is
+  written for the containerd shim and passes no `--agent-sock`,
+  `--net-gateway` or `--net-mac`, so `exec`, the gateway and per-guest DHCP
+  leases would not work. hull builds the argv itself, the same as urunc's
+  darwin builder minus the shares, and a test fails if the two drift.
+- **`hvi` is found beside hull first**, then on `PATH`, as on macOS.
+- **The store is a plain directory**, created 0700. There is no sparse image
+  and no `hull store`. hull refuses a store directory on a case-insensitive
+  filesystem.
+- **e2fsprogs comes from the distribution.** hull looks for `mke2fs`,
+  `debugfs` and `e2fsck` in `/usr/sbin`, then `/sbin`, then `PATH`. Debian and
+  Raspberry Pi OS keep them in `/sbin`, which an ordinary login's `PATH` does
+  not include.
+- **Image ownership is recorded on unpack.** Run as an ordinary user, hull
+  cannot chown the files it unpacks, so it records each file's uid, gid and
+  mode in a `user.com.nofire.hvi.linux-attr` xattr, as macOS does in its own
+  namespace, and writes them into the block image, then removes the xattr
+  from the image. Symlinks cannot hold a `user.` xattr on Linux, so their
+  owners go in `rootfs.link-owners.json` beside the image's rootfs. On the
+  host, unpacked files keep owner read and directories owner rwx even where
+  the image asks for less (Fedora's `/etc/shadow` is 0000), so mke2fs can
+  read them and `hull rmi` can delete them; the image's own mode is what the
+  guest sees. Run as root, the files carry the real owners and modes and
+  nothing is recorded.
+- **No pull inside a single-id user namespace.** Under `unshare -r`, hull is
+  uid 0, so it chowns as root would and the chown fails with `invalid
+  argument` on the first file owned by an id the namespace does not map
+  (`/etc/shadow`, gid 42, in alpine). The pull stops there. Run hull as an
+  ordinary user or as real root instead.
+- **Not on Linux:** `compose`, `store`, `--gui` and `--rosetta`.
+  `checkpoint` and `restore` take `hvi` instances only, which on Linux is
+  every instance.
+
+The user running hull needs read-write access to `/dev/kvm`, usually through
+the `kvm` group. A group added to a logged-in user reaches only new sessions.
+
+Tested on a Raspberry Pi 5 (Cortex-A76, KVM with a GICv2) running Raspberry Pi
+OS with kernel 6.12, using the `linux-arm64` boot assets.
 
 ## `qemu`
 

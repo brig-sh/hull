@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build darwin
-
 package main
 
 import (
@@ -29,11 +27,6 @@ import (
 	"strings"
 
 	"github.com/brig-sh/hull/pkg/ociclient"
-)
-
-const (
-	mke2fsBin  = "/opt/homebrew/opt/e2fsprogs/sbin/mke2fs"
-	debugfsBin = "/opt/homebrew/opt/e2fsprogs/sbin/debugfs"
 )
 
 // blockInject is a per-instance file placed into the image after it is built.
@@ -64,6 +57,23 @@ type blockInject struct {
 // (see ociclient.GuestAttr) and is restored here, straight into the finished
 // filesystem, where ext4's inodes can hold what APFS could not.
 func buildBlockRootfs(ctx context.Context, diskPath, rootfsDir string, injects []blockInject, sizeMB int) error {
+	if err := makeBlockImage(ctx, diskPath, rootfsDir, sizeMB); err != nil {
+		return err
+	}
+	return fixupBlockImage(ctx, diskPath, rootfsDir, injects)
+}
+
+// makeBlockImage runs mke2fs over rootfsDir into a new image at diskPath,
+// readable by its owner alone.
+func makeBlockImage(ctx context.Context, diskPath, rootfsDir string, sizeMB int) error {
+	// All three are needed, and the last two run only after mke2fs has written
+	// a full-size image; finding out that debugfs is missing at that point
+	// leaves a 15 GiB sparse file and an error that names the wrong step.
+	for _, bin := range []string{mke2fsBin, debugfsBin, e2fsckBin} {
+		if _, err := os.Stat(bin); err != nil {
+			return fmt.Errorf("the block rootfs needs e2fsprogs (mke2fs, debugfs, e2fsck): %w", err)
+		}
+	}
 	mkCmd := exec.CommandContext(ctx, mke2fsBin, "-t", "ext4", "-d", rootfsDir,
 		"-L", "rootfs", "-m", "0", "-q", diskPath, fmt.Sprintf("%dM", sizeMB))
 	if out, err := mkCmd.CombinedOutput(); err != nil {
@@ -87,7 +97,16 @@ func buildBlockRootfs(ctx context.Context, diskPath, rootfsDir string, injects [
 	if err := os.Chmod(diskPath, 0o600); err != nil {
 		return fmt.Errorf("failed to restrict the block image: %w", err)
 	}
+	return nil
+}
 
+// fixupBlockImage writes into the image at diskPath the ownership and modes
+// rootfsDir records, when rootfsDir is given, then the injects, and settles
+// the filesystem. With neither it changes nothing.
+func fixupBlockImage(ctx context.Context, diskPath, rootfsDir string, injects []blockInject) error {
+	if rootfsDir == "" && len(injects) == 0 {
+		return nil
+	}
 	// The injected files need to exist on the host for debugfs to copy them in.
 	// Three small files beside the image, not a second copy of the rootfs.
 	stage, err := os.MkdirTemp(filepath.Dir(diskPath), "block-inject-")
@@ -96,7 +115,26 @@ func buildBlockRootfs(ctx context.Context, diskPath, rootfsDir string, injects [
 	}
 	defer func() { _ = os.RemoveAll(stage) }()
 
+	// The image's own ownership and modes go first, so that the injects below
+	// have the last word on the paths they replace. The other way round, an
+	// image that ships its own /urunit.conf at 0644 would have that mode put
+	// back over the injected 0600 file that carries the guest's credentials.
 	var script bytes.Buffer
+	skipped := 0
+	if rootfsDir != "" {
+		skipped, err = appendOwnershipScript(&script, rootfsDir)
+		if err != nil {
+			return err
+		}
+	}
+	if skipped > 0 {
+		// Not fatal, but not silent either: those files keep the host's
+		// ownership inside the guest, and a caller staring at one of them
+		// deserves to know why.
+		log.Warnf("%d path(s) could not be given their recorded ownership in the "+
+			"block image because the name is not expressible as a debugfs argument", skipped)
+	}
+
 	for i, inj := range injects {
 		hostPath := filepath.Join(stage, fmt.Sprintf("f%d", i))
 		if err := os.WriteFile(hostPath, inj.content, 0600); err != nil {
@@ -115,17 +153,6 @@ func buildBlockRootfs(ctx context.Context, diskPath, rootfsDir string, injects [
 		fmt.Fprintf(&script, "sif %s gid 0\n", debugfsPath(inj.guestPath))
 	}
 
-	skipped, err := appendOwnershipScript(&script, rootfsDir)
-	if err != nil {
-		return err
-	}
-	if skipped > 0 {
-		// Not fatal, but not silent either: those files keep the host's
-		// ownership inside the guest, and a caller staring at one of them
-		// deserves to know why.
-		log.Warnf("%d path(s) could not be given their recorded ownership in the "+
-			"block image because the name is not expressible as a debugfs argument", skipped)
-	}
 	if script.Len() == 0 {
 		return nil
 	}
@@ -167,7 +194,7 @@ func repairBlockImage(ctx context.Context, diskPath string) error {
 	// -f forces a full check even though the filesystem looks clean, which it
 	// does: nothing has mounted it. -y answers the questions, all of which are
 	// "recount this".
-	cmd := exec.CommandContext(ctx, "/opt/homebrew/opt/e2fsprogs/sbin/e2fsck", "-f", "-y", diskPath)
+	cmd := exec.CommandContext(ctx, e2fsckBin, "-f", "-y", diskPath)
 	out, err := cmd.CombinedOutput()
 	if err := ctx.Err(); err != nil {
 		return err
@@ -186,7 +213,8 @@ func repairBlockImage(ctx context.Context, diskPath string) error {
 	return fmt.Errorf("failed to check the block image: %s: %w", string(out), err)
 }
 
-// appendOwnershipScript emits the ownership every path in the image declares.
+// appendOwnershipScript emits the ownership every path in the image declares,
+// and the mode wherever the host file does not already carry it.
 //
 // Only paths that carry a record are touched. Anything else keeps what mke2fs
 // gave it, which is the right answer for a file the image did not bring.
@@ -196,6 +224,14 @@ func appendOwnershipScript(w *bytes.Buffer, rootfsDir string) (skipped int, err 
 		return 0, fmt.Errorf("failed to open image rootfs %s: %w", rootfsDir, err)
 	}
 	defer func() { _ = root.Close() }()
+
+	// Symlink ownership from an unprivileged Linux unpack, which could not
+	// put it on the links themselves. A tree without it keeps the host's
+	// ownership on its links, as before.
+	links, linkErr := ociclient.LinkOwners(rootfsDir)
+	if linkErr != nil {
+		log.Warnf("symlinks keep the host's ownership in the block image: %v", linkErr)
+	}
 
 	buf := bufio.NewWriter(w)
 	// The walk runs over root.FS() rather than over rootfsDir with
@@ -217,6 +253,11 @@ func appendOwnershipScript(w *bytes.Buffer, rootfsDir string) (skipped int, err 
 		}
 		symlink := d.Type()&fs.ModeSymlink != 0
 		mode, uid, gid, ok := ociclient.GuestAttr(rootfsEntry(rootfsDir, name), symlink)
+		if !ok && symlink {
+			if o, found := links[name]; found {
+				uid, gid, ok = o.UID, o.GID, true
+			}
+		}
 		if !ok {
 			return nil
 		}
@@ -231,18 +272,16 @@ func appendOwnershipScript(w *bytes.Buffer, rootfsDir string) (skipped int, err 
 		// a failure here is reported once rather than at every line.
 		_, _ = fmt.Fprintf(buf, "sif %s uid %d\n", q, uid)
 		_, _ = fmt.Fprintf(buf, "sif %s gid %d\n", q, gid)
-		// Ownership only. The mode is already right -- the unpack put the
-		// image's mode on the host file, setuid included, and mke2fs copies it
-		// faithfully.
-		//
-		// Setting it here would also be actively destructive: debugfs writes
-		// the whole i_mode field, file-type bits and all, so a permission-only
-		// value silently clears S_IFDIR and turns every directory it touches
-		// into a regular file. That corrupts the filesystem so thoroughly that
-		// debugfs cannot reopen it, every later command fails with
-		// "Filesystem not open" -- and debugfs still exits 0, so nothing
-		// reports it until the guest kernel refuses the mount.
-		_ = mode
+		if line := modeFixup(q, d, mode); line != "" {
+			_, _ = buf.WriteString(line)
+		}
+		// The record has done its job once the lines above exist. Where mke2fs
+		// copied it into the image, take it out: it is host bookkeeping, and
+		// the guest has no use for it. Removing an attribute the inode does
+		// not have is silent in debugfs, so this needs no check of its own.
+		if ociclient.CopiedRecordXattr != "" && !symlink {
+			_, _ = fmt.Fprintf(buf, "ea_rm %s %s\n", q, ociclient.CopiedRecordXattr)
+		}
 		return nil
 	})
 	if flushErr := buf.Flush(); flushErr != nil {
@@ -252,6 +291,61 @@ func appendOwnershipScript(w *bytes.Buffer, rootfsDir string) (skipped int, err 
 		return skipped, fmt.Errorf("failed to read image ownership: %w", walkErr)
 	}
 	return skipped, nil
+}
+
+// modeFixup returns the debugfs line that gives a regular file or directory
+// its recorded mode, or "" when mke2fs already copied that mode from the host.
+//
+// Usually it did: the unpack puts the image's mode on the host file, setuid
+// included, and mke2fs copies it faithfully. The exception is an unprivileged
+// Linux unpack, which keeps owner read on files and owner rwx on directories
+// so mke2fs can read them at all (see ociclient's hostFileMode). A 0000
+// /etc/shadow is 0400 on the host, and this puts the 0000 back.
+//
+// The file type comes from the entry itself, never from the record. debugfs
+// writes the whole i_mode field, file-type bits and all, and a tar header may
+// or may not carry them, so a permission-only value would silently clear
+// S_IFDIR and turn every directory it touches into a regular file. That
+// corrupts the filesystem so thoroughly that debugfs cannot reopen it, every
+// later command fails with "Filesystem not open" -- and debugfs still exits 0.
+// Worse, e2fsck then "repairs" what is left, so the build succeeds and the
+// guest finds its directories gone. Symlinks and everything else are left
+// alone: their mode carries nothing a guest consults.
+func modeFixup(q string, d fs.DirEntry, recorded uint32) string {
+	var fileType uint32
+	switch {
+	case d.IsDir():
+		fileType = 0o040000
+	case d.Type().IsRegular():
+		fileType = 0o100000
+	default:
+		return ""
+	}
+	info, err := d.Info()
+	if err != nil {
+		return ""
+	}
+	want := recorded & 0o7777
+	if posixPermBits(info.Mode()) == want {
+		return ""
+	}
+	return fmt.Sprintf("sif %s mode 0%o\n", q, fileType|want)
+}
+
+// posixPermBits is guestFileMode in reverse: the permission, setuid, setgid
+// and sticky bits of an fs.FileMode at their POSIX positions.
+func posixPermBits(m fs.FileMode) uint32 {
+	bits := uint32(m.Perm())
+	if m&fs.ModeSetuid != 0 {
+		bits |= 0o4000
+	}
+	if m&fs.ModeSetgid != 0 {
+		bits |= 0o2000
+	}
+	if m&fs.ModeSticky != 0 {
+		bits |= 0o1000
+	}
+	return bits
 }
 
 // rootfsEntry returns the host path of an entry a rooted rootfs walk produced.

@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build darwin
-
 package main
 
 import (
@@ -74,6 +72,12 @@ func removeInstanceIn(s *store.Store, instanceID string, force bool) error {
 	if err != nil {
 		return removeWedgedInstance(s, instanceID, err)
 	}
+	// A move in progress needs what is in the directory: on the source its
+	// fenced checkpoint, the only copy until the destination has one; on
+	// the destination, what it received. The move's abort ends it first.
+	if err := moveRefusal(s, instanceID, "rm"); err != nil && !moveCommittedAway(s, instanceID) {
+		return err
+	}
 
 	// Check if running and force flag is set. "starting" counts as running the
 	// moment a pid is on the record, because by then there really is a VMM.
@@ -110,6 +114,10 @@ func removeInstanceIn(s *store.Store, instanceID string, force bool) error {
 	// Remove instance directory
 	if err := s.DeleteInstance(instanceID); err != nil {
 		return fmt.Errorf("failed to remove instance: %w", err)
+	}
+	// Its disk's base goes too once nothing else needs it (basegc.go).
+	if state.Base != nil {
+		releaseBase(s, state.Base.SHA256)
 	}
 
 	fmt.Printf("Instance %s removed\n", instanceID)

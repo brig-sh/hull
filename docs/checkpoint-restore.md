@@ -1,11 +1,40 @@
-# Checkpoint / restore (Vz backend)
+# Checkpoint and restore
+
+Two backends can save a running guest and bring it back later without a cold
+boot: `vz` on macOS, and `hvi` on macOS and Linux. The verbs are the same, and
+hull picks the path from the instance's record:
+
+| | `vz` | `hvi` |
+|---|---|---|
+| How | vz-runner, on a signal | hvi's control socket |
+| Captures | Virtualization.framework's machine state, plus an APFS clone of the disk | a [bundle](#what-a-bundle-holds) of RAM and device state, and on macOS (HVF, `hvi` from 4ea836f) the vCPU, interrupt controller and timer state a resume needs; on KVM a partial bundle without those; not the disk |
+| After `checkpoint` | the guest keeps running | `--then continue` (the default) or `--then fence` |
+| Restore from | the latest checkpoint, any number of times | a fenced checkpoint, onto the disk the guest stopped with, with an `hvi` that has a `restore` subcommand: on macOS (HVF) from 4ea836f on `hvi`'s `feat/teleport`, not yet pushed and not the submodule's pin; a KVM bundle cannot be restored yet |
+| Also | | `hull pause` and `hull resume` |
+| Hosts | macOS 14+, Apple silicon | macOS (HVF) and Linux (KVM) |
+
+Both need a block rootfs (`run --rootfs-type block`) and no shared host
+directory. For `hvi`, pause, resume and checkpoint work today. Restore works
+on macOS (HVF) with an `hvi` that has `restore` (4ea836f on `hvi`'s
+`feat/teleport`, the one the moves in [migration.md](migration.md#verified)
+ran with). The `hvi` this branch pins (890f9e0) has none, and hull refuses a
+restore with it. On Linux (KVM) `hvi` writes a partial bundle without the
+vCPU, interrupt controller and timer state, which no restore can resume yet.
+
+An `hvi` checkpoint taken with `--then fence` is also what moves an instance
+to another host: `hull migrate` takes one, sends it and the disk over ssh, and
+restores it there. See [migration.md](migration.md). While a move holds an
+instance, its checkpoint is `migrating` and a plain `hull restore` of it is
+refused; after the move commits it is `migrated`, stale for good.
+
+## Vz
 
 The Vz backend can checkpoint a running microVM, meaning pause, save the machine
 state and resume, then later restore it, resuming the guest exactly where it
 was instead of cold-booting. Built on Virtualization.framework's
 `saveMachineStateTo` / `restoreMachineStateFrom` (macOS 14+, Apple Silicon).
 
-## Usage
+### Usage
 
 Checkpointable instances must use a **block rootfs** (see below):
 
@@ -37,7 +66,7 @@ large the state file is relative to guest RAM, and how fast a restore is. None
 of them had a source in the tree, so they have been removed rather than
 restated. Measure on your own hardware if you need a figure.
 
-## What is captured
+### What is captured
 
 Artifacts live in `<store>/instances/<name>/checkpoint/`:
 
@@ -76,7 +105,7 @@ Artifacts live in `<store>/instances/<name>/checkpoint/`:
   ("Stale file handle") and the guest effectively dies. The CLI errors out
   early instead of producing a broken restore.
 
-## Semantics and limits
+### Semantics and limits
 
 - **Treat this as suspend and resume on one machine, not migration.** hull
   records the machine identifier and requires the identical identity at
@@ -128,7 +157,7 @@ Artifacts live in `<store>/instances/<name>/checkpoint/`:
   automatically. Instances created by an older hull (no state dir)
   must be re-run once before they can be checkpointed.
 
-## e2e coverage
+### e2e coverage
 
 `test/pty-checkpoint-test.py` boots the ubuntu test image on a block rootfs,
 starts a tick counter in the guest shell, checkpoints mid-count, verifies the VM
@@ -149,3 +178,232 @@ successes in 4 attempts on one machine against 15 in 16 on another, while
 ordinary boots on the same machine pass. SIP state is not the discriminator,
 and the reason is unresolved. CI pins the checkpoint job to a runner with a
 console session.
+
+## hvi
+
+hull drives `hvi` through the control socket hvi serves with `--control-sock`.
+Every `hvi` run gets one at `<instance>/control.sock`, a machine profile at
+`<instance>/profile.json` (`--profile-out`), and `--checkpoint-root
+<instance>/checkpoint`, the one directory hvi's confinement lets it write a
+bundle under. The record keeps the first two as `controlSock` and
+`profilePath`, which `hull inspect` prints; the root is on the recorded
+command line. The socket has
+no authentication: anyone who can connect to it can pause or stop the VM. It
+sits in the instance directory, which is 0700.
+
+The control socket arrived in hvi after the commit hull's `hvi-vmm` submodule
+pins (890f9e0), which answers these flags with `unknown boot arg` and would
+refuse the boot. So before each run hull asks the `hvi` it is about to start,
+with `hvi boot --checkpoint-root` and no value: that fails while parsing on
+every `hvi`, and names the flag as unknown only on one without it. An `hvi`
+without the flags runs as before, with no control socket: `hull stop` works,
+and `pause` and `checkpoint` say that this `hvi` predates the socket. For
+pause and checkpoint, put an `hvi` built from hvi's `feat/teleport` branch
+(bf3b1aa or later) next to hull.
+
+### Usage
+
+```bash
+hull run --detach --hypervisor hvi --rootfs-type block --net none --name demo alpine
+
+hull pause demo                     # the I/O threads and every vCPU stop
+hull resume demo
+
+hull checkpoint demo                # --then continue: write a bundle, keep running
+hull checkpoint --then fence demo   # write a bundle; the guest never runs again here
+hull stop demo
+hull restore demo                   # from the fenced bundle, then resume
+hull restore --paused --detach demo # from the bundle, left paused for `hull resume`
+```
+
+`pause` and `resume` are idempotent. A paused guest's counter does not move,
+and neither does anything else in it. `hull ps` shows such an instance as
+STATUS `running` (its VMM is alive) and VM `paused` or `fenced`, and `hull
+exec` refuses it with the command that gets it running. hvi waits up to 10 s
+for its I/O threads at a pause and then 2 s for the vCPUs, and serves one
+connection at a time, so a request from another client waits behind a pause
+as long. It asks clients for at least 13 s; one that gives up sooner reports
+"not paused" for a VM that then pauses. hull waits 15 s for the reply to
+`pause`, `resume`, `status` and `profile`, and 5 s for each status a
+restore polls. `hull ps`, `hull exec` and a move's
+checks ask `status` with 0.5 s, and read an hvi busy with a pause as `?`; `hull
+stop` waits 5 s for its reply before the signals. If a pause times out anyway,
+hull says the VM may now be paused, and `hull resume` is harmless when it is
+not.
+
+`hull stop` on an `hvi` instance sends `stop` on the socket first and waits up
+to half of `--timeout` for hvi to end the run (it logs `guest stopped:
+Requested`), then falls back to SIGTERM and SIGKILL as for any VMM. An `hvi`
+from before the socket goes straight to the signals.
+
+### Checkpoint
+
+`hull checkpoint` needs a running `hvi` instance with a control socket, booted
+from a block rootfs (`--disk`) with no shared host directory. A virtio-fs root
+or share lives in host files and the guest's FUSE caches, which no bundle
+holds, so those are refused by name before the VM is paused.
+
+hull sends `{"v":1,"op":"checkpoint","dir":DIR,"then":"continue"|"fence"}`
+and waits up to `--timeout` seconds (60). hvi pauses the guest, writes a
+bundle into `DIR`, and then either resumes the guest or, with `fence`, keeps
+it parked for good: hvi refuses a later `resume` with `fenced`, and only
+`stop` ends it. A failed capture resumes the guest (a guest that was paused
+stays paused) and leaves no bundle: hull removes a directory it made for one,
+and empties a `--dir` you gave so the same one can be retried. With no reply
+in time hull leaves everything in place, since hvi may still be writing.
+
+One checkpoint or restore of an instance runs at a time: each takes
+`<instance>/migration.lock`, and a second one is refused at once.
+
+`DIR` is a new 0700 directory `<instance>/checkpoint/<txid>`, where the txid
+is a random id hull draws, or an empty directory you name with `--dir`, which
+has to be below `<instance>/checkpoint` too. hull resolves links in it and in
+the root it passes at boot, so the two are compared in one spelling (on macOS
+`/tmp` is a link to `/private/tmp`), and sends hvi that resolved path. An instance started without a checkpoint root
+is refused. On
+success hull writes `<instance>/checkpoint/latest.json`:
+
+```json
+{"dir": "...", "manifestSha256": "...", "then": "fence",
+ "stats": {"pause_ms": 0, "capture_ms": 0, "ram_present_bytes": 0, "ram_total_bytes": 0},
+ "savedAt": "...", "txid": "..."}
+```
+
+and sets the record's `migration` to `{"state": "checkpointed"|"fenced",
+"bundleDir": "...", "txid": "...", "manifestSha256": "..."}`. The record keeps
+the manifest's sha256 too, outside the directory hvi may write to, and a
+restore checks the bundle's `manifest.json` against it. `stats` is what hvi reported. hull keeps
+one bundle of its own per instance and removes the previous one after a new
+checkpoint succeeds; a bundle placed with `--dir` is never removed by hull.
+
+An `hvi` from before the checkpoint op answers `not_implemented`, and hull
+reports that this `hvi` cannot checkpoint yet.
+
+### What a bundle holds
+
+A bundle (checkpoint format 1) is a directory of `manifest.json`, written
+last with the size and sha256 of every other part, `profile.json`, `ram.map`
+and `ram.bin` (the guest's RAM, sparse: all-zero pages take no space),
+`cpu.json`, `platform.json`, `devices.json` (the virtio-blk, net and vsock
+devices and the UART), `disk.json` and `session.json`, which carries hull's
+txid. `hvi checkpoint-verify DIR` checks one.
+
+**On KVM, and with the pinned hvi, the bundle is partial.** That hvi
+records only part of each vCPU's registers and none of the interrupt
+controller or timer state, and `checkpoint-verify` says so: "vCPU registers,
+interrupt controller and timer not captured, so no restore can resume this
+bundle". On macOS the hvi with `restore` (4ea836f on its `feat/teleport`)
+captures them whole, and its `checkpoint-verify` answers "complete: every
+part a restore needs is captured". The disk is not in the
+bundle: hvi syncs it and records its size and write count, and the restore
+reopens the same file. hvi's own
+[docs/checkpoint.md](../hvi-vmm/docs/checkpoint.md) describes the format and
+the clock rules once that page lands in the commit hull pins. In short: the
+guest's monotonic clock continues from the captured value, so the downtime is
+invisible to it, timers that expired in the meantime fire on resume, and the
+wall clock is behind by the downtime until the guest corrects it. Agent
+connections over vsock are reset by a restore.
+
+### Restore
+
+No `hvi` has a `restore` subcommand yet, so `hull restore` on an `hvi`
+instance ends at the last refusal below. What follows is what hull does once
+one does.
+
+`hull restore` on an `hvi` instance starts `hvi restore` from the bundle the
+record names. It refuses, with the reason:
+
+- while the instance's VMM is alive. A fenced source stays alive until `hull
+  stop`, and two VMMs must never share one disk.
+- unless the checkpoint was fenced, or an earlier restore of it never ran the
+  guest. The disk is not in the bundle, so it has to be the disk the guest
+  stopped with. After `--then continue` the guest kept writing to it, and
+  after a restored guest has run it has moved on: a guest given that disk with
+  the older RAM sees a filesystem that disagrees with its own caches.
+- when `latest.json` names a later checkpoint than the record. That is a
+  checkpoint whose record update failed. If it was fenced, the guest never ran
+  after it, and `hull restore --adopt-latest` records it and restores from it,
+  once its bundle is below the checkpoint root and its `manifest.json` hashes
+  to the sha256 in `latest.json`. One taken with `--then continue` cannot be
+  restored, and neither can the record's older one, since the guest ran on
+  after both. A `latest.json` that does not parse is refused too.
+- when the bundle's `manifest.json` no longer hashes to the sha256 the record
+  kept from hvi's reply.
+- when the gateway the instance ran on does not answer on its socket.
+- when the `hvi` the instance ran has no `restore` subcommand.
+
+`hull rm` removes the instance directory, and the bundles hull placed are
+inside it.
+
+The `hvi restore` command line is built from the one the instance last ran.
+hull drops `--kernel`, `--initramfs`, `--cmdline`, `--mem-mib`, `--cpus`,
+`--fs-uid` and `--fs-gid`, because the bundle's RAM and profile fix them. It
+keeps `--disk`, `--net-gateway`, `--net-mac`, `--agent-sock`, `--sandbox-id`
+and `--events`, the host resources the devices attach to, and
+`--checkpoint-root`, so the restored guest can be checkpointed again. A bare `--net`
+becomes `--net-stub`. hull then adds `--from` and the instance's control
+socket and profile paths. Any other flag is refused by name rather than
+dropped.
+
+The record goes `starting`, then `running`, as for any run, while
+`migration.state` goes `restoring`, then `restored-paused` once hvi reports it
+on the socket, then `restored` when hull sends `resume`. With `--paused`,
+hull stops at `restored-paused` and `hull resume` starts the guest. Whatever
+may run the restored guest (the restore's own resume, `hull resume`, any
+`hull checkpoint`, since a failed capture resumes the guest) records
+`restored` before it is sent, and a resume with no reply counts as one that
+ran. The state never moves back, whichever hull process writes it last, so a
+guest that may have run is never restored over again. hull waits up to
+`--timeout` seconds (120) for hvi to rebuild the VM.
+
+**The gateway.** hvi reaches the gateway by the socket path on its command
+line, so a restore on the same host re-joins the gateway the instance left,
+with the same MAC and so the same lease. `--gateway-sock` is for Vz only. A
+restore on another host needs a gateway there with the same subnet and gateway
+address, because the guest resumes with its address and routes in memory. The
+planned `hull migrate` sets that up; nothing does yet.
+
+**Other hosts.** A bundle restores only where the machine profile matches:
+same hvi commit, backend, CPU identity and ID registers, counter frequency,
+interrupt controller layout, RAM layout and devices. hvi checks this before it
+creates anything. A Mac to Linux move is refused: the guest's counter runs at
+24 MHz on Apple silicon and 54 MHz on a Raspberry Pi 5, and KVM cannot change
+it.
+
+### Verified
+
+On this Mac (HVF) and on a Raspberry Pi 5 (KVM, seccomp on), with an alpine
+guest on a block rootfs printing a counter every second, hull run with `hvi`
+built from hvi's `feat/teleport` at bf3b1aa:
+
+- `hull pause` held the counter for 5 s with every vCPU parked, a second
+  `pause` succeeded, and `hull resume` restarted it. While paused, `hull ps`
+  showed STATUS `running` and VM `paused`, and `hull exec` refused in under
+  0.1 s; it worked after resume.
+- Two `hull checkpoint` runs started together: one wrote its bundle, the
+  other was refused as in progress. The sha256 of the bundle's
+  `manifest.json` matched the one in `latest.json` and in the record.
+- `hull checkpoint --then continue` stored about 57 MiB of a 512 MiB
+  guest's RAM in 0.3 s (Mac) and 0.6 to 1.0 s (Pi), `hvi checkpoint-verify`
+  accepted the bundle (and called it partial), and the counter kept going.
+- `hull restore` on the running instance was refused.
+- `hull checkpoint --then fence` wrote a second bundle, removed the first,
+  froze the counter, and recorded `fenced`. `hull ps` showed VM and
+  CHECKPOINT `fenced`, and `hull exec` and `hull resume` were refused.
+- `hull stop` ended the run through the socket (`guest stopped: Requested`)
+  with no `hvi` left running, and the record kept `fenced`.
+- `hull restore` was refused, because that `hvi` has no `restore`
+  subcommand yet. With the record's txid rewritten to stand in for a failed
+  record update, restore pointed at `--adopt-latest`, which adopted the
+  fenced checkpoint. After one byte was added to its `manifest.json`, restore
+  was refused as changed since the checkpoint.
+
+With the `hvi` hull pins (890f9e0), on both hosts: the run left the control
+flags off, the guest booted and counted, `pause` and `checkpoint` said the
+`hvi` predates the socket, and `exec` and `stop` worked. On this Mac,
+`test/hvi-boot-test.py`, the boot check CI runs, passed with that `hvi`; with
+the hull from before this check it failed, because hull passed the flags and
+`hvi` exited with `unknown boot arg "--control-sock"`.
+
+A live restore waits for hvi's `restore`; until then the restore path is
+covered by unit tests against a stub control socket.

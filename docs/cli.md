@@ -27,9 +27,12 @@ for the one build that reports `dev`.
 
 ## Commands
 
-There are nineteen top-level commands. `network-gateway` is the only hidden one:
-it does not appear in `hull --help`, but it runs and prints its own help when
-named. No flag anywhere in the tree is hidden.
+There are twenty-two top-level commands you call, plus hidden ones.
+`network-gateway` is hidden: it does not appear in `hull --help`, but it runs
+and prints its own help when named. The `migrate-*` verbs other than
+`migrate-prepare` are hidden too: `hull migrate` runs them on the
+destination over ssh (see below). The one hidden flag is `restore --move`,
+which only a move's own restore passes.
 
 | Command | What it does |
 |---|---|
@@ -38,20 +41,25 @@ named. No flag anywhere in the tree is hidden.
 | `exec <id> <cmd...>` | run a command in a running instance |
 | `ps` | list instances |
 | `stop <id>` | stop a running instance |
-| `checkpoint <id>` | pause a running `vz` instance, save VM and disk state, resume it |
-| `restore <id>` | restore a stopped `vz` instance from its checkpoint |
+| `pause <id>` | pause a running `hvi` instance: its I/O threads and every vCPU stop |
+| `resume <id>` | resume an `hvi` instance paused by `pause` |
+| `checkpoint <id>` | `vz`: pause, save VM and disk state, resume. `hvi`: write a checkpoint bundle, then continue or fence |
+| `restore <id>` | restore a stopped instance: `vz` from its saved state; `hvi` from a fenced bundle, with an `hvi` that has a `restore` subcommand (on macOS, from 4ea836f on `hvi`'s `feat/teleport`; a KVM bundle cannot be restored yet) |
+| `migrate <id> --to USER@HOST` | move a running `hvi` instance to another host over ssh; see [migration.md](migration.md) |
+| `migrate-prepare <id> --to USER@HOST` | put the instance's base, its profile's kernel and its image on another host ahead of a move; see [migration.md](migration.md#preparing-a-destination) |
 | `rm <id>` | remove a stopped instance |
 | `logs <id>` | show an instance's log |
 | `inspect <id>` | print instance details as JSON |
 | `images` | list pulled images |
 | `rmi <image>` | remove images from the store |
-| `prune` | remove images and pull leftovers nothing needs |
+| `prune` | remove images, disk bases and pull leftovers nothing needs |
 | `assets` | manage the boot assets used for images that carry no kernel |
 | `store` | manage the volume the store lives on |
 | `compose` | run a multi-service compose file, one VM per service |
 | `telemetry` | control usage and crash telemetry |
 | `version` | print the version and the build behind this binary |
 | `network-gateway` | run the user-mode network gateway daemon (hidden) |
+| `migrate-probe`, `migrate-receive`, `migrate-commit`, `migrate-status`, `migrate-abort`, `migrate-take-base`, `migrate-spare-base`, `migrate-take-kernel`, `migrate-take-image` | the destination's half of a move and of a prepare (hidden); `migrate-prepare --txid` is the destination's step too |
 
 ## `hull run`
 
@@ -59,7 +67,7 @@ The image reference is the first positional argument. Everything after it
 replaces the image's `Cmd`, the way `docker run` does. The image entrypoint is
 kept when that entrypoint is `urunit`.
 
-Twenty-three flags:
+Twenty-four flags:
 
 | Flag | Default | What it does |
 |---|---|---|
@@ -74,6 +82,7 @@ Twenty-three flags:
 | `--hypervisor <name>` | from image annotation, else `qemu` | `vz`, `hvi`, `qemu`, or `qemu-hvf` |
 | `--qemu-path <path>` | auto-detect, prefers a signed copy | path to `qemu-system-aarch64` |
 | `--rootfs-type <mode>` | `virtiofs` on `vz` and `hvi`, `9pfs` on `qemu` | `block`, `virtiofs` or `9pfs` |
+| `--profile <name>` | `native` | `hvi` machine profile: `native` or `portable-arm64-v1`, whose checkpoints restore on an Apple host and a Linux arm64 host alike. Also the annotation `com.nofire.hvi.profile`, read from `--annotation` only. Recorded in `state.json` as `profile` and passed to `hvi` as `--profile`. See [backends.md](backends.md#machine-profiles) |
 | `--annotation <k=v>` | | set an OCI runtime annotation. Repeatable |
 | `--no-boot-assets` | off | do not fall back to the published boot assets when the image carries no kernel |
 | `--env`, `-e <spec>` | | `KEY=VALUE`, or a bare `KEY` to inherit it from the host without putting the value in argv. Repeatable |
@@ -98,6 +107,15 @@ These fail before anything starts, rather than being documented and ignored:
   because hvi's built-in stack forwards no traffic. The error names the gateway
 - `--gui` or `--rosetta` on any backend but `vz`
 - `--gui-title` without `--gui`
+- `--profile` other than `native` with a backend other than `hvi`, without
+  `--rootfs-type block` (on macOS an unset `--rootfs-type` is virtiofs, and is
+  refused, not switched), with `--shared-dir` or `--shared-dir-fd`, with an
+  image that boots from its own initrd, with an `hvi` that does not take
+  `--profile` or has no control socket, with `--profile` and the annotation
+  naming different profiles, or with a kernel that is not the profile's: a
+  `com.urunc.unikernel.bootKernel` that does not hash to the kernel in
+  `hull assets dir --profile NAME`, a kernel from the image, or
+  `--no-boot-assets`
 - `--rosetta` without the virtiofs rootfs mode, a `urunit` init, and a static
   arm64 `busybox` at `/.rosetta/busybox` in the image
 
@@ -144,12 +162,15 @@ as a default that an explicit `--env TERM` beats.
 | `inspect <id>` | none. Always prints JSON |
 | `images` | `--json` prints the store's records with full digests |
 | `rmi <image>...` | `--force`, `-f` remove one a stopped instance refers to; `--platform <p>` narrow to one platform |
-| `prune` | `--all` also remove every image no instance refers to; `--dry-run` print and remove nothing |
-| `checkpoint <id>` | `--timeout <secs>`, default 60 |
-| `restore <id>` | `--detach`, `-d`; `--stop-grace <secs>`, default 10; `--wait-ip`; `--gateway-sock <path>` |
-| `assets show` | none |
-| `assets dir` | none. Prints the directory and nothing else, for scripts |
-| `assets pull [REF]` | `--force` download even when the assets are present |
+| `prune` | `--all` also remove every image no instance refers to; `--bases` also remove the disk bases kept for images and received ahead of a move that no instance or move uses ([migration.md](migration.md#bases)); `--dry-run` print and remove nothing |
+| `pause <id>`, `resume <id>` | none |
+| `checkpoint <id>` | `--timeout <secs>`, default 60; `hvi` only: `--then continue\|fence`, default `continue`; `--dir <path>`, an empty directory for the bundle, below `<instance>/checkpoint` |
+| `restore <id>` | `--detach`, `-d`; `--stop-grace <secs>`, default 10; `--wait-ip`; `--gateway-sock <path>` (`vz` only); `hvi` only: `--paused`, `--timeout <secs>`, default 120, `--adopt-latest` |
+| `migrate <id>` | `--to USER@HOST`; `--remote-store <dir>`; `--remote-hull <path>`; `--remote-hvi <path>`; `--remote-gateway-sock <path>`; `--txid <txid>` resume a move; `--dry-run`; `--abort` and `--status` (with a name or a txid); `--timeout <secs>`, default 120, for the fence; `--allow-no-restore`, testing only; `--whole-bundle` send the whole checkpoint and disk even when both hosts can stream |
+| `migrate-prepare <id>` | `--to USER@HOST`; `--remote-store <dir>`; `--remote-hull <path>`; `--remote-hvi <path>`; `--remote-gateway-sock <path>`, checked, not started; `--kernel-sha256 <sum>`, the profile kernel the destination is to hold, which replaces another one there when this host's is that one; `--json` prints what was done and what the destination holds |
+| `assets show` | `--profile NAME` shows that profile's kernel and the initrd it boots with |
+| `assets dir` | `--profile NAME` prints the profile's kernel directory instead. Prints the directory and nothing else, for scripts |
+| `assets pull [REF]` | `--force` download even when the assets are present. `--profile NAME` installs the profile's kernel from REF, `HULL_PORTABLE_KERNEL` or `HULL_PORTABLE_KERNEL_REF` (see [images.md](images.md#a-profiles-kernel)); without `--force` it checks the installed one against its record. Plain `--force` leaves the profile's kernel alone: replace it with `--profile NAME --force` |
 | `store detach` | `--force` detach even with files still open |
 | `store compact` | `--force` detach even with files still open, before compacting |
 | `telemetry on\|off\|status` | none |
@@ -158,16 +179,56 @@ as a default that an explicit `--env TERM` beats.
 `-t` means two different things: a pseudo-terminal on `exec`, and a force-kill
 timeout in seconds on `stop`.
 
-`hull checkpoint` refuses an instance that is not running, one whose VMM is not
-`vz-runner`, one started without a checkpoint state directory, and one that is
-not on a block rootfs.
+`hull checkpoint` refuses an instance that is not running and one that is not
+on a block rootfs. For a `vz` instance it also refuses one started without a
+checkpoint state directory. For an `hvi` instance it also refuses one started
+without a control socket (an `hvi` from before the socket gets none) and one
+with a shared host directory, and `--then` and `--dir` are refused on any
+other backend.
+
+`hull pause` and `hull resume` take only `hvi` instances. `hull restore` on an
+`hvi` instance refuses unless its last checkpoint was fenced, while its VMM is
+still running, and when the `hvi` it ran has no `restore` subcommand. See
+[checkpoint-restore.md](checkpoint-restore.md#hvi).
+
+`hull stop` on an `hvi` instance asks hvi over its control socket first, then
+signals as for any VMM.
+
+`hull migrate` moves a running `hvi` instance to `--to USER@HOST`: it fences
+the guest here, streams the checkpoint and the disk over ssh, has the
+destination restore it paused, and only then commits, after which the
+destination resumes it and the copy here is stale. When both hosts can, it
+relays hvi's migrate stream, which sends the guest's RAM and the disk
+blocks that differ from the instance's base in rounds while the guest
+runs, and the guest stops only for the last round (see
+[migration.md](migration.md#the-streamed-move)). While a move holds an
+instance, `checkpoint`, `resume`, `restore` and `rm` of it are refused on
+both hosts, and what an aborted move left on the destination can only be
+removed. The protocol, its states and its recovery are in
+[migration.md](migration.md).
+
+The destination's verbs each print one JSON object on stdout:
+`{"protocol":1,"ok":bool,"code":...,"error":...,"record":{...}}`. They are:
+
+| Verb | Flags | What it does |
+|---|---|---|
+| `migrate-probe` | `--name`, `--hvi`, `--gateway-sock` | reports hull and hvi versions, whether hvi takes the control flags and `--profile` (a stand-in for "can restore a portable bundle"; see [migration.md](migration.md#usage)), has `restore`, restores from a stream (`hviStream`) and writes a stream's disk rounds onto a copy of a base (`hviStreamDisk`, `restore --disk-base-sha256`), the hypervisor, free space, whether the name is taken, whether the gateway answers, the bases and profile kernels the store holds, and the capability `stream-v3` |
+| `migrate-receive` | `--txid`, `--name`, `--reserve`, `--stream`, `--session` | with `--reserve`, claims the name (a JSON request on stdin); with `--stream`, reads a streamed move (`HULLMIG3`) on stdin, makes a synced copy of the base the instance's disk, hands hvi's stream as it arrives to `hvi restore --from-stream - --disk <the copy> --disk-base-sha256 <base>` and ends `restored-paused`; with `--session` too, prints `accepted`, `acked` and `verified` lines on stdout as it goes, takes the commit after the trailer and ends `running` (migration.md, "One session"); with neither, reads the whole-bundle stream and ends `verified` |
+| `migrate-prepare` | `--txid` | restores the received checkpoint paused |
+| `migrate-commit` | `--txid`, `--epoch` | records `running`, then resumes the guest |
+| `migrate-status` | `--txid` | prints the move's record and the VM's state |
+| `migrate-abort` | `--txid` | refused once running; otherwise records `aborted`, stops what the move restored and frees the name |
+| `migrate-take-base` | `--sha256` | keeps the base the stream on stdin carries, if it has that digest |
+| `migrate-take-kernel` | `--profile`, `--sha256`, `--size` | installs the profile kernel on stdin, if it has that sha256 and size |
+| `migrate-take-image` | `--digest`, `--ref` | pulls the image by its reference unless the store has its digest |
 
 `hull images` prints `No images found` and `hull ps` prints
 `No instances found` on an empty store. Both exit 0. `hull prune` prints
 `Nothing to prune` and exits 0 the same way.
 
 `hull rmi` and `hull prune` remove from the image cache; `hull rm` removes an
-instance and never touches the cache. Neither returns space to the host on its
+instance and never touches the cache, but takes the instance's disk base
+with it when nothing else needs that base. Neither returns space to the host on its
 own -- the store's sparse image only shrinks under `hull store compact`. See
 [storage.md](storage.md#disk-space-and-how-to-get-it-back).
 
@@ -272,6 +333,8 @@ whole kernel command line.
 | `HULL_VERIFY` | how the bundle's cosign signature is checked: `warn` (default), `require`, `strict`, or `off`/`none`/`0`. Anything unrecognized is `warn` |
 | `HULL_BOOT_ASSETS_ALLOW_FOREIGN` | `1`, or the repository being allowed, to fetch from a repository other than the published one |
 | `HULL_BOOT_ASSETS_INSECURE` | `1` to fetch from a registry that resolves to a scheme other than https |
+| `HULL_PORTABLE_KERNEL` | a local kernel `Image` for `--profile portable-arm64-v1`, installed by `hull assets pull --profile portable-arm64-v1` or the first run that needs it |
+| `HULL_PORTABLE_KERNEL_REF` | an OCI artifact carrying that kernel instead. Setting both is refused |
 | `XDG_DATA_HOME` | consulted only with no store and off macOS; assets then live under `$XDG_DATA_HOME/brig/assets` |
 
 With no store, the fallback asset directory is `~/.hull/assets` on macOS.
@@ -297,6 +360,8 @@ See [telemetry.md](telemetry.md).
 | `CI` | counts the session as non-interactive, so the consent prompt never shows |
 | `TERM` | forwarded into the guest for a pty `exec` |
 | `COMPOSE_FILE`, `COMPOSE_PROJECT_NAME`, `COMPOSE_PROFILES`, `COMPOSE_DISABLE_ENV_FILE` | compose equivalents of the flags above |
+| `HULL_MIGRATE_SSH` | a program `hull migrate` runs instead of `ssh`, with the same arguments; for testing a move on one machine (see [migration.md](migration.md#testing-a-move)) |
+| `HULL_MIGRATE_SSH_MUX` | `off` gives every step of a move its own ssh connection. Otherwise the steps share one (`ControlMaster`, socket `/tmp/hull-ssh-<uid>/%C`), kept a minute after the last, so the commit pays for no handshake. The directory is made 0700; one that is not a directory owned by this user and closed to others turns the mux off with a warning, since whoever owns the socket would get the move's stream |
 
 A session counts as interactive only when `CI` is unset **and** both stdin and
 stderr are terminals.

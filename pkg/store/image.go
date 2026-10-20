@@ -74,7 +74,7 @@ func (s *Store) DeleteImage(digest string) error {
 		return err
 	}
 	defer func() { _ = held.Close() }()
-	if err := os.RemoveAll(aside); err != nil {
+	if err := RemoveTree(aside); err != nil {
 		return fmt.Errorf("failed to remove image %s: %w", digest, err)
 	}
 	return nil
@@ -152,7 +152,7 @@ func (s *Store) CommitImage(digest, stagingDir string, staging *StagingLock) err
 		return err
 	}
 	if previous != nil {
-		_ = os.RemoveAll(oldDir)
+		_ = RemoveTree(oldDir)
 		_ = previous.Close()
 	}
 	return nil
@@ -250,7 +250,7 @@ func (s *Store) RemoveStagingDir(name string) (bool, error) {
 		return false, err
 	}
 	defer func() { _ = l.Close() }()
-	if err := os.RemoveAll(dir); err != nil {
+	if err := RemoveTree(dir); err != nil {
 		return false, fmt.Errorf("failed to remove staging directory %s: %w", name, err)
 	}
 	return true, nil

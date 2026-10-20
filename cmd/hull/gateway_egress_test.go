@@ -18,6 +18,7 @@ import (
 	"context"
 	"net"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -113,6 +114,7 @@ func TestGatewayListensOnTheDerivedQemuSocketByDefault(t *testing.T) {
 				args = append(args, append(tc.extra, want)...)
 			}
 
+			workers := tcpWorkers()
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan error, 1)
 			go func() {
@@ -122,6 +124,16 @@ func TestGatewayListensOnTheDerivedQemuSocketByDefault(t *testing.T) {
 			t.Cleanup(func() {
 				cancel()
 				<-done
+				// The gateway's stack goes with it: its idle TCP workers
+				// would otherwise burn CPU under -race for the rest of the
+				// package.
+				deadline := time.Now().Add(5 * time.Second)
+				for tcpWorkers() > workers && time.Now().Before(deadline) {
+					time.Sleep(10 * time.Millisecond)
+				}
+				if left := tcpWorkers(); left > workers {
+					t.Errorf("the stopped gateway left %d TCP workers running", left-workers)
+				}
 			})
 
 			deadline := time.Now().Add(5 * time.Second)
@@ -142,5 +154,20 @@ func TestGatewayListensOnTheDerivedQemuSocketByDefault(t *testing.T) {
 				time.Sleep(20 * time.Millisecond)
 			}
 		})
+	}
+}
+
+// tcpWorkers counts the goroutines of every netstack's TCP workers in the
+// process.
+func tcpWorkers() int {
+	buf := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			// Each worker's trace names its creator, whether or not it
+			// has run yet.
+			return strings.Count(string(buf[:n]), "created by gvisor.dev/gvisor/pkg/tcpip/transport/tcp.(*dispatcher).init")
+		}
+		buf = make([]byte, 2*len(buf))
 	}
 }

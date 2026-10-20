@@ -38,6 +38,11 @@ import (
 // change with it.
 const guestAttrXattr = "com.nofire.hvi.linux-attr"
 
+// CopiedRecordXattr is empty on macOS: the record's name is in no namespace
+// e2fsprogs maps to ext4, so mke2fs -d leaves it out of the block image and
+// there is nothing for the builder to remove.
+const CopiedRecordXattr = ""
+
 // recordsOwnership says the manual extractor has to run on every layer, not
 // only on the ones archive.Apply could not finish.
 //
@@ -46,6 +51,20 @@ const guestAttrXattr = "com.nofire.hvi.linux-attr"
 // first regardless: it contributes something checkpoint/restore depends on,
 // which is not yet pinned down, so this adds a pass rather than replacing one.
 const recordsOwnership = true
+
+// recordsLinksAside is false on macOS: XATTR_NOFOLLOW puts a symlink's
+// record on the link itself.
+const recordsLinksAside = false
+
+// hostFileMode and hostDirMode return the image's mode unchanged on macOS.
+//
+// The Linux build widens what the owner may do with an unpacked file, because
+// there the host file only feeds mke2fs. Here it is also what vz and qemu
+// serve to the guest over virtiofs and 9pfs, which report the host mode
+// straight through, so a widened /etc/shadow would reach those guests readable.
+func hostFileMode(mode int64) int64 { return mode }
+
+func hostDirMode(mode int64) int64 { return mode }
 
 // recordGuestAttr stores the ownership and mode an entry has inside the image.
 //

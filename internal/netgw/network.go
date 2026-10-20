@@ -147,6 +147,17 @@ func (n *Network) Leases() map[string]string {
 	return n.ipPool.Leases()
 }
 
+// Close stops the network's stack: it aborts every endpoint, the DHCP and
+// DNS servers' among them, and tells the TCP workers to stop, which they do
+// shortly after. It does not wait for the endpoints to close: a member still
+// attached may open a connection after the abort, and waiting on it would
+// hold the gateway's exit. The stack does not stop with the ctx given to
+// Start, so a gateway that returns without Close leaves its TCP workers
+// running for the rest of the process.
+func (n *Network) Close() {
+	n.stack.Close()
+}
+
 // Start runs the network's background work until ctx is done. It is separate
 // from New so the caller owns the lifetime, and returns having started
 // nothing when the policy has no literal host rule to keep current.

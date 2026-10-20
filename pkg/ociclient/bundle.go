@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -182,7 +183,14 @@ func createOCISpec(imgConfig *v1.ConfigFile, rootfsDir string) *specs.Spec {
 
 	if !hasUruncAnnotations {
 		spec.Annotations[UnikernelTypeAnnotation] = "linux"
-		spec.Annotations[HypervisorAnnotation] = "qemu-hvf"
+		// macOS only. hull on Linux reads this annotation as the image's own
+		// choice of backend and refuses anything but hvi, so a qemu-hvf
+		// written here on the image's behalf would refuse every plain
+		// container image. Left out, the backend falls to the platform
+		// default, which on Linux is hvi.
+		if runtime.GOOS == "darwin" {
+			spec.Annotations[HypervisorAnnotation] = "qemu-hvf"
+		}
 		spec.Annotations[UnikernelBinaryAnnotation] = "unikernel"
 		spec.Annotations["com.urunc.unikernel.kernel"] = "unikernel"
 	}

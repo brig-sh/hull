@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build darwin
-
 // One-shot compose services.
 //
 // A one-shot service is a job: it runs a command to completion and its exit

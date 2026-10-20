@@ -92,6 +92,95 @@ type InstanceState struct {
 	// TelemetryEndSent guards the telemetry `end` event to exactly once
 	// across the foreground exit path and `stop`.
 	TelemetryEndSent bool `json:"telemetryEndSent,omitempty"`
+	// ControlSock is the hvi control socket (--control-sock) that pauses,
+	// resumes, checkpoints and stops the VM. Empty for other backends and for
+	// hvi instances started before hull passed it: those cannot be paused or
+	// checkpointed, only signalled.
+	ControlSock string `json:"controlSock,omitempty"`
+	// ProfilePath is where hvi wrote its machine profile (--profile-out): the
+	// facts a destination host compares before it accepts a checkpoint.
+	ProfilePath string `json:"profilePath,omitempty"`
+	// Profile is the hvi machine profile the instance boots under
+	// (`run --profile`), passed to hvi as --profile. Empty is hvi's native
+	// profile, which hull never names, so the record and the command line
+	// of a native run are what they were before profiles existed.
+	// portable-arm64-v1 is a machine a checkpoint of which restores on an
+	// Apple host and on a Linux arm64 host alike.
+	Profile string `json:"profile,omitempty"`
+	// Migration is where this instance stands in a checkpoint, restore or
+	// move. Nil until the first `hull checkpoint`. Stopping the instance
+	// leaves it alone: a fenced instance that was stopped is exactly the one
+	// a restore needs to find.
+	Migration *MigrationState `json:"migration,omitempty"`
+	// OwnerEpoch counts the moves (`hull migrate`) that brought this
+	// instance to this host: 0 for one that was started here, and one more
+	// than the source's at every committed move. A move hands over the
+	// next epoch, and the destination accepts its commit only for that
+	// epoch, so a commit meant for an earlier move is refused.
+	OwnerEpoch uint64 `json:"ownerEpoch,omitempty"`
+	// Base names the immutable copy of the disk image this instance's disk
+	// started from, kept under <store>/bases by its digest, so that a move
+	// sends only the blocks that differ from it. Nil for an instance with
+	// no block rootfs, one run by an hvi without a control socket, and one
+	// recorded before bases existed.
+	Base *BaseState `json:"base,omitempty"`
+}
+
+// BaseState is the base image an instance's disk started from.
+type BaseState struct {
+	// SHA256 is the base's disk digest (docs/migration.md, "Bases"), which
+	// is also its file name under <store>/bases.
+	SHA256 string `json:"sha256"`
+	// HviWhy says why the hvi running the instance was not booted against
+	// the base, when hull could not hand it over; a move then sends the
+	// whole bundle, and says this.
+	HviWhy string `json:"hviWhy,omitempty"`
+}
+
+// Migration states. A checkpointed instance kept running after the capture,
+// so its disk has moved on since; a fenced one never ran again, so its disk
+// still matches the bundle. Restoring records restoring, then restored-paused
+// once hvi has rebuilt the VM, then restored once it runs.
+//
+// A move (`hull migrate`) adds three. On the source, migrating is a fenced
+// checkpoint that a move has taken over: only the move, or its abort, may
+// decide what becomes of it, so a plain restore refuses it. migrated is a
+// source whose move committed: the VM runs on another host now, and this
+// checkpoint is stale for good. On the destination, incoming is a received
+// checkpoint that only the move's own restore may bring up, and only its
+// commit may resume.
+const (
+	MigrationCheckpointed   = "checkpointed"
+	MigrationFenced         = "fenced"
+	MigrationRestoring      = "restoring"
+	MigrationRestoredPaused = "restored-paused"
+	MigrationRestored       = "restored"
+	MigrationMigrating      = "migrating"
+	MigrationMigrated       = "migrated"
+	MigrationIncoming       = "incoming"
+)
+
+// MigrationState is the record of the last checkpoint taken of an instance
+// and of what became of it.
+type MigrationState struct {
+	// State is one of the Migration* constants.
+	State string `json:"state"`
+	// BundleDir is the absolute directory hvi wrote the checkpoint bundle to.
+	BundleDir string `json:"bundleDir"`
+	// TxID names the checkpoint. hull draws it and hvi records it in the
+	// bundle's session record.
+	TxID string `json:"txid"`
+	// ManifestSHA256 is the sha256 of the bundle's manifest.json as hvi
+	// reported it on the checkpoint. Kept here, outside the checkpoint root
+	// hvi may write to, so a restore can check the bundle is the one hull
+	// recorded.
+	ManifestSHA256 string `json:"manifestSha256,omitempty"`
+	// MoveTxID names the move (`hull migrate`) this checkpoint belongs to,
+	// when it belongs to one; its record is <instance>/migration.json.
+	MoveTxID string `json:"moveTxid,omitempty"`
+	// Peer is the other host of that move: where a migrated instance went,
+	// or where an incoming one came from.
+	Peer string `json:"peer,omitempty"`
 }
 
 // StatusStarting marks the one moment an instance has no pid to record: the
@@ -663,6 +752,50 @@ func (s *Store) InstanceAgentSocket(id string) string {
 	return filepath.Join(s.rootDir, "instances", id, "agent.sock")
 }
 
+// InstanceControlSocket returns the path hvi binds its control socket at.
+// It sits in the 0700 instance directory because the socket has no
+// authentication: whoever can connect to it can pause or stop the VM.
+func (s *Store) InstanceControlSocket(id string) string {
+	return s.instancePath(id, "control.sock")
+}
+
+// InstanceProfilePath returns where hvi writes the instance's machine
+// profile.
+func (s *Store) InstanceProfilePath(id string) string {
+	return s.instancePath(id, "profile.json")
+}
+
+// InstanceMigrationRecord returns the path of the record of the instance's
+// move between hosts (`hull migrate`), on either side of it.
+func (s *Store) InstanceMigrationRecord(id string) string {
+	return s.instancePath(id, "migration.json")
+}
+
+// MigrationTombstoneDir is the ledger where a destination keeps the records
+// of moves that ended on it, committed or aborted, as <txid>.json. Aborting
+// removes the instance directory, so the name is free for another run, and
+// `hull rm` or a later move can remove or replace a committed one; the
+// record here outlives both, so a late commit, an abort or a status query
+// for its txid still gets the true answer.
+func (s *Store) MigrationTombstoneDir() string {
+	return filepath.Join(s.rootDir, "migrations")
+}
+
+// BasesDir holds the base images of block rootfs disks, each an immutable
+// file named <sha256>.ext4 by its disk digest. A run puts the image it built
+// there before the guest writes to its own copy, and a move's preparation
+// puts the same file on the destination, so the move itself carries only
+// the blocks the guest changed.
+func (s *Store) BasesDir() string {
+	return filepath.Join(s.rootDir, "bases")
+}
+
+// BasePath is where the base with disk digest sha256 is kept. The digest is
+// not checked here; callers validate it before they read or write the file.
+func (s *Store) BasePath(sha256 string) string {
+	return filepath.Join(s.BasesDir(), filepath.Base(sha256)+".ext4")
+}
+
 // DeleteInstance removes an instance directory
 func (s *Store) DeleteInstance(id string) error {
 	// This one recurses, so it validates even though callers resolve the
@@ -673,8 +806,10 @@ func (s *Store) DeleteInstance(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// RemoveTree, because a virtiofs instance holds a clone of the image's
+	// rootfs, 0555 directories and all.
 	instanceDir := filepath.Join(s.rootDir, "instances", id)
-	return os.RemoveAll(instanceDir)
+	return RemoveTree(instanceDir)
 }
 
 // RootDir returns the root directory of the store

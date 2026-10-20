@@ -17,6 +17,8 @@ package netgw
 import (
 	"context"
 	"net"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -177,6 +179,40 @@ func testNetwork(t *testing.T) *Network {
 		t.Fatalf("New: %v", err)
 	}
 	return n
+}
+
+// tcpWorkers counts the goroutines of every stack's TCP workers in the
+// process.
+func tcpWorkers() int {
+	buf := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			// Each worker's trace names its creator, whether or not it
+			// has run yet.
+			return strings.Count(string(buf[:n]), "created by gvisor.dev/gvisor/pkg/tcpip/transport/tcp.(*dispatcher).init")
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+}
+
+// A closed network leaves no TCP workers behind. The stack does not stop
+// with the ctx given to Start, and its idle workers burn CPU under -race,
+// which slowed every later test in a package that ran a gateway in process.
+func TestCloseStopsTheStacksWorkers(t *testing.T) {
+	before := tcpWorkers()
+	n := testNetwork(t)
+	if tcpWorkers() == before {
+		t.Fatal("found no TCP workers to stop")
+	}
+	n.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for tcpWorkers() > before {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d TCP workers left after Close, %d before New", tcpWorkers(), before)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func arpRequest(t *testing.T, m *member, target net.IP) []byte {
