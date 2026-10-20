@@ -130,7 +130,7 @@ func Connect(ctx context.Context, address, namespace string) (*client.Client, er
 	_, err = os.Stat(address)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("cannot reach containerd: no socket at %s\n"+
-			"Start containerd, or point hull at its socket with %s", address, AddressEnv)
+			"Start containerd, or point hull at its socket with --containerd-address or %s", address, AddressEnv)
 	}
 	c, err := client.New(address, client.WithDefaultNamespace(namespace))
 	if err != nil {
@@ -145,7 +145,7 @@ func Connect(ctx context.Context, address, namespace string) (*client.Client, er
 	if err != nil {
 		_ = c.Close()
 		return nil, fmt.Errorf("cannot reach containerd at %s: %w\n"+
-			"Start containerd, or point hull at its socket with %s", address, err, AddressEnv)
+			"Start containerd, or point hull at its socket with --containerd-address or %s", address, err, AddressEnv)
 	}
 	return c, nil
 }

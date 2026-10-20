@@ -14,7 +14,7 @@ two runners must be signed before they can start a VM.
 
 ## Prerequisites
 
-- An Apple Silicon Mac. Linux builds only the start of the CLI so far; see
+- An Apple Silicon Mac. On Linux the CLI has only `hull images` so far; see
   [Building on Linux](#building-on-linux).
 - **Go** 1.26 or later. `go.mod` declares 1.26.4.
 - **Xcode command line tools**, which supply Swift. `vz-runner` declares
@@ -100,15 +100,38 @@ other work, cap them rather than letting each build assume it owns the box.
 
 ### Building on Linux
 
-A Linux port has started, and it does not run anything yet. `make linux`, or
-plain `make` on a Linux host, builds a `hull` with the start of the Linux
-command tree. Its one verb, `hull images`, refuses with an explanation for
-now. It builds no runners and signs nothing.
+A Linux port has started, and it cannot run anything yet. `make linux`, or
+plain `make` on a Linux host, builds a `hull` whose only command is
+`hull images`. It builds no runners and signs nothing.
 
 ```bash
 make                        # dist/hull_linux_<host arch>
 make linux LINUX_ARCH=amd64 # cross-build for another architecture
 ```
+
+On Linux, hull is a containerd client, and images live in containerd.
+`hull images` lists them in the same table and JSON form as on macOS. It
+needs a running containerd, which hull does not install or start. hull looks
+for its socket in this order:
+
+1. `--containerd-address`
+2. `$HULL_CONTAINERD_ADDRESS`
+3. `/run/containerd/containerd.sock` when run as root, and
+   `$XDG_RUNTIME_DIR/containerd/containerd.sock`, where a rootless containerd
+   puts it, for any other user
+
+There is no store directory on Linux, and no `--store-dir`. Isolation comes
+from the containerd namespace instead: `--namespace`, then
+`$HULL_NAMESPACE`, then `hull`. Two namespaces see none of each other's
+images, and `ctr -n hull images ls` shows what hull sees.
+
+containerd keeps one record per image name, and it may hold several
+platforms of that image. The listing describes one: the host's platform if
+all its layers are present, otherwise a platform whose layers are. A pull of
+another platform therefore lists as that platform, even though `ctr` also
+fetches the host platform's manifest along the way. Entries of an index that
+are not images, such as build attestations and signatures, are never listed
+as the image.
 
 `make test` runs on Linux too. The `internal/` and `pkg/` packages build and
 test natively. Of `cmd/hull`, only the files with no darwin dependency compile
