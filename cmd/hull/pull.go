@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/brig-sh/hull/pkg/ociclient"
 	"github.com/urfave/cli/v3"
@@ -68,12 +69,5 @@ func pullImage(ctx context.Context, cmd *cli.Command) error {
 	fmt.Printf("Digest: %s\n", result.Digest)
 	fmt.Printf("Size: %d bytes\n", result.Size)
 
-	if len(result.Labels) > 0 {
-		fmt.Println("Labels:")
-		for k, v := range result.Labels {
-			fmt.Printf("  %s: %s\n", k, v)
-		}
-	}
-
-	return nil
+	return writeLabels(os.Stdout, result.Labels)
 }
