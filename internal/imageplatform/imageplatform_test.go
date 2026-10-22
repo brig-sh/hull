@@ -29,6 +29,10 @@ func TestParsePlatform(t *testing.T) {
 		{in: "linux", wantErr: true},
 		{in: "linux/arm64/v8/extra", wantErr: true},
 		{in: "", wantErr: true},
+		{in: "linux/", wantErr: true},
+		{in: "/amd64", wantErr: true},
+		{in: "linux//v8", wantErr: true},
+		{in: "linux/arm64/", wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {
