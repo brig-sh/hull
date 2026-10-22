@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/brig-sh/hull/internal/imageplatform"
 	"github.com/brig-sh/hull/pkg/store"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/crane"
@@ -85,19 +86,6 @@ func registryTransport() crane.Option {
 // path (an amd64 rootfs translated under an arm64 kernel).
 const DefaultPlatform = "linux/arm64"
 
-// parsePlatform turns an "os/arch" or "os/arch/variant" string into a
-// registry platform selector.
-func parsePlatform(s string) (*v1.Platform, error) {
-	parts := strings.Split(s, "/")
-	switch len(parts) {
-	case 2:
-		return &v1.Platform{OS: parts[0], Architecture: parts[1]}, nil
-	case 3:
-		return &v1.Platform{OS: parts[0], Architecture: parts[1], Variant: parts[2]}, nil
-	}
-	return nil, fmt.Errorf("invalid platform %q, expected os/arch (e.g. linux/amd64)", s)
-}
-
 // Pull fetches an OCI image from a registry and stores it locally,
 // selecting the default (native arm64) platform.
 func (c *Client) Pull(ctx context.Context, ref string) (*PullResult, error) {
@@ -107,11 +95,11 @@ func (c *Client) Pull(ctx context.Context, ref string) (*PullResult, error) {
 // PullPlatform fetches an OCI image for an explicit platform. The store is
 // digest-keyed, so different platform variants of the same tag coexist.
 func (c *Client) PullPlatform(ctx context.Context, ref, platformStr string) (*PullResult, error) {
-	p, err := parsePlatform(platformStr)
+	p, err := imageplatform.Parse(platformStr)
 	if err != nil {
 		return nil, err
 	}
-	platform := crane.WithPlatform(p)
+	platform := crane.WithPlatform(&v1.Platform{OS: p.OS, Architecture: p.Architecture, Variant: p.Variant})
 	// Fetch the manifest the reference names, then resolve it to the image,
 	// rather than going straight to the image with crane.Pull. Same requests,
 	// but this way the index in front of a multi-arch image is visible: its
