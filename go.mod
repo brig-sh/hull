@@ -8,8 +8,10 @@ require (
 	github.com/containerd/containerd v1.7.36
 	github.com/containerd/containerd/v2 v2.3.5
 	github.com/containerd/errdefs v1.0.0
+	github.com/containerd/log v0.1.0
 	github.com/containerd/platforms v1.0.0-rc.5
 	github.com/containers/gvisor-tap-vsock v0.8.9
+	github.com/distribution/reference v0.6.0
 	github.com/google/go-containerregistry v0.20.6
 	github.com/hashicorp/go-version v1.9.0
 	github.com/inetaf/tcpproxy v0.0.0-20250222171855-c4b9df066048
@@ -42,14 +44,12 @@ require (
 	github.com/containerd/continuity v0.5.0 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
 	github.com/containerd/fifo v1.1.0 // indirect
-	github.com/containerd/log v0.1.0 // indirect
 	github.com/containerd/plugin v1.1.0 // indirect
 	github.com/containerd/stargz-snapshotter/estargz v0.16.3 // indirect
 	github.com/containerd/ttrpc v1.2.9 // indirect
 	github.com/containerd/typeurl/v2 v2.3.0 // indirect
 	github.com/coreos/go-systemd/v22 v22.7.0 // indirect
 	github.com/cyphar/filepath-securejoin v0.7.0 // indirect
-	github.com/distribution/reference v0.6.0 // indirect
 	github.com/docker/cli v29.2.0+incompatible // indirect
 	github.com/docker/distribution v2.8.3+incompatible // indirect
 	github.com/docker/docker-credential-helpers v0.9.3 // indirect

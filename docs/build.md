@@ -14,8 +14,8 @@ two runners must be signed before they can start a VM.
 
 ## Prerequisites
 
-- An Apple Silicon Mac. On Linux the CLI has only `hull images` so far; see
-  [Building on Linux](#building-on-linux).
+- An Apple Silicon Mac. On Linux the CLI has only `hull images` and
+  `hull pull` so far; see [Building on Linux](#building-on-linux).
 - **Go** 1.26 or later. `go.mod` declares 1.26.4.
 - **Xcode command line tools**, which supply Swift. `vz-runner` declares
   `swift-tools-version:5.9` and a macOS 14 deployment target.
@@ -101,8 +101,8 @@ other work, cap them rather than letting each build assume it owns the box.
 ### Building on Linux
 
 A Linux port has started, and it cannot run anything yet. `make linux`, or
-plain `make` on a Linux host, builds a `hull` whose only command is
-`hull images`. It builds no runners and signs nothing.
+plain `make` on a Linux host, builds a `hull` whose only commands are
+`hull images` and `hull pull`. It builds no runners and signs nothing.
 
 ```bash
 make                        # dist/hull_linux_<host arch>
@@ -110,9 +110,9 @@ make linux LINUX_ARCH=amd64 # cross-build for another architecture
 ```
 
 On Linux, hull is a containerd client, and images live in containerd.
-`hull images` lists them in the same table and JSON form as on macOS. It
-needs a running containerd, which hull does not install or start. hull looks
-for its socket in this order:
+`hull pull` fetches them and `hull images` lists them, with the same output
+as on macOS. Both need a running containerd, which hull does not install or
+start. hull looks for its socket in this order:
 
 1. `--containerd-address`
 2. `$HULL_CONTAINERD_ADDRESS`
@@ -132,6 +132,27 @@ another platform therefore lists as that platform, even though `ctr` also
 fetches the host platform's manifest along the way. Entries of an index that
 are not images, such as build attestations and signatures, are never listed
 as the image.
+
+`hull pull` differs from the macOS pull in these ways:
+
+- `--platform` defaults to the host's, `linux/amd64` or `linux/arm64`, not
+  to `linux/arm64`.
+- The image is stored under its full name, so `hull pull busybox` lists as
+  `docker.io/library/busybox`, the name `ctr` and nerdctl use for it too.
+- containerd unpacks the image into a snapshot, with overlayfs unless the
+  namespace's `containerd.io/defaults/snapshotter` label names another
+  snapshotter, and keeps the layers in its content store. The daemon does
+  the unpacking, so its user needs permission to create the snapshot: a
+  containerd run as an ordinary user, outside rootlesskit, cannot.
+- The progress line counts bytes downloaded, not extracted: the daemon
+  unpacks and reports nothing to hull while it does.
+
+The pull itself runs in hull's process, not the daemon's, so it uses the
+same credentials as on macOS: the Docker config and its credential helpers.
+A credential helper that fails, as one needing a locked keychain does,
+leaves the pull anonymous. Registries on loopback, private RFC 1918
+addresses or `.local` names are tried over HTTPS and then plain HTTP, as on
+macOS.
 
 `make test` runs on Linux too. The `internal/` and `pkg/` packages build and
 test natively. Of `cmd/hull`, only the files with no darwin dependency compile
