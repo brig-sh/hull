@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package ociclient
+package imageplatform
 
 import "testing"
 
@@ -32,18 +32,18 @@ func TestParsePlatform(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {
-			p, err := parsePlatform(tc.in)
+			p, err := Parse(tc.in)
 			if tc.wantErr {
 				if err == nil {
-					t.Fatalf("parsePlatform(%q) = %+v, want error", tc.in, p)
+					t.Fatalf("Parse(%q) = %+v, want error", tc.in, p)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("parsePlatform(%q): %v", tc.in, err)
+				t.Fatalf("Parse(%q): %v", tc.in, err)
 			}
 			if p.OS != tc.os || p.Architecture != tc.arch || p.Variant != tc.variant {
-				t.Fatalf("parsePlatform(%q) = %s/%s/%s, want %s/%s/%s",
+				t.Fatalf("Parse(%q) = %s/%s/%s, want %s/%s/%s",
 					tc.in, p.OS, p.Architecture, p.Variant, tc.os, tc.arch, tc.variant)
 			}
 		})
