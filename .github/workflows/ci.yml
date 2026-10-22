@@ -211,14 +211,29 @@ jobs:
           working-directory: pkg/telemetry
 
   unit-linux:
-    name: unit tests (linux)
+    name: unit tests (linux, ${{ matrix.arch }})
     # `unit` runs the Go suite on a Mac, where the linux-tagged files in
     # cmd/hull do not build, and `lint` only builds and lints for Linux.
     # This runs the root module's suite natively on Linux, under the race
     # detector: the internal/ and pkg/ packages, the untagged files in
     # cmd/hull, and the linux-tagged ones. Like `unit`, it is cheap and runs
     # on every diff.
-    runs-on: ubuntu-latest
+    #
+    # It runs once for each architecture the Linux CLI is built for, on a
+    # runner of that architecture. `lint` builds and lints for linux/amd64
+    # only, so this is the one place the Linux code is compiled and tested
+    # on arm64.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+            containerd-sha256: 2f0a095a71e3262d0d91ff0e50e2e4ae73c3866c4d1ff6a15f341097fba3dd44
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            containerd-sha256: 06f46cbc073872c5ad1fbc922a53543e9a26b798d62ff106d44639dcb9947942
+    runs-on: ${{ matrix.runner }}
     env:
       # A test that needs a containerd daemon fails without one, instead of
       # skipping, so this job cannot pass without having run them.
@@ -239,13 +254,14 @@ jobs:
       - name: Start containerd
         env:
           CONTAINERD_VERSION: 2.3.5
-          CONTAINERD_SHA256: 2f0a095a71e3262d0d91ff0e50e2e4ae73c3866c4d1ff6a15f341097fba3dd44
+          CONTAINERD_ARCH: ${{ matrix.arch }}
+          CONTAINERD_SHA256: ${{ matrix.containerd-sha256 }}
         run: |
           set -euo pipefail
           dir="$RUNNER_TEMP/containerd"
           mkdir -p "$dir"
           curl -fsSL -o "$dir/containerd.tar.gz" \
-            "https://github.com/containerd/containerd/releases/download/v${CONTAINERD_VERSION}/containerd-${CONTAINERD_VERSION}-linux-amd64.tar.gz"
+            "https://github.com/containerd/containerd/releases/download/v${CONTAINERD_VERSION}/containerd-${CONTAINERD_VERSION}-linux-${CONTAINERD_ARCH}.tar.gz"
           echo "${CONTAINERD_SHA256}  $dir/containerd.tar.gz" | sha256sum -c -
           tar -C "$dir" -xzf "$dir/containerd.tar.gz"
           cat > "$dir/config.toml" <<EOF
