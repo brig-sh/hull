@@ -59,6 +59,21 @@ type Image struct {
 // chosen. A caller can still show an image whose content is damaged or
 // missing.
 func DescribeImage(ctx context.Context, cs content.Store, img images.Image, pref platforms.MatchComparer) (Image, error) {
+	return describeImage(ctx, cs, img, pref, false)
+}
+
+// DescribePlatform is DescribeImage limited to the manifests of an index a
+// pull for platform can have fetched, which pulledManifests picks out. A
+// pull describes the image it has just fetched this way, because a
+// successful pull can leave that platform's layers missing:
+// containerd's unpacker does not download a layer whose snapshot already
+// exists (core/unpack/unpacker.go). DescribeImage would then rank another
+// platform, complete from an earlier pull, ahead of the one pulled.
+func DescribePlatform(ctx context.Context, cs content.Store, img images.Image, platform platforms.MatchComparer) (Image, error) {
+	return describeImage(ctx, cs, img, platform, true)
+}
+
+func describeImage(ctx context.Context, cs content.Store, img images.Image, pref platforms.MatchComparer, onlyPref bool) (Image, error) {
 	out := Image{
 		Name:      img.Name,
 		Digest:    img.Target.Digest.String(),
@@ -71,7 +86,11 @@ func DescribeImage(ctx context.Context, cs content.Store, img images.Image, pref
 		if err != nil {
 			return out, fmt.Errorf("read index: %w", err)
 		}
-		picked, err := pickManifest(ctx, cs, idx.Manifests, pref)
+		manifests := idx.Manifests
+		if onlyPref {
+			manifests = pulledManifests(idx.Manifests, pref)
+		}
+		picked, err := pickManifest(ctx, cs, manifests, pref)
 		if err != nil {
 			return out, err
 		}
@@ -102,6 +121,31 @@ func DescribeImage(ctx context.Context, cs content.Store, img images.Image, pref
 		out.Platform = platforms.Format(config.Platform)
 	}
 	return out, nil
+}
+
+// pulledManifests returns the entries of an index that a pull for platform
+// can have fetched: those whose platform matches, or, when none does, those
+// that name no platform. The platform field of an entry is optional.
+// containerd's pull keeps an entry without one (images.FilterPlatforms) but
+// sorts it after every entry that has one (images.LimitManifests), and
+// fetches only the first, so it fetches an entry without a platform only
+// when no entry matches. Offering both kinds whenever both are present would
+// let an earlier pull's complete entry without a platform outrank the
+// matching one this pull fetched.
+func pulledManifests(manifests []ocispec.Descriptor, platform platforms.Matcher) []ocispec.Descriptor {
+	var matching, unnamed []ocispec.Descriptor
+	for _, m := range manifests {
+		switch {
+		case m.Platform == nil:
+			unnamed = append(unnamed, m)
+		case platform.Match(*m.Platform):
+			matching = append(matching, m)
+		}
+	}
+	if len(matching) > 0 {
+		return matching
+	}
+	return unnamed
 }
 
 // pickManifest chooses, among an index's manifests, the one pref ranks

@@ -72,6 +72,7 @@ func newApp() *cli.Command {
 		},
 		Commands: []*cli.Command{
 			imagesCommand(),
+			pullCommand(),
 		},
 	}
 }
