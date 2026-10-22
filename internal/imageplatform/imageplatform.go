@@ -19,19 +19,26 @@ package imageplatform
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 // Parse turns an "os/arch" or "os/arch/variant" string into a platform.
+//
+// An empty part is refused. Left in, "linux/" would match no image of a
+// multi-platform index and fail only at the registry. A single-platform
+// image has no index to match against, so it would be pulled whatever its
+// architecture, and recorded as the platform "linux/".
 func Parse(s string) (ocispec.Platform, error) {
 	parts := strings.Split(s, "/")
-	switch len(parts) {
-	case 2:
-		return ocispec.Platform{OS: parts[0], Architecture: parts[1]}, nil
-	case 3:
-		return ocispec.Platform{OS: parts[0], Architecture: parts[1], Variant: parts[2]}, nil
+	if len(parts) < 2 || len(parts) > 3 || slices.Contains(parts, "") {
+		return ocispec.Platform{}, fmt.Errorf("invalid platform %q, expected os/arch (e.g. linux/amd64)", s)
 	}
-	return ocispec.Platform{}, fmt.Errorf("invalid platform %q, expected os/arch (e.g. linux/amd64)", s)
+	p := ocispec.Platform{OS: parts[0], Architecture: parts[1]}
+	if len(parts) == 3 {
+		p.Variant = parts[2]
+	}
+	return p, nil
 }
