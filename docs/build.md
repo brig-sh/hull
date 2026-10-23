@@ -15,7 +15,7 @@ two runners must be signed before they can start a VM.
 ## Prerequisites
 
 - An Apple Silicon Mac. On Linux the CLI has only `hull images`,
-  `hull pull` and `hull version` so far; see
+  `hull pull`, `hull rmi` and `hull version` so far; see
   [Building on Linux](#building-on-linux).
 - **Go** 1.26 or later. `go.mod` declares 1.26.4.
 - **Xcode command line tools**, which supply Swift. `vz-runner` declares
@@ -103,8 +103,8 @@ other work, cap them rather than letting each build assume it owns the box.
 
 A Linux port has started, and it cannot run anything yet. `make linux`, or
 plain `make` on a Linux host, builds a `hull` whose only commands are
-`hull images`, `hull pull` and `hull version`. It builds no runners and
-signs nothing.
+`hull images`, `hull pull`, `hull rmi` and `hull version`. It builds no
+runners and signs nothing.
 
 ```bash
 make                        # dist/hull_linux_<host arch>
@@ -112,8 +112,8 @@ make linux LINUX_ARCH=amd64 # cross-build for another architecture
 ```
 
 On Linux, hull is a containerd client, and images live in containerd.
-`hull pull` fetches them and `hull images` lists them, with the same output
-as on macOS. Both need a running containerd, which hull does not install or
+`hull pull` fetches them, `hull images` lists them and `hull rmi` removes
+them, with the same output as on macOS. All three need a running containerd, which hull does not install or
 start. hull looks for its socket in this order:
 
 1. `--containerd-address`
@@ -155,6 +155,32 @@ A credential helper that fails, as one needing a locked keychain does,
 leaves the pull anonymous. Registries on loopback, private RFC 1918
 addresses or `.local` names are tried over HTTPS and then plain HTTP, as on
 macOS.
+
+`hull rmi` takes the macOS arguments and flags and prints the same
+`Removed <digest> <name>` lines, but containerd's model changes what some of
+them mean:
+
+- A name is one image. `hull rmi busybox` finds
+  `docker.io/library/busybox:latest`, in any spelling `hull pull` accepts,
+  and removes that name only. On macOS a tag can answer several stored
+  digests, and all of them go.
+- A digest, or a digest prefix, can match several names of one image. As
+  `docker rmi` does for an image ID in several repositories, that is refused
+  unless `--force` is given, which removes every one of them. A prefix that
+  matches more than one digest is refused as ambiguous, as on macOS.
+- `--platform` removes that platform's manifest, and containerd's garbage
+  collector takes its config, layers and snapshot, as `docker rmi --platform`
+  does. The name stays while it holds another platform. The content store
+  holds a manifest once, so every name whose index lists it loses the
+  platform too, and that takes `--force`. `--platform linux/arm64` matches an
+  image recorded as `linux/arm64/v8`.
+- The containerd containers in hull's namespace that were created from an
+  image hold it, the role instances play on macOS. A running one, with a task
+  that has not stopped, refuses the removal even under `--force`. A stopped
+  one refuses it without `--force`. A container keeps its own snapshot, so it
+  does not lose its root filesystem when its image goes.
+- `hull rmi` waits for containerd's garbage collector, so the space is free
+  when it returns. There is no `hull store compact` step.
 
 `make test` runs on Linux too. The `internal/` and `pkg/` packages build and
 test natively. Of `cmd/hull`, only the files with no darwin dependency compile
