@@ -174,3 +174,40 @@ func TestLegacyRecordAnswersItsIndexDigestReference(t *testing.T) {
 		t.Error("a record with no index digest must still answer the reference it was pulled under")
 	}
 }
+
+// MatchImages works on records a caller already has, as the Linux CLI's are,
+// which come from containerd rather than a store directory.
+func TestMatchImages(t *testing.T) {
+	arm := &ImageMetadata{Ref: refTestTag, Digest: refTestDigest, IndexDigest: refTestIndexDigest}
+	amd := &ImageMetadata{
+		Ref:         refTestTag,
+		Digest:      "sha256:c408ba1111111111111111111111111111111111111111111111111111111111",
+		IndexDigest: refTestIndexDigest,
+	}
+	images := []*ImageMetadata{arm, amd}
+
+	for _, tc := range []struct {
+		ref      string
+		want     []*ImageMetadata
+		byPrefix bool
+	}{
+		{refTestTag, []*ImageMetadata{arm, amd}, false},
+		{refTestRepo + "@" + refTestDigest, []*ImageMetadata{arm}, false},
+		{refTestIndexDigest, []*ImageMetadata{arm, amd}, false},
+		{refTestDigest[:19], []*ImageMetadata{arm}, true},
+		{"sha256:c408ba", []*ImageMetadata{arm, amd}, true},
+		{refTestRepo + ":other", nil, false},
+	} {
+		got, byPrefix := MatchImages(images, tc.ref)
+		if len(got) != len(tc.want) || byPrefix != tc.byPrefix {
+			t.Errorf("MatchImages(%q) = %d match(es), byPrefix %v; want %d, %v",
+				tc.ref, len(got), byPrefix, len(tc.want), tc.byPrefix)
+			continue
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Errorf("MatchImages(%q)[%d] = %s, want %s", tc.ref, i, got[i].Digest, tc.want[i].Digest)
+			}
+		}
+	}
+}
