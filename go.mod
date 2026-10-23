@@ -1,11 +1,11 @@
 module github.com/brig-sh/hull
 
-go 1.26.6
+go 1.26.8
 
 require (
 	github.com/brig-sh/hull/pkg/telemetry v0.0.0-00010101000000-000000000000
 	github.com/compose-spec/compose-go/v2 v2.14.0
-	github.com/containerd/containerd/v2 v2.3.5
+	github.com/containerd/containerd/v2 v2.3.6
 	github.com/containerd/errdefs v1.0.0
 	github.com/containerd/log v0.1.0
 	github.com/containerd/platforms v1.0.0-rc.5
