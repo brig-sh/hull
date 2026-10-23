@@ -143,7 +143,7 @@ as a default that an explicit `--env TERM` beats.
 | `logs <id>` | `--follow`, `-f`; `--tail`, `-n <lines>` |
 | `inspect <id>` | none. Always prints JSON |
 | `images` | `--json` prints the store's records with full digests |
-| `rmi <image>...` | `--force`, `-f` remove one a stopped instance refers to; `--platform <p>` narrow to one platform |
+| `rmi <image>...` | `--force`, `-f` remove one a stopped instance refers to; `--platform <p>` narrow to one platform. On Linux both mean more; see [Building on Linux](build.md#building-on-linux) |
 | `prune` | `--all` also remove every image no instance refers to; `--dry-run` print and remove nothing |
 | `checkpoint <id>` | `--timeout <secs>`, default 60 |
 | `restore <id>` | `--detach`, `-d`; `--stop-grace <secs>`, default 10; `--wait-ip`; `--gateway-sock <path>` |

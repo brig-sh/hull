@@ -148,3 +148,50 @@ func (m *ImageMetadata) Answers(ref Reference) bool {
 	stored, ok := canonicalRepository(m.Ref)
 	return ok && stored == ref.repository
 }
+
+// MatchImages returns every image in images the reference names.
+//
+// The reference is matched as ImageMetadata.Answers defines it: the reference
+// as written, a store key, or a digest pin checked against both digests the
+// record knows. A reference that matches nothing that way is then tried as a
+// digest prefix, because the DIGEST column of `hull images` is truncated to 19
+// characters and that is what a user copies out of it.
+//
+// byPrefix says the answer came from that fallback. A caller acting on the
+// result has to treat several matches differently in the two cases: a tag
+// naming three images names all three, while a digest prefix naming three names
+// one of them and cannot say which.
+func MatchImages(images []*ImageMetadata, ref string) (matches []*ImageMetadata, byPrefix bool) {
+	want := ParseReference(ref)
+	for _, img := range images {
+		if img.Answers(want) {
+			matches = append(matches, img)
+		}
+	}
+	if len(matches) > 0 || !IsDigestPrefix(ref) {
+		return matches, false
+	}
+
+	// A bare index digest names every platform record that resolved through
+	// it, whole. ParseReference returns early for a bare `sha256:` string with
+	// Digest empty, so Answers never reaches its IndexDigest comparison and
+	// the reference fell through to the prefix pass below. There it matched
+	// each platform record through the shared index digest and was refused as
+	// ambiguous, listing digests that do not start with what was typed and
+	// leaving no way to remove by that identifier.
+	for _, img := range images {
+		if img.IndexDigest != "" && img.IndexDigest == ref {
+			matches = append(matches, img)
+		}
+	}
+	if len(matches) > 0 {
+		return matches, false
+	}
+
+	for _, img := range images {
+		if img.HasDigestPrefix(ref) {
+			matches = append(matches, img)
+		}
+	}
+	return matches, true
+}
