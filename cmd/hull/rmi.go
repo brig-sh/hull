@@ -12,13 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build darwin
-
 package main
 
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -30,18 +29,18 @@ import (
 func rmiCommand() *cli.Command {
 	return &cli.Command{
 		Name:        "rmi",
-		Usage:       "remove one or more images from the store",
+		Usage:       rmiUsage,
 		ArgsUsage:   "<image> [<image>...]",
 		Description: rmiDescription,
 		Flags: []cli.Flag{
 			&cli.BoolFlag{
 				Name:    "force",
 				Aliases: []string{"f"},
-				Usage:   "remove an image a stopped instance still refers to",
+				Usage:   rmiForceUsage,
 			},
 			&cli.StringFlag{
 				Name:  "platform",
-				Usage: "only remove entries pulled for this platform, e.g. linux/amd64",
+				Usage: rmiPlatformUsage,
 			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
@@ -64,7 +63,7 @@ func pickRemovals(ref, platform string, matches []*store.ImageMetadata, byPrefix
 		// image" for a tag the store does have, under another platform,
 		// sends the reader looking for a typo that is not there.
 		if found > 0 {
-			return nil, fmt.Errorf("%s is in the store, but not for platform %s", ref, platform)
+			return nil, fmt.Errorf(rmiNotForPlatform, ref, platform)
 		}
 		return nil, fmt.Errorf("no such image: %s", ref)
 	}
@@ -79,8 +78,9 @@ func pickRemovals(ref, platform string, matches []*store.ImageMetadata, byPrefix
 	return matches, nil
 }
 
-// imageHolder is an instance that refers to an image, and whether its VMM is
-// alive right now.
+// imageHolder is an instance that refers to an image, and whether it runs
+// right now: on macOS whether its VMM is alive, on Linux whether its
+// containerd task has not stopped.
 type imageHolder struct {
 	id      string
 	running bool
@@ -112,7 +112,9 @@ func matchedDigests(images []*store.ImageMetadata) []string {
 		digests = append(digests, img.Digest)
 	}
 	sort.Strings(digests)
-	return digests
+	// On Linux several names can point at one image, and a digest prefix
+	// that matches them all still names that one image, not several.
+	return slices.Compact(digests)
 }
 
 func holderIDs(held []imageHolder) []string {

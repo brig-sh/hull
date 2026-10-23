@@ -31,6 +31,15 @@ import (
 	"github.com/brig-sh/hull/pkg/store"
 )
 
+// The text rmiCommand and pickRemovals use, shared with Linux, words the
+// store and its instances.
+const (
+	rmiUsage          = "remove one or more images from the store"
+	rmiForceUsage     = "remove an image a stopped instance still refers to"
+	rmiPlatformUsage  = "only remove entries pulled for this platform, e.g. linux/amd64"
+	rmiNotForPlatform = "%s is in the store, but not for platform %s"
+)
+
 const rmiDescription = "An image is named by the reference it was pulled under, by its store " +
 	"digest, or by the first characters of that digest as `hull images` prints " +
 	"them.\n\n" +
