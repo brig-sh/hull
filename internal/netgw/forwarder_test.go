@@ -365,3 +365,17 @@ func TestPinsFollowTheSourceAddressNotTheMember(t *testing.T) {
 		t.Fatalf("dialed %v", got)
 	}
 }
+
+func TestRejectLogReportsAgainAfterTheInterval(t *testing.T) {
+	l := newRejectLog()
+	start := time.Now()
+	if !l.first("k", start) {
+		t.Fatal("the first report was held back")
+	}
+	if l.first("k", start.Add(rejectLogInterval-time.Second)) {
+		t.Fatal("a repeat inside the interval was reported")
+	}
+	if !l.first("k", start.Add(rejectLogInterval)) {
+		t.Fatal("a repeat once the interval ran out was held back")
+	}
+}

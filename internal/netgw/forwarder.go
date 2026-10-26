@@ -75,14 +75,20 @@ const rejectLogInterval = 30 * time.Second
 func newRejectLog() *rejectLog { return &rejectLog{seen: map[string]time.Time{}} }
 
 func (l *rejectLog) report(protocol string, guest netip.Addr, dst netip.Addr, port uint16) {
-	key := fmt.Sprintf("%s|%s|%s|%d", protocol, guest, dst, port)
-	now := time.Now()
+	if !l.first(fmt.Sprintf("%s|%s|%s|%d", protocol, guest, dst, port), time.Now()) {
+		return
+	}
+	log.Warnf("egress: rejected %s from %s to %s", protocol, guest, net.JoinHostPort(dst.String(), strconv.Itoa(int(port))))
+}
 
+// first reports whether key is due a line at now, and if it is, starts its
+// interval.
+func (l *rejectLog) first(key string, now time.Time) bool {
 	l.mu.Lock()
+	defer l.mu.Unlock()
 	last, ok := l.seen[key]
 	if ok && now.Sub(last) < rejectLogInterval {
-		l.mu.Unlock()
-		return
+		return false
 	}
 	l.seen[key] = now
 	for k, t := range l.seen {
@@ -90,9 +96,7 @@ func (l *rejectLog) report(protocol string, guest netip.Addr, dst netip.Addr, po
 			delete(l.seen, k)
 		}
 	}
-	l.mu.Unlock()
-
-	log.Warnf("egress: rejected %s from %s to %s", protocol, guest, net.JoinHostPort(dst.String(), strconv.Itoa(int(port))))
+	return true
 }
 
 // tcpForwarder handles every TCP segment that matches no endpoint on the
