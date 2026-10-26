@@ -171,8 +171,8 @@ func (r VerifyResult) Message() string {
 			"of ours to check; be sure you trust where they came from", r.Ref)
 	case BundleNoTooling:
 		return fmt.Sprintf("cannot check the signature on the boot assets %s: cosign is not "+
-			"installed (`brew install cosign`). The kernel your sandboxes boot is being taken "+
-			"unverified", r.Ref)
+			"installed (%s). The kernel your sandboxes boot is being taken "+
+			"unverified", r.Ref, cosignInstall)
 	case BundleUnsigned:
 		return fmt.Sprintf("boot assets %s carry no signature; hull publishes signed bundles, so "+
 			"this is either an older one or not what we published", r.Ref)

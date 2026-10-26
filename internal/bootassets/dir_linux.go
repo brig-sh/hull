@@ -26,15 +26,18 @@ import (
 // under, which on Linux is always: hull has no store there.
 //
 // It is the directory brig fetches into when it drives nerdctl, so either
-// runtime finds a bundle the other fetched.
+// runtime finds a bundle the other fetched, and it follows brig's rules
+// (internal/runtime/bootdir_other.go in brig). A relative XDG_DATA_HOME is
+// ignored, as the XDG Base Directory spec says, because honouring it would put
+// the assets under whichever directory hull ran from, where brig never looks.
 func defaultDir() (string, error) {
+	share := os.Getenv("XDG_DATA_HOME")
+	if filepath.IsAbs(share) {
+		return filepath.Join(share, "brig", "assets"), nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("no home directory to find the boot assets in: %w", err)
 	}
-	share := os.Getenv("XDG_DATA_HOME")
-	if share == "" {
-		share = filepath.Join(home, ".local", "share")
-	}
-	return filepath.Join(share, "brig", "assets"), nil
+	return filepath.Join(home, ".local", "share", "brig", "assets"), nil
 }

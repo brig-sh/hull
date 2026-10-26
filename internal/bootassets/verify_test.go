@@ -173,6 +173,9 @@ func TestVerifyBundleTellsAMissingToolFromAFailedSignature(t *testing.T) {
 	if !strings.Contains(missing.Message(), "cosign is not installed") {
 		t.Errorf("the missing-tool message should say what to install, got: %s", missing.Message())
 	}
+	if !strings.Contains(missing.Message(), cosignInstall) {
+		t.Errorf("the missing-tool message should say how to get cosign on this OS, got: %s", missing.Message())
+	}
 	if strings.Contains(missing.Message(), "DID NOT VERIFY") {
 		t.Errorf("a missing tool must not read as a failed signature, got: %s", missing.Message())
 	}

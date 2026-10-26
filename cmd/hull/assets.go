@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build darwin
-
 package main
 
 import (
@@ -35,6 +33,9 @@ import (
 // `hull run` fetches these on demand, so this command is for the cases it
 // cannot cover: seeding a machine ahead of time, pinning a version, or finding
 // out what is actually on disk when a boot goes wrong.
+//
+// On Linux there is no `hull run` yet, so there this command, run by hand or
+// by brig, is the only thing that fetches them.
 func assetsCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "assets",
@@ -57,6 +58,11 @@ func assetsCommand() *cli.Command {
 				// forever. brig needs exactly this path -- it checks whether
 				// the assets are present and passes them to the runtime as
 				// annotations -- so hull answers rather than making it guess.
+				//
+				// On Linux there is no store and the directory is brig's own,
+				// but the reason stands: HULL_BOOT_ASSETS and BRIG_BOOT_ASSETS
+				// still move it, and brig asks hull rather than resolving them
+				// itself, as it does on macOS.
 				//
 				// One bare line, no decoration, so a shell can consume it:
 				//	assets=$(hull assets dir)

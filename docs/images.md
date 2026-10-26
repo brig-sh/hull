@@ -156,7 +156,8 @@ ghcr.io/nofireai/hull-assets:<os>-<arch>
 ```
 
 On an Apple Silicon Mac that resolves to
-`ghcr.io/nofireai/hull-assets:darwin-arm64`. The repository is public and the
+`ghcr.io/nofireai/hull-assets:darwin-arm64`, and on Linux to `linux-amd64` or
+`linux-arm64`, by the host's architecture. The repository is public and the
 pull is anonymous.
 
 ```bash
@@ -169,13 +170,20 @@ hull assets pull REF       # fetch a specific reference
 
 The kernel file is named `Image` on arm64 and `bzImage` on amd64. The initrd is
 `container-initrd`. Both live at `<store>/assets/` alongside a
-`provenance.json`.
+`provenance.json`. Linux has no store, so there they live where brig keeps
+them, `~/.local/share/brig/assets`; see
+[Building on Linux](build.md#building-on-linux).
 
 Assets live **under the store**, not at a fixed path in `$HOME`, so
 `--store-dir` is a complete isolation boundary: two stores never share a
 kernel, and an `assets pull` against one store cannot change what a run using
 another store boots. That was a real defect once. An unrelated command in
 another shell could change what a CI job booted.
+
+On Linux this does not hold. The asset directory is shared with brig, and the
+containerd namespace, hull's isolation boundary there, does not move it, so an
+`assets pull` changes what every namespace boots. Point `HULL_BOOT_ASSETS` at
+a directory of its own for anything that must not share them.
 
 ### Offline preparation
 
@@ -200,7 +208,7 @@ because it only reads a path and will not mount a volume to answer a question.
 | `HULL_REGISTRY_TOKEN` | a `read:packages` token, for a private bundle or a locked keychain |
 | `HULL_BOOT_ASSETS_ALLOW_FOREIGN` | `1`, or the repository being allowed, to fetch from a repository other than the published one. Without it, such a reference is refused |
 | `HULL_BOOT_ASSETS_INSECURE` | `1` to fetch from a registry that resolves to a scheme other than https |
-| `XDG_DATA_HOME` | consulted only with no store and off macOS. Assets then live under `$XDG_DATA_HOME/brig/assets` |
+| `XDG_DATA_HOME` | consulted only on Linux, and only when it is an absolute path. Assets then live under `$XDG_DATA_HOME/brig/assets` |
 
 The last two exist because a kernel is more privileged than the filesystem
 above it. Without `HULL_BOOT_ASSETS_INSECURE`, hull refuses a non-https
@@ -252,8 +260,10 @@ That last row is deliberate. A typo such as `HULL_VERIFY=of` or
 `HULL_VERIFY=false` must not be the thing that silently turns the check off, so
 the fallback is the safe end.
 
-The Homebrew cask depends on `cosign` for this reason. On a host without it,
-`warn` boots with a warning and `require` refuses.
+The Homebrew cask depends on `cosign` for this reason. On Linux nothing
+installs it for you; see
+[Sigstore's installation page](https://docs.sigstore.dev/cosign/system_config/installation/).
+On a host without it, `warn` boots with a warning and `require` refuses.
 
 ### What `provenance.json` is, and is not
 
