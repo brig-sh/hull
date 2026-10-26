@@ -100,7 +100,7 @@ func TestAssetsShowListsTheFiles(t *testing.T) {
 	for _, want := range []string{
 		"directory: " + dir + "\n",
 		"reference: " + bootassets.Ref() + "\n",
-		"provenance: none",
+		"provenance: none (no record beside these files",
 		bootassets.KernelName() + " ",
 		bootassets.InitrdName + " ",
 	} {
@@ -110,5 +110,36 @@ func TestAssetsShowListsTheFiles(t *testing.T) {
 	}
 	if strings.Contains(got, "missing") {
 		t.Errorf("hull assets show reported a file missing:\n%s", got)
+	}
+}
+
+// Before anything is fetched there is no record because there is nothing to
+// record, and show says that rather than blaming an older hull.
+func TestAssetsShowBeforeAnyFetch(t *testing.T) {
+	t.Setenv("HULL_BOOT_ASSETS", t.TempDir())
+
+	got := runAssets(t, "show")
+	if !strings.Contains(got, "provenance: none (the boot assets have not been fetched here)\n") {
+		t.Errorf("hull assets show printed\n%s\nwant it to say nothing has been fetched", got)
+	}
+}
+
+// Fetch writes its record last, so a fetch interrupted after the kernel
+// leaves a kernel and no record. show must not then claim nothing was
+// fetched while its table lists the kernel.
+func TestAssetsShowAfterAnUnfinishedFetch(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HULL_BOOT_ASSETS", dir)
+	err := os.WriteFile(filepath.Join(dir, bootassets.KernelName()), []byte("not a kernel"), 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := runAssets(t, "show")
+	if strings.Contains(got, "have not been fetched") {
+		t.Errorf("hull assets show printed\n%s\nwant it not to say nothing was fetched", got)
+	}
+	if !strings.Contains(got, "a fetch that did not finish") {
+		t.Errorf("hull assets show printed\n%s\nwant it to name an unfinished fetch", got)
 	}
 }
