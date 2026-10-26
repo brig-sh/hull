@@ -128,8 +128,12 @@ func showBootAssets(stdout io.Writer, storeDir string) error {
 	// as a full one: "we did not check" is information, and hiding it behind a
 	// missing line is how it stops being noticed.
 	switch record, err := bootassets.Record(storeDir); {
+	case errors.Is(err, bootassets.ErrNoProvenance) && bootAssetFilesAbsent(storeDir):
+		_, _ = fmt.Fprintf(stdout, "provenance: none (the boot assets have not been fetched here)\n\n")
 	case errors.Is(err, bootassets.ErrNoProvenance):
-		_, _ = fmt.Fprintf(stdout, "provenance: none (fetched by a hull that predates the record)\n\n")
+		_, _ = fmt.Fprintf(stdout, "provenance: none (no record beside these files: a fetch that "+
+			"did not finish, a hull that predates the record, or something other than hull put "+
+			"them here)\n\n")
 	case err != nil:
 		_, _ = fmt.Fprintf(stdout, "provenance: unreadable: %v\n\n", err)
 	case record.VerifiedDigest != "":
@@ -164,4 +168,22 @@ func showBootAssets(stdout io.Writer, storeDir string) error {
 		}
 	}
 	return w.Flush()
+}
+
+// bootAssetFilesAbsent reports whether neither the kernel nor the initrd is
+// on disk. bootassets.Present is not the test for "nothing was fetched": it
+// is false as soon as one file is missing or empty, which is also what a
+// fetch interrupted between the two files leaves behind.
+func bootAssetFilesAbsent(storeDir string) bool {
+	kernel, initrd, err := bootassets.Paths(storeDir)
+	if err != nil {
+		return false
+	}
+	for _, path := range []string{kernel, initrd} {
+		_, err := os.Stat(path)
+		if !errors.Is(err, os.ErrNotExist) {
+			return false
+		}
+	}
+	return true
 }
