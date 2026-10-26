@@ -91,6 +91,9 @@ func KernelName() string {
 // HULL_BOOT_ASSETS still points at a local build and wins over everything.
 // BRIG_BOOT_ASSETS is honoured too, so a machine that already has brig pointed
 // somewhere does not need the same path spelled twice.
+//
+// On Linux hull has no store, so its callers pass an empty storeDir and get
+// the directory brig uses there.
 func Dir(storeDir string) (string, error) {
 	if d := os.Getenv("HULL_BOOT_ASSETS"); d != "" {
 		return d, nil
@@ -101,20 +104,8 @@ func Dir(storeDir string) (string, error) {
 	if storeDir != "" {
 		return filepath.Join(storeDir, "assets"), nil
 	}
-	// No store to hang them off: fall back to the per-platform default, which
-	// is what brig looks for when it is driving something other than hull.
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("no home directory to find the boot assets in: %w", err)
-	}
-	if runtime.GOOS == "darwin" {
-		return filepath.Join(home, ".hull", "assets"), nil
-	}
-	share := os.Getenv("XDG_DATA_HOME")
-	if share == "" {
-		share = filepath.Join(home, ".local", "share")
-	}
-	return filepath.Join(share, "brig", "assets"), nil
+	// No store to hang them off: fall back to the per-platform default.
+	return defaultDir()
 }
 
 // Ref is the registry reference for this host's bundle.
