@@ -10,7 +10,9 @@ import (
 	"testing"
 )
 
-// Linux hull has no store, so its directory is the one brig uses.
+// Linux hull has no store, so its directory is brig's, resolved by brig's
+// rules: a relative XDG_DATA_HOME would put the assets where brig never
+// looks.
 func TestDirWithoutAStoreFollowsBrig(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -21,6 +23,7 @@ func TestDirWithoutAStoreFollowsBrig(t *testing.T) {
 		want string
 	}{
 		{"", filepath.Join(home, ".local", "share", "brig", "assets")},
+		{"relative/share", filepath.Join(home, ".local", "share", "brig", "assets")},
 		{"/srv/share", filepath.Join("/srv/share", "brig", "assets")},
 	} {
 		t.Setenv("XDG_DATA_HOME", tc.xdg)

@@ -71,6 +71,7 @@ func newApp() *cli.Command {
 			return nil, nil
 		},
 		Commands: []*cli.Command{
+			assetsCommand(),
 			imagesCommand(),
 			pullCommand(),
 			rmiCommand(),

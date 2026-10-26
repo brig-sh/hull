@@ -14,8 +14,8 @@ two runners must be signed before they can start a VM.
 
 ## Prerequisites
 
-- An Apple Silicon Mac. On Linux the CLI has only `hull images`,
-  `hull pull`, `hull rmi` and `hull version` so far; see
+- An Apple Silicon Mac. On Linux the CLI has only `hull assets`,
+  `hull images`, `hull pull`, `hull rmi` and `hull version` so far; see
   [Building on Linux](#building-on-linux).
 - **Go** 1.26 or later. `go.mod` declares 1.26.4.
 - **Xcode command line tools**, which supply Swift. `vz-runner` declares
@@ -103,8 +103,8 @@ other work, cap them rather than letting each build assume it owns the box.
 
 A Linux port has started, and it cannot run anything yet. `make linux`, or
 plain `make` on a Linux host, builds a `hull` whose only commands are
-`hull images`, `hull pull`, `hull rmi` and `hull version`. It builds no
-runners and signs nothing.
+`hull assets`, `hull images`, `hull pull`, `hull rmi` and `hull version`. It
+builds no runners and signs nothing.
 
 ```bash
 make                        # dist/hull_linux_<host arch>
@@ -181,6 +181,27 @@ them mean:
   does not lose its root filesystem when its image goes.
 - `hull rmi` waits for containerd's garbage collector, so the space is free
   when it returns. There is no `hull store compact` step.
+
+`hull assets` has the macOS subcommands, output, signature check and
+`provenance.json`; see [Boot assets](images.md#boot-assets). It does not use
+containerd, and only the directory differs. With no store, the assets live
+where brig keeps them on Linux, so a bundle either tool fetched is found by
+the other:
+
+1. `$HULL_BOOT_ASSETS`
+2. `$BRIG_BOOT_ASSETS`
+3. `$XDG_DATA_HOME/brig/assets`, when `XDG_DATA_HOME` is an absolute path. A
+   relative one is ignored, as brig ignores it
+4. `~/.local/share/brig/assets`
+
+The namespace does not move this directory, so every namespace shares one
+kernel with brig. There is no `hull run` on Linux yet, so today only brig,
+through nerdctl, boots these files. Checking their signature needs cosign on
+the `PATH`. On macOS the Homebrew cask installs it; on Linux nothing does, so
+install it yourself, as
+[Sigstore's installation page](https://docs.sigstore.dev/cosign/system_config/installation/)
+describes. Without it a fetch warns that it took the assets unchecked, and
+`HULL_VERIFY=require` refuses the fetch.
 
 `make test` runs on Linux too. The `internal/` and `pkg/` packages build and
 test natively. Of `cmd/hull`, only the files with no darwin dependency compile

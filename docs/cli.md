@@ -272,9 +272,11 @@ whole kernel command line.
 | `HULL_VERIFY` | how the bundle's cosign signature is checked: `warn` (default), `require`, `strict`, or `off`/`none`/`0`. Anything unrecognized is `warn` |
 | `HULL_BOOT_ASSETS_ALLOW_FOREIGN` | `1`, or the repository being allowed, to fetch from a repository other than the published one |
 | `HULL_BOOT_ASSETS_INSECURE` | `1` to fetch from a registry that resolves to a scheme other than https |
-| `XDG_DATA_HOME` | consulted only with no store and off macOS; assets then live under `$XDG_DATA_HOME/brig/assets` |
+| `XDG_DATA_HOME` | consulted only on Linux, and only when it is an absolute path; assets then live under `$XDG_DATA_HOME/brig/assets` |
 
-With no store, the fallback asset directory is `~/.hull/assets` on macOS.
+With no store, the fallback asset directory is `~/.hull/assets` on macOS. Linux
+never has a store, and the directory there is `~/.local/share/brig/assets`, the
+one brig uses; see [Building on Linux](build.md#building-on-linux).
 
 ### Telemetry
 
