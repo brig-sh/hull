@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"text/tabwriter"
@@ -43,12 +44,12 @@ func assetsCommand() *cli.Command {
 				Name:  "show",
 				Usage: "show where the boot assets are and whether they are present",
 				Action: func(_ context.Context, cmd *cli.Command) error {
-					return showBootAssets(cmd.String("store-dir"))
+					return showBootAssets(cmd.Writer, assetsStoreDir(cmd))
 				},
 			},
 			{
 				Name:  "dir",
-				Usage: "print the boot asset directory for this store, and nothing else",
+				Usage: assetsDirUsage,
 				// Now that the assets live under the store, nothing outside
 				// hull can work out where they are: it would have to know the
 				// store dir, the default store location and the precedence of
@@ -60,12 +61,12 @@ func assetsCommand() *cli.Command {
 				// One bare line, no decoration, so a shell can consume it:
 				//	assets=$(hull assets dir)
 				Action: func(_ context.Context, cmd *cli.Command) error {
-					dir, err := bootassets.Dir(cmd.String("store-dir"))
+					dir, err := bootassets.Dir(assetsStoreDir(cmd))
 					if err != nil {
 						return err
 					}
-					fmt.Println(dir)
-					return nil
+					_, err = fmt.Fprintln(cmd.Writer, dir)
+					return err
 				},
 			},
 			{
@@ -83,18 +84,9 @@ func assetsCommand() *cli.Command {
 					if cmd.Args().Len() > 0 {
 						ref = cmd.Args().First()
 					}
-					storeDir := cmd.String("store-dir")
-					// The assets live under the store, so the store has to be
-					// real before anything is written into it. Skipping this
-					// leaves the files on the bare mountpoint, and the next
-					// command that opens the store refuses to mount over them
-					// -- a fresh install would pull its assets and then be
-					// unable to run anything.
-					//
-					// `show` and `dir` do not do this: they only read a path,
-					// and mounting a 200GB image to answer a question would be
-					// the same overreach that made every command mount one.
-					if err := ensureStore(storeDir, defaultStoreDir()); err != nil {
+					storeDir := assetsStoreDir(cmd)
+					err := prepareAssetsStore(storeDir)
+					if err != nil {
 						return err
 					}
 					if !cmd.Bool("force") && bootassets.Present(storeDir) {
@@ -102,26 +94,27 @@ func assetsCommand() *cli.Command {
 						if err != nil {
 							return err
 						}
-						fmt.Printf("boot assets are already present in %s (use --force to replace them)\n", dir)
-						return nil
-					}
-					if err := bootassets.Fetch(ctx, ref, storeDir); err != nil {
+						_, err = fmt.Fprintf(cmd.Writer, "boot assets are already present in %s (use --force to replace them)\n", dir)
 						return err
 					}
-					return showBootAssets(storeDir)
+					err = bootassets.Fetch(ctx, ref, storeDir)
+					if err != nil {
+						return err
+					}
+					return showBootAssets(cmd.Writer, storeDir)
 				},
 			},
 		},
 	}
 }
 
-func showBootAssets(storeDir string) error {
+func showBootAssets(stdout io.Writer, storeDir string) error {
 	dir, err := bootassets.Dir(storeDir)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("directory: %s\n", dir)
-	fmt.Printf("reference: %s\n", bootassets.Ref())
+	_, _ = fmt.Fprintf(stdout, "directory: %s\n", dir)
+	_, _ = fmt.Fprintf(stdout, "reference: %s\n", bootassets.Ref())
 
 	// Whether these bytes were signature-checked when they arrived is the one
 	// thing about them nobody can otherwise find out, and it is the question
@@ -130,13 +123,13 @@ func showBootAssets(storeDir string) error {
 	// missing line is how it stops being noticed.
 	switch record, err := bootassets.Record(storeDir); {
 	case errors.Is(err, bootassets.ErrNoProvenance):
-		fmt.Printf("provenance: none (fetched by a hull that predates the record)\n\n")
+		_, _ = fmt.Fprintf(stdout, "provenance: none (fetched by a hull that predates the record)\n\n")
 	case err != nil:
-		fmt.Printf("provenance: unreadable: %v\n\n", err)
+		_, _ = fmt.Fprintf(stdout, "provenance: unreadable: %v\n\n", err)
 	case record.VerifiedDigest != "":
-		fmt.Printf("fetched from: %s\nsignature: verified against %s\n\n", record.Ref, record.VerifiedDigest)
+		_, _ = fmt.Fprintf(stdout, "fetched from: %s\nsignature: verified against %s\n\n", record.Ref, record.VerifiedDigest)
 	default:
-		fmt.Printf("fetched from: %s\nsignature: NOT checked when these were fetched "+
+		_, _ = fmt.Fprintf(stdout, "fetched from: %s\nsignature: NOT checked when these were fetched "+
 			"(no cosign on the host, an unsigned bundle, or %s=off)\n\n",
 			record.Ref, bootassets.VerifyModeEnv)
 	}
@@ -144,7 +137,7 @@ func showBootAssets(storeDir string) error {
 	// Writes to a tabwriter go to its buffer, so the only error that can
 	// actually surface is Flush's -- which is returned. Ignoring them
 	// explicitly says that, rather than leaving errcheck to guess.
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
+	w := tabwriter.NewWriter(stdout, 0, 0, 3, ' ', 0)
 	row := func(format string, args ...any) {
 		_, _ = fmt.Fprintf(w, format, args...)
 	}
