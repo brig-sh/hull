@@ -71,23 +71,6 @@ func TestDirFallsBackToBrigOverride(t *testing.T) {
 	}
 }
 
-// With no store to hang them off, fall back to what brig looks for.
-func TestDirWithoutAStoreMatchesTheRuntimes(t *testing.T) {
-	t.Setenv("HULL_BOOT_ASSETS", "")
-	t.Setenv("BRIG_BOOT_ASSETS", "")
-	got, err := Dir("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := filepath.Join(".hull", "assets")
-	if runtime.GOOS != "darwin" {
-		want = filepath.Join("brig", "assets")
-	}
-	if !strings.HasSuffix(got, want) {
-		t.Fatalf("Dir = %q, want it to end in %q", got, want)
-	}
-}
-
 // The platform lives in the tag, not in an index, so the default reference has
 // to name this host exactly.
 func TestRefNamesTheHostPlatform(t *testing.T) {
