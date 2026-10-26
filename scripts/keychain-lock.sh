@@ -29,26 +29,94 @@ LOCK="${HULL_KEYCHAIN_LOCK:-/Users/Shared/hull-keychain.lock}"
 STALE="${HULL_KEYCHAIN_LOCK_STALE:-5400}"
 WAIT="${HULL_KEYCHAIN_LOCK_WAIT:-3600}"
 POLL="${HULL_KEYCHAIN_LOCK_POLL:-10}"
+# How long a takeover marker may sit before the next generation takes over
+# from it. A takeover takes milliseconds.
+MARK_STALE="${HULL_KEYCHAIN_LOCK_MARK_STALE:-120}"
 OWNER="${GITHUB_RUN_ID:-local}.${GITHUB_RUN_ATTEMPT:-0}.${GITHUB_JOB:-job}"
 
 holder() { cat "$LOCK/owner" 2> /dev/null || echo "unknown"; }
 
-# The lock's age, from the owner file. Empty while the winner of a mkdir has
-# not written it yet, and empty when a release removed it between the test and
-# the stat. Neither is stale.
-age() {
-  m="$(stat -f %m "$LOCK/owner" 2> /dev/null)" || return 0
+# Seconds since a path last changed, or nothing when it is gone.
+since() {
+  m="$(stat -f %m "$1" 2> /dev/null)" || return 0
   echo $(( $(date +%s) - m ))
+}
+
+# The lock's age: from the owner file, or from the directory when the holder
+# died before writing one. Nothing when no lock exists.
+age() {
+  since "$LOCK/owner" | grep . || since "$LOCK"
+}
+
+# The identity of a lock directory: its inode, its birth time and its owner. A
+# lock that is removed and made again has a new one. Nothing when it is gone.
+ident() {
+  i="$(stat -f '%i.%B' "$1" 2> /dev/null)" || return 0
+  o="$(cat "$1/owner" 2> /dev/null | tr -c 'A-Za-z0-9._-' '_')" || true
+  echo "$i.${o:-none}"
+}
+
+# Take over the stale lock whose identity is $1, and return 0 once it is gone.
+#
+# Only the waiter that creates the takeover marker for this identity acts, so
+# two waiters that saw the same stale lock never both act. No marker is ever
+# cleared to make room: a marker names one lock, and a lock made again has
+# another identity. A marker older than MARK_STALE was left by a waiter killed
+# here, and the next generation of the marker takes over from it.
+#
+# The winner checks that $LOCK is still the lock it judged stale, moves it
+# aside with one rename, and only then removes it. A removal that fails, or a
+# job cancelled after the rename, leaves a renamed directory that blocks
+# nobody. If the moved directory turns out to be another lock, which takes a
+# winner stalled past MARK_STALE between two commands, it is put back.
+take_over() {
+  id="$1"
+  [ -n "$id" ] || return 1
+  gen=1
+  while ! mkdir "$LOCK.takeover.$id.$gen" 2> /dev/null; do
+    t="$(since "$LOCK.takeover.$id.$gen")"
+    # A live waiter holds this generation, or the marker cannot be made.
+    if [ -z "$t" ] || [ "$t" -le "$MARK_STALE" ] || [ "$gen" -ge 5 ]; then
+      return 1
+    fi
+    gen=$(( gen + 1 ))
+  done
+  [ "$(ident "$LOCK")" = "$id" ] || return 1
+  a="$(age)"
+  if [ -z "$a" ] || [ "$a" -le "$STALE" ]; then
+    return 1
+  fi
+  dead="$LOCK.dead.$id.$gen"
+  if ! mv "$LOCK" "$dead" 2> /dev/null; then
+    echo "keychain-lock: cannot move aside the lock held for ${a}s by $(holder):" \
+      "$(ls -ld "$LOCK" 2> /dev/null || echo gone)" >&2
+    return 1
+  fi
+  if [ "$(ident "$dead")" != "$id" ]; then
+    echo "keychain-lock: moved a live lock aside by mistake; putting it back" >&2
+    [ -e "$LOCK" ] || mv "$dead" "$LOCK" 2> /dev/null || true
+    return 1
+  fi
+  echo "keychain-lock: took over a lock held for ${a}s by $(cat "$dead/owner" 2> /dev/null || echo unknown)" >&2
+  rm -rf "$dead" 2> /dev/null || true
+}
+
+# Markers and moved-aside locks are left behind on purpose (see take_over).
+# One older than twice STALE names a lock that is long gone.
+prune() {
+  find "$(dirname "$LOCK")" -maxdepth 1 \
+    \( -name "$(basename "$LOCK").takeover.*" -o -name "$(basename "$LOCK").dead.*" \) \
+    -mmin +$(( STALE * 2 / 60 )) -exec rm -rf {} + 2> /dev/null || true
 }
 
 case "${1:-}" in
   acquire)
+    prune
     waited=0
     until mkdir "$LOCK" 2> /dev/null; do
       a="$(age)"
-      if [ -n "$a" ] && [ "$a" -gt "$STALE" ]; then
-        echo "keychain-lock: taking over a lock held for ${a}s by $(holder)" >&2
-        rm -rf "$LOCK"
+      if [ -n "$a" ] && [ "$a" -gt "$STALE" ] && take_over "$(ident "$LOCK")"; then
+        # The stale lock is gone: try for it again at once.
         continue
       fi
       if [ "$waited" -ge "$WAIT" ]; then
