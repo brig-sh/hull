@@ -465,6 +465,11 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # The signing jobs share a lock on the Mac (scripts/keychain-lock.sh).
+      # Its test runs on a lock in a temporary directory, and macOS stat.
+      - name: Check the keychain lock
+        run: sh scripts/keychain-lock-test.sh
+
       # cmd/hull/terminal_swift_contract_test.go runs the guest-console filter
       # policy through BOTH implementations -- Go's sanitizeTerminalBytes and
       # the Swift TerminalSanitizer, reached by driving `vz-runner
