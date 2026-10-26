@@ -63,8 +63,9 @@ func toNetip(a tcpip.Address) netip.Addr {
 
 // rejectLog keeps a rejected destination out of the log for a while after it
 // is first reported. A blocked TCP connection is retried by the guest for as
-// long as its stack keeps retransmitting the SYN, and one line per
-// retransmission buries everything else.
+// long as its stack keeps retransmitting the SYN, and a refused name is asked
+// again by the guest's resolver, so one line per attempt buries everything
+// else.
 type rejectLog struct {
 	mu   sync.Mutex
 	seen map[string]time.Time
@@ -82,8 +83,12 @@ func (l *rejectLog) report(protocol string, guest netip.Addr, dst netip.Addr, po
 }
 
 // first reports whether key is due a line at now, and if it is, starts its
-// interval.
+// interval. A nil log holds nothing back, so a DNS handler built without one
+// logs every refusal.
 func (l *rejectLog) first(key string, now time.Time) bool {
+	if l == nil {
+		return true
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	last, ok := l.seen[key]

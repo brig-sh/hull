@@ -19,10 +19,13 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
+	"strings"
 	"testing"
 
 	gvntypes "github.com/containers/gvisor-tap-vsock/pkg/types"
 	"github.com/miekg/dns"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 )
@@ -270,6 +273,74 @@ func TestDNSRefusesUnlistedNamesUnderDenyDefault(t *testing.T) {
 	}
 	if len(reply.Answer) != 0 {
 		t.Fatalf("a refused query still carried answers: %v", reply.Answer)
+	}
+}
+
+// refusalLines returns the refusal lines logged since the hook was installed.
+func refusalLines(hook *logtest.Hook) []string {
+	var out []string
+	for _, e := range hook.AllEntries() {
+		if strings.HasPrefix(e.Message, "egress: refused the ") {
+			out = append(out, e.Message)
+		}
+	}
+	return out
+}
+
+// A resolver asks for A and AAAA side by side, so a line that leaves out the
+// type reads as the same refusal twice.
+func TestDNSRefusalLogNamesTheRecordType(t *testing.T) {
+	hook := logtest.NewGlobal()
+	defer hook.Reset()
+	h := &dnsHandler{
+		upstream: newFakeResolver(nil),
+		policy:   mustPolicy(t, "deny", nil, nil),
+		rejects:  newRejectLog(),
+	}
+	ask(h, "evil.test", dns.TypeA)
+	ask(h, "evil.test", dns.TypeAAAA)
+
+	want := []string{
+		"egress: refused the A query evil.test. from " + testGuestIP,
+		"egress: refused the AAAA query evil.test. from " + testGuestIP,
+	}
+	if got := refusalLines(hook); !slices.Equal(got, want) {
+		t.Fatalf("refusal lines = %q, want %q", got, want)
+	}
+}
+
+// glibc asks a nameserver that refused again, and a guest in a loop asks
+// without end. Each repeat is still refused; only its line is held back.
+func TestDNSRefusalIsLoggedOncePerInterval(t *testing.T) {
+	hook := logtest.NewGlobal()
+	defer hook.Reset()
+	h := &dnsHandler{
+		upstream: newFakeResolver(nil),
+		policy:   mustPolicy(t, "deny", nil, nil),
+		rejects:  newRejectLog(),
+	}
+	for i := 0; i < 5; i++ {
+		// A resolver may randomise the case of a name per query, which does
+		// not make it a new name.
+		name := "evil.test"
+		if i%2 == 1 {
+			name = "EVIL.test"
+		}
+		if reply := ask(h, name, dns.TypeA); reply.Rcode != dns.RcodeRefused {
+			t.Fatalf("repeat %d: rcode = %s, want REFUSED", i, dns.RcodeToString[reply.Rcode])
+		}
+	}
+	other := netip.MustParseAddr("10.87.0.3")
+	if reply := askAs(h, other, "evil.test", dns.TypeA); reply.Rcode != dns.RcodeRefused {
+		t.Fatalf("other guest: rcode = %s, want REFUSED", dns.RcodeToString[reply.Rcode])
+	}
+
+	want := []string{
+		"egress: refused the A query evil.test. from " + testGuestIP,
+		"egress: refused the A query evil.test. from 10.87.0.3",
+	}
+	if got := refusalLines(hook); !slices.Equal(got, want) {
+		t.Fatalf("refusal lines = %q, want %q", got, want)
 	}
 }
 

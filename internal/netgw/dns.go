@@ -16,9 +16,11 @@ package netgw
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/netip"
 	"strings"
+	"time"
 
 	gvntypes "github.com/containers/gvisor-tap-vsock/pkg/types"
 	"github.com/miekg/dns"
@@ -45,6 +47,7 @@ type dnsHandler struct {
 	upstream resolver
 	policy   *Policy
 	diverts  *diverts
+	rejects  *rejectLog
 }
 
 func (h *dnsHandler) handle(w dns.ResponseWriter, r *dns.Msg, maxSize int) {
@@ -76,13 +79,23 @@ func (h *dnsHandler) addAnswers(m *dns.Msg, guest netip.Addr) {
 		}
 		allowed := h.policy.AllowsQuery(q.Name)
 		if !allowed && !h.diverts.coversName(q.Name) {
-			log.Warnf("egress: refused the query %s from %s", q.Name, guest)
+			h.rejects.reportQuery(guest, q)
 			m.Answer = nil
 			m.Rcode = dns.RcodeRefused
 			return
 		}
 		h.addUpstreamAnswers(m, q, guest, allowed)
 	}
+}
+
+// reportQuery logs a refused query once per interval. The type is in the line
+// because a resolver asks for A and AAAA side by side, and the key folds case
+// because a resolver may randomise it per query.
+func (l *rejectLog) reportQuery(guest netip.Addr, q dns.Question) {
+	if !l.first(fmt.Sprintf("dns|%s|%s|%d", guest, normalizeName(q.Name), q.Qtype), time.Now()) {
+		return
+	}
+	log.Warnf("egress: refused the %s query %s from %s", dns.Type(q.Qtype), q.Name, guest)
 }
 
 // guestAddr is the address of whoever sent the query, which is the guest the
