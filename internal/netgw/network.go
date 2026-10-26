@@ -262,7 +262,7 @@ func addServices(cfg Config, s *stack.Stack, ipPool *tap.IPPool, divs *diverts) 
 	s.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpForwarder(s, cfg.Egress, divs, gateway, dial, rejects).HandlePacket)
 	s.SetTransportProtocolHandler(udp.ProtocolNumber, udpForwarder(s, cfg.Egress, divs, gateway, dial, rejects).HandlePacket)
 
-	if err := dnsServer(cfg, s, divs); err != nil {
+	if err := dnsServer(cfg, s, divs, rejects); err != nil {
 		return nil, err
 	}
 	if err := dhcpServer(cfg, s, ipPool); err != nil {
@@ -271,7 +271,7 @@ func addServices(cfg Config, s *stack.Stack, ipPool *tap.IPPool, divs *diverts) 
 	return forwardHostVM(cfg, s)
 }
 
-func dnsServer(cfg Config, s *stack.Stack, divs *diverts) error {
+func dnsServer(cfg Config, s *stack.Stack, divs *diverts, rejects *rejectLog) error {
 	gatewayAddr := tcpip.AddrFrom4Slice(net.ParseIP(cfg.GatewayIP).To4())
 	udpConn, err := gonet.DialUDP(s, &tcpip.FullAddress{NIC: nicID, Addr: gatewayAddr, Port: 53}, nil, ipv4.ProtocolNumber)
 	if err != nil {
@@ -282,7 +282,7 @@ func dnsServer(cfg Config, s *stack.Stack, divs *diverts) error {
 		return err
 	}
 
-	handler := &dnsHandler{zones: cfg.DNSZones, upstream: upstreamResolver(cfg), policy: cfg.Egress, diverts: divs}
+	handler := &dnsHandler{zones: cfg.DNSZones, upstream: upstreamResolver(cfg), policy: cfg.Egress, diverts: divs, rejects: rejects}
 	serve := func(srv *dns.Server, maxSize int) {
 		mux := dns.NewServeMux()
 		mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) { handler.handle(w, r, maxSize) })
