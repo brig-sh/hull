@@ -40,7 +40,6 @@ func TestGatewayRefusesBadDiverts(t *testing.T) {
 		{"relative socket", []string{"--divert", "api.example.com:443=divert.sock"}, "must be absolute"},
 		{"port out of range", []string{"--divert", "api.example.com:70000=/tmp/d.sock"}, "not in 1-65535"},
 		{"no port", []string{"--divert", "api.example.com=/tmp/d.sock"}, "expected host:port=socket"},
-		{"link-local", []string{"--divert", "169.254.169.254:80=/tmp/d.sock"}, "resets link-local"},
 		{"duplicate", []string{"--divert", "api.example.com:443=/tmp/a.sock", "--divert", "api.example.com:443=/tmp/b.sock"}, "diverted twice"},
 		{"socket path too long", []string{"--divert", "api.example.com:443=/" + strings.Repeat("d", 200)}, "pass a shorter --divert socket path"},
 	}

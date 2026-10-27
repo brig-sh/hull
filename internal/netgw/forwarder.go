@@ -107,7 +107,8 @@ func (l *rejectLog) first(key string, now time.Time) bool {
 // tcpForwarder handles every TCP segment that matches no endpoint on the
 // stack, which is every connection a guest opens to the outside world.
 //
-// A diverted destination is matched before the policy, and is never dialed.
+// A diverted destination is matched before the link-local reset and the
+// policy, and is never dialed.
 //
 // The gateway's own address is never dialed either. It names this gateway,
 // not a host: dialing it sent the guest's connection to whatever answers that
@@ -121,12 +122,15 @@ func tcpForwarder(s *stack.Stack, policy *Policy, divs *diverts, gateway tcpip.A
 		dst, port := r.ID().LocalAddress, r.ID().LocalPort
 		guest := r.ID().RemoteAddress
 
-		if linkLocal.Contains(dst) {
-			r.Complete(true)
-			return
-		}
+		// A divert is matched before the link-local reset: it names one
+		// address and port and is never dialed, so it cannot reach the
+		// metadata service the reset keeps the guest from.
 		if rule := divs.match(toNetip(dst), port); rule != nil {
 			rule.serve(r)
+			return
+		}
+		if linkLocal.Contains(dst) {
+			r.Complete(true)
 			return
 		}
 		if dst == gateway {
