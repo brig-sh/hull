@@ -19,7 +19,6 @@ package main
 import (
 	"context"
 	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2052,18 +2051,6 @@ func imageCarriesKernel(annotations map[string]string) bool {
 	return false
 }
 
-func parseAnnotationEntries(entries []string) (map[string]string, error) {
-	annotations := make(map[string]string, len(entries))
-	for _, entry := range entries {
-		key, value, ok := strings.Cut(entry, "=")
-		if !ok || key == "" {
-			return nil, fmt.Errorf("invalid --annotation %q, expected KEY=VALUE", entry)
-		}
-		annotations[key] = value
-	}
-	return annotations, nil
-}
-
 // errImagePlantedPath marks a containment refusal: a file hull was about to
 // write into, read out of, or boot from an unpacked image turned out to lead
 // somewhere else on the host.
@@ -2741,17 +2728,6 @@ func cachedDigest(s *store.Store, ref, platform string) (string, bool) {
 	return best.Digest, true
 }
 
-// Pull policies, matching docker's vocabulary.
-const (
-	pullMissing = "missing" // use the cached image if there is one (default)
-	pullAlways  = "always"  // re-resolve the reference and pull it again
-	pullNever   = "never"   // never reach the network; fail if not cached
-)
-
-func validPullPolicy(p string) bool {
-	return p == pullMissing || p == pullAlways || p == pullNever
-}
-
 // resolveImageDigest gets the image digest, pulling according to policy.
 //
 // Note what "missing" means for a tag: a tag is a moving target, and a cached
@@ -2782,16 +2758,6 @@ func resolveImageDigest(ctx context.Context, client *ociclient.Client, s *store.
 	}
 
 	return result.Digest, nil
-}
-
-// generateID generates a random instance ID
-func generateID(length int) string {
-	b := make([]byte, length/2)
-	if _, err := rand.Read(b); err != nil {
-		// Fallback to timestamp-based ID
-		return fmt.Sprintf("%x", time.Now().UnixNano())[:length]
-	}
-	return hex.EncodeToString(b)[:length]
 }
 
 // generateMAC returns a random MAC (QEMU's traditional 52:54:00 prefix)
