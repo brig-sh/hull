@@ -25,10 +25,12 @@ import (
 	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/core/leases"
 	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/containerd/errdefs"
@@ -107,16 +109,21 @@ func WriteImage(ctx context.Context, t testing.TB, cs content.Ingester, p ocispe
 // daemon may collect it at once: an image record references only its
 // target, and the blobs under an index or manifest are kept by labels that
 // a pull sets and WriteBlob does not.
+//
+// The lease ends with a synchronous delete. Otherwise what it held goes
+// only at the daemon's next collection, and a namespace that still holds
+// it cannot be deleted when the test ends.
 func Lease(ctx context.Context, t testing.TB, c *client.Client) context.Context {
 	t.Helper()
-	ctx, done, err := c.WithLease(ctx)
+	ls := c.LeasesService()
+	l, err := ls.Create(ctx, leases.WithRandomID(), leases.WithExpiration(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		_ = done(ctx)
+		_ = ls.Delete(ctx, l, leases.SynchronousDelete)
 	})
-	return ctx
+	return leases.WithLease(ctx, l.ID)
 }
 
 // CreateImage records name as an image that points at target, replacing a

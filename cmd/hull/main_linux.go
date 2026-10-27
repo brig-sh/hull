@@ -32,7 +32,10 @@ import (
 // containerd, in the namespace --namespace names, not in a store directory as
 // on macOS. Only the verbs that work on Linux are registered.
 
-var build = buildinfo.Read()
+var (
+	build = buildinfo.Read()
+	log   = logrus.WithField("subsystem", "hull")
+)
 
 func main() {
 	err := newApp().Run(context.Background(), os.Args)
@@ -78,6 +81,7 @@ func newApp() *cli.Command {
 			pullCommand(),
 			rmCommand(),
 			rmiCommand(),
+			runCommand(),
 			versionCommand(),
 		},
 	}
