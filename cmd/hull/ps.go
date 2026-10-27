@@ -18,11 +18,8 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"os"
-	"strconv"
-	"text/tabwriter"
 	"time"
 
 	"github.com/urfave/cli/v3"
@@ -57,18 +54,7 @@ func renderInstances(s *store.Store, out io.Writer) error {
 		return err
 	}
 
-	if len(instances) == 0 {
-		_, _ = fmt.Fprintln(out, "No instances found")
-		return nil
-	}
-
-	// Create table output
-	w := tabwriter.NewWriter(out, 4, 8, 2, ' ', 0)
-	_, _ = fmt.Fprintln(w, "ID\tSTATUS\tEXIT\tPID\tIP\tCREATED")
-
 	for _, state := range instances {
-		status := state.Status
-
 		// A StatusStarting record is deliberately left alone by the
 		// reconciliation below and shown as it is. There is no pid to probe,
 		// so there is nothing to reconcile against, and guessing "stopped"
@@ -85,7 +71,6 @@ func renderInstances(s *store.Store, out io.Writer) error {
 		// exactly this table. `stop` already checks the argv before it acts on
 		// a pid; the same check belongs on the read path.
 		if state.PID > 0 && state.Status == "running" && !processIsAVMM(state.PID, state) {
-			status = "stopped"
 			// Update state in store. The exit status stays nil: the VM
 			// ending on its own carries no observable code.
 			state.Status = "stopped"
@@ -95,44 +80,7 @@ func renderInstances(s *store.Store, out io.Writer) error {
 			}
 			_ = s.SaveInstance(state)
 		}
-
-		// "-" is an honest rendering of "ended without a reportable
-		// status"; a code only appears when one was actually observed.
-		exitStr := "-"
-		if state.ExitCode != nil {
-			exitStr = strconv.Itoa(*state.ExitCode)
-		}
-
-		// An empty cell, not a "0". A record can legitimately carry no pid --
-		// a stopped instance, or one still at StatusStarting whose run died
-		// between spawning the VMM and recording the pid -- and printing 0
-		// there would read as a real process number and invite someone (or
-		// brig) to signal it. The status column already says which it is.
-		pidStr := ""
-		if state.PID > 0 {
-			pidStr = fmt.Sprintf("%d", state.PID)
-		}
-
-		ip := state.IP
-		if ip == "" {
-			ip = "-"
-		}
-		// A zero StartTime is a row built because the record could not be
-		// read. Year 1 is not a creation time; "-" is the same empty cell
-		// the IP column already uses.
-		created := "-"
-		if !state.StartTime.IsZero() {
-			created = state.StartTime.Format("2006-01-02 15:04:05")
-		}
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			state.ID,
-			status,
-			exitStr,
-			pidStr,
-			ip,
-			created,
-		)
 	}
 
-	return w.Flush()
+	return writeInstanceTable(out, instances)
 }
