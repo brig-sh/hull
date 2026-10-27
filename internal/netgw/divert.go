@@ -67,7 +67,7 @@ const divertResolveTimeout = 5 * time.Second
 // Socket.
 type Divert struct {
 	// Host is a DNS name, lower case with no trailing dot, or an IPv4
-	// literal outside 169.254.0.0/16.
+	// literal.
 	Host string `json:"host"`
 	// Port is the destination port, 1-65535.
 	Port uint16 `json:"port"`
@@ -128,14 +128,10 @@ func parseDivert(v string) (Divert, error) {
 			return Divert{}, fmt.Errorf("invalid --divert %q: an address with a zone cannot be matched", v)
 		}
 		addr = addr.Unmap()
-		// The forwarder resets link-local before it matches a divert, and
-		// the stack has no IPv6. A divert of either would start and then
-		// reset every connection.
+		// The stack has no IPv6, so a divert of one would start and then
+		// never match.
 		if !addr.Is4() {
 			return Divert{}, fmt.Errorf("invalid --divert %q: the gateway does not forward IPv6, so %s cannot be matched", v, addr)
-		}
-		if netip.MustParsePrefix(linkLocalSubnet).Contains(addr) {
-			return Divert{}, fmt.Errorf("invalid --divert %q: the gateway resets link-local %s before it checks diverts", v, linkLocalSubnet)
 		}
 		host = addr.String()
 	} else {

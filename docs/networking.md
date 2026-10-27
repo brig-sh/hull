@@ -277,9 +277,12 @@ hull network-gateway --socket /tmp/gw.sock \
 port must be 1-65535, and a `host:port` may appear once. The flag repeats. The
 gateway refuses to start on a value it cannot parse.
 
-It also refuses an IPv6 literal and a literal in `169.254.0.0/16`. The gateway
-does not forward IPv6, and it resets link-local before it checks the diverts,
-so neither would ever be diverted.
+It also refuses an IPv6 literal, because the gateway does not forward IPv6 and
+the divert would never match.
+
+A divert may name a link-local literal in `169.254.0.0/16`. The gateway checks
+the diverts before it resets link-local, so a diverted `host:port` reaches its
+socket and every other link-local destination is still reset.
 
 For each diverted connection, the gateway connects to the socket and writes one
 line:

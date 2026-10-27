@@ -39,6 +39,7 @@ func TestParseDivertsReadsTheFlagGrammar(t *testing.T) {
 		"API.Example.com.:443=/run/brig/s1/divert.sock",
 		"93.184.216.34:8443=/tmp/a/../b.sock",
 		"[::ffff:1.2.3.4]:443=/tmp/mapped.sock",
+		"169.254.170.2:80=/tmp/link-local.sock",
 	})
 	if err != nil {
 		t.Fatalf("ParseDiverts: %v", err)
@@ -47,6 +48,7 @@ func TestParseDivertsReadsTheFlagGrammar(t *testing.T) {
 		{Host: "api.example.com", Port: 443, Socket: "/run/brig/s1/divert.sock"},
 		{Host: "93.184.216.34", Port: 8443, Socket: "/tmp/b.sock"},
 		{Host: "1.2.3.4", Port: 443, Socket: "/tmp/mapped.sock"},
+		{Host: "169.254.170.2", Port: 80, Socket: "/tmp/link-local.sock"},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %d diverts, want %d", len(got), len(want))
@@ -76,8 +78,6 @@ func TestParseDivertsRefusesWhatCannotBeMatched(t *testing.T) {
 		{"zone", []string{"[fe80::1%en0]:443=/tmp/s"}, "zone"},
 		{"IPv6", []string{"[2606:2800:220::1]:443=/tmp/s"}, "does not forward IPv6"},
 		{"IPv6 link-local", []string{"[fe80::1]:443=/tmp/s"}, "does not forward IPv6"},
-		{"link-local", []string{"169.254.169.254:80=/tmp/s"}, "resets link-local"},
-		{"mapped link-local", []string{"[::ffff:169.254.1.1]:80=/tmp/s"}, "resets link-local"},
 		{"duplicate", []string{"api.example.com:443=/tmp/a", "API.example.com.:443=/tmp/b"}, "diverted twice"},
 		{"duplicate literal", []string{"1.2.3.4:443=/tmp/a", "[::ffff:1.2.3.4]:443=/tmp/b"}, "diverted twice"},
 	}
@@ -765,4 +765,31 @@ func TestTheGatewayAddressAnswersOnlyWhatItServes(t *testing.T) {
 			owner.expectNone(t)
 		})
 	}
+}
+
+// A divert of a link-local address is served, so a guest can reach a
+// credential endpoint at the address its SDK accepts plain HTTP from. Every
+// other link-local destination, the metadata service included, is still
+// reset and never dialed.
+func TestDivertServesALinkLocalDestination(t *testing.T) {
+	owner := newSocketOwner(t)
+	n, dials := divertNetwork(t, nil, nil, "169.254.170.2:80="+owner.path)
+	m := join(t, n)
+
+	client := newTCPClient(m, "169.254.170.2", 80, 40111)
+	if !client.connect(t) {
+		t.Fatal("the diverted link-local connection was refused")
+	}
+	if got := owner.next(t); got.preamble != preambleFor("169.254.170.2", 80, 40111) {
+		t.Fatalf("preamble %q", got.preamble)
+	}
+
+	for _, dst := range []struct {
+		ip   string
+		port uint16
+	}{{"169.254.169.254", 80}, {"169.254.170.2", 443}} {
+		m.send(t, tcpSYN4(t, m, dst.ip, dst.port))
+	}
+	expectNoDial(t, dials)
+	owner.expectNone(t)
 }
