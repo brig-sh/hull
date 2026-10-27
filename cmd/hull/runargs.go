@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/urfave/cli/v3"
 )
 
 // Pull policies, matching docker's vocabulary.
@@ -55,4 +57,54 @@ func parseAnnotationEntries(entries []string) (map[string]string, error) {
 		annotations[key] = value
 	}
 	return annotations, nil
+}
+
+// The run flags whose meaning is the same on every OS. Each is its own
+// function so a command lists them in whatever order it lists the rest.
+
+func pullFlag() cli.Flag {
+	return &cli.StringFlag{
+		Name:  "pull",
+		Value: pullMissing,
+		Usage: "pull policy: 'missing' (default), 'always' or 'never'. " +
+			"A cached tag is not re-resolved, so use 'always' to pick up a republished tag",
+	}
+}
+
+func memFlag() cli.Flag {
+	return &cli.IntFlag{
+		Name:  "mem",
+		Value: 512,
+		Usage: "memory size in MB",
+	}
+}
+
+func cpusFlag() cli.Flag {
+	return &cli.IntFlag{
+		Name:  "cpus",
+		Value: 1,
+		Usage: "number of CPUs",
+	}
+}
+
+func nameFlag() cli.Flag {
+	return &cli.StringFlag{
+		Name:  "name",
+		Usage: "instance name (default: auto-generated)",
+	}
+}
+
+func annotationFlag() cli.Flag {
+	return &cli.StringSliceFlag{
+		Name:  "annotation",
+		Usage: "set an OCI runtime annotation: KEY=VALUE (repeatable)",
+	}
+}
+
+func envFlag() cli.Flag {
+	return &cli.StringSliceFlag{
+		Name:    "env",
+		Aliases: []string{"e"},
+		Usage:   "set an environment variable in the guest: KEY=VALUE, or a bare KEY to inherit it from the host environment and keep the value out of argv (repeatable)",
+	}
 }

@@ -65,27 +65,10 @@ func runCommand() *cli.Command {
 				Value: "none",
 				Usage: "network mode: 'none' (default) or 'shared'",
 			},
-			&cli.StringFlag{
-				Name:  "pull",
-				Value: pullMissing,
-				Usage: "pull policy: 'missing' (default), 'always' or 'never'. " +
-					"A cached tag is not re-resolved, so use 'always' to pick up a republished tag",
-			},
-			&cli.IntFlag{
-				Name:  "mem",
-				Value: 512,
-				Usage: "memory size in MB",
-			},
-			&cli.IntFlag{
-				Name:  "cpus",
-				Value: 1,
-				Usage: "number of CPUs",
-			},
-			&cli.StringFlag{
-				Name:  "name",
-				Value: "",
-				Usage: "instance name (default: auto-generated)",
-			},
+			pullFlag(),
+			memFlag(),
+			cpusFlag(),
+			nameFlag(),
 			&cli.StringSliceFlag{
 				Name:  "shared-dir",
 				Usage: "share a host directory with the guest: /host/path:/guest/path[:ro|rw] (repeatable)",
@@ -110,19 +93,12 @@ func runCommand() *cli.Command {
 				Value: "",
 				Usage: "rootfs sharing mode: 'block' (ext4 disk image), 'virtiofs' (Vz and HVI default), '9pfs' (QEMU default)",
 			},
-			&cli.StringSliceFlag{
-				Name:  "annotation",
-				Usage: "set an OCI runtime annotation: KEY=VALUE (repeatable)",
-			},
+			annotationFlag(),
 			&cli.BoolFlag{
 				Name:  "no-boot-assets",
 				Usage: "do not fall back to the published boot assets when the image carries no kernel",
 			},
-			&cli.StringSliceFlag{
-				Name:    "env",
-				Aliases: []string{"e"},
-				Usage:   "set an environment variable in the guest: KEY=VALUE, or a bare KEY to inherit it from the host environment and keep the value out of argv (repeatable)",
-			},
+			envFlag(),
 			&cli.StringSliceFlag{
 				Name:  "add-host",
 				Usage: "add an entry to the guest's /etc/hosts (host:ip, repeatable)",
