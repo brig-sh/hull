@@ -525,8 +525,8 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	// are resolved on the host, from the host's own asset directory, and only
 	// when the image itself offered nothing.
 	if !cmd.Bool("no-boot-assets") &&
-		annotationOverrides["com.urunc.unikernel.bootKernel"] == "" &&
-		annotationOverrides["com.urunc.unikernel.bootInitrd"] == "" &&
+		annotationOverrides[ociclient.BootKernelAnnotation] == "" &&
+		annotationOverrides[ociclient.BootInitrdAnnotation] == "" &&
 		(vmmType == hypervisors.VzVmm || vmmType == hypervisors.HviVmm) &&
 		!imageCarriesKernel(ociSpec.Annotations) {
 		kernel, initrdFile, assetErr := bootassets.Ensure(ctx, cmd.String("store-dir"))
@@ -537,8 +537,8 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 		// Both maps, so this run is indistinguishable from one where the
 		// annotations were passed on the command line.
 		for k, v := range map[string]string{
-			"com.urunc.unikernel.bootKernel": kernel,
-			"com.urunc.unikernel.bootInitrd": initrdFile,
+			ociclient.BootKernelAnnotation: kernel,
+			ociclient.BootInitrdAnnotation: initrdFile,
 		} {
 			annotationOverrides[k] = v
 			ociSpec.Annotations[k] = v
@@ -547,8 +547,8 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 
 	// Host boot paths are accepted only from this invocation, never from image
 	// metadata or urunc.json: an image must not be able to nominate host files.
-	containerBoot := annotationOverrides["com.urunc.unikernel.bootKernel"] != "" ||
-		annotationOverrides["com.urunc.unikernel.bootInitrd"] != ""
+	containerBoot := annotationOverrides[ociclient.BootKernelAnnotation] != "" ||
+		annotationOverrides[ociclient.BootInitrdAnnotation] != ""
 	unikernelType, unikernelTypeDeclared := unikernelFamily(ociSpec.Annotations, containerBoot)
 
 	// Create VMM instance
@@ -641,10 +641,11 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	// Extract kernel and rootfs paths from annotations (for Linux kernels on darwin).
 	// bootKernel is a host artifact; binary remains an image-relative path.
 	kernelPath := ""
-	bootKernel := annotationOverrides["com.urunc.unikernel.bootKernel"]
-	bootInitrd := annotationOverrides["com.urunc.unikernel.bootInitrd"]
-	if (bootKernel == "") != (bootInitrd == "") {
-		return errors.New("com.urunc.unikernel.bootKernel and com.urunc.unikernel.bootInitrd must be set together")
+	bootKernel := annotationOverrides[ociclient.BootKernelAnnotation]
+	bootInitrd := annotationOverrides[ociclient.BootInitrdAnnotation]
+	err = checkBootPair(bootKernel, bootInitrd)
+	if err != nil {
+		return err
 	}
 	// Whatever this run is about to boot gets checked here, and here is the
 	// only place it happens: after the paths are settled and before anything
@@ -1977,35 +1978,6 @@ func underBootAssetDir(storeDir, path string) (bool, error) {
 		return false, err
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)), nil
-}
-
-func verifyContainerBootAssets(bootKernel, bootInitrd string) error {
-	paths := make([]string, 0, 2)
-	for _, p := range []string{bootKernel, bootInitrd} {
-		if p == "" {
-			continue
-		}
-		abs, err := filepath.Abs(p)
-		if err != nil {
-			return fmt.Errorf("resolve boot asset %s: %w", p, err)
-		}
-		paths = append(paths, abs)
-	}
-	if len(paths) == 0 {
-		return nil
-	}
-	err := bootassets.VerifyFiles(paths...)
-	switch {
-	case err == nil:
-		return nil
-	case errors.Is(err, bootassets.ErrNoProvenance):
-		log.Warnf("The kernel and initrd for this run (%s) have no provenance record beside "+
-			"them, so nothing vouches for their contents; they are being booted as given",
-			strings.Join(paths, ", "))
-		return nil
-	default:
-		return fmt.Errorf("refusing to boot this kernel: %w", err)
-	}
 }
 
 // imageCarriesKernel reports whether the image brought a kernel of its own, in
