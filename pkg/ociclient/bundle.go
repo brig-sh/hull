@@ -33,6 +33,11 @@ const (
 	UnikernelBinaryAnnotation  = "com.urunc.unikernel.binary"
 	InitrdAnnotation           = "com.urunc.unikernel.initrd"
 	UnikernelVersionAnnotation = "com.urunc.unikernel.version"
+
+	// The host kernel and initrd a container boot uses. Only the run sets
+	// them, never the image, since they name files on the host.
+	BootKernelAnnotation = "com.urunc.unikernel.bootKernel"
+	BootInitrdAnnotation = "com.urunc.unikernel.bootInitrd"
 )
 
 // GenerateBundle creates an OCI runtime bundle (config.json + rootfs symlink) in the bundle directory
