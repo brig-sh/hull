@@ -20,6 +20,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/containerd/errdefs"
@@ -52,8 +54,8 @@ func rmCommand() *cli.Command {
 }
 
 // removeInstance deletes an instance's container, with its task and its
-// snapshot, and refuses a running one without --force, in the words macOS
-// uses.
+// snapshot, and its log, and refuses a running one without --force, in the
+// words macOS uses.
 func removeInstance(ctx context.Context, cmd *cli.Command) error {
 	args := cmd.Args()
 	if args.Len() == 0 {
@@ -71,6 +73,24 @@ func removeInstance(ctx context.Context, cmd *cli.Command) error {
 	}
 	defer func() { _ = c.Close() }()
 
+	// The path hull run computes for this name, and not the one the
+	// container's log-file label names: any client of the namespace can set
+	// a label, and rm would then delete whatever file it pointed at.
+	logFile, logErr := instanceLogPath(containerd.ResolveNamespace(cmd.String("namespace")), instanceID)
+	if logErr == nil {
+		var unlock func()
+		unlock, logErr = lockLogDir(filepath.Dir(logFile))
+		switch {
+		case errors.Is(logErr, os.ErrNotExist):
+			// No run in the namespace has written a log, so this instance
+			// has none. A log that appears from here on is a new run's.
+			logFile = ""
+			logErr = nil
+		case logErr == nil:
+			defer unlock()
+		}
+	}
+
 	err = containerd.RemoveInstance(ctx, c, instanceID, cmd.Bool("force"), forceKillGrace)
 	switch {
 	case errdefs.IsNotFound(err):
@@ -79,6 +99,12 @@ func removeInstance(ctx context.Context, cmd *cli.Command) error {
 		return errors.New("instance is running, use --force to stop it first")
 	case err != nil:
 		return fmt.Errorf("failed to remove instance: %w", err)
+	}
+	if logErr == nil && logFile != "" {
+		logErr = os.Remove(logFile)
+	}
+	if logErr != nil && !errors.Is(logErr, os.ErrNotExist) {
+		return fmt.Errorf("instance %s removed, but not its log: %w", instanceID, logErr)
 	}
 
 	_, err = fmt.Fprintf(cmd.Writer, "Instance %s removed\n", instanceID)

@@ -22,6 +22,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -233,5 +235,46 @@ func TestInstanceCommandsRefuseBadNames(t *testing.T) {
 		if err == nil || err.Error() != "instance ID required" {
 			t.Errorf("%s with no name: error = %v, want instance ID required", verb, err)
 		}
+	}
+}
+
+// rm removes the log at the path run gives the name, and not a file the
+// container's log-file label names: any client of the namespace can set
+// that label.
+func TestRemoveDeletesOnlyTheInstanceLog(t *testing.T) {
+	privateLogDirs(t)
+	f := newInstanceFixture(t)
+	ctx := context.Background()
+	decoy := filepath.Join(t.TempDir(), "keep")
+	err := os.WriteFile(decoy, []byte("not a log"), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctr, err := f.c.NewContainer(ctx, "vm", client.WithSpec(&oci.Spec{}),
+		client.WithContainerLabels(map[string]string{containerd.LabelLogFile: decoy}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ctr.Delete(ctx) })
+	logFile, err := instanceLogFile(f.ns, "vm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = os.WriteFile(logFile, []byte("console\n"), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = f.run(f.ns, "rm", "vm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = os.Stat(logFile)
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("log %s: error = %v, want it removed", logFile, err)
+	}
+	_, err = os.Stat(decoy)
+	if err != nil {
+		t.Errorf("%s, named by the label: %v, want it kept", decoy, err)
 	}
 }

@@ -34,7 +34,7 @@ named. No flag anywhere in the tree is hidden.
 | Command | What it does |
 |---|---|
 | `pull <image>` | pull an OCI image into the store |
-| `run <image> [cmd...]` | create and run an instance |
+| `run <image> [cmd...]` | create and run an instance. On Linux only in the background, with no network; see [Building on Linux](build.md#building-on-linux) |
 | `exec <id> <cmd...>` | run a command in a running instance |
 | `ps` | list instances |
 | `stop <id>` | stop a running instance |

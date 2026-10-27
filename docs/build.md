@@ -15,7 +15,8 @@ two runners must be signed before they can start a VM.
 ## Prerequisites
 
 - An Apple Silicon Mac. On Linux the CLI has only `hull assets`,
-  `hull images`, `hull pull`, `hull rmi` and `hull version` so far; see
+  `hull images`, `hull inspect`, `hull ps`, `hull pull`, `hull rm`,
+  `hull rmi`, `hull run` and `hull version` so far; see
   [Building on Linux](#building-on-linux).
 - **Go** 1.26 or later. `go.mod` declares 1.26.4.
 - **Xcode command line tools**, which supply Swift. `vz-runner` declares
@@ -101,11 +102,11 @@ other work, cap them rather than letting each build assume it owns the box.
 
 ### Building on Linux
 
-A Linux port has started, and it cannot run anything yet. `make linux`, or
-plain `make` on a Linux host, builds a `hull` whose only commands are
-`hull assets`, `hull images`, `hull inspect`, `hull ps`, `hull pull`,
-`hull rm`, `hull rmi` and `hull version`. It builds no runners and signs
-nothing.
+A Linux port has started. It can start an instance in the background, with
+no network, and little else yet. `make linux`, or plain `make` on a Linux
+host, builds a `hull` whose only commands are `hull assets`, `hull images`,
+`hull inspect`, `hull ps`, `hull pull`, `hull rm`, `hull rmi`, `hull run`
+and `hull version`. It builds no runners and signs nothing.
 
 ```bash
 make                        # dist/hull_linux_<host arch>
@@ -196,8 +197,8 @@ the other:
 4. `~/.local/share/brig/assets`
 
 The namespace does not move this directory, so every namespace shares one
-kernel with brig. There is no `hull run` on Linux yet, so today only brig,
-through nerdctl, boots these files. Checking their signature needs cosign on
+kernel with brig. `hull run` does not boot these files on Linux, for the
+reason given below. Checking their signature needs cosign on
 the `PATH`. On macOS the Homebrew cask installs it; on Linux nothing does, so
 install it yourself, as
 [Sigstore's installation page](https://docs.sigstore.dev/cosign/system_config/installation/)
@@ -205,10 +206,9 @@ describes. Without it a fetch warns that it took the assets unchecked, and
 `HULL_VERIFY=require` refuses the fetch.
 
 An instance is a containerd container in hull's namespace, named by its
-container ID. There is no `hull run` on Linux yet, so nothing hull does
-creates one, but `hull ps`, `hull inspect` and `hull rm` act on any container
-there, including those `ctr` or nerdctl created. They print what they print
-on macOS, with these differences:
+container ID. `hull run` creates one, and `hull ps`, `hull inspect` and
+`hull rm` act on any container there, including those `ctr` or nerdctl
+created. They print what they print on macOS, with these differences:
 
 - The status comes from the container's task. A container with no task is
   `stopped`: containerd cannot tell one that was never started from one whose
@@ -222,12 +222,113 @@ on macOS, with these differences:
 - CREATED, and `startTime` in `hull inspect`, is when the container was
   created. PID is the process ID containerd reports for the task. IP is
   always `-`.
-- `hull inspect` prints the macOS fields, and leaves empty those containerd
-  has no counterpart for, among them `imageDigest`, `cmdLine` and `logFile`.
-- `hull rm` deletes the container's task, the container and its snapshot. A
-  task that has not stopped is refused without `--force`. With it, the task is
-  sent SIGKILL, and `hull rm` fails rather than delete anything if the task
-  has not exited within 5 seconds.
+- `hull inspect` prints the macOS fields. `imageDigest`, `backend` and
+  `logFile` come from labels `hull run` sets, so they are empty for a
+  container another client created. Those containerd has no counterpart for,
+  among them `cmdLine` and `bundleDir`, are always empty.
+- `hull rm` deletes the container's task, the container and its snapshot,
+  and the instance's log. A task that has not stopped is refused without
+  `--force`. With it, the task is sent SIGKILL, and `hull rm` fails rather
+  than delete anything if the task has not exited within 5 seconds.
+
+`hull run` boots an image as a VM through urunc, as the containerd runtime
+`io.containerd.urunc.v2`. It needs urunc's shim installed where the daemon
+finds it, and a monitor urunc is configured for; the brig-standalone-linux
+bundle provides both, and hull is tested against its v0.1.0-rc17. A plain
+image also needs a urunc that can boot an unmodified container image, as
+the bundle's can; urunc-dev/urunc f149eb7 adds that. A urunc without it
+requires a unikernel binary in every case, so it runs a plain image with
+runc, on the host's kernel. hull cannot tell which urunc the shim runs, so
+it cannot refuse that. It takes
+`--name`, `--pull`, `--mem`, `--cpus`, `--env`, `--annotation` and
+`--no-boot-assets` with their macOS meaning, and differs from macOS in these
+ways:
+
+- `--detach` is required. The guest's console goes to a log file and nothing
+  attaches to it. The log is under `$XDG_STATE_HOME/hull/<namespace>`, or
+  `~/.local/state/hull/<namespace>`, and under `/var/log/hull/<namespace>` for
+  root.
+- `--net` takes only `none`, its default: the instance has no network.
+  Neither `--net shared` nor the network gateway exists on Linux yet.
+- An image is looked up under the name it was pulled by. A reference pinned
+  to a digest, `repo@sha256:…` or `repo:tag@sha256:…`, also finds an image
+  of the same repository pulled by its tag when that image is the digest,
+  so `--pull never` runs it and `--pull missing` does not fetch it again.
+  An image counts as pulled only when containerd holds its manifest and
+  config for the host's platform. One pulled only for another platform is
+  pulled again with `--pull missing`, and refused with `--pull never`.
+- `--hypervisor` names one of the monitors urunc knows: `cloud-hypervisor`,
+  `firecracker`, `qemu`, `hvt`, `spt` or `hyperlight-unikraft`. Any other
+  name is refused, `vz` and `hvi` among them, whether `--hypervisor` or the
+  `com.urunc.unikernel.hypervisor` annotation gives it. Without the flag,
+  the monitor comes from that annotation, and a plain image boots on
+  `cloud-hypervisor`, since the bundle ships no qemu, urunc's own default.
+  The monitor must also be installed where urunc's configuration says; the
+  bundle ships `cloud-hypervisor` and `firecracker`.
+- A plain image boots on `firecracker` only when containerd's default
+  snapshotter gives the container a block device, as devmapper does.
+  firecracker has no shared filesystem, so on overlayfs, the bundle's
+  default, urunc refuses to start the instance. hull has no flag to choose
+  the snapshotter.
+- A plain image, one that names no unikernel binary in its annotations or
+  in `--annotation`, boots a generic kernel and initrd. With the bundle
+  installed, they are the bundle's own: under
+  `$XDG_DATA_HOME/brig/data/share/guest`, or
+  `~/.local/share/brig/data/share/guest`, and then
+  `/var/lib/brig/data/share/guest`. With `HULL_BOOT_ASSETS` set, they are
+  the files in that directory instead, and the bundle's are not looked at.
+  `--annotation` with `com.urunc.unikernel.bootKernel` and `bootInitrd`
+  overrides both, as brig passes them. A relative path, in
+  `HULL_BOOT_ASSETS` or `--annotation`, is taken from the current
+  directory.
+- Whichever way a run arrives at its kernel and initrd, they are checked
+  before it boots, and half a pair is refused, as on macOS. A file in a
+  directory with a `SHA256SUMS`, as the bundle's are, must match it, wherever
+  the other file is. Any other file is checked as macOS checks it, against
+  the provenance record `hull assets pull` writes beside it; one with no
+  record boots with a warning.
+- hull on Linux never boots or fetches the boot assets `hull assets pull`
+  fetches. The bundle's initrd is built for the bundle's urunc, and under
+  that urunc the `linux-amd64` initrd from `ghcr.io/nofireai/hull-assets`
+  boots a guest that cannot find the container's command. With no bundle,
+  no `HULL_BOOT_ASSETS` and no `--annotation` paths, `hull run` of a plain
+  image fails and says to install the bundle or supply the files. This may
+  change once a published initrd boots under urunc on Linux.
+- hull writes every `com.urunc.unikernel.*` annotation urunc reads into the
+  container's spec, empty for one that is not set. urunc's shim copies any of
+  them the spec lacks from the image's manifest, and an image could
+  otherwise name a host file as the kernel or initrd to boot. The image's
+  annotations are still honored, except `bootKernel`, `bootInitrd`, `vAccel`
+  and `RPCAddress`, which only `--annotation` sets.
+- `hull run` refuses a run urunc would not boot as a VM. urunc needs a
+  unikernel type and a monitor in the annotations, and a binary unless a
+  boot kernel and initrd are given. When one is missing it looks for a
+  `urunc.json` in the image's root filesystem, and when that is missing or
+  invalid too, it runs the image with runc, as an ordinary container on the
+  host's kernel. hull reads no file from the image, so it cannot tell
+  whether a `urunc.json` would save the run. A run with a boot kernel and
+  initrd gets the type `linux` unless it names one. That refuses
+  `--no-boot-assets` for an image whose annotations name no complete
+  unikernel, and an image that names a binary but not its type or monitor. An image that declares its unikernel only in
+  a `urunc.json` runs with its unikernel type, monitor and binary given
+  with `--annotation`. `--annotation io.kubernetes.cri.container-name` is
+  refused too: urunc reads it as a Kubernetes container's name, and runs a
+  container named `queue-proxy` with runc.
+- The image's command follows docker's rules, which differ from macOS hull
+  in two ways. Arguments after the image replace its `Cmd` and keep its
+  `Entrypoint`, where macOS replaces both. An image with neither a command
+  nor arguments is refused, where macOS runs `/bin/sh`.
+- The image's `USER` must be empty, `root`, or a numeric uid and gid. hull
+  reads the image's config from containerd's content store and no file from
+  its root filesystem, so it cannot look a user name up in `/etc/passwd`. A
+  uid with no gid runs with gid 0, as docker runs a uid `/etc/passwd` does
+  not list. macOS reads the image's `/etc/passwd`, so it takes a listed
+  uid's group from there, and gives an unlisted uid its own value as its
+  gid.
+- A container's snapshot is named after it, so a snapshot left behind with
+  no container, as a failed client may leave one, keeps its name from a
+  run. The run fails and names the snapshot. `hull rm` cannot remove it,
+  since there is no instance; `ctr snapshots rm` can.
 
 `make test` runs on Linux too. The `internal/` and `pkg/` packages build and
 test natively. Of `cmd/hull`, only the files with no darwin dependency compile

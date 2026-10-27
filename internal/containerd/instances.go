@@ -32,6 +32,10 @@ import (
 type Instance struct {
 	ID        string
 	CreatedAt time.Time
+	// Labels are the container's labels, among them the ones hull sets on
+	// a container it creates: LabelBackend, LabelImageDigest and
+	// LabelLogFile.
+	Labels map[string]string
 	// Task is nil when the container has no task. containerd cannot tell a
 	// container that was never started from one whose task was deleted
 	// after it stopped.
@@ -97,6 +101,7 @@ func describeInstance(ctx context.Context, ctr client.Container) (Instance, erro
 		return inst, fmt.Errorf("container %s: %w", ctr.ID(), err)
 	}
 	inst.CreatedAt = info.CreatedAt
+	inst.Labels = info.Labels
 	inst.Task, err = describeTask(ctx, ctr)
 	return inst, err
 }
