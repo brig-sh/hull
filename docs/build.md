@@ -103,8 +103,9 @@ other work, cap them rather than letting each build assume it owns the box.
 
 A Linux port has started, and it cannot run anything yet. `make linux`, or
 plain `make` on a Linux host, builds a `hull` whose only commands are
-`hull assets`, `hull images`, `hull pull`, `hull rmi` and `hull version`. It
-builds no runners and signs nothing.
+`hull assets`, `hull images`, `hull inspect`, `hull ps`, `hull pull`,
+`hull rm`, `hull rmi` and `hull version`. It builds no runners and signs
+nothing.
 
 ```bash
 make                        # dist/hull_linux_<host arch>
@@ -202,6 +203,31 @@ install it yourself, as
 [Sigstore's installation page](https://docs.sigstore.dev/cosign/system_config/installation/)
 describes. Without it a fetch warns that it took the assets unchecked, and
 `HULL_VERIFY=require` refuses the fetch.
+
+An instance is a containerd container in hull's namespace, named by its
+container ID. There is no `hull run` on Linux yet, so nothing hull does
+creates one, but `hull ps`, `hull inspect` and `hull rm` act on any container
+there, including those `ctr` or nerdctl created. They print what they print
+on macOS, with these differences:
+
+- The status comes from the container's task. A container with no task is
+  `stopped`: containerd cannot tell one that was never started from one whose
+  task was deleted. A task that is created but not started is `starting`, a
+  running one `running`, and one that exited `stopped`, with its exit code.
+  Any other status containerd reports, such as `paused`, is printed under
+  containerd's name. A container whose task containerd cannot read, as when
+  its shim does not answer, is listed as `unreadable`, with no PID, and the
+  other containers are still listed. `hull inspect` of it fails with
+  containerd's error.
+- CREATED, and `startTime` in `hull inspect`, is when the container was
+  created. PID is the process ID containerd reports for the task. IP is
+  always `-`.
+- `hull inspect` prints the macOS fields, and leaves empty those containerd
+  has no counterpart for, among them `imageDigest`, `cmdLine` and `logFile`.
+- `hull rm` deletes the container's task, the container and its snapshot. A
+  task that has not stopped is refused without `--force`. With it, the task is
+  sent SIGKILL, and `hull rm` fails rather than delete anything if the task
+  has not exited within 5 seconds.
 
 `make test` runs on Linux too. The `internal/` and `pkg/` packages build and
 test natively. Of `cmd/hull`, only the files with no darwin dependency compile

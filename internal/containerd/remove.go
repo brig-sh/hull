@@ -196,19 +196,9 @@ func ImageHolders(ctx context.Context, c *client.Client, name string) ([]Holder,
 }
 
 func taskRunning(ctx context.Context, ctr client.Container) (bool, error) {
-	task, err := ctr.Task(ctx, nil)
-	if errdefs.IsNotFound(err) {
-		return false, nil
-	}
+	task, err := describeTask(ctx, ctr)
 	if err != nil {
-		return false, fmt.Errorf("task of container %s: %w", ctr.ID(), err)
+		return false, err
 	}
-	status, err := task.Status(ctx)
-	if errdefs.IsNotFound(err) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("status of container %s: %w", ctr.ID(), err)
-	}
-	return status.Status != client.Stopped, nil
+	return task != nil && task.Status != client.Stopped, nil
 }

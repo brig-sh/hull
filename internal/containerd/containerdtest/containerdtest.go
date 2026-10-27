@@ -29,6 +29,8 @@ import (
 	"github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/pkg/cio"
+	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/platforms"
 	"github.com/opencontainers/go-digest"
@@ -134,4 +136,57 @@ func CreateImage(ctx context.Context, t testing.TB, c *client.Client, name strin
 		_ = is.Delete(ctx, name, images.SynchronousDelete())
 	})
 	return img
+}
+
+// TaskImage is the image StartTask runs: containerd's copy of busybox on
+// ghcr.io. Docker Hub's anonymous rate limits would make CI flaky.
+const TaskImage = "ghcr.io/containerd/busybox:1.36"
+
+// StartTask pulls TaskImage for the host's platform, creates the container
+// id from it with args as its process, and starts the container's task with
+// no I/O attached. The task, the container and its snapshot are deleted
+// when the test ends, unless the test removed them first.
+//
+// The task runs under runc, which the daemon's runc shim finds on its PATH,
+// and the daemon must be able to unpack layers: rootful, or rootless inside
+// rootlesskit.
+func StartTask(ctx context.Context, t testing.TB, c *client.Client, id string, args ...string) (client.Container, client.Task) {
+	t.Helper()
+	img, err := c.Pull(ctx, TaskImage, client.WithPullUnpack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctr, err := c.NewContainer(ctx, id,
+		client.WithNewSnapshot(id+"-snapshot", img),
+		client.WithNewSpec(
+			// Not oci.WithImageConfig: it reads the image's /etc/group from
+			// the snapshot in this process, and a test that is not root
+			// cannot open the snapshot of a daemon that is, as in CI.
+			// busybox needs only a PATH to find its commands.
+			oci.WithDefaultPathEnv,
+			oci.WithProcessArgs(args...),
+			// No cgroup path, so runc creates no cgroup. A rootless daemon
+			// without a delegated cgroup could not, and these tasks need
+			// no limits.
+			oci.WithCgroup(""),
+		))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		task, err := ctr.Task(ctx, nil)
+		if err == nil {
+			_, _ = task.Delete(ctx, client.WithProcessKill)
+		}
+		_ = ctr.Delete(ctx, client.WithSnapshotCleanup)
+	})
+	task, err := ctr.NewTask(ctx, cio.NullIO)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = task.Start(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ctr, task
 }

@@ -137,11 +137,11 @@ as a default that an explicit `--env TERM` beats.
 | Command | Flags |
 |---|---|
 | `pull <image>` | `--platform` |
-| `ps` | none. Columns: ID, STATUS, EXIT, PID, IP, CREATED. No JSON mode |
+| `ps` | none. Columns: ID, STATUS, EXIT, PID, IP, CREATED. No JSON mode. On Linux the status comes from containerd; see [Building on Linux](build.md#building-on-linux) |
 | `stop <id>` | `--timeout`, `-t <secs>` force-kill timeout |
-| `rm <id>` | `--force`, `-f` remove a running instance |
+| `rm <id>` | `--force`, `-f` remove a running instance. On Linux it removes a containerd container; see [Building on Linux](build.md#building-on-linux) |
 | `logs <id>` | `--follow`, `-f`; `--tail`, `-n <lines>` |
-| `inspect <id>` | none. Always prints JSON |
+| `inspect <id>` | none. Always prints JSON. On Linux some fields are empty; see [Building on Linux](build.md#building-on-linux) |
 | `images` | `--json` prints the store's records with full digests |
 | `rmi <image>...` | `--force`, `-f` remove one a stopped instance refers to; `--platform <p>` narrow to one platform. On Linux both mean more; see [Building on Linux](build.md#building-on-linux) |
 | `prune` | `--all` also remove every image no instance refers to; `--dry-run` print and remove nothing |
