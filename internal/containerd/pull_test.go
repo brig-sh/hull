@@ -29,7 +29,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/brig-sh/hull/internal/containerd/containerdtest"
 	"github.com/containerd/containerd/v2/core/images"
@@ -450,22 +449,15 @@ func TestPullThroughDaemon(t *testing.T) {
 	}
 	t.Setenv("DOCKER_CONFIG", dockerConfig)
 
-	namespace := fmt.Sprintf("hull-test-pull-%d", time.Now().UnixNano())
 	ctx := context.Background()
-	c, err := Connect(ctx, addr, namespace)
+	c, err := Connect(ctx, addr, containerdtest.NamespaceName("hull-test-pull"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Cleanups run last in, first out, so the client is still open while
 	// the image and namespace are removed.
 	t.Cleanup(func() { _ = c.Close() })
-	t.Cleanup(func() {
-		imgs, _ := c.ImageService().List(ctx)
-		for _, img := range imgs {
-			_ = c.ImageService().Delete(ctx, img.Name, images.SynchronousDelete())
-		}
-		_ = c.NamespaceService().Delete(ctx, namespace)
-	})
+	containerdtest.DeleteNamespace(t, c)
 
 	// What hull pull asks for by default: the host's architecture, with no
 	// variant.

@@ -126,6 +126,30 @@ func Lease(ctx context.Context, t testing.TB, c *client.Client) context.Context 
 	return leases.WithLease(ctx, l.ID)
 }
 
+// NamespaceName returns a namespace for one run of a test, made of prefix
+// and the time, so no other test, and no earlier run of this one, shares
+// what is in it.
+func NamespaceName(prefix string) string {
+	return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
+}
+
+// DeleteNamespace deletes the namespace of c when the test ends, with the
+// images left in it. Register it right after the cleanup that closes c, so
+// it runs after the test's other cleanups have removed its containers and
+// leases, and while c is still open.
+func DeleteNamespace(t testing.TB, c *client.Client) {
+	t.Helper()
+	ns := c.DefaultNamespace()
+	t.Cleanup(func() {
+		ctx := context.Background()
+		imgs, _ := c.ImageService().List(ctx)
+		for _, img := range imgs {
+			_ = c.ImageService().Delete(ctx, img.Name, images.SynchronousDelete())
+		}
+		_ = c.NamespaceService().Delete(ctx, ns)
+	})
+}
+
 // CreateImage records name as an image that points at target, replacing a
 // record an earlier run left behind, and deletes it when the test ends.
 func CreateImage(ctx context.Context, t testing.TB, c *client.Client, name string, target ocispec.Descriptor) images.Image {
