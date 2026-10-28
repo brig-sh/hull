@@ -19,14 +19,12 @@ package containerd
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/containers"
-	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/containerd/errdefs"
@@ -39,22 +37,14 @@ import (
 func instancesClient(t *testing.T) *client.Client {
 	t.Helper()
 	addr := containerdtest.DaemonAddress(t)
-	namespace := fmt.Sprintf("hull-test-instances-%d", time.Now().UnixNano())
-	ctx := context.Background()
-	c, err := Connect(ctx, addr, namespace)
+	c, err := Connect(context.Background(), addr, containerdtest.NamespaceName("hull-test-instances"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Cleanups run last in, first out: the containers a test creates are
 	// gone before the images, and the client is closed last.
 	t.Cleanup(func() { _ = c.Close() })
-	t.Cleanup(func() {
-		imgs, _ := c.ImageService().List(ctx)
-		for _, img := range imgs {
-			_ = c.ImageService().Delete(ctx, img.Name, images.SynchronousDelete())
-		}
-		_ = c.NamespaceService().Delete(ctx, namespace)
-	})
+	containerdtest.DeleteNamespace(t, c)
 	return c
 }
 

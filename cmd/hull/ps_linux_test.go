@@ -21,7 +21,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,7 +28,6 @@ import (
 	"time"
 
 	"github.com/containerd/containerd/v2/client"
-	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/pkg/oci"
 
 	"github.com/brig-sh/hull/internal/containerd"
@@ -103,9 +101,8 @@ type instanceFixture struct {
 func newInstanceFixture(t *testing.T) *instanceFixture {
 	t.Helper()
 	addr := containerdtest.DaemonAddress(t)
-	ns := fmt.Sprintf("hull-test-ps-%d", time.Now().UnixNano())
-	ctx := context.Background()
-	c, err := containerd.Connect(ctx, addr, ns)
+	ns := containerdtest.NamespaceName("hull-test-ps")
+	c, err := containerd.Connect(context.Background(), addr, ns)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,13 +110,7 @@ func newInstanceFixture(t *testing.T) *instanceFixture {
 	// gone before the images and the namespace, and the client is closed
 	// last.
 	t.Cleanup(func() { _ = c.Close() })
-	t.Cleanup(func() {
-		imgs, _ := c.ImageService().List(ctx)
-		for _, img := range imgs {
-			_ = c.ImageService().Delete(ctx, img.Name, images.SynchronousDelete())
-		}
-		_ = c.NamespaceService().Delete(ctx, ns)
-	})
+	containerdtest.DeleteNamespace(t, c)
 	return &instanceFixture{t: t, addr: addr, ns: ns, c: c}
 }
 

@@ -19,16 +19,13 @@ package main
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"regexp"
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/brig-sh/hull/internal/containerd"
 	"github.com/brig-sh/hull/internal/containerd/containerdtest"
-	"github.com/containerd/containerd/v2/core/images"
 )
 
 func TestDefaultPlatformIsTheHosts(t *testing.T) {
@@ -62,7 +59,7 @@ func TestPullCommandRefusesBadArguments(t *testing.T) {
 // the pull stored it by.
 func TestPullCommandAgainstDaemon(t *testing.T) {
 	addr := containerdtest.DaemonAddress(t)
-	ns := fmt.Sprintf("hull-test-cli-pull-%d", time.Now().UnixNano())
+	ns := containerdtest.NamespaceName("hull-test-cli-pull")
 	const ref = "ghcr.io/containerd/busybox:1.36"
 	c, err := containerd.Connect(context.Background(), addr, ns)
 	if err != nil {
@@ -71,11 +68,7 @@ func TestPullCommandAgainstDaemon(t *testing.T) {
 	// Cleanups run last in, first out, so the client is still open while
 	// the image and namespace are removed.
 	t.Cleanup(func() { _ = c.Close() })
-	t.Cleanup(func() {
-		ctx := context.Background()
-		_ = c.ImageService().Delete(ctx, ref, images.SynchronousDelete())
-		_ = c.NamespaceService().Delete(ctx, ns)
-	})
+	containerdtest.DeleteNamespace(t, c)
 
 	run := func(args ...string) (string, string) {
 		t.Helper()
