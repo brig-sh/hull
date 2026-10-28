@@ -259,13 +259,14 @@ func TestDescribeImageSkipsEntriesThatAreNotImages(t *testing.T) {
 // back from the daemon as not found rather than as some other error.
 func TestDescribeImageThroughDaemon(t *testing.T) {
 	addr := containerdtest.DaemonAddress(t)
-	c, err := Connect(context.Background(), addr, "hull-test-describe")
+	c, err := Connect(context.Background(), addr, containerdtest.NamespaceName("hull-test-describe"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Closed by a cleanup, not a defer: the cleanups that delete the test's
 	// image and lease run after the test returns and still need the client.
 	t.Cleanup(func() { _ = c.Close() })
+	containerdtest.DeleteNamespace(t, c)
 	ctx := containerdtest.Lease(context.Background(), t, c)
 	cs := c.ContentStore()
 

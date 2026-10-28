@@ -44,7 +44,7 @@ type rmiFixture struct {
 func newRmiFixture(t *testing.T) *rmiFixture {
 	t.Helper()
 	addr := containerdtest.DaemonAddress(t)
-	const ns = "hull-test-rmi"
+	ns := containerdtest.NamespaceName("hull-test-rmi")
 	c, err := containerd.Connect(context.Background(), addr, ns)
 	if err != nil {
 		t.Fatal(err)
@@ -52,6 +52,7 @@ func newRmiFixture(t *testing.T) *rmiFixture {
 	// Closed by a cleanup, not a defer: the cleanups that delete the test's
 	// images and lease run after the test returns and still need the client.
 	t.Cleanup(func() { _ = c.Close() })
+	containerdtest.DeleteNamespace(t, c)
 	return &rmiFixture{t: t, addr: addr, ns: ns, c: c, ctx: containerdtest.Lease(context.Background(), t, c)}
 }
 

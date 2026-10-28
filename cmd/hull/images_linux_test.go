@@ -36,7 +36,7 @@ import (
 // listImages prefers, so the expected output holds on any host.
 func TestImagesCommandAgainstDaemon(t *testing.T) {
 	addr := containerdtest.DaemonAddress(t)
-	const ns = "hull-test-cli"
+	ns := containerdtest.NamespaceName("hull-test-cli")
 	c, err := containerd.Connect(context.Background(), addr, ns)
 	if err != nil {
 		t.Fatal(err)
@@ -44,6 +44,7 @@ func TestImagesCommandAgainstDaemon(t *testing.T) {
 	// Closed by a cleanup, not a defer: the cleanups that delete the test's
 	// image and lease run after the test returns and still need the client.
 	t.Cleanup(func() { _ = c.Close() })
+	containerdtest.DeleteNamespace(t, c)
 	ctx := containerdtest.Lease(context.Background(), t, c)
 	cs := c.ContentStore()
 

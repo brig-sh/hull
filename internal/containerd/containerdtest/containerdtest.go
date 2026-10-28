@@ -137,6 +137,11 @@ func NamespaceName(prefix string) string {
 // images left in it. Register it right after the cleanup that closes c, so
 // it runs after the test's other cleanups have removed its containers and
 // leases, and while c is still open.
+//
+// containerd refuses to delete a namespace that still holds anything, and
+// the namespace then stays on the daemon. The test fails, so what it left
+// behind is noticed. A namespace the test never wrote to was never created,
+// so its absence is no failure.
 func DeleteNamespace(t testing.TB, c *client.Client) {
 	t.Helper()
 	ns := c.DefaultNamespace()
@@ -146,7 +151,10 @@ func DeleteNamespace(t testing.TB, c *client.Client) {
 		for _, img := range imgs {
 			_ = c.ImageService().Delete(ctx, img.Name, images.SynchronousDelete())
 		}
-		_ = c.NamespaceService().Delete(ctx, ns)
+		err := c.NamespaceService().Delete(ctx, ns)
+		if err != nil && !errdefs.IsNotFound(err) {
+			t.Errorf("delete the test's namespace %s: %v", ns, err)
+		}
 	})
 }
 

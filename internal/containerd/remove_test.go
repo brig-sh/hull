@@ -82,13 +82,14 @@ func TestImageManifests(t *testing.T) {
 // Dropping the last one takes the name too.
 func TestDropManifestsThroughDaemon(t *testing.T) {
 	addr := containerdtest.DaemonAddress(t)
-	c, err := Connect(context.Background(), addr, "hull-test-drop")
+	c, err := Connect(context.Background(), addr, containerdtest.NamespaceName("hull-test-drop"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Closed by a cleanup, not a defer: the cleanups that delete the test's
 	// image and lease run after the test returns and still need the client.
 	t.Cleanup(func() { _ = c.Close() })
+	containerdtest.DeleteNamespace(t, c)
 	ctx := containerdtest.Lease(context.Background(), t, c)
 	cs := c.ContentStore()
 
@@ -137,19 +138,15 @@ func TestDropManifestsThroughDaemon(t *testing.T) {
 // running.
 func TestImageHoldersThroughDaemon(t *testing.T) {
 	addr := containerdtest.DaemonAddress(t)
-	c, err := Connect(context.Background(), addr, "hull-test-holders")
+	c, err := Connect(context.Background(), addr, containerdtest.NamespaceName("hull-test-holders"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = c.Close() })
+	containerdtest.DeleteNamespace(t, c)
 	ctx := context.Background()
 
 	const name = "example.com/hull/held:1"
-	// A run that failed before its cleanup leaves the container behind.
-	stale, err := c.LoadContainer(ctx, "holder")
-	if err == nil {
-		_ = stale.Delete(ctx)
-	}
 	ctr, err := c.NewContainer(ctx, "holder", client.WithImageName(name), client.WithSpec(&oci.Spec{}))
 	if err != nil {
 		t.Fatal(err)
