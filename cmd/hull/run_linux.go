@@ -26,6 +26,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/containerd/containerd/v2/pkg/identifiers"
 	"github.com/containerd/errdefs"
 	"github.com/urfave/cli/v3"
 
@@ -369,7 +370,21 @@ func lockLogDir(dir string) (unlock func(), err error) {
 // written. Root's logs go under rootLogDir; anyone else's under
 // $XDG_STATE_HOME/hull, or ~/.local/state/hull, so a rootless daemon's shim,
 // which runs as the same user, can write them.
+//
+// The namespace and the id are path elements, so each is checked here: a
+// namespace such as ../x would put the log, and the directory run creates
+// and rm locks, outside base. connectContainerd refuses such a namespace
+// and the commands refuse such an id, both before they get here, but the
+// path must not depend on that order.
 func instanceLogPath(namespace, id string) (string, error) {
+	err := identifiers.Validate(namespace)
+	if err != nil {
+		return "", fmt.Errorf("invalid containerd namespace: %w", err)
+	}
+	err = store.ValidateInstanceID(id)
+	if err != nil {
+		return "", err
+	}
 	base := rootLogDir
 	if os.Geteuid() != 0 {
 		state := os.Getenv("XDG_STATE_HOME")

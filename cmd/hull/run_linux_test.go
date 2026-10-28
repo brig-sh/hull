@@ -76,6 +76,25 @@ func privateLogDirs(t *testing.T) {
 	t.Cleanup(func() { rootLogDir = old })
 }
 
+// A namespace or an id that is not a single path element gives no path,
+// whatever the caller checked before.
+func TestInstanceLogPathRefusesPathElements(t *testing.T) {
+	for _, tc := range []struct{ namespace, id string }{
+		{"../x", "vm"},
+		{"a/b", "vm"},
+		{"..", "vm"},
+		{"", "vm"},
+		{"ns", "../vm"},
+		{"ns", "a/b"},
+		{"ns", ""},
+	} {
+		got, err := instanceLogPath(tc.namespace, tc.id)
+		if err == nil {
+			t.Errorf("instanceLogPath(%q, %q) = %q, want an error", tc.namespace, tc.id, got)
+		}
+	}
+}
+
 func TestInstanceLogPath(t *testing.T) {
 	if os.Geteuid() == 0 {
 		old := rootLogDir
