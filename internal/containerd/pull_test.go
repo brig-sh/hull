@@ -66,16 +66,18 @@ func TestNormalizeRef(t *testing.T) {
 // go-containerregistry, are the ones the Linux pull may.
 func TestAllowsPlainHTTP(t *testing.T) {
 	cases := map[string]bool{
-		"localhost:5000":       true,
-		"127.0.0.1:5000":       true,
-		"[::1]:5000":           true,
-		"10.0.0.2:5000":        true,
-		"192.168.1.10":         true,
-		"registry.local":       true,
-		"registry.local:5000":  true,
-		"ghcr.io":              false,
-		"registry-1.docker.io": false,
-		"8.8.8.8:5000":         false,
+		"localhost:5000":          true,
+		"127.0.0.1:5000":          true,
+		"[::1]:5000":              true,
+		"10.0.0.2:5000":           true,
+		"192.168.1.10":            true,
+		"registry.localhost":      true,
+		"registry.localhost:5000": true,
+		"registry.local":          false,
+		"registry.local:5000":     false,
+		"ghcr.io":                 false,
+		"registry-1.docker.io":    false,
+		"8.8.8.8:5000":            false,
 	}
 	for host, want := range cases {
 		got := allowsPlainHTTP(host)
