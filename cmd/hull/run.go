@@ -1044,14 +1044,18 @@ exec %s "$@"
 	kernelCmdline := ""
 	// Only request kernel DHCP when networking is enabled
 	ipArg := ""
+	// The same network, for urunc to spell on a container boot's command line.
+	var guestNet unikernels.LinuxNet
 	if gatewayIP != "" {
 		addr, gw, mask, err := gatewayNetConfig(gatewayIP)
 		if err != nil {
 			return err
 		}
 		ipArg = fmt.Sprintf(" ip=%s::%s:%s:urunc:eth0:off:%s", addr, gw, mask, gw)
+		guestNet = unikernels.LinuxNet{Address: addr, Gateway: gw, Mask: mask, DNS: gw}
 	} else if netMode != "none" {
 		ipArg = " ip=dhcp"
+		guestNet = unikernels.LinuxNet{DHCP: true}
 	}
 
 	// Rosetta needs the generated .vz-init wrapper to register the x86_64
@@ -1061,11 +1065,10 @@ exec %s "$@"
 	}
 
 	if containerBoot {
-		initrdEntry := "/vz-init"
-		if rootfsDiskImage != "" {
-			initrdEntry = "/init"
+		kernelCmdline, err = containerBootCmdline(vmmType, rootfsDiskImage != "", guestNet, cmdLine)
+		if err != nil {
+			return err
 		}
-		kernelCmdline = fmt.Sprintf("rdinit=%s console=%s", initrdEntry, consoleDev) + ipArg
 	} else if rootfsDir != "" && vmmType == hypervisors.VzVmm {
 		// Vz: virtiofs rootfs boot (no initramfs)
 		kernelCmdline = fmt.Sprintf("root=rootfs rootfstype=virtiofs rw console=%s", consoleDev) + ipArg
@@ -2764,6 +2767,28 @@ func procConfig(uid, gid uint32, cwd string) types.ProcessConfig {
 // unikernelCommandLine renders the guest command line for a unikernel, in the
 // spelling its family expects.
 //
+// containerBootCmdline is the kernel command line of a generic container
+// boot. urunc builds it, next to the initrd contract it belongs to: the
+// init role, the root, the console, the network and how the guest ends. The
+// command reaches the guest in /urunc-cmd, so it stays off the line.
+func containerBootCmdline(vmm hypervisors.VmmType, blockRootfs bool, guestNet unikernels.LinuxNet, cmd []string) (string, error) {
+	l := &unikernels.Linux{
+		Monitor:       string(vmm),
+		RootFsType:    "virtiofs",
+		ContainerBoot: true,
+		InitrdConf:    true,
+		// hull's console has always shown the kernel's boot messages.
+		Verbose:    true,
+		Net:        guestNet,
+		ProcConfig: types.ProcessConfig{Args: cmd},
+	}
+	if blockRootfs {
+		l.RootFsType = "block"
+		l.RootFsFsType = "ext4"
+	}
+	return l.CommandString()
+}
+
 // hull builds a Linux command line everywhere else: rdinit=, console=, and an
 // ip= argument for the address. A unikernel reads none of that. urunc knows
 // each family's convention -- Unikraft takes netdev.* and vfs.* library
