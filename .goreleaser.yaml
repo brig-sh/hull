@@ -71,10 +71,11 @@ archives:
     name_template: "{{ .ProjectName }}-{{ .Version }}-{{ .Arch }}"
     formats: [tar.gz]
     files:
-      # Staged by the release workflow, signed and notarized with the
-      # virtualization and hypervisor entitlements respectively. Outside
-      # dist/, which --clean wipes. strip_parent, or the archive carries
-      # build/vz-runner and the cask's `binaries:` finds nothing to link.
+      # Staged by the release workflow outside dist/, which --clean wipes.
+      # vz-runner is signed and notarized there with the virtualization
+      # entitlement. hvi arrives signed and notarized from its release.
+      # strip_parent, or the archive carries build/vz-runner and the cask's
+      # `binaries:` finds nothing to link.
       - src: build/vz-runner
         strip_parent: true
         info: {mode: 0o755}

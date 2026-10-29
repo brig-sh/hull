@@ -28,8 +28,9 @@ build, see [signing.md](signing.md).
    pseudo-version naming the commit it came from. A build from a tree with
    uncommitted changes says `+dirty`.
 
-2. Wait for `release.yml`. It signs and notarizes `vz-runner` and `hvi`, then
-   runs goreleaser, which builds and notarizes `hull`, packs all three into
+2. Wait for `release.yml`. It signs and notarizes `vz-runner`, fetches the
+   signed and notarized `hvi` release that `hvi.pin` names, then runs
+   goreleaser, which builds and notarizes `hull`, packs all three into
    `hull-<version>-arm64.tar.gz`, writes `checksums.txt` with a keyless cosign
    signature, generates an SBOM for the archive, and drafts the GitHub release
    with notes from the pull request titles.
@@ -108,8 +109,9 @@ entitlement under SIP on the installing machine. See
 
 `vz-runner` is Swift. goreleaser cannot build it, and importing a prebuilt
 binary is a goreleaser Pro feature. The release workflow therefore builds,
-signs and notarizes `vz-runner` and `hvi` before goreleaser runs, and they
-travel in the archive as extra files.
+signs and notarizes `vz-runner` before goreleaser runs. It travels in the
+archive as an extra file, and so does `hvi`, which arrives signed and
+notarized from its release.
 
 The same restriction applies to the DMG. Notarizing an app bundle inside a DMG
 is Pro-only, which is why a separate job handles it rather than goreleaser.
@@ -146,10 +148,10 @@ whole names, so a per-build tag on `main` itself would become the nearest tag
 for the next release.
 
 The job runs on the same `notary` runner and signs and notarizes the same way
-a release does. It has to: vz-runner and hvi carry the virtualization and
-hypervisor entitlements, and macOS refuses either without a Developer ID
-signature, so an unsigned channel build would install and then fail to boot a
-VM.
+a release does. It has to: vz-runner carries the virtualization entitlement,
+and macOS refuses it without a Developer ID signature, so an unsigned channel
+build would install and then fail to boot a VM. hvi arrives signed and
+notarized from its release.
 
 The two signing steps are copied from `release.yml` rather than shared. A
 composite action is the right end state; it is not done here because it would

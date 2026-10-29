@@ -35,14 +35,14 @@ PREFIX         ?= /usr/local/bin
 HULL_BIN := $(BUILD_DIR)/hull
 VZ_RUNNER_DIR   := $(CURDIR)/vz-runner
 VZ_RUNNER_BIN   := $(VZ_RUNNER_DIR)/.build/arm64-apple-macosx/release/vz-runner
-# hvi, the Hypervisor Virtualization Interface, is a submodule rather than
-# vendored source: it is
-# its own project with its own tests and release cadence, and hull consumes a
-# pinned commit of it. It is discovered next to the hull executable, exactly
-# like vz-runner, so everywhere one is staged the other is too.
-HVI_DIR         := $(CURDIR)/hvi-vmm
-HVI_BIN         := $(HVI_DIR)/target/release/hvi
-CARGO           ?= cargo
+# hvi, the Hypervisor Virtualization Interface, is its own project with its
+# own release cadence. hull ships the release hvi.pin names, and fetch_hvi
+# stages it in build/hvi. It is discovered next to the hull executable,
+# exactly like vz-runner, so everywhere one is staged the other is too.
+#? HVI_BIN hvi to stage instead of the pinned release, eg. a local cargo build (default: build/hvi, fetched)
+HVI_OUT         := $(CURDIR)/build
+HVI             := $(HVI_OUT)/hvi
+HVI_BIN         ?= $(HVI)
 
 # Golang variables
 GO             ?= go
@@ -79,12 +79,11 @@ endif
 CODESIGN_IDENTITY ?= -
 #? VZ_ENTITLEMENTS Entitlements plist for vz-runner (default: virtualization only, no vmnet)
 VZ_ENTITLEMENTS   ?= $(VZ_RUNNER_DIR)/Entitlements-novmnet.plist
-#? HVI_ENTITLEMENTS Entitlements plist for hvi (default: com.apple.security.hypervisor)
-#?     hvi calls Hypervisor.framework directly rather than through
-#?     Virtualization.framework, so it needs the hypervisor entitlement and not
-#?     the virtualization one. Same rule as vz-runner otherwise: a real Apple
-#?     identity for it to be honored under SIP, ad-hoc only with AMFI disabled.
-HVI_ENTITLEMENTS  ?= $(HVI_DIR)/hvi.entitlements
+#? HVI_ENTITLEMENTS Entitlements plist for a local hvi build (default: com.apple.security.hypervisor)
+#?     The release hvi is signed with the Developer ID and notarized, and is
+#?     never re-signed: a new signature would drop its notarization ticket. A
+#?     local build is signed like vz-runner, with the hypervisor entitlement.
+HVI_ENTITLEMENTS  ?= $(CURDIR)/packaging/hvi.entitlements
 #? CODESIGN_KEYCHAIN Keychain holding the identity. Pin it when other jobs may
 #?     share this login: `security list-keychains -d user -s` is a per-user
 #?     setting, so a concurrent build that sets its own search list evicts this
@@ -100,6 +99,18 @@ DMG               := $(BUILD_DIR)/hull.dmg
 RELEASE_TAG       := $(shell git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null)
 RELEASE_VERSION   := $(or $(patsubst v%,%,$(RELEASE_TAG)),0.0.0)
 TARBALL           := $(BUILD_DIR)/hull-$(RELEASE_VERSION)-arm64.tar.gz
+
+# Signs the hvi at $(1) unless it carries a Developer ID signature. That one
+# is the notarized release, and a new signature would drop its ticket.
+define sign_hvi
+@if codesign -dvv $(1) 2>&1 | grep -q '^Authority=Developer ID Application'; then \
+		echo "$(1): Developer ID signed, kept as shipped"; \
+	else \
+		echo codesign $(CODESIGN_FLAGS) --sign "$(CODESIGN_IDENTITY)" --entitlements $(HVI_ENTITLEMENTS) $(1); \
+		codesign $(CODESIGN_FLAGS) --sign "$(CODESIGN_IDENTITY)" \
+			--entitlements $(HVI_ENTITLEMENTS) $(1); \
+	fi
+endef
 
 ## default Build for the host: `macos` on a Mac, `linux` on Linux.
 .PHONY: default
@@ -124,20 +135,11 @@ linux:
 vz_runner:
 	cd $(VZ_RUNNER_DIR) && swift build -c release
 
-## hvi_vmm Build hvi, the Hypervisor Virtualization Interface, from the submodule.
-.PHONY: hvi_vmm
-hvi_vmm:
-	@test -f $(HVI_DIR)/Cargo.toml || { \
-		echo "error: $(HVI_DIR) is empty — the hvi submodule is not checked out." >&2; \
-		echo "       run: git submodule update --init hvi-vmm" >&2; exit 1; }
-	@# Run from inside the submodule rather than passing --manifest-path.
-	@# rustup picks a toolchain from the working directory, not from the
-	@# manifest, so building from here silently ignored hvi-vmm's
-	@# rust-toolchain.toml: the pin exists to keep the build reproducible
-	@# against the committed lockfile, and it was not being applied. On a
-	@# runner with no default toolchain there is then nothing to fall back
-	@# to, and cargo refuses to choose one at all.
-	cd $(HVI_DIR) && $(CARGO) build --release
+## fetch_hvi Fetch and verify the hvi release hvi.pin names, into build/hvi.
+##           HVI_BIN=/path/to/hvi copies that binary instead.
+.PHONY: fetch_hvi
+fetch_hvi:
+	HVI_BIN="$(filter-out $(HVI),$(HVI_BIN))" scripts/fetch-hvi.sh $(HVI_OUT)
 
 ## sign Code-sign hull + vz-runner + hvi and strip quarantine.
 ##      Override the identity: make sign CODESIGN_IDENTITY="Apple Development: Name (TEAMID)"
@@ -145,10 +147,9 @@ hvi_vmm:
 sign:
 	codesign $(CODESIGN_FLAGS) --sign "$(CODESIGN_IDENTITY)" \
 		--entitlements $(VZ_ENTITLEMENTS) $(VZ_RUNNER_BIN)
-	codesign $(CODESIGN_FLAGS) --sign "$(CODESIGN_IDENTITY)" \
-		--entitlements $(HVI_ENTITLEMENTS) $(HVI_BIN)
+	$(call sign_hvi,$(HVI))
 	codesign $(CODESIGN_FLAGS) --sign "$(CODESIGN_IDENTITY)" $(HULL_BIN)_$(ARCH)
-	xattr -cr $(VZ_RUNNER_BIN) $(HVI_BIN) $(HULL_BIN)_$(ARCH)
+	xattr -cr $(VZ_RUNNER_BIN) $(HVI) $(HULL_BIN)_$(ARCH)
 	@echo "Signed vz-runner + hvi + hull with identity: $(CODESIGN_IDENTITY)"
 
 ## codesign_verify Print signature authority + entitlements of the signed binaries.
@@ -157,8 +158,8 @@ codesign_verify:
 	@echo "== hull =="; codesign -dvvv $(HULL_BIN)_$(ARCH) 2>&1 | grep -E "Authority|flags" || true
 	@echo "== vz-runner =="; codesign -dvvv $(VZ_RUNNER_BIN) 2>&1 | grep -E "Authority|flags" || true
 	@codesign -d --entitlements - --xml $(VZ_RUNNER_BIN) 2>/dev/null && echo || true
-	@echo "== hvi =="; codesign -dvvv $(HVI_BIN) 2>&1 | grep -E "Authority|flags" || true
-	@codesign -d --entitlements - --xml $(HVI_BIN) 2>/dev/null && echo || true
+	@echo "== hvi =="; codesign -dvvv $(HVI) 2>&1 | grep -E "Authority|flags" || true
+	@codesign -d --entitlements - --xml $(HVI) 2>/dev/null && echo || true
 
 ## test Run the Go unit suite.
 .PHONY: test
@@ -180,9 +181,9 @@ test-harness:
 test-cask:
 	python3 scripts/render-cask-test.py
 
-## macos Build hull + vz-runner + hvi, then sign all three.
+## macos Build hull + vz-runner, fetch hvi, then sign them.
 .PHONY: macos
-macos: urunc_macos vz_runner hvi_vmm sign
+macos: urunc_macos vz_runner fetch_hvi sign
 
 APP := $(BUILD_DIR)/hull.app
 
@@ -190,21 +191,20 @@ APP := $(BUILD_DIR)/hull.app
 ##     vz-runner and hvi sit next to hull inside Contents/MacOS, so the
 ##     executable-sibling discovery keeps working from /Applications.
 .PHONY: app
-app: urunc_macos vz_runner hvi_vmm
+app: urunc_macos vz_runner fetch_hvi
 	rm -rf $(APP)
 	mkdir -p $(APP)/Contents/MacOS $(APP)/Contents/Resources
 	cp packaging/Info.plist $(APP)/Contents/Info.plist
 	cp -p $(HULL_BIN)_$(ARCH) $(APP)/Contents/MacOS/hull
 	cp -p $(VZ_RUNNER_BIN) $(APP)/Contents/MacOS/vz-runner
-	cp -p $(HVI_BIN) $(APP)/Contents/MacOS/hvi
+	cp -p $(HVI) $(APP)/Contents/MacOS/hvi
 	cp packaging/AppIcon.icns $(APP)/Contents/Resources/AppIcon.icns
 	# Sign nested code first (vz-runner carries the virtualization
 	# entitlement, hvi the hypervisor one), then the bundle itself — never
 	# --deep.
 	codesign $(CODESIGN_FLAGS) --sign "$(CODESIGN_IDENTITY)" \
 		--entitlements $(VZ_ENTITLEMENTS) $(APP)/Contents/MacOS/vz-runner
-	codesign $(CODESIGN_FLAGS) --sign "$(CODESIGN_IDENTITY)" \
-		--entitlements $(HVI_ENTITLEMENTS) $(APP)/Contents/MacOS/hvi
+	$(call sign_hvi,$(APP)/Contents/MacOS/hvi)
 	codesign $(CODESIGN_FLAGS) --sign "$(CODESIGN_IDENTITY)" $(APP)/Contents/MacOS/hull
 	codesign $(CODESIGN_FLAGS) --sign "$(CODESIGN_IDENTITY)" $(APP)
 	xattr -cr $(APP)
@@ -266,8 +266,7 @@ release_tarball:
 		$(APP)/Contents/MacOS/hvi $(BUILD_DIR)/tarball-stage/
 	codesign $(CODESIGN_FLAGS) --sign "$(CODESIGN_IDENTITY)" \
 		--entitlements $(VZ_ENTITLEMENTS) $(BUILD_DIR)/tarball-stage/vz-runner
-	codesign $(CODESIGN_FLAGS) --sign "$(CODESIGN_IDENTITY)" \
-		--entitlements $(HVI_ENTITLEMENTS) $(BUILD_DIR)/tarball-stage/hvi
+	$(call sign_hvi,$(BUILD_DIR)/tarball-stage/hvi)
 	codesign $(CODESIGN_FLAGS) --sign "$(CODESIGN_IDENTITY)" $(BUILD_DIR)/tarball-stage/hull
 	codesign --verify --strict $(BUILD_DIR)/tarball-stage/hull
 	codesign --verify --strict $(BUILD_DIR)/tarball-stage/vz-runner
@@ -297,22 +296,21 @@ dmg: dmg_image
 
 ## install Install hull, vz-runner and hvi side by side in PREFIX.
 ##         Both VMMs are discovered next to hull, so all three must be copied.
-##         Installing re-signs them: `install` copies rather than preserving
-##         the signature's file identity.
+##         Installing re-signs vz-runner and a local hvi build: `install`
+##         copies rather than preserving the signature's file identity.
 .PHONY: install
 install: macos
 	install -m0755 $(HULL_BIN)_$(ARCH) $(PREFIX)/hull
 	install -m0755 $(VZ_RUNNER_BIN) $(PREFIX)/vz-runner
-	install -m0755 $(HVI_BIN) $(PREFIX)/hvi
+	install -m0755 $(HVI) $(PREFIX)/hvi
 	codesign $(CODESIGN_FLAGS) --sign "$(CODESIGN_IDENTITY)" \
 		--entitlements $(VZ_ENTITLEMENTS) $(PREFIX)/vz-runner
-	codesign $(CODESIGN_FLAGS) --sign "$(CODESIGN_IDENTITY)" \
-		--entitlements $(HVI_ENTITLEMENTS) $(PREFIX)/hvi
+	$(call sign_hvi,$(PREFIX)/hvi)
 
 ## clean Remove build artifacts.
 .PHONY: clean
 clean:
-	rm -rf $(BUILD_DIR) $(VZ_RUNNER_DIR)/.build $(HVI_DIR)/target
+	rm -rf $(BUILD_DIR) $(VZ_RUNNER_DIR)/.build $(HVI)
 
 ## help Show this help message
 help:

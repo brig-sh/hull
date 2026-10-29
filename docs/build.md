@@ -3,14 +3,15 @@
 You only need this to work on hull. To use it, install a release; see
 [install.md](install.md).
 
-hull is three executables in three languages. All three must be built, and the
-two runners must be signed before they can start a VM.
+hull is three executables in three languages. hull builds two of them and
+fetches `hvi` from its release. Both runners must be signed before they can
+start a VM.
 
 | Executable | Language | Built by |
 |---|---|---|
 | `hull` | Go | `go build`, from `cmd/hull` |
 | `vz-runner` | Swift | `swift build`, from `vz-runner/` |
-| `hvi` | Rust | `cargo build`, from the `hvi-vmm` submodule |
+| `hvi` | Rust | [hvi-vmm](https://github.com/brig-sh/hvi-vmm); hull fetches the release `hvi.pin` names |
 
 ## Prerequisites
 
@@ -22,42 +23,29 @@ two runners must be signed before they can start a VM.
 - **Go** 1.26 or later. `go.mod` declares 1.26.4.
 - **Xcode command line tools**, which supply Swift. `vz-runner` declares
   `swift-tools-version:5.9` and a macOS 14 deployment target.
-- **Rust.** The `hvi-vmm` submodule pins stable **1.95.0** in its
-  `rust-toolchain.toml`. Install `rustup` and let it read that pin.
+- **cosign** v3 or later (`brew install cosign`), which verifies the hvi
+  release.
 - Optional: `brew install e2fsprogs` for the block rootfs mode, and
   `brew install qemu` for the QEMU backend.
 
-Two Rust version numbers exist and mean different things. `1.95.0` in
-`rust-toolchain.toml` is the **build pin**, chosen so a fresh checkout builds
-reproducibly against the committed lockfile. `rust-version` in `Cargo.toml`
-declares a **1.77 MSRV floor**, which is a separate compatibility contract. A
-third toolchain, the nightly `nightly-2026-08-30`, is pinned only for a
-comment-reflow check, because `rustfmt`'s `wrap_comments` option is
-nightly-only. It is not needed to build hvi.
+## The hvi release
 
-## Clone with submodules
+`hvi.pin` names the hvi release hull ships: its version, its commit and the
+sha256 of its `aarch64-apple-darwin` archive. `make fetch_hvi` runs
+`scripts/fetch-hvi.sh`, which downloads that release and checks the cosign
+signature of its `SHA256SUMS`, the archive's sha against the pin, and the
+binary's Developer ID signature and hypervisor entitlement. It installs the
+binary to `build/hvi` and caches the archive in `.cache/hvi/`.
 
-`hvi-vmm` is a submodule, and `make macos` needs it:
-
-```bash
-git clone --recursive https://github.com/brig-sh/hull.git
-cd hull
-```
-
-If you already cloned without `--recursive`:
+The release binary is signed and notarized, and no `make` target re-signs it.
+To work on hvi itself, build it in a clone of hvi-vmm and point hull at it:
 
 ```bash
-git submodule update --init hvi-vmm
+HVI_BIN=/path/to/hvi-vmm/target/release/hvi make macos
 ```
 
-`make hvi_vmm` checks for `hvi-vmm/Cargo.toml` and stops with that exact
-command in the error when the submodule is missing.
-
-The submodule is pinned to a **commit**, not a branch. `git submodule status`
-showing a `+` prefix means the checked-out commit differs from the one this
-repository records. Run `git submodule update --init` to get back to the
-recorded pin, and do not commit a submodule bump as a side effect of unrelated
-work.
+`make` copies that binary to `build/hvi` and signs it ad-hoc with
+`packaging/hvi.entitlements`.
 
 ## Build
 
@@ -65,8 +53,8 @@ work.
 make macos
 ```
 
-That runs four steps: build `hull`, build `vz-runner`, build `hvi`, then sign
-all three ad-hoc and strip the quarantine attribute.
+That runs four steps: build `hull`, build `vz-runner`, fetch `hvi`, then sign
+`hull` and `vz-runner` ad-hoc and strip the quarantine attribute.
 
 A plain `make` picks the build for the host: `macos` on a Mac, `linux`
 anywhere else.
@@ -78,8 +66,8 @@ Individual targets:
 | `make urunc_macos` | build the Go CLI for macOS to `dist/hull_arm64` |
 | `make linux` | build the Go CLI for Linux to `dist/hull_linux_<arch>` |
 | `make vz_runner` | `swift build -c release` in `vz-runner/` |
-| `make hvi_vmm` | `cargo build --release` in `hvi-vmm/` |
-| `make sign` | sign all three and strip quarantine |
+| `make fetch_hvi` | fetch and verify the pinned hvi release into `build/hvi` |
+| `make sign` | sign `hull`, `vz-runner` and a local hvi build, and strip quarantine |
 | `make codesign_verify` | print each binary's authority chain and entitlements |
 | `make test` | `go test -count=1 ./...`, then the same in `pkg/telemetry` |
 | `make app` | assemble `hull.app` with both runners inside `Contents/MacOS` |
@@ -90,16 +78,10 @@ Individual targets:
 | `make clean` | remove build artifacts |
 | `make help` | list every target |
 
-`make hvi_vmm` runs `cargo` from inside the submodule rather than passing
-`--manifest-path`. That is deliberate: `rustup` picks a toolchain from the
-working directory, not from the manifest, so building from the repository root
-silently ignored the submodule's pin. On a runner with no default toolchain
-there is then nothing to fall back to, and cargo refuses to choose.
-
 ### Build concurrency
 
-`cargo` and `swift build` both parallelize by default. On a machine running
-other work, cap them rather than letting each build assume it owns the box.
+`swift build` parallelizes by default. On a machine running other work, cap
+it rather than letting the build assume it owns the box.
 
 ### Building on Linux
 
@@ -376,12 +358,12 @@ For a local build, symlink the runners next to the CLI:
 
 ```bash
 ln -sf vz-runner/.build/arm64-apple-macosx/release/vz-runner .
-ln -sf hvi-vmm/target/release/hvi .
+ln -sf build/hvi .
 ./dist/hull_arm64 --help
 ```
 
 Or use `make install`, which copies all three into `PREFIX` and re-signs
-`vz-runner` and `hvi` there. It does not re-sign `hull`, which needs no
+`vz-runner` there, and `hvi` when it is a local build. It does not re-sign `hull`, which needs no
 entitlement.
 
 Putting only `hull` on your PATH is the most common local-build mistake. The
@@ -545,8 +527,9 @@ Note one bundle subtlety. A bundle's **main** executable, `hull` here, is
 sealed to the bundle's `Info.plist` and resource directory, so extracted as a
 lone file its signature is invalid and AMFI kills it at exec. Nested binaries
 like `vz-runner` and `hvi` are not sealed that way and survive extraction.
-`make release_tarball` re-signs all three as standalone code, which `hull`
-needs and the runners do not. A plain `cp` of an already-standalone binary
+`make release_tarball` re-signs `hull` and `vz-runner` as standalone code,
+which `hull` needs and `vz-runner` does not. The release `hvi` keeps its own
+signature. A plain `cp` of an already-standalone binary
 breaks nothing. See
 [signing.md](signing.md#does-copying-a-binary-break-its-signature).
 

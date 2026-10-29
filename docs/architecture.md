@@ -126,7 +126,7 @@ with `--gateway-sock`. See [networking.md](networking.md) and
 | `internal/netgw` | the gateway's netstack, DNS and egress filter |
 | `pkg/telemetry` | the telemetry client, a module of its own that brig links too |
 | `vz-runner` | the Swift runner for the `vz` backend |
-| `hvi-vmm` | the `hvi` VMM, a git submodule pinned to a commit |
+| `hvi.pin` | the `hvi` VMM release hull ships, fetched by `scripts/fetch-hvi.sh` |
 
 hull consumes [urunc](https://github.com/urunc-dev/urunc) as a Go dependency
 for the darwin hypervisor backends and the generic container initrd. The

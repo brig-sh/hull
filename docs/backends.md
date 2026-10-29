@@ -129,15 +129,12 @@ a console session is unresolved.
 object, owns the vCPUs, and implements its own virtio device model. That is
 what lets brig give a workload the same devices on macOS and on Linux.
 
-hull consumes `hvi` as a git submodule pinned to a commit, not as a released
-version. The facts on this page come from that pinned commit.
+hull consumes `hvi` as the signed release that `hvi.pin` names. The facts on
+this page come from that release.
 
 **Host requirements.** Apple Silicon. On macOS the only guest architecture is
 arm64, booted as an unmodified Linux `Image` with a devicetree. There is no
-firmware or bootloader stage, and no x86-64 guest on macOS. Building `hvi`
-needs the Rust toolchain its submodule pins, currently stable 1.95.0. That pin
-is the build toolchain, not a minimum: the manifest declares a 1.77 floor, and
-the two are separate contracts.
+firmware or bootloader stage, and no x86-64 guest on macOS.
 
 **Entitlement.** `com.apple.security.hypervisor`, and nothing else.
 `com.apple.vm.networking` is deliberately absent, and the entitlements file

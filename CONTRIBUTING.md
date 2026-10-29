@@ -6,10 +6,10 @@ notes come first.
 
 ## Repo specifics
 
-- Clone with `--recursive`, or run `git submodule update --init` after
-  the fact: `hvi-vmm` is a submodule and `make macos` needs it.
-- Build: `make macos` builds and ad-hoc signs the `hull` CLI, the Swift
-  `vz-runner` and the Rust `hvi`. See the Makefile header for signing knobs
+- Build: `make macos` builds and ad-hoc signs the `hull` CLI and the Swift
+  `vz-runner`. It fetches `hvi` from the signed release `hvi.pin` names,
+  which needs cosign v3. `HVI_BIN=/path/to/hvi make macos` uses a local hvi
+  build instead. See the Makefile header for signing knobs
   (`CODESIGN_IDENTITY`, `VZ_ENTITLEMENTS`, `HVI_ENTITLEMENTS`).
 - End-to-end: the harnesses under `test/` (`pty-terminal-test.py`,
   `pty-jobcontrol-test.py`, `pty-checkpoint-test.py`, `share-test.py`,

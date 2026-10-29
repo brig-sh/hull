@@ -11,13 +11,14 @@
 # brig@main depends on hull@main and brig@experimental on hull@experimental.
 #
 # This runs the same build, sign and notarize steps the release does, on the
-# same runner, because a channel build has to be installable: vz-runner and
-# hvi carry the virtualization and hypervisor entitlements, and macOS refuses
-# either without a Developer ID signature. The two signing steps below are
-# copied from release.yml rather than shared. Factoring them into a composite
-# action is the right end state and is deliberately not done here: it would
-# edit the release path to add a channel, and that path is not one to change
-# blind. See the note in docs/releasing.md.
+# same runner, because a channel build has to be installable: vz-runner
+# carries the virtualization entitlement, and macOS refuses it without a
+# Developer ID signature. hvi arrives signed and notarized from its release.
+# The two signing steps below are copied from release.yml rather than shared.
+# Factoring them into a composite action is the right end state and is
+# deliberately not done here: it would edit the release path to add a
+# channel, and that path is not one to change blind. See the note in
+# docs/releasing.md.
 name: channel
 
 on:
@@ -89,7 +90,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ steps.channel.outputs.ref }}
-          submodules: recursive
           # goreleaser reads the tag history to derive the version this build
           # is the successor to, so a shallow clone gives it the wrong answer.
           fetch-depth: 0
@@ -164,6 +164,10 @@ jobs:
             echo "$changed" >&2
             exit 1; }
 
+      # The hvi this ref pins. It needs no keychain, so it is fetched before
+      # the lock is taken.
+      - uses: ./.github/actions/fetch-hvi
+
       # One signing job at a time on the shared Mac. See
       # scripts/keychain-lock.sh for why this is not a concurrency group.
       - name: Take the keychain lock
@@ -192,24 +196,22 @@ jobs:
           [ -n "$IDENTITY" ] || { echo "no Developer ID identity" >&2; exit 1; }
           echo "IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
 
-      # vz-runner carries com.apple.security.virtualization and hvi carries
-      # com.apple.security.hypervisor. Without a Developer ID signature macOS
-      # refuses either entitlement under SIP and no VM starts, so this is not
-      # optional for either. The two are handled by one function rather than
-      # two copies of it: the only things that differ are the name, the
-      # entitlements plist and the key that must survive signing.
-      - name: Build, sign and notarize the VMMs
+      # vz-runner carries com.apple.security.virtualization. Without a
+      # Developer ID signature macOS refuses the entitlement under SIP and no
+      # VM starts. hvi is not signed here: it arrives signed and notarized
+      # from its release, and a new signature would drop its ticket.
+      - name: Build, sign and notarize vz-runner
         env:
           NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
           NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
           NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
         run: |
-          make vz_runner hvi_vmm
+          make vz_runner
           # NOT dist/: goreleaser runs with --clean and wipes that directory
           # before it builds, which would delete the binaries we just signed.
+          # build/hvi is already there.
           mkdir -p build
           cp vz-runner/.build/arm64-apple-macosx/release/vz-runner build/vz-runner
-          cp hvi-vmm/target/release/hvi build/hvi
           echo "$NOTARY_KEY_P8" > "$RUNNER_TEMP/notary-key.p8"
 
           sign_and_notarize() {
@@ -260,8 +262,6 @@ jobs:
 
           sign_and_notarize vz-runner vz-runner/Entitlements-novmnet.plist \
             com.apple.security.virtualization
-          sign_and_notarize hvi hvi-vmm/hvi.entitlements \
-            com.apple.security.hypervisor
           rm "$RUNNER_TEMP/notary-key.p8"
 
       - name: Stage the notary key for GoReleaser

@@ -87,7 +87,8 @@ jobs that each assert the machine's actual state before trusting the result:
   enabled, and boots real VMs on `vz` and `hvi` from a **Developer ID** build.
 - `boot-nosip` runs on a `sip-disabled` runner, asserts `csrutil status`
   reports disabled, and boots the same two backends from a plain ad-hoc
-  `make macos` build with no keychain and no certificate. Its own comment
+  `make macos` build with no keychain and no certificate. `hvi` keeps the
+  Developer ID signature of its release there too. Its own comment
   states the rule: the entitlements are "honored without a real signature"
   with SIP off, "which is exactly the posture this job exists to exercise".
 
@@ -197,9 +198,10 @@ For `hull.app` that means `hull` is the one that genuinely needs re-signing
 after extraction. `vz-runner` and `hvi` ride inside `Contents/MacOS` as nested
 binaries and survive extraction on their own.
 
-`make release_tarball` re-signs the staged binaries as **standalone** code
+`make release_tarball` re-signs `hull` and `vz-runner` as **standalone** code
 anyway and gates on `codesign --verify --strict` for each. For `hull` that is
-required. For the two runners it is belt and braces.
+required. For `vz-runner` it is belt and braces. The release `hvi` is never
+re-signed: it is notarized, and a new signature would drop its ticket.
 
 ### What actually blocks a downloaded binary
 
@@ -283,6 +285,6 @@ The release workflow does the same and then asserts that
 `com.apple.security.virtualization` is present on the shipped `vz-runner`, so a
 build that silently lost the entitlement fails rather than shipping.
 
-Note that `hvi` must be re-signed after every rebuild. Rebuilding produces a new
-Mach-O, and a new Mach-O carries no signature until you apply one. `make macos`
-handles this by signing after it builds.
+Note that a local `hvi` build must be re-signed after every rebuild. Rebuilding
+produces a new Mach-O, and a new Mach-O carries no signature until you apply
+one. `HVI_BIN=/path/to/hvi make macos` handles this by signing the staged copy.

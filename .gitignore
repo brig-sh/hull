@@ -20,3 +20,6 @@ go.work.sum
 # under it is silently untracked -- already-tracked ones keep working, which is
 # exactly what makes it easy to miss.
 !/vz-runner/
+
+# Verified hvi release archives (scripts/fetch-hvi.sh).
+/.cache/

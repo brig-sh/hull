@@ -60,7 +60,7 @@ hull delegates work to three projects with their own documentation:
   backends and the generic container initrd. hull pins a specific commit; see
   [build.md](build.md#the-urunc-dependency).
 - [hvi](https://github.com/brig-sh/hvi-vmm) is the Rust VMM behind the `hvi`
-  backend, and a git submodule of this repository.
+  backend. hull ships the signed release that `hvi.pin` names.
 - [brig](https://github.com/brig-sh/brig) drives hull on macOS. If you came
   here from brig, most of what you want is in [cli.md](cli.md) and
   [storage.md](storage.md).
