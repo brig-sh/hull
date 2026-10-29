@@ -133,7 +133,7 @@ The PTY harnesses boot `harbor.nbfc.io/nubificus/urunc-ubuntu-vz:aarch64`.
 ## How CI runs them
 
 `.github/workflows/ci.yml` gates only the VM-booting tiers on a code change
-(Go, Swift, the hvi submodule, `.github/actions/`, `test/`, workflows) or a
+(Go, Swift, `hvi.pin`, `.github/actions/`, `test/`, workflows) or a
 manual dispatch; a docs-only change still runs lint, `build`, and the
 `unit` job's test suite -- none of those can be broken by a diff they
 cannot see, so none of them are gated on one. Only `e2e`, `microVM boot

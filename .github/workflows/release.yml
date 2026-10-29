@@ -5,7 +5,8 @@ name: Release
 # vz-runner first, because GoReleaser cannot build a Swift binary and cannot
 # import one in the open-source edition. It is signed with the virtualization
 # entitlement and notarized here, then GoReleaser picks it up as an extra file
-# in the archive, notarizes the Go binary and writes the changelog. For a
+# in the archive, notarizes the Go binary and writes the changelog. hvi
+# arrives signed and notarized from the release hvi.pin names. For a
 # stable tag the `tap` job then renders the cask and opens it against the tap
 # as a pull request.
 #
@@ -83,9 +84,8 @@ jobs:
           # about 110s of actual build, sign and notarize work.
           cache: false
 
-      # hvi-vmm is a submodule and a shipped binary, so a release cannot be cut
-      # without it.
-      - uses: ./.github/actions/fetch-hvi-vmm
+      # hvi is a shipped binary, so a release cannot be cut without it.
+      - uses: ./.github/actions/fetch-hvi
 
       # goreleaser checks the tree before its tidy hook runs, so a hook that
       # changes go.mod or go.sum would ship every binary as +dirty. Tidy first.
@@ -132,24 +132,22 @@ jobs:
           [ -n "$IDENTITY" ] || { echo "no Developer ID identity" >&2; exit 1; }
           echo "IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
 
-      # vz-runner carries com.apple.security.virtualization and hvi carries
-      # com.apple.security.hypervisor. Without a Developer ID signature macOS
-      # refuses either entitlement under SIP and no VM starts, so this is not
-      # optional for either. The two are handled by one function rather than
-      # two copies of it: the only things that differ are the name, the
-      # entitlements plist and the key that must survive signing.
-      - name: Build, sign and notarize the VMMs
+      # vz-runner carries com.apple.security.virtualization. Without a
+      # Developer ID signature macOS refuses the entitlement under SIP and no
+      # VM starts. hvi is not signed here: it arrives signed and notarized
+      # from its release, and a new signature would drop its ticket.
+      - name: Build, sign and notarize vz-runner
         env:
           NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
           NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
           NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
         run: |
-          make vz_runner hvi_vmm
+          make vz_runner
           # NOT dist/: goreleaser runs with --clean and wipes that directory
           # before it builds, which would delete the binaries we just signed.
+          # build/hvi is already there.
           mkdir -p build
           cp vz-runner/.build/arm64-apple-macosx/release/vz-runner build/vz-runner
-          cp hvi-vmm/target/release/hvi build/hvi
           echo "$NOTARY_KEY_P8" > "$RUNNER_TEMP/notary-key.p8"
 
           sign_and_notarize() {
@@ -200,8 +198,6 @@ jobs:
 
           sign_and_notarize vz-runner vz-runner/Entitlements-novmnet.plist \
             com.apple.security.virtualization
-          sign_and_notarize hvi hvi-vmm/hvi.entitlements \
-            com.apple.security.hypervisor
           rm "$RUNNER_TEMP/notary-key.p8"
 
       - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
@@ -437,9 +433,9 @@ jobs:
           # runner, so the Actions cache round-trip is pure overhead.
           cache: false
 
-      # The app bundle carries hvi, so this job builds it too and needs the
-      # submodule for the same reason the release job does.
-      - uses: ./.github/actions/fetch-hvi-vmm
+      # The app bundle carries hvi, and `make app` fetches it again from the
+      # cache. This also installs the cosign v3 that fetch needs.
+      - uses: ./.github/actions/fetch-hvi
 
       - name: Install create-dmg
         run: test -x "$(brew --prefix)/bin/create-dmg" || brew install create-dmg

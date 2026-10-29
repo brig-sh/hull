@@ -80,25 +80,16 @@ jobs:
               - '**/go.sum'
               - 'Makefile'
               - 'vz-runner/**'
-              # The hvi submodule is a VMM we build, sign and ship, so a bump to
-              # it is a code change like any other. It was not listed here, and
-              # the consequence was immediate: a bump carrying a virtio-fs fix
-              # went to main with "unit + e2e (boots real VMs): skipped",
-              # because the only files that changed were a version bump and
-              # a submodule pointer. The one job that boots hvi is the one that
-              # did not run.
-              #
-              # A gitlink shows up in a diff as the submodule's own path, so
-              # matching the directory is enough.
-              - 'hvi-vmm'
-              - 'hvi-vmm/**'
-              - '.gitmodules'
+              # hvi is a VMM we ship, so a bump of its pin is a code change
+              # like any other and has to run the jobs that boot hvi.
+              # scripts/** below covers scripts/fetch-hvi.sh.
+              - 'hvi.pin'
               - 'packaging/**'
               - 'scripts/**'
               - 'test/**'
               - '.github/workflows/**'
               # The same gap existed one level down: '.github/actions/**' was
-              # missing too. fetch-hvi-vmm and verify-vz-entitlement live
+              # missing too. fetch-hvi and verify-vz-entitlement live
               # there but are already exercised regardless of this filter --
               # `build` below has no `needs: changes` and runs unconditionally,
               # and it uses both -- so the real exposure was narrower:
@@ -326,9 +317,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      # hvi-vmm is a submodule that `make macos` builds and signs, so this
-      # job needs it checked out.
-      - uses: ./.github/actions/fetch-hvi-vmm
+      # `make macos` stages the pinned hvi release, which needs cosign v3.
+      - uses: ./.github/actions/fetch-hvi
 
       # Self-hosted runners provide their own Go toolchain; setup-go is only
       # needed on ephemeral GitHub-hosted runners.
@@ -474,9 +464,9 @@ jobs:
       # to run. ~15s. Swift is present on both routings -- on the
       # self-hosted Macs (`build` above already runs `swift build -c release`
       # there through `make macos`) and on GitHub-hosted macos-15, where it
-      # ships in the preinstalled Xcode. vz-runner is in-tree, not a
-      # submodule, and its Package.swift declares no dependencies, so this
-      # needs neither fetch-hvi-vmm nor the network. --filter-selftest only
+      # ships in the preinstalled Xcode. vz-runner is in-tree, and its
+      # Package.swift declares no dependencies, so this needs neither
+      # fetch-hvi nor the network. --filter-selftest only
       # reads stdin and writes stdout, so it needs no entitlement, no real
       # signature and no virtualization to run.
       - name: Build vz-runner (the Swift terminal contract test needs it)
@@ -626,9 +616,10 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      # hvi-vmm is a submodule that `make macos` builds and signs, so this
-      # job needs it checked out.
-      - uses: ./.github/actions/fetch-hvi-vmm
+      # `make macos` below stages the pinned hvi release, which needs cosign
+      # v3. Only the self-hosted routing builds.
+      - uses: ./.github/actions/fetch-hvi
+        if: runner.environment == 'self-hosted'
 
       # Self-hosted runners provide their own Go toolchain; setup-go is only
       # needed on ephemeral GitHub-hosted runners.
@@ -640,9 +631,8 @@ jobs:
       # Everything below boots real VMs (or only exists to serve those
       # steps), so it runs on the self-hosted runner only. On GitHub-hosted
       # macos-15 -- where a fork PR's code change routes -- every step below
-      # self-disables and this job does nothing beyond fetching the
-      # submodule: `unit` above already covered the test suite by then, on
-      # the same routing.
+      # self-disables and this job does nothing: `unit` above already covered
+      # the test suite by then, on the same routing.
       # One signing job at a time on the shared Mac. See
       # scripts/keychain-lock.sh for why this is not a concurrency group.
       - name: Take the keychain lock
@@ -676,7 +666,7 @@ jobs:
           # Both VMMs are discovered next to the hull executable, so they have
           # to sit beside it in dist/ for the e2e steps below to find them.
           cp -p vz-runner/.build/arm64-apple-macosx/release/vz-runner dist/vz-runner
-          cp -p hvi-vmm/target/release/hvi dist/hvi
+          cp -p build/hvi dist/hvi
 
       - name: Ensure QEMU
         if: runner.environment == 'self-hosted'
@@ -890,9 +880,9 @@ jobs:
       - name: Choose a short store dir (macOS SUN_LEN)
         run: echo "HULL_STORE_DIR=$HOME/hull-ci-store" >> "$GITHUB_ENV"
 
-      # hvi-vmm is a submodule that `make macos` builds and signs -- and this job
-      # boots the hvi backend, so it genuinely needs it.
-      - uses: ./.github/actions/fetch-hvi-vmm
+      # This job boots the hvi backend. `make macos` stages the pinned hvi
+      # release, which needs cosign v3.
+      - uses: ./.github/actions/fetch-hvi
 
       # The signed build is the whole point here: an ad-hoc signature boots fine
       # with SIP off and is refused the entitlement with SIP on. Sign with the
@@ -932,7 +922,7 @@ jobs:
           # Both VMMs are discovered next to the hull executable, so they have to
           # sit beside it in dist/ for the boots below to find them.
           cp -p vz-runner/.build/arm64-apple-macosx/release/vz-runner dist/vz-runner
-          cp -p hvi-vmm/target/release/hvi dist/hvi
+          cp -p build/hvi dist/hvi
 
       # Belt and braces: the entitlement has to be on the binary before the
       # framework can honor it. Cheap to check, and it turns a bare "the VM did
@@ -1054,20 +1044,22 @@ jobs:
       - name: Choose a short store dir (macOS SUN_LEN)
         run: echo "HULL_STORE_DIR=$HOME/hull-ci-store" >> "$GITHUB_ENV"
 
-      # This job boots the hvi backend, so it needs the submodule.
-      - uses: ./.github/actions/fetch-hvi-vmm
+      # This job boots the hvi backend. `make macos` stages the pinned hvi
+      # release, which needs cosign v3.
+      - uses: ./.github/actions/fetch-hvi
 
       # Ad-hoc build, no keychain and no Developer ID: `make macos` with no
       # identity still embeds the entitlements (the build job's check proves it),
       # and with SIP off they are honored without a real signature -- which is
-      # exactly the posture this job exists to exercise.
+      # exactly the posture this job exists to exercise. hvi keeps the
+      # Developer ID signature of its release.
       - name: Build ad-hoc-signed binaries
         run: |
           make macos
           # Both VMMs are discovered next to the hull executable, so they have to
           # sit beside it in dist/ for the boots below to find them.
           cp -p vz-runner/.build/arm64-apple-macosx/release/vz-runner dist/vz-runner
-          cp -p hvi-vmm/target/release/hvi dist/hvi
+          cp -p build/hvi dist/hvi
 
       # The entitlement has to be on the binary even here -- SIP off relaxes who
       # may HOLD it, not whether the framework looks for it. Cheap to check, and
@@ -1092,7 +1084,7 @@ jobs:
         run: python3 test/pty-terminal-test.py vz ci-nosip-vz-${GITHUB_RUN_ID} type
 
       # hvi boot: boots an unmodified OCI image on the hvi backend, exercising the
-      # ad-hoc hvi VMM, the host kernel and initrd, and the virtio-fs rootfs export
+      # release hvi VMM, the host kernel and initrd, and the virtio-fs rootfs export
       # in one go. Skips with a named reason (exit 0) when the assets or the hvi
       # binary are missing.
       - name: Boot a microVM on hvi (real VM, SIP off)

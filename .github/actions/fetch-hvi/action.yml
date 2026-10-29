@@ -1,0 +1,24 @@
+name: Fetch hvi
+description: >
+  Fetch the hvi release that hvi.pin names into build/hvi, through
+  scripts/fetch-hvi.sh, so every job that ships or boots hvi verifies it the
+  same way. The binary arrives signed and notarized from its release.
+
+runs:
+  using: composite
+  steps:
+    # hvi's SHA256SUMS is signed in the cosign v3 bundle format. This cosign
+    # goes to a directory of its own, and fetch-hvi.sh calls it by path. The
+    # installer also puts that directory first on the PATH of the job's later
+    # steps, so a job that signs with its own cosign installs it after this
+    # action, and that cosign comes first.
+    - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      with:
+        cosign-release: v3.0.6
+        install-dir: ${{ runner.temp }}/cosign-hvi
+
+    - name: Fetch and verify hvi
+      shell: bash
+      env:
+        COSIGN: ${{ runner.temp }}/cosign-hvi/cosign
+      run: make fetch_hvi
