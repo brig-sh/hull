@@ -77,6 +77,7 @@ func newApp() *cli.Command {
 			assetsCommand(),
 			imagesCommand(),
 			inspectCommand(),
+			logsCommand(),
 			psCommand(),
 			pullCommand(),
 			rmCommand(),
