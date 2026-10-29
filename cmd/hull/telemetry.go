@@ -497,6 +497,15 @@ func startVMMMetricsSampler(launcherPID int, backend string, vcpus int, startTim
 			if !ok {
 				return true // baseline taken, or the two are not comparable
 			}
+			// A ps takes a while, over a second under -race. An attach that
+			// ended meanwhile sends nothing: the event would go wherever the
+			// telemetry endpoint points by then, which for tests is the next
+			// test's server.
+			select {
+			case <-done:
+				return false
+			default:
+			}
 			telemetryClient.Send("metrics", map[string]string{
 				"backend":  knownBackend(backend),
 				"rss_kb":   rssKB,
