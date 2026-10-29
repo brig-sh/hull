@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -428,5 +429,60 @@ func TestSamplerSettlesToTheSteadyIntervalAfterTheFirstSample(t *testing.T) {
 	case <-events:
 		t.Error("a second sample arrived far inside the steady interval: the sampler never left the warm-up")
 	case <-time.After(5 * time.Second):
+	}
+}
+
+// A tick still in its ps when the attach ends sends nothing. It used to send,
+// and the telemetry client reads its endpoint at delivery, so the sample went
+// to whatever endpoint the next test had set: the flake
+// TestSamplerSettlesToTheSteadyIntervalAfterTheFirstSample showed under -race,
+// where a ps takes over a second.
+func TestSamplerSendsNothingAfterTheAttachEnds(t *testing.T) {
+	fakePS(t, 1.0)
+	orig, err := exec.LookPath("ps")
+	if err != nil {
+		t.Fatal(err)
+	}
+	slow, mark := t.TempDir(), filepath.Join(t.TempDir(), "calls")
+	script := fmt.Sprintf("#!/bin/sh\necho x >> %q\nsleep 2\nexec %q \"$@\"\n", mark, orig)
+	if err := os.WriteFile(filepath.Join(slow, "ps"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", slow+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	events := make(chan struct{}, 16)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		events <- struct{}{}
+	}))
+	defer srv.Close()
+
+	intervalWas, warmupWas := metricsInterval, metricsWarmupInterval
+	t.Cleanup(func() { metricsInterval, metricsWarmupInterval = intervalWas, warmupWas })
+	metricsWarmupInterval = 50 * time.Millisecond
+	metricsInterval = 60 * time.Second
+	withTelemetryClient(t, srv.URL)
+
+	done := make(chan struct{})
+	startVMMMetricsSampler(os.Getpid(), "qemu", 1, time.Now(), t.TempDir(), done)
+
+	// The first tick takes the baseline; the second is the one that would
+	// send. End the attach while it is in its ps.
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		b, _ := os.ReadFile(mark)
+		if strings.Count(string(b), "x") >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the sampler never reached its second tick")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	close(done)
+
+	select {
+	case <-events:
+		t.Error("a tick that outlived its attach sent a sample")
+	case <-time.After(6 * time.Second):
 	}
 }
