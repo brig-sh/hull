@@ -182,8 +182,10 @@ func registryClient(httpFallback bool) *http.Client {
 // allowsPlainHTTP reports whether a registry may be reached over plain HTTP
 // when HTTPS fails. The macOS pull goes through go-containerregistry, which
 // tries HTTPS and then HTTP for loopback addresses, localhost, RFC 1918
-// addresses and .local names. The same rule applies here, taken from the
+// addresses and .localhost names. The same rule applies here, taken from the
 // same code, so a local registry that works on one OS works on the other.
+// go-containerregistry v0.22 narrowed .local, which anyone on the LAN can
+// answer for over mDNS, to .localhost.
 func allowsPlainHTTP(host string) bool {
 	reg, err := name.NewRegistry(host)
 	if err != nil {
