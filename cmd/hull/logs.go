@@ -17,41 +17,16 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"time"
 
 	"github.com/urfave/cli/v3"
 
 	"github.com/brig-sh/hull/pkg/store"
 )
-
-func logsCommand() *cli.Command {
-	return &cli.Command{
-		Name:  "logs",
-		Usage: "view instance logs",
-		Flags: []cli.Flag{
-			&cli.BoolFlag{
-				Name:    "follow",
-				Aliases: []string{"f"},
-				Usage:   "follow log output",
-			},
-			&cli.IntFlag{
-				Name:    "tail",
-				Aliases: []string{"n"},
-				Value:   -1,
-				Usage:   "number of recent lines to show (-1 for all)",
-			},
-		},
-		Action: func(ctx context.Context, cmd *cli.Command) error {
-			return viewLogs(ctx, cmd)
-		},
-	}
-}
 
 func viewLogs(ctx context.Context, cmd *cli.Command) error {
 	args := cmd.Args()
@@ -90,91 +65,4 @@ func logsInstance(s *store.Store, instanceID string, out io.Writer, follow bool,
 		return fmt.Errorf("instance %s is still being created; it has no console log yet", instanceID)
 	}
 	return readLogs(out, state.LogFile, follow, tail)
-}
-
-func readLogs(out io.Writer, logFile string, follow bool, tail int) error {
-	file, err := os.Open(logFile)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("log file not found: %s", logFile)
-		}
-		return fmt.Errorf("failed to open log file: %w", err)
-	}
-	defer func() { _ = file.Close() }()
-
-	if !follow {
-		// Non-follow mode: read all or tail lines
-		if tail < 0 {
-			// Read all
-			_, err := io.Copy(out, file)
-			return err
-		}
-
-		// Read last N lines
-		lines, err := readLastLines(file, tail)
-		if err != nil {
-			return err
-		}
-		for _, line := range lines {
-			_, _ = fmt.Fprintln(out, line)
-		}
-		return nil
-	}
-
-	// Follow mode: stream log updates
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		_, _ = fmt.Fprintln(out, scanner.Text())
-	}
-
-	// Continue scanning for new data
-	for {
-		// Seek to end and wait for new data
-		stat, err := file.Stat()
-		if err != nil {
-			return fmt.Errorf("failed to stat log file: %w", err)
-		}
-
-		// Create a new scanner to read new lines
-		scanner := bufio.NewScanner(file)
-		for scanner.Scan() {
-			_, _ = fmt.Fprintln(out, scanner.Text())
-		}
-
-		// Check if file still exists
-		if _, err := os.Stat(logFile); err != nil {
-			// File deleted or instance removed
-			return nil
-		}
-
-		// Check if there's new content
-		newStat, _ := os.Stat(logFile)
-		if newStat.Size() > stat.Size() {
-			// File grew, continue scanning
-			continue
-		}
-
-		// Wait a bit before checking again
-		time.Sleep(100 * time.Millisecond)
-	}
-}
-
-func readLastLines(file *os.File, n int) ([]string, error) {
-	var lines []string
-	scanner := bufio.NewScanner(file)
-
-	for scanner.Scan() {
-		lines = append(lines, scanner.Text())
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-
-	// Return last n lines
-	if len(lines) <= n {
-		return lines, nil
-	}
-
-	return lines[len(lines)-n:], nil
 }
