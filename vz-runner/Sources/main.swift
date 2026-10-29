@@ -1357,7 +1357,10 @@ class VZManager: NSObject, VZVirtualMachineDelegate {
 
     // MARK: - VZVirtualMachineDelegate
 
-    nonisolated func virtualMachineDidStop(_ virtualMachine: VZVirtualMachine) {
+    // The guest powered itself off. This is VZVirtualMachineDelegate's
+    // guestDidStop; under any other name the framework never calls it, the
+    // runner outlived the VM, and hull's run waited for it forever.
+    nonisolated func guestDidStop(_ virtualMachine: VZVirtualMachine) {
         drainConsole()
         print("VZRunner: VM stopped", to: &standardError)
         exit(0)
