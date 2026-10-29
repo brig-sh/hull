@@ -15,8 +15,9 @@ two runners must be signed before they can start a VM.
 ## Prerequisites
 
 - An Apple Silicon Mac. On Linux the CLI has only `hull assets`,
-  `hull images`, `hull inspect`, `hull ps`, `hull pull`, `hull rm`,
-  `hull rmi`, `hull run`, `hull stop` and `hull version` so far; see
+  `hull images`, `hull inspect`, `hull logs`, `hull ps`, `hull pull`,
+  `hull rm`, `hull rmi`, `hull run`, `hull stop` and `hull version` so far;
+  see
   [Building on Linux](#building-on-linux).
 - **Go** 1.26 or later. `go.mod` declares 1.26.4.
 - **Xcode command line tools**, which supply Swift. `vz-runner` declares
@@ -103,11 +104,11 @@ other work, cap them rather than letting each build assume it owns the box.
 ### Building on Linux
 
 A Linux port has started. It can start an instance in the background, with
-no network, and stop it, and little else yet. `make linux`, or plain `make`
-on a Linux host, builds a `hull` whose only commands are `hull assets`,
-`hull images`, `hull inspect`, `hull ps`, `hull pull`, `hull rm`,
-`hull rmi`, `hull run`, `hull stop` and `hull version`. It builds no runners
-and signs nothing.
+no network, read its log and stop it, and little else yet. `make linux`, or
+plain `make` on a Linux host, builds a `hull` whose only commands are
+`hull assets`, `hull images`, `hull inspect`, `hull logs`, `hull ps`,
+`hull pull`, `hull rm`, `hull rmi`, `hull run`, `hull stop` and
+`hull version`. It builds no runners and signs nothing.
 
 ```bash
 make                        # dist/hull_linux_<host arch>
@@ -208,9 +209,9 @@ describes. Without it a fetch warns that it took the assets unchecked, and
 
 An instance is a containerd container in hull's namespace, named by its
 container ID. `hull run` creates one, and `hull ps`, `hull inspect`,
-`hull stop` and `hull rm` act on any container there, including those `ctr`
-or nerdctl created. They print what they print on macOS, with these
-differences:
+`hull logs`, `hull stop` and `hull rm` act on any container there, including
+those `ctr` or nerdctl created. They print what they print on macOS, with
+these differences:
 
 - The status comes from the container's task. A container with no task is
   `stopped`: containerd cannot tell one that was never started from one whose
@@ -243,6 +244,25 @@ differences:
   a container boot defaults to, exits on it at once. The guest is not asked
   to shut down first, as it is on macOS's `vz` and `qemu` backends; see
   [backends.md](backends.md).
+- `hull logs` prints the log `hull run` writes, and takes `--follow` and
+  `--tail` as on macOS. It reads the file at the path hull computes for the
+  name, as `hull rm` deletes it, and not the one the container's `logFile`
+  label names, which any client of the namespace can set. A container
+  another client created has no log of its own, and `hull logs` reports the
+  file as not found, with one exception: a hull instance removed with `ctr`
+  or nerdctl rather than `hull rm` leaves its log behind, and `hull logs`
+  prints that log for a later container of the same name. Besides the
+  guest's console, the log holds what virtiofsd prints. Printed to a
+  terminal, the log goes through the filter `HULL_TERMINAL_FILTER` controls,
+  as on macOS; see [cli.md](cli.md).
+- `hull logs` reads the file as macOS does, with the same limits.
+  `--follow` goes on after the instance stops, and ends when `hull rm`
+  deletes the log. It prints the whole log and ignores `--tail`, and a line
+  the guest has not finished when the follow reads it comes out as two
+  lines. `--tail` drops the carriage return of the console's `\r\n` line
+  endings, which the whole log keeps, and fails with `token too long` on a
+  line over 64 KiB, such as progress output that only ever returns to the
+  start of the line.
 
 `hull run` boots an image as a VM through urunc, as the containerd runtime
 `io.containerd.urunc.v2`. It needs urunc's shim installed where the daemon
@@ -257,10 +277,10 @@ it cannot refuse that. It takes
 `--no-boot-assets` with their macOS meaning, and differs from macOS in these
 ways:
 
-- `--detach` is required. The guest's console goes to a log file and nothing
-  attaches to it. The log is under `$XDG_STATE_HOME/hull/<namespace>`, or
-  `~/.local/state/hull/<namespace>`, and under `/var/log/hull/<namespace>` for
-  root.
+- `--detach` is required. The guest's console goes to a log file, which
+  `hull logs` reads, and nothing attaches to it. The log is under
+  `$XDG_STATE_HOME/hull/<namespace>`, or `~/.local/state/hull/<namespace>`,
+  and under `/var/log/hull/<namespace>` for root.
 - `--net` takes only `none`, its default: the instance has no network.
   Neither `--net shared` nor the network gateway exists on Linux yet.
 - An image is looked up under the name it was pulled by. A reference pinned
