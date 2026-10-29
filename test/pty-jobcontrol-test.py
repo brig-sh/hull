@@ -2,12 +2,31 @@
 # spawns hull in its own process group, puts it in the foreground,
 # and waits with WUNTRACED — exactly how zsh runs a job. A SIGTTOU-suspended
 # job is reported instead of silently hanging.
-import os, pty, sys, time, fcntl, termios, select, signal
+import os, pty, subprocess, sys, time, fcntl, termios, select, signal
 
 BIN = sys.argv[1]; hv = sys.argv[2]; name = sys.argv[3]
 STORE = os.environ.get("HULL_STORE_DIR", "")
 GLOBAL_ARGS = (["--store-dir", STORE] if STORE else [])
 IMG = "harbor.nbfc.io/nubificus/urunc-ubuntu-vz:aarch64"
+
+# `rm --force` stops the instance too, so a failed stop cannot leave it
+# behind. A missing or wedged hull must not keep the harness from its
+# verdict, so a cleanup that cannot run, or does not return, only says so.
+# It prints every failure but "instance not found", so a reader does not
+# take a cleanup problem for the verdict.
+def cleanup():
+    argv = [BIN] + GLOBAL_ARGS + ["rm", "--force", name]
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(f"cleanup: hull rm --force {name}: {e}")
+        return
+    if r.returncode != 0 and "instance not found" not in r.stderr:
+        print(f"cleanup: hull rm --force {name} exited {r.returncode}: {r.stderr.strip()}")
+
+# CI names the instance after the run, and a re-run of the job keeps the
+# name and the store, so an instance an earlier attempt left must go first.
+cleanup()
 
 master, slave = pty.openpty()
 shell = os.fork()
@@ -33,7 +52,6 @@ if shell == 0:
     os.write(2, b"FAKESHELL: job ended cleanly\n")
     os._exit(0)
 
-os.close(slave)
 def drain(sec):
     out=b""; end=time.time()+sec
     while time.time()<end:
@@ -59,45 +77,58 @@ def drain(sec):
 # be misread as a boot that never happened.
 BOOT_MARKER = b"Run /."
 BOOT_TIMEOUT = int(os.environ.get("HULL_TEST_BOOT_TIMEOUT", "180"))
-console = b""
-st = 0
-shell_reaped = False
-deadline = time.time() + BOOT_TIMEOUT
-while time.time() < deadline:
-    console += drain(1)
-    if BOOT_MARKER in console:
-        break
-    reaped, st = os.waitpid(shell, os.WNOHANG)
-    if reaped == shell:
-        shell_reaped = True
-        console += drain(1)  # flush whatever the guest wrote in the same
-                             # window as the shell exiting, so a marker
-                             # written right before exit still counts
-        break
 
-if not shell_reaped:
-    console += drain(2)  # settle
-    # ^C at the guest prompt. If the job already ended (guest halted before
-    # we got here), the fake shell has exited and closed the pty slave, so
-    # this write raises EIO. That is not a failure: fall through to the
-    # shell's exit status, which is the actual verdict (CLEAN vs
-    # SUSPENDED-BUG).
-    try:
-        os.write(master, b"\x03")
-    except OSError:
-        pass
-    console += drain(12)
-    _, st = os.waitpid(shell, 0)
+def wait_for_verdict():
+    console = b""
+    st = 0
+    shell_reaped = False
+    deadline = time.time() + BOOT_TIMEOUT
+    while time.time() < deadline:
+        console += drain(1)
+        if BOOT_MARKER in console:
+            break
+        reaped, st = os.waitpid(shell, os.WNOHANG)
+        if reaped == shell:
+            shell_reaped = True
+            console += drain(1)  # flush whatever the guest wrote in the same
+                                 # window as the shell exiting, so a marker
+                                 # written right before exit still counts
+            break
 
-tail = console[-160:]
-print(f"console tail: {tail!r}")
-booted = BOOT_MARKER in console
+    if not shell_reaped:
+        console += drain(2)  # settle
+        # ^C at the guest prompt. If the job already ended (guest halted before
+        # we got here), the fake shell has exited and closed the pty slave, so
+        # this write raises EIO. That is not a failure: fall through to the
+        # shell's exit status, which is the actual verdict (CLEAN vs
+        # SUSPENDED-BUG).
+        try:
+            os.write(master, b"\x03")
+        except OSError:
+            pass
+        console += drain(12)
+        _, st = os.waitpid(shell, 0)
 
-if os.WEXITSTATUS(st) == 3:
-    verdict = 'SUSPENDED-BUG'
-elif booted:
-    verdict = 'CLEAN'
-else:
-    verdict = 'NO-BOOT-EVIDENCE'
-print(f"verdict: {verdict}")
+    tail = console[-160:]
+    print(f"console tail: {tail!r}")
+    booted = BOOT_MARKER in console
+
+    if os.WEXITSTATUS(st) == 3:
+        verdict = 'SUSPENDED-BUG'
+    elif booted:
+        verdict = 'CLEAN'
+    else:
+        verdict = 'NO-BOOT-EVIDENCE'
+    print(f"verdict: {verdict}")
+    return verdict
+
+# Only the parent gets here: the children above end in execv or os._exit,
+# and one whose execv fails dies with the exception. So the cleanup below
+# runs once, whatever ends the wait: a verdict, Ctrl-C or an exception.
+verdict = None
+try:
+    os.close(slave)
+    verdict = wait_for_verdict()
+finally:
+    cleanup()
 sys.exit(0 if verdict == 'CLEAN' else 1)

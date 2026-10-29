@@ -266,6 +266,9 @@ expect_contains "case 6: reports NO-BOOT-EVIDENCE" "$out" "verdict: NO-BOOT-EVID
 cat > "$WORK/fake-boot-hull" <<'PYEOF'
 #!/usr/bin/env python3
 import sys, time
+# The harness also calls stop and rm, before and after the run.
+if sys.argv[1:2] != ["run"]:
+    sys.exit(0)
 print("Run /.")
 sys.stdout.flush()
 try:
@@ -284,7 +287,9 @@ expect_contains "case 7: reports CLEAN" "$out" "verdict: CLEAN"
 # a future reorder of that branch cannot silently swap the two.
 cat > "$WORK/fake-stop-hull" <<'PYEOF'
 #!/usr/bin/env python3
-import os, signal, time
+import os, signal, sys, time
+if sys.argv[1:2] != ["run"]:
+    sys.exit(0)
 os.kill(os.getpid(), signal.SIGTTOU)
 time.sleep(30)
 PYEOF

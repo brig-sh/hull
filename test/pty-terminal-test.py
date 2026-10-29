@@ -14,6 +14,10 @@ GLOBAL_ARGS = (["--store-dir", STORE] if STORE else [])
 hv, name, mode = sys.argv[1], sys.argv[2], sys.argv[3]
 failures = []  # mode: intr | double | term
 
+# CI names the instance after the run, and a re-run of the job keeps the
+# name and the store, so an instance an interrupted attempt left must go.
+subprocess.run([BIN] + GLOBAL_ARGS + ["rm", "--force", name], capture_output=True)
+
 master, slave = pty.openpty()
 # The type scenario needs the image's default interactive shell (it types
 # into it and checks the echo); the signal scenarios use a quiet workload.
