@@ -1061,11 +1061,7 @@ exec %s "$@"
 	}
 
 	if containerBoot {
-		initrdEntry := "/vz-init"
-		if rootfsDiskImage != "" {
-			initrdEntry = "/init"
-		}
-		kernelCmdline = fmt.Sprintf("rdinit=%s console=%s", initrdEntry, consoleDev) + ipArg
+		kernelCmdline = containerBootCmdline(rootfsDiskImage != "", vmmType, consoleDev) + ipArg
 	} else if rootfsDir != "" && vmmType == hypervisors.VzVmm {
 		// Vz: virtiofs rootfs boot (no initramfs)
 		kernelCmdline = fmt.Sprintf("root=rootfs rootfstype=virtiofs rw console=%s", consoleDev) + ipArg
@@ -2764,6 +2760,29 @@ func procConfig(uid, gid uint32, cwd string) types.ProcessConfig {
 // unikernelCommandLine renders the guest command line for a unikernel, in the
 // spelling its family expects.
 //
+// containerBootCmdline is the kernel command line of a generic container
+// boot, without the network part. The initrd's urunit is the early init: as
+// /vz-init it takes the virtiofs tag rootfs, and as /init it takes the root the
+// command line names, so a block rootfs names /dev/vda, the ext4 image hull
+// attaches first.
+//
+// URUNIT_POWEROFF makes the guest power off when the application ends. A
+// reset would reboot a Vz VM and run the command again; hvi exits on either.
+// On hvi panic=-1 also turns a guest whose init dies into a reset, which ends
+// the VM instead of leaving it in the panic. Vz would reboot instead, so it
+// does not get it.
+func containerBootCmdline(blockRootfs bool, vmm hypervisors.VmmType, consoleDev string) string {
+	cmdline := "rdinit=/vz-init"
+	if blockRootfs {
+		cmdline = "rdinit=/init root=/dev/vda rootfstype=ext4 rw"
+	}
+	cmdline += " URUNIT_POWEROFF=1"
+	if vmm == hypervisors.HviVmm {
+		cmdline += " panic=-1"
+	}
+	return cmdline + " console=" + consoleDev
+}
+
 // hull builds a Linux command line everywhere else: rdinit=, console=, and an
 // ip= argument for the address. A unikernel reads none of that. urunc knows
 // each family's convention -- Unikraft takes netdev.* and vfs.* library
