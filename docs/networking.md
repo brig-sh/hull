@@ -282,7 +282,9 @@ the divert would never match.
 
 A divert may name a link-local literal in `169.254.0.0/16`. The gateway checks
 the diverts before it resets link-local, so a diverted `host:port` reaches its
-socket and every other link-local destination is still reset.
+socket and every other link-local destination is still reset. A divert by name
+never takes a link-local address from DNS, so a name that resolves into
+`169.254.0.0/16` does not divert the metadata service.
 
 For each diverted connection, the gateway connects to the socket and writes one
 line:

@@ -235,18 +235,28 @@ func (d *diverts) coversName(name string) bool {
 }
 
 // learn adds addrs to every named divert whose host is name.
+//
+// A link-local address is never learned. The forwarder matches a divert
+// before it resets link-local, and a name's addresses come from DNS and are
+// kept, so a name that once resolved to the metadata service would hand
+// every connection to it to the socket owner. Only a literal names a
+// link-local address on purpose.
 func (d *diverts) learn(name string, addrs []netip.Addr) {
 	if d == nil || len(addrs) == 0 {
 		return
 	}
 	name = normalizeName(name)
+	ll := netip.MustParsePrefix(linkLocalSubnet)
 	for _, rule := range d.rules {
 		if !rule.named || rule.Host != name {
 			continue
 		}
 		rule.mu.Lock()
 		for _, addr := range addrs {
-			rule.addrs[addr.Unmap()] = struct{}{}
+			if addr = addr.Unmap(); ll.Contains(addr) {
+				continue
+			}
+			rule.addrs[addr] = struct{}{}
 		}
 		rule.mu.Unlock()
 	}
