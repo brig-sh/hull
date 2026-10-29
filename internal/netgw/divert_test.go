@@ -793,3 +793,30 @@ func TestDivertServesALinkLocalDestination(t *testing.T) {
 	expectNoDial(t, dials)
 	owner.expectNone(t)
 }
+
+// A named divert takes no link-local address from DNS. Only a literal
+// bypasses the reset, so a name that resolves to the metadata service does
+// not hand the guest's connection to it to the socket owner.
+func TestNamedDivertLearnsNoLinkLocalAddress(t *testing.T) {
+	const addr = "203.0.113.9"
+	owner := newSocketOwner(t)
+	res := newFakeResolver(map[string][]net.IPAddr{"api.example.com": v4addrs(addr, "169.254.169.254")})
+	n, dials := divertNetwork(t, nil, res, "api.example.com:80="+owner.path)
+	n.Start(t.Context())
+	m := join(t, n)
+
+	metadata := newTCPClient(m, "169.254.169.254", 80, 40112)
+	if metadata.connect(t) {
+		t.Fatal("a named divert served the metadata address it resolved to")
+	}
+	owner.expectNone(t)
+
+	client := newTCPClient(m, addr, 80, 40113)
+	if !client.connect(t) {
+		t.Fatal("the name's other address was not diverted")
+	}
+	if got := owner.next(t); got.preamble != preambleFor(addr, 80, 40113) {
+		t.Fatalf("preamble %q", got.preamble)
+	}
+	expectNoDial(t, dials)
+}
