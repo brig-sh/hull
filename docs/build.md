@@ -16,7 +16,7 @@ two runners must be signed before they can start a VM.
 
 - An Apple Silicon Mac. On Linux the CLI has only `hull assets`,
   `hull images`, `hull inspect`, `hull ps`, `hull pull`, `hull rm`,
-  `hull rmi`, `hull run` and `hull version` so far; see
+  `hull rmi`, `hull run`, `hull stop` and `hull version` so far; see
   [Building on Linux](#building-on-linux).
 - **Go** 1.26 or later. `go.mod` declares 1.26.4.
 - **Xcode command line tools**, which supply Swift. `vz-runner` declares
@@ -103,10 +103,11 @@ other work, cap them rather than letting each build assume it owns the box.
 ### Building on Linux
 
 A Linux port has started. It can start an instance in the background, with
-no network, and little else yet. `make linux`, or plain `make` on a Linux
-host, builds a `hull` whose only commands are `hull assets`, `hull images`,
-`hull inspect`, `hull ps`, `hull pull`, `hull rm`, `hull rmi`, `hull run`
-and `hull version`. It builds no runners and signs nothing.
+no network, and stop it, and little else yet. `make linux`, or plain `make`
+on a Linux host, builds a `hull` whose only commands are `hull assets`,
+`hull images`, `hull inspect`, `hull ps`, `hull pull`, `hull rm`,
+`hull rmi`, `hull run`, `hull stop` and `hull version`. It builds no runners
+and signs nothing.
 
 ```bash
 make                        # dist/hull_linux_<host arch>
@@ -206,9 +207,10 @@ describes. Without it a fetch warns that it took the assets unchecked, and
 `HULL_VERIFY=require` refuses the fetch.
 
 An instance is a containerd container in hull's namespace, named by its
-container ID. `hull run` creates one, and `hull ps`, `hull inspect` and
-`hull rm` act on any container there, including those `ctr` or nerdctl
-created. They print what they print on macOS, with these differences:
+container ID. `hull run` creates one, and `hull ps`, `hull inspect`,
+`hull stop` and `hull rm` act on any container there, including those `ctr`
+or nerdctl created. They print what they print on macOS, with these
+differences:
 
 - The status comes from the container's task. A container with no task is
   `stopped`: containerd cannot tell one that was never started from one whose
@@ -230,6 +232,17 @@ created. They print what they print on macOS, with these differences:
   and the instance's log. A task that has not stopped is refused without
   `--force`. With it, the task is sent SIGKILL, and `hull rm` fails rather
   than delete anything if the task has not exited within 5 seconds.
+- `hull stop` sends the task SIGTERM, then SIGKILL if it has not exited
+  within `--timeout` seconds (10 by default), and fails if it has not exited
+  5 seconds after that. It then deletes the task, and keeps the container,
+  its snapshot and its log until `hull rm`. A task that had already exited
+  is deleted too, since its shim runs until it is, and `hull stop` says the
+  instance is already stopped. With its task deleted, the instance is
+  `stopped` with no exit code.
+- urunc hands the SIGTERM to the monitor, and cloud-hypervisor, the monitor
+  a container boot defaults to, exits on it at once. The guest is not asked
+  to shut down first, as it is on macOS's `vz` and `qemu` backends; see
+  [backends.md](backends.md).
 
 `hull run` boots an image as a VM through urunc, as the containerd runtime
 `io.containerd.urunc.v2`. It needs urunc's shim installed where the daemon

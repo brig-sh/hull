@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"syscall"
 	"time"
 
 	"github.com/containerd/containerd/v2/client"
@@ -192,4 +193,88 @@ func deleteTask(ctx context.Context, ctr client.Container, kill bool, grace time
 		return fmt.Errorf("delete task of container %s: %w", ctr.ID(), err)
 	}
 	return nil
+}
+
+// StopInstance ends the task of the container id and deletes it, and keeps
+// the container and its snapshot. A task that has not stopped is sent
+// SIGTERM, then SIGKILL if it has not exited within timeout, and
+// StopInstance fails if it has not exited within grace after that. It
+// reports whether the task was still running. An error that
+// errdefs.IsNotFound accepts means no container has that ID in the client's
+// namespace.
+//
+// A task that had already exited is deleted too. Its shim keeps running
+// until the task is deleted, and urunc's holds about 18 MB for a VM that is
+// gone.
+func StopInstance(ctx context.Context, c *client.Client, id string, timeout, grace time.Duration) (bool, error) {
+	ctr, err := c.LoadContainer(ctx, id)
+	if err != nil {
+		return false, fmt.Errorf("load container %s: %w", id, err)
+	}
+	task, status, err := loadTask(ctx, ctr)
+	if task == nil || err != nil {
+		return false, err
+	}
+	running := status.Status != client.Stopped
+	if running {
+		err = endTask(ctx, task, timeout, grace)
+		if err != nil {
+			return true, fmt.Errorf("task of container %s: %w", id, err)
+		}
+	}
+	_, err = task.Delete(ctx)
+	if err != nil && !errdefs.IsNotFound(err) {
+		return running, fmt.Errorf("delete task of container %s: %w", id, err)
+	}
+	return running, nil
+}
+
+func endTask(ctx context.Context, task client.Task, timeout, grace time.Duration) error {
+	waitCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	exited, err := task.Wait(waitCtx)
+	if err != nil {
+		return fmt.Errorf("wait: %w", err)
+	}
+	done, err := signalAndWait(ctx, task, exited, syscall.SIGTERM, timeout)
+	if done || err != nil {
+		return err
+	}
+	// The SIGKILL goes to every process in the container, as rm --force's
+	// does. Killing init ends the rest only in a container with a PID
+	// namespace of its own, and one another client created may share the
+	// host's. The SIGTERM goes to init alone, which can end the rest itself.
+	done, err = signalAndWait(ctx, task, exited, syscall.SIGKILL, grace, client.WithKillAll)
+	if done || err != nil {
+		return err
+	}
+	return fmt.Errorf("still running %s after SIGKILL", grace)
+}
+
+// signalAndWait sends sig to task and reports whether it exited within
+// wait. A task that exited before the signal arrived is not found by the
+// kill, which is no error.
+func signalAndWait(ctx context.Context, task client.Task, exited <-chan client.ExitStatus, sig syscall.Signal, wait time.Duration, opts ...client.KillOpts) (bool, error) {
+	err := task.Kill(ctx, sig, opts...)
+	if err != nil && !errdefs.IsNotFound(err) {
+		return false, fmt.Errorf("send %v: %w", sig, err)
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case status := <-exited:
+		// The channel also delivers when ctx ends, with ctx's error, and
+		// the task may then be running still.
+		err = status.Error()
+		// A task another stop or rm deleted after StopInstance read it
+		// makes the wait fail with not found. Only an ended task can be
+		// deleted, so this one has stopped, and the error must not reach
+		// a caller that reads not found as no such container.
+		if errdefs.IsNotFound(err) {
+			return true, nil
+		}
+		return true, err
+	case <-timer.C:
+		return false, nil
+	}
 }

@@ -32,8 +32,10 @@ import (
 )
 
 // forceKillGrace is how long `rm --force` waits for a SIGKILLed task to
-// exit before giving up, as on macOS. The container's snapshot is the
-// instance's root filesystem, and it is removed only once the VMM is gone.
+// exit before giving up, as on macOS, and how long `stop` waits after the
+// SIGKILL it sends once its timeout has passed. The container's snapshot is
+// the instance's root filesystem, and it is removed only once the VMM is
+// gone.
 const forceKillGrace = 5 * time.Second
 
 func rmCommand() *cli.Command {

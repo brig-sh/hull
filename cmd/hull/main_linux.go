@@ -82,6 +82,7 @@ func newApp() *cli.Command {
 			rmCommand(),
 			rmiCommand(),
 			runCommand(),
+			stopCommand(),
 			versionCommand(),
 		},
 	}
