@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -239,6 +240,113 @@ func TestRemoveInstanceWhoseTaskExited(t *testing.T) {
 		t.Fatalf("removing an instance whose task exited: %v", err)
 	}
 	assertNoContainer(ctx, t, c, "exited")
+}
+
+// StopInstance deletes the task, and keeps the container and its snapshot
+// for hull rm. A container's first process gets no signal it has no handler
+// for, so busybox's sleep, run on its own, ignores SIGTERM and needs the
+// SIGKILL, and the shell that traps SIGTERM exits on it.
+func TestStopInstanceThroughDaemon(t *testing.T) {
+	c := instancesClient(t)
+	ctx := context.Background()
+	newIdleContainer(ctx, t, c, "idle")
+	polite, _ := containerdtest.StartTask(ctx, t, c, "polite", "sh", "-c", "trap 'exit 0' TERM; sleep 300 & wait")
+	containerdtest.StartTask(ctx, t, c, "stubborn", "sleep", "300")
+	_, task := containerdtest.StartTask(ctx, t, c, "exited", "true")
+	exitCh, err := task.Wait(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-exitCh
+
+	_, err = StopInstance(ctx, c, "missing", time.Second, time.Second)
+	if !errdefs.IsNotFound(err) {
+		t.Errorf("stopping a missing instance: error = %v, want not found", err)
+	}
+
+	for _, tc := range []struct {
+		id      string
+		timeout time.Duration
+		running bool
+	}{
+		{"idle", time.Second, false},
+		{"exited", time.Second, false},
+		// Exits on SIGTERM, well before the timeout.
+		{"polite", time.Minute, true},
+		{"stubborn", 100 * time.Millisecond, true},
+		{"polite", time.Second, false},
+	} {
+		start := time.Now()
+		running, err := StopInstance(ctx, c, tc.id, tc.timeout, 5*time.Second)
+		if err != nil || running != tc.running {
+			t.Errorf("stopping %s = %v, %v; want %v, no error", tc.id, running, err, tc.running)
+		}
+		elapsed := time.Since(start)
+		if tc.timeout == time.Minute && elapsed > 30*time.Second {
+			t.Errorf("stopping %s took %s; want it ended by SIGTERM, not SIGKILL", tc.id, elapsed)
+		}
+		inst, err := LoadInstance(ctx, c, tc.id)
+		if err != nil || inst.Task != nil {
+			t.Errorf("%s after the stop: task = %+v, error = %v; want the container, with no task", tc.id, inst.Task, err)
+		}
+	}
+
+	info, err := polite.Info(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.SnapshotService(info.Snapshotter).Stat(ctx, info.SnapshotKey)
+	if err != nil {
+		t.Errorf("snapshot %s: %v, want it kept", info.SnapshotKey, err)
+	}
+}
+
+// A task still alive when the grace after SIGKILL ends keeps its container
+// and its task. A grace of a nanosecond ends before the task's exit can
+// reach the client, though the kill itself is sent.
+func TestStopInstanceFailsWhenTheGraceEnds(t *testing.T) {
+	c := instancesClient(t)
+	ctx := context.Background()
+	containerdtest.StartTask(ctx, t, c, "stubborn", "sleep", "300")
+
+	running, err := StopInstance(ctx, c, "stubborn", 0, time.Nanosecond)
+	if !running || err == nil || !strings.Contains(err.Error(), "after SIGKILL") {
+		t.Fatalf("stopping past the grace = %v, %v; want a failure after SIGKILL", running, err)
+	}
+	inst, err := LoadInstance(ctx, c, "stubborn")
+	if err != nil || inst.Task == nil {
+		t.Errorf("after the failed stop: task = %+v, error = %v; want the task kept", inst.Task, err)
+	}
+}
+
+// fakeTask is a task whose kill succeeds, so a test can deliver any exit
+// status without a daemon. Calling any other method panics on the nil
+// embedded interface.
+type fakeTask struct {
+	client.Task
+}
+
+func (fakeTask) Kill(context.Context, syscall.Signal, ...client.KillOpts) error { return nil }
+
+// A task deleted between StopInstance reading it and waiting on it fails
+// the wait with not found. It has ended, and the not found must not reach
+// hull stop, which would report that no such container exists.
+func TestSignalAndWaitTakesADeletedTaskAsEnded(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		err     error
+		wantErr error
+	}{
+		{"deleted", errdefs.ErrNotFound, nil},
+		{"context ended", context.Canceled, context.Canceled},
+	} {
+		exited := make(chan client.ExitStatus, 1)
+		exited <- *client.NewExitStatus(client.UnknownExitStatus, time.Time{}, tc.err)
+		done, err := signalAndWait(context.Background(), fakeTask{}, exited, syscall.SIGTERM, time.Minute)
+		if !done || !errors.Is(err, tc.wantErr) {
+			t.Errorf("%s: signalAndWait = %v, %v; want true, %v", tc.name, done, err, tc.wantErr)
+		}
+	}
 }
 
 func assertNoContainer(ctx context.Context, t *testing.T, c *client.Client, id string) {

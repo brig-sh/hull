@@ -212,7 +212,7 @@ func TestInstanceCommandsAgainstDaemon(t *testing.T) {
 }
 
 func TestInstanceCommandsRefuseBadNames(t *testing.T) {
-	for _, verb := range []string{"inspect", "rm"} {
+	for _, verb := range []string{"inspect", "rm", "stop"} {
 		var out bytes.Buffer
 		app := newApp()
 		app.Writer = &out
