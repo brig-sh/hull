@@ -39,12 +39,7 @@ func stopCommand() *cli.Command {
 		Name:  "stop",
 		Usage: "stop a running instance",
 		Flags: []cli.Flag{
-			&cli.IntFlag{
-				Name:    "timeout",
-				Aliases: []string{"t"},
-				Value:   10,
-				Usage:   "timeout in seconds before force kill",
-			},
+			stopTimeoutFlag(),
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			return stopInstance(ctx, cmd)
