@@ -366,8 +366,8 @@ ln -sf build/hvi .
 ```
 
 Or use `make install`, which copies all three into `PREFIX` and re-signs
-`vz-runner` there, and `hvi` when it is a local build. It does not re-sign `hull`, which needs no
-entitlement.
+`vz-runner` there, and `hvi` when it is a local build. It does not re-sign
+`hull`, which needs no entitlement.
 
 Putting only `hull` on your PATH is the most common local-build mistake. The
 `vz` and `hvi` backends then fail with a message about not finding the runner.
@@ -532,8 +532,7 @@ lone file its signature is invalid and AMFI kills it at exec. Nested binaries
 like `vz-runner` and `hvi` are not sealed that way and survive extraction.
 `make release_tarball` re-signs `hull` and `vz-runner` as standalone code,
 which `hull` needs and `vz-runner` does not. The release `hvi` keeps its own
-signature. A plain `cp` of an already-standalone binary
-breaks nothing. See
+signature. A plain `cp` of an already-standalone binary breaks nothing. See
 [signing.md](signing.md#does-copying-a-binary-break-its-signature).
 
 ## Changelog

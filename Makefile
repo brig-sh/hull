@@ -307,7 +307,8 @@ install: macos
 		--entitlements $(VZ_ENTITLEMENTS) $(PREFIX)/vz-runner
 	$(call sign_hvi,$(PREFIX)/hvi)
 
-## clean Remove build artifacts.
+## clean Remove build artifacts. The verified hvi archives in .cache/hvi stay;
+##       remove that directory to download the pinned release again.
 .PHONY: clean
 clean:
 	rm -rf $(BUILD_DIR) $(VZ_RUNNER_DIR)/.build $(HVI)
