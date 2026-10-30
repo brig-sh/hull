@@ -174,6 +174,7 @@ store. Nothing recovers it.
 
 ## Build from source instead
 
-See [build.md](build.md). Building needs a recursive clone, a Go toolchain, the
-Xcode command line tools and a Rust toolchain. If you build without an Apple
-signing identity, read [signing.md](signing.md) before your first run.
+See [build.md](build.md). Building needs a Go toolchain, the Xcode command line
+tools and cosign v3, which verifies the hvi release the build fetches. If you
+build without an Apple signing identity, read [signing.md](signing.md) before
+your first run.
