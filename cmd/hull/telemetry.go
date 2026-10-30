@@ -27,6 +27,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/brig-sh/hull/pkg/store"
@@ -423,20 +424,39 @@ func parseCPUCount(v string) (int, bool) {
 // startTime is the VM's launch time, so uptime is the VM's and not the
 // sampler's; vcpus normalises the CPU reading and comes from the argv. A
 // non-blocking per-instance flock keeps it to one sampler per VM, so a
-// second attach never double-counts. Sampling stops when done closes, when
-// the flock is dropped with the process, or when the VMM PID disappears.
-func startVMMMetricsSampler(launcherPID int, backend string, vcpus int, startTime time.Time, instanceDir string, done <-chan struct{}) {
-	if !telemetryClient.Sends("metrics") {
-		return
+// second attach never double-counts. Sampling stops when the returned stop
+// is called, when the flock is dropped with the process, or when the VMM
+// PID disappears.
+//
+// No sample is sent once stop has returned. The tick checks for stop and
+// sends under the same mutex stop takes, so a tick still in its ps when the
+// attach ends drops its sample. stop does not wait for that ps to finish.
+// The client is read once here, so the goroutine never reads the global a
+// test may be restoring.
+func startVMMMetricsSampler(launcherPID int, backend string, vcpus int, startTime time.Time, instanceDir string) (stop func()) {
+	client := telemetryClient
+	if !client.Sends("metrics") {
+		return func() {}
 	}
 	lock, err := os.OpenFile(filepath.Join(instanceDir, ".metrics.lock"), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return
+		return func() {}
 	}
 	if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		// Another attach already samples this instance.
 		_ = lock.Close()
-		return
+		return func() {}
+	}
+	var mu sync.Mutex
+	stopped := false
+	done := make(chan struct{})
+	stop = func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if !stopped {
+			stopped = true
+			close(done)
+		}
 	}
 	go func() {
 		defer func() {
@@ -498,15 +518,13 @@ func startVMMMetricsSampler(launcherPID int, backend string, vcpus int, startTim
 				return true // baseline taken, or the two are not comparable
 			}
 			// A ps takes a while, over a second under -race. An attach that
-			// ended meanwhile sends nothing: the event would go wherever the
-			// telemetry endpoint points by then, which for tests is the next
-			// test's server.
-			select {
-			case <-done:
+			// ended meanwhile sends nothing.
+			mu.Lock()
+			defer mu.Unlock()
+			if stopped {
 				return false
-			default:
 			}
-			telemetryClient.Send("metrics", map[string]string{
+			client.Send("metrics", map[string]string{
 				"backend":  knownBackend(backend),
 				"rss_kb":   rssKB,
 				"cpu_pct":  strconv.FormatFloat(pct, 'f', 1, 64),
@@ -528,6 +546,7 @@ func startVMMMetricsSampler(launcherPID int, backend string, vcpus int, startTim
 			}
 		}
 	}()
+	return stop
 }
 
 // resolveVzHelper finds the com.apple.Virtualization.VirtualMachine XPC
