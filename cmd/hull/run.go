@@ -738,6 +738,29 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	if err != nil {
 		return err
 	}
+	// HULL_ROOTFS_MODE=overlay-block: the container root is an overlay of a
+	// read-only ext4 image of the store rootfs (disk0) and the instance's
+	// own ext4 upper (disk1). Both reach the VMM as block devices, and
+	// vz-init finds them by serial from the /urunc-rootfs-lower and
+	// /urunc-rootfs-upper markers.
+	containerRootfsLower := ""
+	var containerBlockDevs []types.BlockDevSpec
+	rootfsMode := os.Getenv("HULL_ROOTFS_MODE")
+	switch rootfsMode {
+	case "", rootfsModeOverlayBlock:
+	default:
+		return fmt.Errorf("HULL_ROOTFS_MODE must be %s or unset (got %q)", rootfsModeOverlayBlock, rootfsMode)
+	}
+	overlayBlock := containerBoot && rootfsMode == rootfsModeOverlayBlock
+	if rootfsMode != "" && !containerBoot {
+		log.Warnf("HULL_ROOTFS_MODE=%s applies to container boots only; ignored for this image", rootfsMode)
+	}
+	if overlayBlock && os.Getenv("HULL_HVI_ROOTFS_UPPER") != "" {
+		return errors.New("HULL_ROOTFS_MODE=overlay-block and HULL_HVI_ROOTFS_UPPER both choose the root layout; set one")
+	}
+	if overlayBlock && rootfsTypeOverride == "block" {
+		return errors.New("HULL_ROOTFS_MODE=overlay-block does not combine with --rootfs-type block")
+	}
 	mountRootfs := ociSpec.Annotations["com.urunc.unikernel.mountRootfs"] == "true"
 
 	if containerBoot {
@@ -802,7 +825,19 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 			if resolveErr != nil {
 				return fmt.Errorf("resolve unpacked OCI rootfs: %w", resolveErr)
 			}
-			if hviUpper != "" {
+			if overlayBlock {
+				layout, err := prepareOverlayBlockRootfs(ctx, filepath.Join(s.RootDir(), "images"),
+					resolved, s.InstanceDir(instanceName))
+				if err != nil {
+					return err
+				}
+				rootfsDir = resolved
+				containerMetadataRootfs = resolved
+				containerBlockDevs = layout.disks
+				containerRootfsLower = layout.lowerMarker
+				containerRootfsUpper = layout.upperMarker
+				containerRootfsUpperPath = layout.disks[1].Path
+			} else if hviUpper != "" {
 				// Overlay: the cached image is the read-only lower and every
 				// guest write lands in the instance's own upper layer, so
 				// nothing is copied before the VMM starts.
@@ -1011,6 +1046,11 @@ exec %s "$@"
 				return fmt.Errorf("select direct writable rootfs in boot initrd: %w", err)
 			}
 		}
+		if containerRootfsLower != "" {
+			if err := initrd.AddFileToInitrd(initrdPath, containerRootfsLower+"\n", "/urunc-rootfs-lower"); err != nil {
+				return fmt.Errorf("select overlay lower layer in boot initrd: %w", err)
+			}
+		}
 		if containerRootfsUpper != "" {
 			if err := initrd.AddFileToInitrd(initrdPath, containerRootfsUpper+"\n", "/urunc-rootfs-upper"); err != nil {
 				return fmt.Errorf("select overlay upper layer in boot initrd: %w", err)
@@ -1089,6 +1129,9 @@ exec %s "$@"
 	}
 
 	if containerBoot {
+		// An overlay-block root takes the virtiofs line: /vz-init and no
+		// root=. The initrd's /urunc-rootfs-lower and /urunc-rootfs-upper name
+		// the root, and /init refuses a root= next to them.
 		kernelCmdline, err = containerBootCmdline(vmmType, rootfsDiskImage != "", guestNet, cmdLine)
 		if err != nil {
 			return err
@@ -1365,6 +1408,8 @@ exec %s "$@"
 	// export (virtiofs on Vz, 9p on QEMU) mounted by the init wrapper.
 	sharedfsParams := types.SharedfsParams{}
 	switch {
+	case overlayBlock:
+		// The root comes from disks; there is no rootfs share to export.
 	case containerBoot && rootfsDir != "":
 		sharedfsParams = types.SharedfsParams{
 			Type: "virtiofs", Path: rootfsDir, Tag: "rootfs", ReadOnly: !containerRootfsDirect,
@@ -1386,8 +1431,10 @@ exec %s "$@"
 		log.Debugf("Shared directory: host=%s guest=%s tag=%s readOnly=%t",
 			sh.host, sh.guest, sh.tag, sh.readOnly)
 	}
-	// vz-init mounts the upper layer by kind: a writable tag named
-	// rootfs-upper, or the guest's only disk.
+	// HULL_HVI_ROOTFS_UPPER: vz-init mounts the upper layer by kind, a
+	// writable tag named rootfs-upper or the guest's only disk. The
+	// overlay-block kinds name serials instead and their disks are already in
+	// containerBlockDevs.
 	blockDevPath := rootfsDiskImage
 	switch containerRootfsUpper {
 	case "virtiofs":
@@ -1421,6 +1468,7 @@ exec %s "$@"
 		InitrdPath:    initrdPath,
 		RootfsPath:    rootfsDir,
 		BlockDevPath:  blockDevPath,
+		BlockDevs:     containerBlockDevs,
 		LogFile:       logFile,
 		AgentSockPath: s.InstanceAgentSocket(instanceName),
 		GUI:           gui,
