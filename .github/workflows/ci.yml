@@ -342,6 +342,21 @@ jobs:
 
       - uses: ./.github/actions/verify-vz-entitlement
 
+      # `make macos` keeps the release hvi's Developer ID signature, so no
+      # lane reaches the other branch of sign_hvi, which signs a local hvi
+      # build with packaging/hvi.entitlements. This signs a stand-in binary
+      # through it and checks that the entitlement landed.
+      - name: Sign a local hvi build the way make does
+        run: |
+          set -euo pipefail
+          plutil -lint packaging/hvi.entitlements
+          cp /usr/bin/true "$RUNNER_TEMP/hvi"
+          make sign HVI="$RUNNER_TEMP/hvi"
+          # Captured first: grep -q would close the pipe early and codesign
+          # would die of SIGPIPE under pipefail.
+          entitlements=$(codesign -d --entitlements - --xml "$RUNNER_TEMP/hvi")
+          printf '%s\n' "$entitlements" | grep -q 'com\.apple\.security\.hypervisor'
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: hull-adhoc
