@@ -5,10 +5,11 @@
 #
 # SHA256SUMS must carry a cosign bundle signed by hvi-vmm's tag-release
 # workflow for the pinned tag. The archive must match both SHA256SUMS and the
-# sha in hvi.pin, which is the trust root. The binary is used as shipped: it
-# is signed with the Developer ID and notarized, and a new signature would
+# sha in hvi.pin, which is the trust root. The binary must be signed with the
+# Developer ID and notarized, and is used as shipped: a new signature would
 # drop the notarization ticket. Verified archives are cached in
-# .cache/hvi/<version>/.
+# .cache/hvi/<version>/. The cache saves the download only: the signature
+# and the notarization are checked online on every run.
 #
 # HVI_BIN=/path/to/hvi skips the fetch and copies that binary instead, eg. a
 # local cargo build. Nothing is verified then.
@@ -38,6 +39,7 @@ if [ -n "${HVI_BIN:-}" ]; then
 	exit 0
 fi
 
+[ -f "$root/hvi.pin" ] || die "$root/hvi.pin is missing; it names the hvi release to fetch"
 # shellcheck source-path=SCRIPTDIR source=../hvi.pin
 . "$root/hvi.pin"
 : "${HVI_VERSION:?hvi.pin sets no HVI_VERSION}"
@@ -76,8 +78,9 @@ sha256() {
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-# A cached archive is reused only when it still has the pinned sha. The
-# signature is checked again either way.
+# A cached archive is reused only when it still has the pinned sha. It saves
+# the download, not the network: the signature check below fetches
+# Sigstore's trust root, and the notarization check asks Apple.
 if [ -f "$cache/$archive" ] && [ "$(sha256 "$cache/$archive")" = "$pin" ] &&
 	[ -f "$cache/SHA256SUMS" ] && [ -f "$cache/SHA256SUMS.cosign.bundle" ]; then
 	src=$cache
@@ -116,12 +119,29 @@ signed=$(plutil -extract signed raw -o - "$tmp/manifest.json") || die "manifest.
 # Captured first: grep -q would close the pipe early and codesign would die
 # of SIGPIPE.
 codesign --verify --strict "$tmp/hvi" || die "the signature of hvi does not verify"
-signature=$(codesign -dvv "$tmp/hvi" 2>&1)
+signature=$(codesign -dvvv "$tmp/hvi" 2>&1)
 printf '%s\n' "$signature" | grep -q '^Authority=Developer ID Application' ||
 	die "hvi is not signed with a Developer ID"
 entitlements=$(codesign -d --entitlements - --xml "$tmp/hvi" 2>/dev/null)
 printf '%s\n' "$entitlements" | grep -q 'com\.apple\.security\.hypervisor' ||
 	die "hvi lacks the com.apple.security.hypervisor entitlement"
+
+# A Developer ID signature does not mean notarized: rc19 shipped a signed
+# binary whose notarization never ran. Apple serves each ticket by the
+# cdhash it covers, from the service Gatekeeper itself queries, so this asks
+# for the ticket of the binary in hand. It needs neither Apple credentials
+# nor Gatekeeper, whose own online check lags and misbehaves on runners
+# with custom boot-args.
+cdhash=$(printf '%s\n' "$signature" | sed -n 's/^CDHash=//p')
+case "$cdhash" in
+'' | *[!0-9a-f]*) die "cannot read the cdhash of hvi" ;;
+esac
+ticket_url=https://api.apple-cloudkit.com/database/1/com.apple.gk.ticket-delivery/production/public/records/lookup
+reply=$(curl -fsS --retry 3 -X POST -H 'Content-Type: application/json' \
+	-d "{\"records\":[{\"recordName\":\"2/2/$cdhash\"}]}" "$ticket_url") ||
+	die "cannot ask Apple for the notarization ticket of hvi ($cdhash)"
+printf '%s' "$reply" | plutil -extract records.0.fields.signedTicket.value raw -o /dev/null - 2>/dev/null ||
+	die "Apple has no notarization ticket for hvi ($cdhash): it is not notarized"
 
 if [ "$src" != "$cache" ]; then
 	rm -rf "$cache"
@@ -130,4 +150,4 @@ if [ "$src" != "$cache" ]; then
 fi
 
 install -m 0755 "$tmp/hvi" "$out/hvi"
-echo "fetch-hvi: $out/hvi is hvi $HVI_VERSION ($rev), verified"
+echo "fetch-hvi: $out/hvi is hvi $HVI_VERSION ($rev), verified and notarized"
