@@ -320,6 +320,29 @@ func TestSendEnvelope(t *testing.T) {
 	}
 }
 
+// An event goes to the endpoint set when Send was called. The delivery runs
+// on a goroutine, and a test's t.Setenv cleanup can hand the variable to the
+// next test before it starts, so reading it there sent one test's sample to
+// another test's server.
+func TestSendUsesTheEndpointAtSendTime(t *testing.T) {
+	var atSend, after atomic.Int32
+	srvAtSend := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { atSend.Add(1) }))
+	defer srvAtSend.Close()
+	srvAfter := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { after.Add(1) }))
+	defer srvAfter.Close()
+	t.Setenv(EnvEndpoint, srvAtSend.URL)
+
+	c := Init(Config{StoreDir: t.TempDir(), Version: "0.1.0-test"})
+	c.Send("command", map[string]string{"command": "run"})
+	t.Setenv(EnvEndpoint, srvAfter.URL)
+	if !c.Flush(2 * time.Second) {
+		t.Fatal("send did not complete in time")
+	}
+	if atSend.Load() != 1 || after.Load() != 0 {
+		t.Fatalf("endpoint at send got %d events, the later one %d; want 1 and 0", atSend.Load(), after.Load())
+	}
+}
+
 func TestOTLPEndpointGetsWrappedLogRecord(t *testing.T) {
 	var got []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

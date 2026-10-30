@@ -259,6 +259,10 @@ func (c *Client) InstallID() string {
 // exit paths call Flush for a bounded grace. Failure is never
 // reported. With HULL_TELEMETRY_DEBUG=1 the payload is printed to
 // stderr instead of being sent.
+//
+// The endpoint is read here, before the goroutine starts, so the event
+// goes where the environment pointed when it was sent, not wherever it
+// points by the time the goroutine runs.
 func (c *Client) Send(event string, fields map[string]string) {
 	if !c.Sends(event) {
 		return
@@ -267,10 +271,11 @@ func (c *Client) Send(event string, fields map[string]string) {
 	if err != nil {
 		return
 	}
+	to := endpoint()
 	c.inflight.Add(1)
 	go func() {
 		defer c.inflight.Done()
-		c.deliver(body)
+		c.deliverTo(to, body)
 	}()
 }
 
@@ -338,11 +343,15 @@ func Checksum(event, product, version, installID, capturedAt string) string {
 // payload was handled -- with no endpoint configured nothing is, so
 // queued crash files stay queued.
 func (c *Client) deliver(body []byte) bool {
+	return c.deliverTo(endpoint(), body)
+}
+
+// deliverTo is deliver to an endpoint the caller has already read.
+func (c *Client) deliverTo(endpoint string, body []byte) bool {
 	if c.debug {
 		_, _ = fmt.Fprintf(c.cfg.Stderr, "telemetry (not sent): %s\n", body)
 		return true
 	}
-	endpoint := endpoint()
 	if endpoint == "" {
 		return false
 	}
