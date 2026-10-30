@@ -388,6 +388,7 @@ jobs:
             --caveats-file packaging/cask-caveats.txt \
             --binary hull --binary vz-runner --binary hvi \
             --depends-formula cosign \
+            --depends-formula e2fsprogs \
             --conflicts-with main --conflicts-with experimental \
             --out "$RUNNER_TEMP/hull.rb"
           cat "$RUNNER_TEMP/hull.rb"

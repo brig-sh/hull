@@ -79,11 +79,11 @@ the boot-asset bundle it downloads. See
 ### Optional extras
 
 ```bash
-brew install e2fsprogs   # for --rootfs-type block
 brew install qemu        # for --hypervisor qemu
 ```
 
-Neither is needed for the default `vz` backend with the default rootfs mode.
+It is not needed for the default `vz` backend. The cask installs e2fsprogs,
+which `--rootfs-type block` and `HULL_ROOTFS_MODE=overlay-block` use.
 
 ## Verify a release
 

@@ -25,8 +25,8 @@ start a VM.
   `swift-tools-version:5.9` and a macOS 14 deployment target.
 - **cosign** v3 or later (`brew install cosign`), which verifies the hvi
   release.
-- Optional: `brew install e2fsprogs` for the block rootfs mode, and
-  `brew install qemu` for the QEMU backend.
+- Optional: `brew install e2fsprogs` for the block and overlay-block rootfs
+  modes (the cask installs it), and `brew install qemu` for the QEMU backend.
 
 ## The hvi release
 
