@@ -114,8 +114,9 @@ require (
 // command line -- is the urunc-dev/urunc branch feat/linux-hvi-v050: the
 // brig v0.5 stack, darwin and Linux, on urunc main. The require below is a
 // commit on that branch, the one hull-assets PINS and community-images
-// agent.mk pin too. It hands the container's command to urunit in
-// urunit.conf, so it needs the single-binary initrd of hull-assets 0.1.11.
+// agent.mk pin too. Its command line expects the single-binary initrd of
+// hull-assets 0.1.11. urunc's own runs hand that initrd the container's
+// command in urunit.conf. hull's macOS runs write it to /urunc-cmd instead.
 // No replace: the module is the upstream repository itself.
 
 // The telemetry client is a module of its own so that brig, which sends its
