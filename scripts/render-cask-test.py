@@ -136,7 +136,7 @@ class RenderCaskTest(unittest.TestCase):
         code, out, cask = render(
             ["on_macos:on_arm:hull-0.2.0-arm64.tar.gz"],
             ["--binary=hull", "--binary=vz-runner", "--binary=hvi",
-             "--depends-formula=cosign",
+             "--depends-formula=cosign", "--depends-formula=e2fsprogs",
              "--conflicts-with=main", "--conflicts-with=experimental",
              f"--caveats-file={REPO / 'packaging' / 'cask-caveats.txt'}"],
             version="0.2.0", tag="v0.2.0", kind=[])
@@ -152,8 +152,8 @@ class RenderCaskTest(unittest.TestCase):
                       '    "hull@main",\n  ]\n', cask)
         self.assertIn("    strategy :github_latest\n", cask)
         self.assertIn('\n  binary "hull"\n  binary "vz-runner"\n  binary "hvi"\n', cask)
-        self.assertIn('             formula: [\n               "cosign",\n             ]\n', cask)
-        self.assertIn("      brew install e2fsprogs\n", cask)
+        self.assertIn('             formula: [\n               "cosign",\n               "e2fsprogs",\n             ]\n', cask)
+        self.assertNotIn("brew install e2fsprogs", cask)
         self.assertNotIn("channel", cask)
 
     def test_one_conflict_is_a_string(self):

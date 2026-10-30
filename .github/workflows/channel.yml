@@ -400,6 +400,7 @@ jobs:
             --source "$SOURCE" \
             --binary hull --binary vz-runner --binary hvi \
             --depends-formula cosign \
+            --depends-formula e2fsprogs \
             --conflicts-with "$OTHER" \
             --out "hull@$CHANNEL.rb"
 

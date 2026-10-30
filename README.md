@@ -55,8 +55,8 @@ The cask installs three executables side by side: `hull`, `vz-runner` and
 
 Installing brig brings hull with it, because brig depends on it.
 
-Two optional extras: `brew install e2fsprogs` for the ext4 block rootfs mode,
-and `brew install qemu` for the QEMU backend.
+The cask installs e2fsprogs, which the ext4 block and overlay-block rootfs
+modes use. One optional extra: `brew install qemu` for the QEMU backend.
 
 To check the signatures on a release before you install it, see
 [docs/install.md](docs/install.md#verify-a-release). To build from source
