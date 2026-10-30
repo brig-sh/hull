@@ -2764,9 +2764,6 @@ func procConfig(uid, gid uint32, cwd string) types.ProcessConfig {
 	return types.ProcessConfig{UID: uid, GID: gid, WorkDir: cwd}
 }
 
-// unikernelCommandLine renders the guest command line for a unikernel, in the
-// spelling its family expects.
-//
 // containerBootCmdline is the kernel command line of a generic container
 // boot. urunc builds it, next to the initrd contract it belongs to: the
 // init role, the root, the console, the network and how the guest ends. The
@@ -2789,6 +2786,9 @@ func containerBootCmdline(vmm hypervisors.VmmType, blockRootfs bool, guestNet un
 	return l.CommandString()
 }
 
+// unikernelCommandLine renders the guest command line for a unikernel, in the
+// spelling its family expects.
+//
 // hull builds a Linux command line everywhere else: rdinit=, console=, and an
 // ip= argument for the address. A unikernel reads none of that. urunc knows
 // each family's convention -- Unikraft takes netdev.* and vfs.* library
