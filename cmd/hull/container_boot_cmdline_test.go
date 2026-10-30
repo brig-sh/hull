@@ -56,6 +56,11 @@ func TestContainerBootCmdline(t *testing.T) {
 		if !hasParam(static, ip) || hasParam(static, "URUNIT_DEFROUTE=1") {
 			t.Errorf("%s static cmdline %q: want %q and no URUNIT_DEFROUTE=1", vmm, static, ip)
 		}
+		// The boots whose line hull builds spell the network as urunc does.
+		staticNet := unikernels.LinuxNet{Address: "10.87.0.2", Gateway: "10.87.0.1", Mask: "255.255.255.0", DNS: "10.87.0.1"}
+		if got := kernelIPArg(staticNet); got != " "+ip {
+			t.Errorf("kernelIPArg(static) = %q, want %q", got, " "+ip)
+		}
 		for _, c := range []string{block, shared, static} {
 			if strings.Contains(c, " -- ") || strings.Contains(c, "echo hi") {
 				t.Errorf("%s cmdline %q carries the command, which travels in /urunc-cmd", vmm, c)
@@ -69,6 +74,20 @@ func TestContainerBootCmdline(t *testing.T) {
 			if vz != hasParam(c, "URUNIT_POWEROFF=1") || vz == hasParam(c, "panic=-1") {
 				t.Errorf("%s cmdline %q: want URUNIT_POWEROFF=1 and no panic=-1 on vz only", vmm, c)
 			}
+		}
+	}
+}
+
+func TestKernelIPArg(t *testing.T) {
+	for _, tc := range []struct {
+		net  unikernels.LinuxNet
+		want string
+	}{
+		{unikernels.LinuxNet{}, ""},
+		{unikernels.LinuxNet{DHCP: true}, " ip=dhcp"},
+	} {
+		if got := kernelIPArg(tc.net); got != tc.want {
+			t.Errorf("kernelIPArg(%+v) = %q, want %q", tc.net, got, tc.want)
 		}
 	}
 }
