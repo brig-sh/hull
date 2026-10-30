@@ -170,7 +170,16 @@ hull assets pull REF       # fetch a specific reference
 
 The kernel file is named `Image` on arm64 and `bzImage` on amd64. The initrd is
 `container-initrd`. Both live at `<store>/assets/` alongside a
-`provenance.json`. Linux has no store, so there they live where brig keeps
+`provenance.json`.
+
+hull boots the single-binary initrd of hull-assets 0.1.11 or later, with the
+command line urunc builds for it. An older initrd does not boot with that line.
+A store keeps the assets it fetched, so after upgrading hull from an earlier
+release, replace them once:
+
+```bash
+hull assets pull --force
+``` Linux has no store, so there they live where brig keeps
 them, `~/.local/share/brig/assets`; see
 [Building on Linux](build.md#building-on-linux).
 

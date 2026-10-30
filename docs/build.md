@@ -142,8 +142,10 @@ The pull itself runs in hull's process, not the daemon's, so it uses the
 same credentials as on macOS: the Docker config and its credential helpers.
 A credential helper that fails, as one needing a locked keychain does,
 leaves the pull anonymous. Registries on loopback, private RFC 1918
-addresses or `.local` names are tried over HTTPS and then plain HTTP, as on
-macOS.
+addresses or `.localhost` names are tried over HTTPS and then plain HTTP, as
+on macOS. A `.local` name is HTTPS only: mDNS can answer for it from anywhere
+on the network. A registry reached as `.local` over plain HTTP needs a
+`.localhost` name or its address instead.
 
 `hull rmi` takes the macOS arguments and flags and prints the same
 `Removed <digest> <name>` lines, but containerd's model changes what some of
