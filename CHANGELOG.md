@@ -7,6 +7,100 @@ release. History before v0.1.0-rc21 predates the import of this tree and
 is kept below as it was generated then; v0.1.0-rc19 and rc20 were re-cut
 imports of the same tree as rc21, and rc23 was a version bump only.
 
+## [0.1.0] - 2026-10-30
+
+### Bug Fixes
+
+- Take over an owner-less stale lock
+- Count hard links once when sizing the overlay-block lower
+- Send no metrics sample once the sampler is stopped
+- Read the endpoint when an event is sent
+- Send no sample once the attach has ended
+- Exit when the guest powers off
+- Learn no link-local address for a named divert
+- Check the namespace and name where the log path is built
+- Say when no boot assets have been fetched yet
+- Never dial the gateway's own address
+- Print image labels after a pull on one line, escaped
+- Refuse a --platform with an empty part
+- Re-unpack an image whose rootfs lost entries
+- Lock staging directories through publication and cleanup
+
+### Build
+
+- Depend on e2fsprogs
+- Refuse an hvi release that Apple has not notarized
+- Pin a signed hvi release, not a submodule
+- Detect the host OS and add a linux target
+- Bump github.com/moby/sys/user from 0.4.0 to 0.4.1
+
+### Documentation
+
+- Document HULL_ROOTFS_MODE and HULL_HVI_ROOTFS_UPPER
+- Say which boot assets hull needs, and that .local is HTTPS only
+- Drop the submodule and Rust from the build prerequisites
+- Add the rc31 changelog section
+
+### Features
+
+- Add HULL_ROOTFS_MODE=overlay-block for container boots
+- Cache a read-only ext4 image per image digest
+- Add --disk and --disk-ro block devices
+- Add overlay upper layers for hvi roots
+- Read instance logs on Linux
+- Stop instances through containerd on Linux
+- Divert a link-local address
+- Run detached instances through containerd and urunc on Linux
+- List, inspect and remove instances through containerd on Linux
+- Add hull assets to the Linux CLI
+- Log a refused DNS query by type, once per interval
+- Remove images through containerd on Linux
+- Divert bound destinations to a socket
+- Add hull version to the Linux CLI
+- Pull images through containerd on Linux
+- List images through containerd on Linux
+- Connect to containerd in a hull namespace
+- Add the Linux command tree with an images verb
+- Build the hull CLI on Linux
+
+### Miscellaneous
+
+- Say which runs hand urunit the command in urunit.conf
+- Move urunc to feat/linux-hvi-v050
+- Bump hvi-vmm for the flock hang
+
+### Refactor
+
+- Set the guest's network in one place
+- Put unikernelCommandLine's doc comment back on it
+- Take the container boot command line from urunc
+- Share the logs command and the log reading
+- Move the guest output filter out of exec.go
+- Share the stop flag whose meaning does not depend on the OS
+- Share the namespace cleanup of the daemon tests
+- Split the boot file checks out of run.go
+- Share the run flags whose meaning does not depend on the OS
+- Move the run arguments shared with Linux out of run.go
+- Share the instance table with Linux
+- Split assets into the command and the macOS store parts
+- Pick the default boot asset directory in per-OS files
+- Split the interval check out of rejectLog
+- Split rmi into the resolution and the macOS store parts
+- Match images against a reference without a store
+- Unpack layers with containerd v2's archive package
+- Move the pull progress line out of pkg/ociclient
+- Move the --platform parser out of pkg/ociclient
+- Share the image listing writers with Linux
+
+### Tests
+
+- Check the console and a static address in the boot command line
+- Follow go-containerregistry on .local registries
+- Remove the e2e harnesses' instances before and after they run
+- Give every daemon test a namespace of its own
+- Widen the reply wait for the shared CI Mac
+- Draw another port when the probed one is taken
+
 ## [0.1.0-rc31] - 2026-10-06
 
 ### Bug Fixes
