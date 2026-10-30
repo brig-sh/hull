@@ -34,8 +34,11 @@ start a VM.
 sha256 of its `aarch64-apple-darwin` archive. `make fetch_hvi` runs
 `scripts/fetch-hvi.sh`, which downloads that release and checks the cosign
 signature of its `SHA256SUMS`, the archive's sha against the pin, and the
-binary's Developer ID signature and hypervisor entitlement. It installs the
-binary to `build/hvi` and caches the archive in `.cache/hvi/`.
+binary's Developer ID signature and hypervisor entitlement. It then asks
+Apple for the notarization ticket of the binary's cdhash, from the service
+Gatekeeper queries, and refuses a binary that has none. It installs the
+binary to `build/hvi` and caches the archive in `.cache/hvi/`. The cache
+saves the download only: both checks need the network on every run.
 
 The release binary is signed and notarized, and no `make` target re-signs it.
 To work on hvi itself, build it in a clone of hvi-vmm and point hull at it:
