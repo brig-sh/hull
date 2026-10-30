@@ -43,9 +43,7 @@ func TestSamplerStaysOffWhenMetricsAreSuppressed(t *testing.T) {
 	}
 
 	instanceDir := t.TempDir()
-	done := make(chan struct{})
-	defer close(done)
-	startVMMMetricsSampler(os.Getpid(), "qemu", 1, time.Now(), instanceDir, done)
+	defer startVMMMetricsSampler(os.Getpid(), "qemu", 1, time.Now(), instanceDir)()
 
 	if _, err := os.Stat(filepath.Join(instanceDir, ".metrics.lock")); !os.IsNotExist(err) {
 		t.Fatal("a sampler started for metrics the wrapper suppressed")

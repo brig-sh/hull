@@ -188,9 +188,7 @@ func TestMetricsEventCarriesAUtilizationNotPsPercent(t *testing.T) {
 	withFastSampler(t, 500*time.Millisecond)
 	withTelemetryClient(t, srv.URL)
 
-	done := make(chan struct{})
-	defer close(done)
-	startVMMMetricsSampler(os.Getpid(), "qemu", 4, time.Now(), t.TempDir(), done)
+	defer startVMMMetricsSampler(os.Getpid(), "qemu", 4, time.Now(), t.TempDir())()
 
 	select {
 	case <-got:
@@ -247,9 +245,7 @@ func TestSamplerEmitsBeforeAFullIntervalHasPassed(t *testing.T) {
 	metricsInterval = 60 * time.Second
 	withTelemetryClient(t, srv.URL)
 
-	done := make(chan struct{})
-	defer close(done)
-	startVMMMetricsSampler(os.Getpid(), "qemu", 1, time.Now(), t.TempDir(), done)
+	defer startVMMMetricsSampler(os.Getpid(), "qemu", 1, time.Now(), t.TempDir())()
 
 	select {
 	case <-got:
@@ -282,10 +278,8 @@ func TestSecondAttachDoesNotDoubleCount(t *testing.T) {
 	withTelemetryClient(t, srv.URL)
 
 	instanceDir := t.TempDir()
-	done := make(chan struct{})
-	defer close(done)
-	startVMMMetricsSampler(os.Getpid(), "qemu", 1, time.Now(), instanceDir, done)
-	startVMMMetricsSampler(os.Getpid(), "qemu", 1, time.Now(), instanceDir, done)
+	defer startVMMMetricsSampler(os.Getpid(), "qemu", 1, time.Now(), instanceDir)()
+	defer startVMMMetricsSampler(os.Getpid(), "qemu", 1, time.Now(), instanceDir)()
 
 	// Whoever holds this refuses everyone else, which is what keeps a
 	// second attach from sampling a VM the first is already reporting.
@@ -414,9 +408,7 @@ func TestSamplerSettlesToTheSteadyIntervalAfterTheFirstSample(t *testing.T) {
 	metricsInterval = 60 * time.Second
 	withTelemetryClient(t, srv.URL)
 
-	done := make(chan struct{})
-	defer close(done)
-	startVMMMetricsSampler(os.Getpid(), "qemu", 1, time.Now(), t.TempDir(), done)
+	defer startVMMMetricsSampler(os.Getpid(), "qemu", 1, time.Now(), t.TempDir())()
 
 	select {
 	case <-events:
@@ -432,11 +424,9 @@ func TestSamplerSettlesToTheSteadyIntervalAfterTheFirstSample(t *testing.T) {
 	}
 }
 
-// A tick still in its ps when the attach ends sends nothing. It used to send,
-// and the telemetry client reads its endpoint at delivery, so the sample went
-// to whatever endpoint the next test had set: the flake
-// TestSamplerSettlesToTheSteadyIntervalAfterTheFirstSample showed under -race,
-// where a ps takes over a second.
+// A tick still in its ps when the attach ends sends nothing: stop returns
+// before the ps does, and no sample goes out after stop. A sample sent then
+// would reach a later test's server, since the tests share the process.
 func TestSamplerSendsNothingAfterTheAttachEnds(t *testing.T) {
 	fakePS(t, 1.0)
 	orig, err := exec.LookPath("ps")
@@ -462,8 +452,7 @@ func TestSamplerSendsNothingAfterTheAttachEnds(t *testing.T) {
 	metricsInterval = 60 * time.Second
 	withTelemetryClient(t, srv.URL)
 
-	done := make(chan struct{})
-	startVMMMetricsSampler(os.Getpid(), "qemu", 1, time.Now(), t.TempDir(), done)
+	stop := startVMMMetricsSampler(os.Getpid(), "qemu", 1, time.Now(), t.TempDir())
 
 	// The first tick takes the baseline; the second is the one that would
 	// send. End the attach while it is in its ps.
@@ -478,7 +467,7 @@ func TestSamplerSendsNothingAfterTheAttachEnds(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	close(done)
+	stop()
 
 	select {
 	case <-events:

@@ -2571,10 +2571,9 @@ func launchVMM(ctx context.Context, cmd *cli.Command, s *store.Store, state *sto
 		waitDone <- vmmCmd.Wait()
 	}()
 
-	metricsDone := make(chan struct{})
-	defer close(metricsDone)
-	startVMMMetricsSampler(vmmCmd.Process.Pid, string(vmmType), vcpusFromCmdLine(state.CmdLine),
-		state.StartTime, s.InstanceDir(state.ID), metricsDone)
+	stopMetrics := startVMMMetricsSampler(vmmCmd.Process.Pid, string(vmmType), vcpusFromCmdLine(state.CmdLine),
+		state.StartTime, s.InstanceDir(state.ID))
+	defer stopMetrics()
 
 	finish := func(waitErr error) (bool, error) {
 		state.Status = "stopped"
