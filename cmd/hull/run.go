@@ -1042,21 +1042,20 @@ exec %s "$@"
 
 	// Build kernel cmdline
 	kernelCmdline := ""
-	// Only request kernel DHCP when networking is enabled
-	ipArg := ""
-	// The same network, for urunc to spell on a container boot's command line.
+	// The guest's network: static behind the gateway, DHCP otherwise, and
+	// none when networking is off. urunc spells it on a container boot's
+	// command line, and kernelIPArg on the others.
 	var guestNet unikernels.LinuxNet
 	if gatewayIP != "" {
 		addr, gw, mask, err := gatewayNetConfig(gatewayIP)
 		if err != nil {
 			return err
 		}
-		ipArg = fmt.Sprintf(" ip=%s::%s:%s:urunc:eth0:off:%s", addr, gw, mask, gw)
 		guestNet = unikernels.LinuxNet{Address: addr, Gateway: gw, Mask: mask, DNS: gw}
 	} else if netMode != "none" {
-		ipArg = " ip=dhcp"
 		guestNet = unikernels.LinuxNet{DHCP: true}
 	}
+	ipArg := kernelIPArg(guestNet)
 
 	// Rosetta needs the generated .vz-init wrapper to register the x86_64
 	// handler, and that wrapper only exists on the virtiofs rootfs path.
@@ -2761,6 +2760,19 @@ func procConfig(uid, gid uint32, cwd string) types.ProcessConfig {
 		cwd = "/"
 	}
 	return types.ProcessConfig{UID: uid, GID: gid, WorkDir: cwd}
+}
+
+// kernelIPArg returns the kernel's ip= for net, with a leading space, or ""
+// when the guest has no network. It is the spelling urunc uses on a
+// container boot's command line, for the boots whose line hull builds.
+func kernelIPArg(net unikernels.LinuxNet) string {
+	switch {
+	case net.DHCP:
+		return " ip=dhcp"
+	case net.Address != "":
+		return fmt.Sprintf(" ip=%s::%s:%s:urunc:eth0:off:%s", net.Address, net.Gateway, net.Mask, net.DNS)
+	}
+	return ""
 }
 
 // containerBootCmdline is the kernel command line of a generic container
