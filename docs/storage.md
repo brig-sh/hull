@@ -196,6 +196,7 @@ in the name only keeps two pulls' directories apart.
     ├── bundle/                  config.json plus the rootfs symlink or image
     ├── log                      0600, detached runs only
     ├── checkpoint/              machine-id, vm.vzstate, rootfs.img, latest.json
+    ├── events/                  0700, hvi only: <boot start, ns>.ndjson, one ledger per boot, 0600
     ├── rootfs-upper.ext4        overlay upper disk (overlay-block, or HULL_HVI_ROOTFS_UPPER=block), 0600
     ├── rootfs-upper/            overlay upper directory (HULL_HVI_ROOTFS_UPPER=virtiofs)
     └── (QMP socket, agent socket, staged boot files)

@@ -92,6 +92,10 @@ type InstanceState struct {
 	// TelemetryEndSent guards the telemetry `end` event to exactly once
 	// across the foreground exit path and `stop`.
 	TelemetryEndSent bool `json:"telemetryEndSent,omitempty"`
+	// EventsLedger is the hvi event ledger of the instance's latest boot,
+	// under <instance>/events/. Empty on other backends and on instances
+	// created before this field existed.
+	EventsLedger string `json:"eventsLedger,omitempty"`
 }
 
 // StatusStarting marks the one moment an instance has no pid to record: the

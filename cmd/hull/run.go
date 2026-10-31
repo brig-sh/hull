@@ -1535,15 +1535,26 @@ exec %s "$@"
 			cmdArgs = append(cmdArgs, "--rosetta")
 		}
 	}
+	// hvi writes a ledger of what the guest did: its disk I/O, its egress with
+	// the names it resolved, and the run's start and stop. One file per boot.
+	var eventsLedger string
+	if vmmType == hypervisors.HviVmm {
+		eventsLedger, err = createEventsLedger(instanceDir, time.Now())
+		if err != nil {
+			return err
+		}
+		cmdArgs = append(cmdArgs, "--events", eventsLedger)
+	}
 
 	state := &store.InstanceState{
-		ID:          instanceName,
-		ImageDigest: imageDigest,
-		QMPSocket:   qmpSocket,
-		LogFile:     logFile,
-		BundleDir:   bundleDir,
-		MAC:         mac,
-		Backend:     string(vmmType),
+		ID:           instanceName,
+		ImageDigest:  imageDigest,
+		QMPSocket:    qmpSocket,
+		LogFile:      logFile,
+		BundleDir:    bundleDir,
+		MAC:          mac,
+		Backend:      string(vmmType),
+		EventsLedger: eventsLedger,
 	}
 	started, err := launchVMM(ctx, cmd, s, state, cmdArgs, append(gatewayFiles, shareFiles...), vmmType, detach, netMode, gatewayIP)
 	instanceStarted = started

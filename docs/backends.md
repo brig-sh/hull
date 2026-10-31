@@ -162,6 +162,17 @@ host xattr under `com.nofire.hvi.` rather than from the host inode. That is why
 `hvi` preserves file modes a plain macOS share cannot express. See
 [storage.md](storage.md).
 
+**Event ledger.** Every boot writes hvi's event ledger: one NDJSON record per
+disk request and per egress packet, with the DNS name the guest resolved, plus
+the run's start and stop. hull creates a new file for each boot,
+`<instance>/events/<boot start in ns>.ndjson`, mode 0600 in a 0700 directory,
+and passes it as `--events`. The instance name is the `--sandbox-id` every
+record carries. `hull inspect` shows the latest boot's ledger as
+`eventsLedger`, and `hull rm` deletes them all with the instance. A boot with
+no `vmm.stop` record at the end did not stop cleanly. hvi's
+[observability.md](https://github.com/brig-sh/hvi-vmm/blob/main/docs/observability.md)
+describes the records and what the ledger can lose.
+
 **Networking. `--net shared` alone is refused here.**
 
 `hull run --hypervisor hvi --net shared IMAGE` with no `--gateway-sock` fails
