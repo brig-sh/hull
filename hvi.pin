@@ -4,6 +4,6 @@
 # SHA256SUMS is signed by hvi's tag-release workflow for the tag. The archive
 # must then have the sha below, and its manifest the commit below. The three
 # lines describe one release, so a bump changes all three together.
-HVI_VERSION=0.1.0-rc.1
-HVI_COMMIT=65570c7
-HVI_SHA256_AARCH64_APPLE_DARWIN=db3d32f3f2ae7517676eedafe6b3c96a3043fadc4c46ec50a05a27c3d6f4133c
+HVI_VERSION=0.1.0-rc.2
+HVI_COMMIT=2ed8f61
+HVI_SHA256_AARCH64_APPLE_DARWIN=33785ef0702cfada99dd1b6e75190ae35a87c00d84a44e27b07d17fc0e5fc32e
