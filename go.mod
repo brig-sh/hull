@@ -2,6 +2,8 @@ module github.com/brig-sh/hull
 
 go 1.26.8
 
+godebug multipathtcp=0
+
 require (
 	github.com/brig-sh/hull/pkg/telemetry v0.0.0-00010101000000-000000000000
 	github.com/compose-spec/compose-go/v2 v2.14.0
