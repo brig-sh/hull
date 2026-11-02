@@ -357,7 +357,7 @@ func processFromImage(config ocispec.ImageConfig, args []string) (process, error
 	}
 	uid, gid, err := numericUser(config.User)
 	if err != nil {
-		return process{}, err
+		return process{}, fmt.Errorf("the image runs as user %q: %w", config.User, err)
 	}
 	p.User.UID, p.User.GID = uid, gid
 	return p, nil
@@ -379,14 +379,14 @@ func numericUser(user string) (uid, gid uint32, err error) {
 	name, group, _ := strings.Cut(user, ":")
 	uid, err = userID(name, "root")
 	if err != nil {
-		return 0, 0, fmt.Errorf("the image runs as user %q: %w", user, err)
+		return 0, 0, err
 	}
 	if group == "" {
 		return uid, 0, nil
 	}
 	gid, err = userID(group, "root")
 	if err != nil {
-		return 0, 0, fmt.Errorf("the image runs as user %q: %w", user, err)
+		return 0, 0, err
 	}
 	return uid, gid, nil
 }
