@@ -19,7 +19,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -63,12 +62,10 @@ func bundleUser(bundleDir string) string {
 }
 
 func execInstance(_ context.Context, cmd *cli.Command) error {
-	args := cmd.Args()
-	if args.Len() < 2 {
-		return errors.New("usage: exec [-t] <instance-id> <command> [args...]")
+	instanceID, argv, err := execArgs(cmd)
+	if err != nil {
+		return err
 	}
-	instanceID := args.First()
-	argv := args.Slice()[1:]
 
 	s, err := globalStore(cmd)
 	if err != nil {
@@ -97,27 +94,14 @@ func execInstance(_ context.Context, cmd *cli.Command) error {
 		state.StartTime, s.InstanceDir(instanceID))
 	defer stopMetrics()
 
-	useTTY := cmd.Bool("tty")
 	stdinFd := int(os.Stdin.Fd())
 	stdinIsTTY := isTerminal(stdinFd)
 
-	env, err := resolveEnvEntries(cmd.StringSlice("env"), os.LookupEnv)
+	opts, err := newExecOptions(cmd, int(os.Stdout.Fd()), int(os.Stdin.Fd()), int(os.Stderr.Fd()))
 	if err != nil {
 		return err
 	}
-	rows, cols := fallbackRows, fallbackCols
-	// The descriptor the size was measured from, re-read on every SIGWINCH.
-	// Whether the session is interactive is a question about stdin, but the
-	// window size belongs to whichever descriptor is really a terminal: callers
-	// that pipe or capture stdout while leaving stdin on the terminal are
-	// ordinary, and measuring stdout there silently yields 24x80.
-	sizeFd, sizeFdIsTerminal := -1, false
-	if useTTY {
-		rows, cols, sizeFd, sizeFdIsTerminal = windowSize(
-			int(os.Stdout.Fd()), int(os.Stdin.Fd()), int(os.Stderr.Fd()))
-		// A default, not an override: an explicit --env TERM must win.
-		env = appendEnvDefault(env, "TERM", os.Getenv("TERM"))
-	}
+	useTTY := opts.tty
 
 	// All frames of this exec ride stream 1: one CLI process, one session.
 	const stream = 1
@@ -142,12 +126,12 @@ func execInstance(_ context.Context, cmd *cli.Command) error {
 
 	req := agentproto.OpenRequest{
 		Argv: argv,
-		Env:  env,
+		Env:  opts.env,
 		Cwd:  cmd.String("cwd"),
 		User: userSpec,
 		TTY:  useTTY,
-		Rows: rows,
-		Cols: cols,
+		Rows: opts.rows,
+		Cols: opts.cols,
 	}
 	if err := writeJSON(agentproto.TypeOpen, req); err != nil {
 		return fmt.Errorf("send open request: %w", err)
@@ -181,15 +165,12 @@ func execInstance(_ context.Context, cmd *cli.Command) error {
 	// SIGWINCH reaches us either way, since it is delivered to the foreground
 	// process group of the controlling terminal rather than through a
 	// descriptor.
-	if useTTY && sizeFdIsTerminal {
-		winch := make(chan os.Signal, 1)
-		signal.Notify(winch, syscall.SIGWINCH)
-		go func() {
-			for range winch {
-				r, c := terminalSize(sizeFd)
-				_ = writeJSON(agentproto.TypeResize, agentproto.Resize{Rows: r, Cols: c})
-			}
-		}()
+	if useTTY && opts.sizeFdIsTerminal {
+		follow, stop := catchWindowSize(opts.sizeFd)
+		defer stop()
+		follow(func(rows, cols uint16) {
+			_ = writeJSON(agentproto.TypeResize, agentproto.Resize{Rows: rows, Cols: cols})
+		})
 	}
 
 	// stdin pump.

@@ -17,6 +17,8 @@
 package main
 
 import (
+	"os"
+	"os/signal"
 	"syscall"
 	"unsafe"
 )
@@ -66,6 +68,32 @@ func terminalSize(fd int) (rows, cols uint16) {
 		return fallbackRows, fallbackCols
 	}
 	return ws.Row, ws.Col
+}
+
+// catchWindowSize starts catching SIGWINCH for a session whose terminal size
+// is measured from fd. follow re-measures fd on each SIGWINCH caught, those
+// caught before follow was called among them, and hands the size to resize.
+// stop stops catching SIGWINCH, and ends follow's loop.
+//
+// Catching and following are apart because a session can have a size to
+// follow before it has anywhere to send one: a resize while it is still being
+// set up is caught, and reaches it once follow is called.
+func catchWindowSize(fd int) (follow func(resize func(rows, cols uint16)), stop func()) {
+	winch := make(chan os.Signal, 1)
+	signal.Notify(winch, syscall.SIGWINCH)
+	follow = func(resize func(rows, cols uint16)) {
+		go func() {
+			for range winch {
+				resize(terminalSize(fd))
+			}
+		}()
+	}
+	return follow, func() {
+		// Once Stop returns no SIGWINCH is sent on winch, so closing it is
+		// safe, and it ends the loop, which would otherwise wait for good.
+		signal.Stop(winch)
+		close(winch)
+	}
 }
 
 // The geometry a session gets when no terminal is reachable. Fixed rather than

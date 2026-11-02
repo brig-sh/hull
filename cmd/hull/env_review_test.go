@@ -105,17 +105,17 @@ func TestUrunitConfIsNotGroupOrWorldReadable(t *testing.T) {
 // appendEnvDefault has its own table test; this guards the call site, which is
 // where the defect actually lived and which that test cannot reach.
 func TestExecAppliesTermAsADefaultNotAnOverride(t *testing.T) {
-	src, err := os.ReadFile("exec.go")
+	src, err := os.ReadFile("execargs.go")
 	if err != nil {
-		t.Fatalf("read exec.go: %v", err)
+		t.Fatalf("read execargs.go: %v", err)
 	}
 	body := string(src)
 
-	if strings.Contains(body, `append(env, "TERM="`) {
-		t.Error(`exec.go appends TERM directly; use appendEnvDefault so an explicit ` +
+	if strings.Contains(body, `append(o.env, "TERM="`) {
+		t.Error(`execargs.go appends TERM directly; use appendEnvDefault so an explicit ` +
 			`--env TERM is not overridden (exec.Cmd.Env dedup keeps the last duplicate)`)
 	}
-	if !strings.Contains(body, `appendEnvDefault(env, "TERM"`) {
-		t.Error(`exec.go should set the host TERM via appendEnvDefault(env, "TERM", ...)`)
+	if !strings.Contains(body, `appendEnvDefault(o.env, "TERM"`) {
+		t.Error(`execargs.go should set the host TERM via appendEnvDefault(o.env, "TERM", ...)`)
 	}
 }

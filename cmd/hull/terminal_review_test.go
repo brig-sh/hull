@@ -118,9 +118,9 @@ func TestResizeFollowsTheMeasuredDescriptorNotStdin(t *testing.T) {
 	}
 	body := string(src)
 
-	notify := strings.Index(body, "signal.Notify(winch, syscall.SIGWINCH)")
+	notify := strings.Index(body, "catchWindowSize(")
 	if notify < 0 {
-		t.Fatal("cannot find the SIGWINCH listener in exec.go")
+		t.Fatal("cannot find the SIGWINCH listener, catchWindowSize, in exec.go")
 	}
 	// The gate immediately preceding the listener decides when resizes are
 	// followed. It must test the measured descriptor.
