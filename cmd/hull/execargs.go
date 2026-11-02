@@ -18,6 +18,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"os"
 
 	"github.com/urfave/cli/v3"
 )
@@ -52,4 +54,44 @@ func execCommand() *cli.Command {
 			return execInstance(ctx, cmd)
 		},
 	}
+}
+
+// execArgs returns the instance an exec names and the command to run in it.
+func execArgs(cmd *cli.Command) (instanceID string, argv []string, err error) {
+	args := cmd.Args()
+	if args.Len() < 2 {
+		return "", nil, errors.New("usage: exec [-t] <instance-id> <command> [args...]")
+	}
+	return args.First(), args.Slice()[1:], nil
+}
+
+// execOptions is what an exec's command gets from the flags and from hull's
+// environment and terminal, whatever carries it to the guest.
+type execOptions struct {
+	env        []string
+	tty        bool
+	rows, cols uint16
+	// The descriptor the size was measured from, re-read on every SIGWINCH.
+	// Whether the session is interactive is a question about stdin, but the
+	// window size belongs to whichever descriptor is really a terminal: callers
+	// that pipe or capture stdout while leaving stdin on the terminal are
+	// ordinary, and measuring stdout there silently yields 24x80.
+	sizeFd           int
+	sizeFdIsTerminal bool
+}
+
+// newExecOptions resolves --env, and with -t sizes the guest's terminal from
+// the first of stdout, stdin and stderr that is a terminal.
+func newExecOptions(cmd *cli.Command, stdout, stdin, stderr int) (execOptions, error) {
+	env, err := resolveEnvEntries(cmd.StringSlice("env"), os.LookupEnv)
+	if err != nil {
+		return execOptions{}, err
+	}
+	o := execOptions{env: env, tty: cmd.Bool("tty"), rows: fallbackRows, cols: fallbackCols, sizeFd: -1}
+	if o.tty {
+		o.rows, o.cols, o.sizeFd, o.sizeFdIsTerminal = windowSize(stdout, stdin, stderr)
+		// A default, not an override: an explicit --env TERM must win.
+		o.env = appendEnvDefault(o.env, "TERM", os.Getenv("TERM"))
+	}
+	return o, nil
 }

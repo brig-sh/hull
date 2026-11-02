@@ -19,6 +19,7 @@ package main
 import (
 	"os"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -90,5 +91,33 @@ func TestTerminalSizeFallsBackWithoutATerminal(t *testing.T) {
 
 	if rows, cols := terminalSize(int(pipe.Fd())); rows != 24 || cols != 80 {
 		t.Errorf("terminalSize on a pipe = %dx%d, want the 24x80 fallback", rows, cols)
+	}
+}
+
+// A resize caught before follow is called reaches resize once it is, with
+// the size the terminal has then.
+func TestCatchWindowSizeKeepsAnEarlyResize(t *testing.T) {
+	master, slave := newPTY(t)
+	follow, stop := catchWindowSize(int(slave.Fd()))
+	defer stop()
+	want := unix.Winsize{Row: 43, Col: 137}
+	err := unix.IoctlSetWinsize(int(master.Fd()), unix.TIOCSWINSZ, &want)
+	if err != nil {
+		t.Fatalf("set pty window size: %v", err)
+	}
+	// The test does not own the terminal, so the kernel sends it no SIGWINCH.
+	err = unix.Kill(unix.Getpid(), unix.SIGWINCH)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(chan unix.Winsize, 1)
+	follow(func(rows, cols uint16) { got <- unix.Winsize{Row: rows, Col: cols} })
+	select {
+	case ws := <-got:
+		if ws != want {
+			t.Errorf("resize got %dx%d, want %dx%d", ws.Row, ws.Col, want.Row, want.Col)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("resize was not called")
 	}
 }
