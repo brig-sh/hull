@@ -204,10 +204,18 @@ func StartTask(ctx context.Context, t testing.TB, c *client.Client, id string, a
 			// busybox needs only a PATH to find its commands.
 			oci.WithDefaultPathEnv,
 			oci.WithProcessArgs(args...),
-			// No cgroup path, so runc creates no cgroup. A rootless daemon
-			// without a delegated cgroup could not, and these tasks need
-			// no limits.
-			oci.WithCgroup(""),
+			// A relative cgroup path, which runc puts next to the cgroup it
+			// runs in, as it does a task with no path. containerd's default,
+			// /<namespace>/<id>, is under the root cgroup, which a rootless
+			// daemon cannot write. With no path, runc names the cgroup after
+			// the container ID alone, so two tests in different namespaces
+			// that start a task with the same ID at once, as the tests of
+			// two packages do, share one cgroup, and runc refuses to start
+			// the second task in a cgroup that already has a process. One
+			// level, not <namespace>/<id>: deleting the task removes only
+			// the last element of the path, and would leave a <namespace>
+			// cgroup behind.
+			oci.WithCgroup(c.DefaultNamespace()+"-"+id),
 		))
 	if err != nil {
 		t.Fatal(err)
