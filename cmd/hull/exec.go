@@ -32,37 +32,10 @@ import (
 	"github.com/urunc-dev/urunc/pkg/agentproto"
 )
 
-func execCommand() *cli.Command {
-	return &cli.Command{
-		Name:      "exec",
-		Usage:     "run a command in a running instance",
-		ArgsUsage: "<instance-id> <command> [args...]",
-		Flags: []cli.Flag{
-			&cli.BoolFlag{
-				Name:    "tty",
-				Aliases: []string{"t"},
-				Usage:   "allocate a pseudo-terminal in the guest",
-			},
-			&cli.StringFlag{
-				Name:  "cwd",
-				Usage: "working directory inside the guest",
-			},
-			&cli.StringFlag{
-				Name:    "user",
-				Aliases: []string{"u"},
-				Usage:   "run as this guest user (name, uid, or uid:gid); default: the image's configured user",
-			},
-			&cli.StringSliceFlag{
-				Name:    "env",
-				Aliases: []string{"e"},
-				Usage:   "set an environment variable in the guest: KEY=VALUE, or a bare KEY to inherit it from the host environment and keep the value out of argv (repeatable)",
-			},
-		},
-		Action: func(ctx context.Context, cmd *cli.Command) error {
-			return execInstance(ctx, cmd)
-		},
-	}
-}
+// execUserUsage is the help of exec's --user. macOS hull hands the user to
+// the guest's agent as given, and the agent looks a name up in the guest's
+// /etc/passwd, so a name works here, unlike on Linux.
+const execUserUsage = "run as this guest user (name, uid, or uid:gid); default: the image's configured user"
 
 // bundleUser reads the uid:gid the image was configured with from the
 // instance's OCI bundle. Empty (root) stays empty so the agent treats it
