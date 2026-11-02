@@ -271,7 +271,13 @@ jobs:
           [debug]
             address = ""
           EOF
-          sudo nohup "$dir/bin/containerd" --config "$dir/config.toml" > "$dir/containerd.log" 2>&1 &
+          # setsid, not nohup, so the daemon does not run with SIGHUP ignored.
+          # Its shims and runc would inherit that, and runc installs its own
+          # signal handler from a background goroutine (signals.go), so a
+          # process it starts can start before then with SIGHUP still
+          # ignored, which a shell cannot trap. In a session of its own, the
+          # daemon gets no hangup from the terminal sudo runs it on either.
+          sudo setsid "$dir/bin/containerd" --config "$dir/config.toml" < /dev/null > "$dir/containerd.log" 2>&1 &
           for _ in $(seq 100); do
             [ -S "$dir/containerd.sock" ] && break
             sleep 0.1
