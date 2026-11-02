@@ -363,10 +363,11 @@ func processFromImage(config ocispec.ImageConfig, args []string) (process, error
 	return p, nil
 }
 
-// numericUser parses an image's USER as uid[:gid]. A name needs the image's
-// /etc/passwd or /etc/group, which are in its snapshot, and LoadRunImage
-// reads no snapshot, so a name other than root is refused rather than run
-// as root. A uid with no gid runs with gid 0, as docker runs a uid that
+// numericUser parses a user, an image's USER or the one hull exec is asked
+// to run as, as uid[:gid]. A name needs the image's /etc/passwd or
+// /etc/group, which are in its snapshot, and hull reads no snapshot (see
+// LoadRunImage), so a name other than root is refused rather than run as
+// root. A uid with no gid runs with gid 0, as docker runs a uid that
 // /etc/passwd does not list; docker would take a listed user's primary
 // group from there. macOS hull reads /etc/passwd from the unpacked root
 // filesystem, so it takes a listed uid's group from there too, and gives

@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 
@@ -39,9 +40,23 @@ var (
 
 func main() {
 	err := newApp().Run(context.Background(), os.Args)
+	var code exitCode
+	if errors.As(err, &code) {
+		os.Exit(int(code))
+	}
 	if err != nil {
 		fatal(err)
 	}
+}
+
+// exitCode is the error a command returns to end hull with that status and
+// no message, as hull exec ends with the status of the command it ran. It
+// is an error rather than an os.Exit in the command so that the command's
+// deferred cleanup runs, and so tests can run the command.
+type exitCode int
+
+func (c exitCode) Error() string {
+	return fmt.Sprintf("exit status %d", int(c))
 }
 
 // newApp builds the command tree. It is separate from main so tests can run
@@ -75,6 +90,7 @@ func newApp() *cli.Command {
 		},
 		Commands: []*cli.Command{
 			assetsCommand(),
+			execCommand(),
 			imagesCommand(),
 			inspectCommand(),
 			logsCommand(),

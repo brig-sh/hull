@@ -131,6 +131,9 @@ the agent socket rather than writing it to a file. The host `TERM` is applied
 as a default that an explicit `--env TERM` beats.
 
 `hull exec` propagates the guest command's exit code as its own exit status.
+On Linux it runs the command through containerd and urunc, which changes
+what `--user` takes, which signals reach the command, and how `-t` sizes and
+filters the terminal; see [Building on Linux](build.md#building-on-linux).
 
 ## Other commands
 
