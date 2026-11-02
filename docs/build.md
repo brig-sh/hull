@@ -16,8 +16,9 @@ start a VM.
 ## Prerequisites
 
 - An Apple Silicon Mac. On Linux the CLI has only `hull assets`,
-  `hull images`, `hull inspect`, `hull logs`, `hull ps`, `hull pull`,
-  `hull rm`, `hull rmi`, `hull run`, `hull stop` and `hull version` so far;
+  `hull exec`, `hull images`, `hull inspect`, `hull logs`, `hull ps`,
+  `hull pull`, `hull rm`, `hull rmi`, `hull run`, `hull stop` and
+  `hull version` so far;
   see
   [Building on Linux](#building-on-linux).
 - **Go** 1.26 or later. `go.mod` declares 1.26.4.
@@ -89,11 +90,12 @@ it rather than letting the build assume it owns the box.
 ### Building on Linux
 
 A Linux port has started. It can start an instance in the background, with
-no network, read its log and stop it, and little else yet. `make linux`, or
-plain `make` on a Linux host, builds a `hull` whose only commands are
-`hull assets`, `hull images`, `hull inspect`, `hull logs`, `hull ps`,
-`hull pull`, `hull rm`, `hull rmi`, `hull run`, `hull stop` and
-`hull version`. It builds no runners and signs nothing.
+no network, run commands in it, read its log and stop it, and little else
+yet. `make linux`, or plain `make` on a Linux host, builds a `hull` whose
+only commands are `hull assets`, `hull exec`, `hull images`,
+`hull inspect`, `hull logs`, `hull ps`, `hull pull`, `hull rm`, `hull rmi`,
+`hull run`, `hull stop` and `hull version`. It builds no runners and signs
+nothing.
 
 ```bash
 make                        # dist/hull_linux_<host arch>
@@ -196,9 +198,9 @@ describes. Without it a fetch warns that it took the assets unchecked, and
 
 An instance is a containerd container in hull's namespace, named by its
 container ID. `hull run` creates one, and `hull ps`, `hull inspect`,
-`hull logs`, `hull stop` and `hull rm` act on any container there, including
-those `ctr` or nerdctl created. They print what they print on macOS, with
-these differences:
+`hull exec`, `hull logs`, `hull stop` and `hull rm` act on any container
+there, including those `ctr` or nerdctl created. They print what they print
+on macOS, with these differences:
 
 - The status comes from the container's task. A container with no task is
   `stopped`: containerd cannot tell one that was never started from one whose
@@ -250,6 +252,90 @@ these differences:
   endings, which the whole log keeps, and fails with `token too long` on a
   line over 64 KiB, such as progress output that only ever returns to the
   start of the line.
+- `hull exec` asks containerd to run the command in the instance's task.
+  Under urunc, the shim runs `urunc exec`, which passes the command to the
+  guest's urunit-agent, the agent macOS hull talks to directly, and exits
+  with its status; hull exits with that status too, and only warns when
+  the shim then fails to delete the exec process. A command that cannot
+  start makes hull exit with status 1. Without `-t` urunc prints why on
+  stderr, but with `-t` hull prints nothing: urunc writes the reason only
+  to the task's `log.json` in containerd's state directory. An exec sent
+  while the guest is still booting waits for the agent: urunc tries to
+  reach it for 15 seconds, and over cloud-hypervisor's or Firecracker's
+  vsock socket its last try can take 3 seconds more.
+- The command gets the instance's environment, with `--env` replacing or
+  adding variables, and the instance's working directory and user unless
+  `--cwd` or `--user` names others. `--user` takes a uid, a uid:gid or
+  root, as `hull run` takes the image's user, since hull reads no file
+  from the image; a uid with no gid runs with gid 0.
+- SIGINT, SIGTERM and SIGHUP sent to hull go to the command, with `-t` or
+  without, and so does the SIGHUP of a terminal that closes. Without `-t`
+  the command gets the signal itself, and a command that ignores it keeps
+  hull waiting. With `-t`, urunc hangs the command up whatever the signal:
+  it gets SIGHUP, and SIGKILL 2 seconds later if it is still running. On
+  macOS, where hull passes a signal on, the command gets the signal
+  itself. A SIGHUP or SIGINT that hull was started with ignored, as
+  `nohup` ignores SIGHUP, stays ignored and does not reach the command.
+  hull cannot tell whether it was started with SIGTERM or SIGQUIT
+  ignored. A SIGTERM always reaches the command, and hull ignores SIGQUIT
+  whenever SIGINT was ignored, as a shell ignores both for a background
+  job. A SIGQUIT ignored without SIGINT still kills the command.
+- SIGQUIT, which urunc does not pass on, and the SIGPIPE hull gets when
+  what reads its output goes away, as `head` does, kill the command, and
+  hull exits with status 137.
+- A signal sent while exec still waits for the agent goes to the exec
+  once the wait ends. It ends the exec, and the command does not run:
+  urunc passes signals on only once the session is open. hull exits with
+  128 plus the signal's number.
+- The signals hull does not catch still end it, and leave behind what
+  SIGKILL does, below: SIGKILL itself, and SIGABRT, SIGILL, SIGTRAP,
+  SIGBUS, SIGFPE, SIGSEGV, SIGSTKFLT and SIGSYS, on which hull prints a Go
+  stack dump.
+- Without `-t`, the end of hull's stdin reaches the command. With `-t` on a
+  terminal, the terminal is in raw mode, ^C goes to the guest as a byte,
+  and changes to the window's size follow. With `-t`, the end of stdin is
+  not passed on, since closing the input of a command on a terminal hangs
+  the terminal up.
+- hull returns once the command has exited and its output has ended. A
+  process it leaves in the background that holds its stdout or stderr
+  keeps hull waiting: in a runc container until that process exits, as
+  docker exec does, and under urunc for at most 2 seconds, after which the
+  agent stops waiting for the output. A signal sent to hull during that
+  wait goes to the command, which has exited, and does not end it.
+- With `-t`, the guest's terminal starts at 24x80, and takes the size of
+  hull's terminal within about a quarter of a second. urunc makes a
+  terminal of its own rather than take the size hull asks for, and passes
+  on the size hull sets right after the start only once it sees it. A
+  command that reads its size as the first thing it does gets 24x80.
+- With `-t`, urunc filters the guest's output as well, wherever it goes:
+  hull filters only output that reaches a terminal, but urunc filters it on
+  its way to a pipe or a file too. So `-t` output captured in a file lacks
+  the sequences the filter removes, which it keeps on macOS. urunc reads
+  `HULL_TERMINAL_FILTER` from the daemon's environment, not from hull's,
+  and turning the filter off for hull leaves urunc's on.
+- The FIFOs that carry the command's input and output go where containerd
+  puts them for root, and under `$XDG_RUNTIME_DIR/hull/fifo` for anyone
+  else, where a rootless daemon's shim can open them too. hull killed with
+  SIGKILL leaves its FIFOs there, the command running in the guest, and
+  its exec process undeleted in the shim. Nothing removes them later:
+  `hull stop` and `hull rm` delete neither another exec's process nor its
+  FIFOs, so the FIFOs and the directory that holds them stay until
+  removed by hand.
+- A command that goes on writing after hull is killed with SIGKILL fills
+  its FIFO, and urunc's exec process then blocks for good. The shim
+  reports the instance stopped only once its exec processes have exited,
+  so `hull stop` and `hull rm -f` fail, even after the VM has exited.
+  Killing the exec process through containerd frees the instance:
+
+  ```bash
+  ctr -a <socket> -n <namespace> task kill -s SIGKILL --exec-id <exec-id> <instance>
+  ```
+
+  where `<socket>` is the daemon's socket, as `--containerd-address`
+  names it, and the exec ID, `hull-` and 16 hex digits, is in the names
+  of the FIFOs hull left. Every namespace and instance shares the FIFO
+  directory, so the names do not say which instance an exec ID belongs
+  to.
 
 `hull run` boots an image as a VM through urunc, as the containerd runtime
 `io.containerd.urunc.v2`. It needs urunc's shim installed where the daemon
