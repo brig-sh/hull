@@ -23,9 +23,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/pkg/cio"
@@ -51,22 +55,26 @@ type ExecConfig struct {
 	Stdin      io.Reader
 	Stdout     io.Writer
 	Stderr     io.Writer
-	// FIFODir is where the FIFOs that carry the process's I/O to and from
-	// the shim are made. Empty means containerd's default, which only root
-	// can write.
-	FIFODir string
 }
 
-// ExecFIFODir returns where an exec's FIFOs should be made, for
-// ExecConfig.FIFODir. containerd's default, /run/containerd/fifo, is root's,
-// so root gets "" for it. Anyone else gets a directory in the runtime
-// directory, which a rootless daemon's shim, running as the same user, can
-// open too; see runtimeDir. The directory may not exist yet.
-func ExecFIFODir() string {
-	if geteuid() == 0 {
-		return ""
+// rootFIFODir is where root's exec FIFOs go. A variable, so tests run as
+// root can point it at a directory of their own.
+var rootFIFODir = "/run/hull/fifo"
+
+// ExecFIFODir returns the directory that holds the FIFOs carrying the I/O of
+// the execs in instance id of namespace to and from the shim. Each instance
+// has one of its own, so that stopping or removing it can find the execs a
+// killed hull left in it; see endExecs. Root's are under /run/hull/fifo.
+// Anyone else's are in the runtime directory, where a rootless daemon's
+// shim, running as the same user, can open them too; see runtimeDir.
+// namespace and id must be valid containerd identifiers, which keeps the
+// path inside that directory.
+func ExecFIFODir(namespace, id string) string {
+	base := rootFIFODir
+	if geteuid() != 0 {
+		base = filepath.Join(runtimeDir(), "hull", "fifo")
 	}
-	return filepath.Join(runtimeDir(), "hull", "fifo")
+	return filepath.Join(base, namespace, id)
 }
 
 // Exec is a process ExecInstance started.
@@ -125,9 +133,17 @@ func ExecInstance(ctx context.Context, c *client.Client, id string, cfg ExecConf
 	if cfg.Terminal {
 		opts = append(opts, cio.WithTerminal)
 	}
-	if cfg.FIFODir != "" {
-		opts = append(opts, cio.WithFIFODir(cfg.FIFODir))
+	// Made only now, so that an exec refused because the instance is not
+	// running leaves no directory behind. One that fails from here on
+	// leaves it empty: removing it could pull it from under another
+	// `hull exec` about to make its FIFOs in it. Stop and rm remove it. A
+	// container that loads has a valid ID.
+	fifoDir := ExecFIFODir(c.DefaultNamespace(), id)
+	err = os.MkdirAll(fifoDir, 0o700)
+	if err != nil {
+		return nil, fmt.Errorf("create the exec FIFO directory: %w", err)
 	}
+	opts = append(opts, cio.WithFIFODir(fifoDir))
 	p, err := task.Exec(ctx, execID, proc, cio.NewCreator(opts...))
 	// The task can end and be deleted after loadTask saw it running, and
 	// any call from here to the start can then fail with not found. That
@@ -253,7 +269,9 @@ func (e *Exec) Wait(ctx context.Context) (int, error) {
 	}
 	e.process.IO().Wait()
 	err = deleteExec(ctx, e.process)
-	if err != nil {
+	// Stopping or removing the instance kills and deletes its execs, this
+	// one among them; see endExecs. The process is then gone already.
+	if err != nil && !errdefs.IsNotFound(err) {
 		return int(code), fmt.Errorf("%w: %s: %w", ErrExecNotDeleted, e.process.ID(), err)
 	}
 	return int(code), nil
@@ -274,6 +292,187 @@ func deleteExec(ctx context.Context, p client.Process, opts ...client.ProcessDel
 		}
 	}
 	return err
+}
+
+// endExecs kills and deletes the execs whose FIFOs are in fifoDir, an
+// instance's ExecFIFODir, and removes fifoDir unless it left an exec in
+// it; see endExec. An exec hull started is
+// deleted by the hull that waits for it, and only one whose hull was
+// killed stays, with its FIFOs. Such an exec keeps the instance from
+// stopping: the shim reports its task exited only once the task's execs
+// have exited, and under urunc, `urunc exec` blocks for good once the
+// command's output fills a FIFO nobody reads. A `hull exec` still waiting
+// sees its command killed, as stopping the instance would end it anyway.
+//
+// task is nil for an instance with no task. Its execs went with the task,
+// and only their FIFOs are left. Each exec gets grace to exit after its
+// SIGKILL.
+func endExecs(ctx context.Context, task client.Task, fifoDir string, grace time.Duration) error {
+	left := false
+	if task != nil {
+		ids, err := fifoExecIDs(fifoDir)
+		if err != nil {
+			return err
+		}
+		for _, id := range ids {
+			err = endExec(ctx, task, id, grace)
+			if errors.Is(err, errExecStarting) {
+				left = true
+				continue
+			}
+			if err != nil {
+				return fmt.Errorf("exec %s: %w", id, err)
+			}
+		}
+	}
+	// The FIFOs of an exec left alone stay, so that a later stop or rm, or
+	// the ctr commands in docs/build.md, can still find its ID. Each exec
+	// that was deleted took its own FIFOs with it.
+	if left {
+		return nil
+	}
+	err := os.RemoveAll(fifoDir)
+	if err != nil {
+		return fmt.Errorf("remove the exec FIFO directory: %w", err)
+	}
+	return nil
+}
+
+// endExec kills and deletes the exec id of task, if it is still there.
+// client.WithProcessKill would wait for the exit with no bound, and the
+// delete does not pass a deadline on, so the wait is done here.
+//
+// The exec's FIFOs are attached to, and what comes out of them is thrown
+// away. The shim deletes an exec only once it has copied the exec's output
+// into them, or after 10 seconds (execProcess.delete in containerd's
+// cmd/containerd-shim-runc-v2/process/exec.go; urunc's shim is built from
+// the runc shim), and with no reader the copy cannot finish. A `hull exec`
+// still waiting loses what the attach reads.
+//
+// An exec whose start has not returned within grace is left alone, and
+// endExec returns errExecStarting. The shim answers nothing about an exec
+// while it starts it, and under urunc the start waits for the guest's
+// agent, for up to 30 seconds while the guest boots. Ending the instance
+// ends such an exec anyway, since the agent it waits for goes with the VM.
+func endExec(ctx context.Context, task client.Task, id string, grace time.Duration) error {
+	loadCtx, cancelLoad := context.WithTimeout(ctx, grace)
+	p, err := task.LoadProcess(loadCtx, id, cio.NewAttach(cio.WithStreams(nil, io.Discard, io.Discard)))
+	starting := err != nil && loadCtx.Err() != nil && ctx.Err() == nil
+	cancelLoad()
+	if starting {
+		return errExecStarting
+	}
+	// The FIFOs go when the hull that started the exec deletes it, between
+	// the shim's answer and the attach.
+	if errdefs.IsNotFound(err) || errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	err = killLeftExec(ctx, p, grace)
+	if err != nil {
+		// The exec may still be there, so its FIFOs stay for a later stop
+		// or rm to find it by.
+		stopCopying(p.IO())
+		return err
+	}
+	return deleteLeftExec(ctx, p)
+}
+
+// killLeftExec sends p SIGKILL and waits up to grace for it to exit.
+func killLeftExec(ctx context.Context, p client.Process, grace time.Duration) error {
+	waitCtx, cancel := context.WithTimeout(ctx, grace)
+	defer cancel()
+	exited, err := p.Wait(waitCtx)
+	if err != nil {
+		return fmt.Errorf("wait: %w", err)
+	}
+	err = p.Kill(ctx, syscall.SIGKILL)
+	// The shim refuses to signal an exec it has created but not started, as
+	// one is when its hull was killed between the two. It has no process to
+	// wait for, and deleting it is enough.
+	if errdefs.IsFailedPrecondition(err) {
+		return nil
+	}
+	if err != nil && !errdefs.IsNotFound(err) {
+		return fmt.Errorf("send SIGKILL: %w", err)
+	}
+	// The channel also delivers when waitCtx ends, and the process may then
+	// be running still.
+	<-exited
+	if waitCtx.Err() != nil {
+		return fmt.Errorf("still running %s after SIGKILL", grace)
+	}
+	return nil
+}
+
+// errExecStarting is endExec's report that it left an exec alone, because
+// the exec's start had not returned within the grace.
+var errExecStarting = errors.New("exec still starting")
+
+// deleteLeftExec deletes p, an exec endExec attached to. deleteExec is not
+// used, because it removes the FIFOs of an exec the shim fails to delete,
+// which a later stop or rm then could not find.
+func deleteLeftExec(ctx context.Context, p client.Process) error {
+	_, err := p.Delete(context.WithoutCancel(ctx))
+	if err == nil {
+		return nil
+	}
+	stopCopying(p.IO())
+	if !errdefs.IsNotFound(err) {
+		return fmt.Errorf("delete: %w", err)
+	}
+	// The shim has no such exec any more, and its FIFOs are of no use.
+	_ = p.IO().Close()
+	return nil
+}
+
+// stopCopying ends the copying of an attached exec's output, which holds
+// the exec's FIFOs open, and leaves the FIFOs in place. cio.IO.Close would
+// remove them as well.
+func stopCopying(pio cio.IO) {
+	pio.Cancel()
+	pio.Wait()
+}
+
+// fifoExecIDs returns the IDs of the execs whose FIFOs are in dir. cio makes
+// each exec's FIFOs in a directory of their own inside dir, named after the
+// exec ID with -stdin, -stdout or -stderr after it. A dir that does not
+// exist holds none.
+func fifoExecIDs(dir string) ([]string, error) {
+	sets, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read the exec FIFO directory: %w", err)
+	}
+	var ids []string
+	for _, set := range sets {
+		if !set.IsDir() {
+			continue
+		}
+		fifos, err := os.ReadDir(filepath.Join(dir, set.Name()))
+		// An exec whose hull deletes it meanwhile takes its directory with
+		// it.
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read the exec FIFO directory: %w", err)
+		}
+		for _, fifo := range fifos {
+			for _, suffix := range []string{"-stdin", "-stdout", "-stderr"} {
+				id, ok := strings.CutSuffix(fifo.Name(), suffix)
+				if ok && !slices.Contains(ids, id) {
+					ids = append(ids, id)
+				}
+			}
+		}
+	}
+	slices.Sort(ids)
+	return ids, nil
 }
 
 // stdinCloser passes on a process's stdin, and closes the process's end
