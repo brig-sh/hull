@@ -23,9 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
-	"strconv"
 	"sync"
 	"syscall"
 
@@ -61,20 +59,14 @@ type ExecConfig struct {
 
 // ExecFIFODir returns where an exec's FIFOs should be made, for
 // ExecConfig.FIFODir. containerd's default, /run/containerd/fifo, is root's,
-// so root gets "" for it. Anyone else gets a directory in $XDG_RUNTIME_DIR,
-// which a rootless daemon's shim, running as the same user, can open too. A
-// relative $XDG_RUNTIME_DIR is ignored, as the XDG Base Directory spec says
-// to, since the shim does not run in hull's working directory and could not
-// find a FIFO under it. The directory may not exist yet.
+// so root gets "" for it. Anyone else gets a directory in the runtime
+// directory, which a rootless daemon's shim, running as the same user, can
+// open too; see runtimeDir. The directory may not exist yet.
 func ExecFIFODir() string {
 	if geteuid() == 0 {
 		return ""
 	}
-	runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
-	if !filepath.IsAbs(runtimeDir) {
-		runtimeDir = filepath.Join("/run/user", strconv.Itoa(getuid()))
-	}
-	return filepath.Join(runtimeDir, "hull", "fifo")
+	return filepath.Join(runtimeDir(), "hull", "fifo")
 }
 
 // Exec is a process ExecInstance started.
