@@ -71,6 +71,9 @@ func TestExecCommandAgainstDaemon(t *testing.T) {
 	if out != "out\nin\n" || errOut != "err\n" || !errors.As(err, &code) || code != 3 {
 		t.Errorf("exec = %q, %q, %v; want %q, %q and exit status 3", out, errOut, err, "out\nin\n", "err\n")
 	}
+	// Nothing exec starts outlives it, the goroutine that passes signals on
+	// to the command among them.
+	waitForGoroutinesOf(t, execInstance)
 
 	// A bare --env takes its value from hull's environment, so a secret
 	// stays out of hull's argv.

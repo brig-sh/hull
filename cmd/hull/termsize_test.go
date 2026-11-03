@@ -119,3 +119,13 @@ func TestCatchWindowSizeKeepsAnEarlyResize(t *testing.T) {
 		t.Error("resize was not called")
 	}
 }
+
+// stop ends the goroutine follow starts, which would otherwise wait for a
+// SIGWINCH for good.
+func TestCatchWindowSizeStopEndsFollowing(t *testing.T) {
+	_, slave := newPTY(t)
+	follow, stop := catchWindowSize(int(slave.Fd()))
+	follow(func(rows, cols uint16) {})
+	stop()
+	waitForGoroutinesOf(t, catchWindowSize)
+}
