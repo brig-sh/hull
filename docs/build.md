@@ -315,9 +315,10 @@ on macOS, with these differences:
 - With `-t`, urunc filters the guest's output as well, wherever it goes:
   hull filters only output that reaches a terminal, but urunc filters it on
   its way to a pipe or a file too. So `-t` output captured in a file lacks
-  the sequences the filter removes, which it keeps on macOS. urunc reads
-  `HULL_TERMINAL_FILTER` from the daemon's environment, not from hull's,
-  and turning the filter off for hull leaves urunc's on.
+  the sequences the filter removes, which it keeps on macOS. urunc's
+  filter has a switch of its own, `URUNC_TERMINAL_FILTER`, which it reads
+  from the daemon's environment, so neither `HULL_TERMINAL_FILTER` nor an
+  `--env` passed to the command turns it off.
 - The FIFOs that carry the command's input and output go in a directory
   of the instance's own: `/run/hull/fifo/<namespace>/<instance>` for
   root, and `$XDG_RUNTIME_DIR/hull/fifo/<namespace>/<instance>` for anyone
