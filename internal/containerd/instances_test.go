@@ -19,6 +19,7 @@ package containerd
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -301,24 +302,6 @@ func TestStopInstanceThroughDaemon(t *testing.T) {
 	}
 }
 
-// A task still alive when the grace after SIGKILL ends keeps its container
-// and its task. A grace of a nanosecond ends before the task's exit can
-// reach the client, though the kill itself is sent.
-func TestStopInstanceFailsWhenTheGraceEnds(t *testing.T) {
-	c := instancesClient(t)
-	ctx := context.Background()
-	containerdtest.StartTask(ctx, t, c, "stubborn", "sleep", "300")
-
-	running, err := StopInstance(ctx, c, "stubborn", 0, time.Nanosecond)
-	if !running || err == nil || !strings.Contains(err.Error(), "after SIGKILL") {
-		t.Fatalf("stopping past the grace = %v, %v; want a failure after SIGKILL", running, err)
-	}
-	inst, err := LoadInstance(ctx, c, "stubborn")
-	if err != nil || inst.Task == nil {
-		t.Errorf("after the failed stop: task = %+v, error = %v; want the task kept", inst.Task, err)
-	}
-}
-
 // fakeTask is a task whose kill succeeds, so a test can deliver any exit
 // status without a daemon. Calling any other method panics on the nil
 // embedded interface.
@@ -346,6 +329,36 @@ func TestSignalAndWaitTakesADeletedTaskAsEnded(t *testing.T) {
 		if !done || !errors.Is(err, tc.wantErr) {
 			t.Errorf("%s: signalAndWait = %v, %v; want true, %v", tc.name, done, err, tc.wantErr)
 		}
+	}
+}
+
+// stubbornTask is a task that never exits, whatever it is sent, and
+// records the signals sent to it. No real process outlives a SIGKILL, and
+// a daemon's task exits as soon as the kill reaches it, often before even
+// a grace of a nanosecond ends.
+type stubbornTask struct {
+	fakeTask
+	sent *[]syscall.Signal
+}
+
+func (t stubbornTask) Kill(_ context.Context, sig syscall.Signal, _ ...client.KillOpts) error {
+	*t.sent = append(*t.sent, sig)
+	return nil
+}
+
+func (stubbornTask) Wait(context.Context) (<-chan client.ExitStatus, error) {
+	return make(chan client.ExitStatus), nil
+}
+
+// A task still alive when the grace after SIGKILL ends fails the stop.
+func TestEndTaskFailsWhenTheGraceEnds(t *testing.T) {
+	var sent []syscall.Signal
+	err := endTask(context.Background(), stubbornTask{sent: &sent}, time.Millisecond, time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "still running 1ms after SIGKILL") {
+		t.Errorf("endTask of a task that never exits = %v; want a failure after SIGKILL", err)
+	}
+	if !slices.Equal(sent, []syscall.Signal{syscall.SIGTERM, syscall.SIGKILL}) {
+		t.Errorf("signals sent = %v, want SIGTERM, then SIGKILL", sent)
 	}
 }
 
