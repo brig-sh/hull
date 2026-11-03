@@ -111,7 +111,8 @@ start. hull looks for its socket in this order:
 2. `$HULL_CONTAINERD_ADDRESS`
 3. `/run/containerd/containerd.sock` when run as root, and
    `$XDG_RUNTIME_DIR/containerd/containerd.sock`, where a rootless containerd
-   puts it, for any other user
+   puts it, for any other user. With `$XDG_RUNTIME_DIR` unset or not an
+   absolute path, `/run/user/<uid>` takes its place.
 
 There is no store directory on Linux, and no `--store-dir`. Isolation comes
 from the containerd namespace instead: `--namespace`, then

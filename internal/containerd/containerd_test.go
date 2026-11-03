@@ -49,6 +49,7 @@ func TestResolveAddress(t *testing.T) {
 		{name: "root uses the system socket", euid: 0, runtimeDir: "/run/user/0", want: "/run/containerd/containerd.sock"},
 		{name: "user uses the rootless socket", euid: 1000, runtimeDir: "/run/user/1000", want: "/run/user/1000/containerd/containerd.sock"},
 		{name: "user without XDG_RUNTIME_DIR", euid: 1000, want: "/run/user/1000/containerd/containerd.sock"},
+		{name: "user with a relative XDG_RUNTIME_DIR", euid: 1000, runtimeDir: "rt", want: "/run/user/1000/containerd/containerd.sock"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

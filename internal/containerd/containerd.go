@@ -87,11 +87,20 @@ func ResolveAddress(explicit string) string {
 	if geteuid() == 0 {
 		return rootfulAddress
 	}
-	runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
-	if runtimeDir == "" {
-		runtimeDir = filepath.Join("/run/user", strconv.Itoa(getuid()))
+	return filepath.Join(runtimeDir(), "containerd", "containerd.sock")
+}
+
+// runtimeDir returns the user's runtime directory: $XDG_RUNTIME_DIR, or
+// /run/user/<uid> when that is unset or relative. The XDG Base Directory spec
+// says to ignore a relative one. A path under it would depend on the working
+// directory: the socket would be looked for wherever hull runs, and a shim,
+// which does not run in hull's working directory, could not find a FIFO.
+func runtimeDir() string {
+	dir := os.Getenv("XDG_RUNTIME_DIR")
+	if !filepath.IsAbs(dir) {
+		dir = filepath.Join("/run/user", strconv.Itoa(getuid()))
 	}
-	return filepath.Join(runtimeDir, "containerd", "containerd.sock")
+	return dir
 }
 
 // ResolveNamespace picks the containerd namespace: the explicit namespace if
