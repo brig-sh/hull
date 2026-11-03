@@ -53,10 +53,6 @@ func execInstance(ctx context.Context, cmd *cli.Command) error {
 	if err != nil {
 		return err
 	}
-	fifoDir, err := execFIFODir()
-	if err != nil {
-		return err
-	}
 
 	c, err := connectContainerd(ctx, cmd)
 	if err != nil {
@@ -136,7 +132,6 @@ func execInstance(ctx context.Context, cmd *cli.Command) error {
 		Stdin:    stdin,
 		Stdout:   out,
 		Stderr:   errOut,
-		FIFODir:  fifoDir,
 	})
 	switch {
 	case errdefs.IsNotFound(err):
@@ -199,17 +194,4 @@ func fileFd(s any) int {
 		return -1
 	}
 	return int(f.Fd())
-}
-
-// execFIFODir returns containerd.ExecFIFODir, and creates it.
-func execFIFODir() (string, error) {
-	dir := containerd.ExecFIFODir()
-	if dir == "" {
-		return "", nil
-	}
-	err := os.MkdirAll(dir, 0o700)
-	if err != nil {
-		return "", fmt.Errorf("create the exec FIFO directory: %w", err)
-	}
-	return dir, nil
 }

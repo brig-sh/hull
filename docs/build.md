@@ -220,16 +220,20 @@ on macOS, with these differences:
   container another client created. Those containerd has no counterpart for,
   among them `cmdLine` and `bundleDir`, are always empty.
 - `hull rm` deletes the container's task, the container and its snapshot,
-  and the instance's log. A task that has not stopped is refused without
-  `--force`. With it, the task is sent SIGKILL, and `hull rm` fails rather
-  than delete anything if the task has not exited within 5 seconds.
+  the instance's log, and the exec processes and FIFOs a killed `hull exec`
+  left, described below. A task that has not stopped is refused without
+  `--force`. With it, the exec processes are ended first, then the task is
+  sent SIGKILL, and `hull rm` fails, keeping the task, the container and
+  its snapshot, if the task has not exited within 5 seconds.
 - `hull stop` sends the task SIGTERM, then SIGKILL if it has not exited
   within `--timeout` seconds (10 by default), and fails if it has not exited
-  5 seconds after that. It then deletes the task, and keeps the container,
-  its snapshot and its log until `hull rm`. A task that had already exited
-  is deleted too, since its shim runs until it is, and `hull stop` says the
-  instance is already stopped. With its task deleted, the instance is
-  `stopped` with no exit code.
+  5 seconds after that. It first kills and deletes the exec processes a
+  killed `hull exec` left, as `hull rm` does, and fails if one has not
+  exited 5 seconds after its SIGKILL. It then deletes the task, and
+  keeps the container, its snapshot and its log until `hull rm`. A task that
+  had already exited is deleted too, since its shim runs until it is, and
+  `hull stop` says the instance is already stopped. With its task deleted,
+  the instance is `stopped` with no exit code.
 - urunc hands the SIGTERM to the monitor, and cloud-hypervisor, the monitor
   a container boot defaults to, exits on it at once. The guest is not asked
   to shut down first, as it is on macOS's `vz` and `qemu` backends; see
@@ -314,19 +318,44 @@ on macOS, with these differences:
   the sequences the filter removes, which it keeps on macOS. urunc reads
   `HULL_TERMINAL_FILTER` from the daemon's environment, not from hull's,
   and turning the filter off for hull leaves urunc's on.
-- The FIFOs that carry the command's input and output go where containerd
-  puts them for root, and under `$XDG_RUNTIME_DIR/hull/fifo` for anyone
+- The FIFOs that carry the command's input and output go in a directory
+  of the instance's own: `/run/hull/fifo/<namespace>/<instance>` for
+  root, and `$XDG_RUNTIME_DIR/hull/fifo/<namespace>/<instance>` for anyone
   else, where a rootless daemon's shim can open them too. hull killed with
   SIGKILL leaves its FIFOs there, the command running in the guest, and
-  its exec process undeleted in the shim. Nothing removes them later:
-  `hull stop` and `hull rm` delete neither another exec's process nor its
-  FIFOs, so the FIFOs and the directory that holds them stay until
-  removed by hand.
-- A command that goes on writing after hull is killed with SIGKILL fills
-  its FIFO, and urunc's exec process then blocks for good. The shim
-  reports the instance stopped only once its exec processes have exited,
-  so `hull stop` and `hull rm -f` fail, even after the VM has exited.
-  Killing the exec process through containerd frees the instance:
+  its exec process undeleted in the shim.
+- `hull stop` and `hull rm` kill and delete the exec processes whose FIFOs
+  are in the instance's directory, and remove the directory, before they
+  end the instance. An exec process they leave running, described below,
+  keeps the directory. A `hull exec` still running in it ends with status
+  137, and output the command wrote just before that may not reach it:
+  stop and rm read the exec process's FIFOs and throw away what they read,
+  so that the shim can delete it. `hull rm` without `--force` refuses a
+  running instance and leaves its exec processes alone.
+- An exec process whose start has not returned within 5 seconds is left
+  running. The shim answers nothing about an exec process while it starts
+  it, and under urunc a start waits for the guest's agent, for up to 30
+  seconds while the guest boots. Ending the instance ends it too, since the
+  agent goes with the VM, but the instance is reported stopped only once
+  the start has failed, so `hull stop` and `hull rm --force` wait for that
+  too, and fail when it outlasts their own wait for the task. Its FIFOs
+  stay in the instance's directory, so a later stop or rm finds it again,
+  and the `ctr` commands below can read its exec ID.
+- Stop and rm look for the directory as `hull exec` does, so one run as
+  another user, or with another `$XDG_RUNTIME_DIR`, does not find the exec
+  processes. The directory is named after the namespace and the instance,
+  not the daemon: with two daemons that both have the same instance in the
+  same namespace, a stop or rm through one removes the other's FIFOs, and
+  the other's stop can then no longer find its exec processes. An instance
+  removed by another client, such as `ctr`, leaves its directory behind,
+  and an exec that fails leaves an empty one until the instance is stopped
+  or removed.
+- The exec processes have to go first: a command that goes on writing
+  after hull is killed with SIGKILL fills its FIFO, and urunc's exec
+  process then blocks for good. The shim reports the instance stopped
+  only once its exec processes have exited, so the instance would not
+  stop, even after the VM has exited. When `hull stop` cannot find such an
+  exec process, killing it through containerd frees the instance:
 
   ```bash
   ctr -a <socket> -n <namespace> task kill -s SIGKILL --exec-id <exec-id> <instance>
@@ -334,9 +363,9 @@ on macOS, with these differences:
 
   where `<socket>` is the daemon's socket, as `--containerd-address`
   names it, and the exec ID, `hull-` and 16 hex digits, is in the names
-  of the FIFOs hull left. Every namespace and instance shares the FIFO
-  directory, so the names do not say which instance an exec ID belongs
-  to.
+  of the FIFOs hull left. An exec process hull was killed before starting
+  cannot be signalled, and the kill fails with `process not created`;
+  `ctr ... task delete --exec-id <exec-id> <instance>` deletes it instead.
 
 `hull run` boots an image as a VM through urunc, as the containerd runtime
 `io.containerd.urunc.v2`. It needs urunc's shim installed where the daemon

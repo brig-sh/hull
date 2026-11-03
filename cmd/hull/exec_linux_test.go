@@ -32,6 +32,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/brig-sh/hull/internal/containerd"
 	"github.com/brig-sh/hull/internal/containerd/containerdtest"
 )
 
@@ -374,15 +375,9 @@ func TestExecPassesSignalsToTheCommand(t *testing.T) {
 			if !errors.As(err, &code) || code != tc.code || !strings.Contains(out.String(), tc.want) {
 				t.Errorf("after %v: error = %v, output %q; want exit status %d and %s", tc.sig, err, out.String(), tc.code, tc.want)
 			}
-			fifoDir, err := execFIFODir()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if fifoDir != "" {
-				left, err := os.ReadDir(fifoDir)
-				if err != nil || len(left) != 0 {
-					t.Errorf("the FIFO directory after exec holds %v, %v; want it empty", left, err)
-				}
+			left, err := os.ReadDir(containerd.ExecFIFODir(f.ns, "vm"))
+			if err != nil || len(left) != 0 {
+				t.Errorf("the FIFO directory after exec holds %v, %v; want it empty", left, err)
 			}
 			if tc.terminal {
 				after, err := unix.IoctlGetTermios(int(slave.Fd()), unix.TCGETS)

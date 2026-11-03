@@ -147,18 +147,19 @@ func loadTask(ctx context.Context, ctr client.Container) (client.Task, client.St
 // not stopped.
 var ErrInstanceRunning = errors.New("instance is running")
 
-// RemoveInstance deletes the container id, its task and its snapshot. A task
-// that has not stopped is refused with ErrInstanceRunning unless kill is
-// set. Then it is sent SIGKILL first, and RemoveInstance waits up to grace
-// for it to exit, so the snapshot is never removed from under a VMM that may
-// still be writing to it. An error that errdefs.IsNotFound accepts means no
-// container has that ID in the client's namespace.
+// RemoveInstance deletes the container id, its task and its snapshot, and
+// the execs a killed hull left in it, with their FIFOs. A task that has not
+// stopped is refused with ErrInstanceRunning unless kill is set. Then it is
+// sent SIGKILL first, and RemoveInstance waits up to grace for it to exit, so
+// the snapshot is never removed from under a VMM that may still be writing
+// to it. An error that errdefs.IsNotFound accepts means no container has
+// that ID in the client's namespace.
 func RemoveInstance(ctx context.Context, c *client.Client, id string, kill bool, grace time.Duration) error {
 	ctr, err := c.LoadContainer(ctx, id)
 	if err != nil {
 		return fmt.Errorf("load container %s: %w", id, err)
 	}
-	err = deleteTask(ctx, ctr, kill, grace)
+	err = deleteTask(ctx, ctr, ExecFIFODir(c.DefaultNamespace(), id), kill, grace)
 	if err != nil {
 		return err
 	}
@@ -169,17 +170,25 @@ func RemoveInstance(ctx context.Context, c *client.Client, id string, kill bool,
 	return nil
 }
 
-func deleteTask(ctx context.Context, ctr client.Container, kill bool, grace time.Duration) error {
+func deleteTask(ctx context.Context, ctr client.Container, fifoDir string, kill bool, grace time.Duration) error {
 	task, status, err := loadTask(ctx, ctr)
-	if task == nil || err != nil {
+	if err != nil {
 		return err
 	}
-	if status.Status == client.Stopped {
+	running := task != nil && status.Status != client.Stopped
+	if running && !kill {
+		return ErrInstanceRunning
+	}
+	err = endExecs(ctx, task, fifoDir, grace)
+	if err != nil {
+		return fmt.Errorf("end the execs in container %s: %w", ctr.ID(), err)
+	}
+	if task == nil {
+		return nil
+	}
+	if !running {
 		_, err = task.Delete(ctx)
 	} else {
-		if !kill {
-			return ErrInstanceRunning
-		}
 		killCtx, cancel := context.WithTimeout(ctx, grace)
 		_, err = task.Delete(killCtx, client.WithProcessKill)
 		timedOut := errors.Is(killCtx.Err(), context.DeadlineExceeded)
@@ -196,10 +205,11 @@ func deleteTask(ctx context.Context, ctr client.Container, kill bool, grace time
 }
 
 // StopInstance ends the task of the container id and deletes it, and keeps
-// the container and its snapshot. A task that has not stopped is sent
-// SIGTERM, then SIGKILL if it has not exited within timeout, and
-// StopInstance fails if it has not exited within grace after that. It
-// reports whether the task was still running. An error that
+// the container and its snapshot. The execs a killed hull left in it are
+// killed and deleted first, and their FIFOs removed; see endExecs. A task
+// that has not stopped is sent SIGTERM, then SIGKILL if it has not exited
+// within timeout, and StopInstance fails if it has not exited within grace
+// after that. It reports whether the task was still running. An error that
 // errdefs.IsNotFound accepts means no container has that ID in the client's
 // namespace.
 //
@@ -212,10 +222,17 @@ func StopInstance(ctx context.Context, c *client.Client, id string, timeout, gra
 		return false, fmt.Errorf("load container %s: %w", id, err)
 	}
 	task, status, err := loadTask(ctx, ctr)
-	if task == nil || err != nil {
+	if err != nil {
 		return false, err
 	}
-	running := status.Status != client.Stopped
+	running := task != nil && status.Status != client.Stopped
+	err = endExecs(ctx, task, ExecFIFODir(c.DefaultNamespace(), id), grace)
+	if err != nil {
+		return running, fmt.Errorf("end the execs in container %s: %w", id, err)
+	}
+	if task == nil {
+		return false, nil
+	}
 	if running {
 		err = endTask(ctx, task, timeout, grace)
 		if err != nil {

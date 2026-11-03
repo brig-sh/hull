@@ -20,9 +20,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -43,9 +46,6 @@ func execAndWait(t *testing.T, c *client.Client, id, stdin string, cfg ExecConfi
 	cfg.Stdin = strings.NewReader(stdin)
 	cfg.Stdout = &out
 	cfg.Stderr = &errOut
-	// containerd's default FIFO directory is root's, and the tests may
-	// run as anyone.
-	cfg.FIFODir = t.TempDir()
 	e, err := ExecInstance(ctx, c, id, cfg)
 	if err != nil {
 		t.Fatalf("exec %q: %v", cfg.Args, err)
@@ -57,7 +57,20 @@ func execAndWait(t *testing.T, c *client.Client, id, stdin string, cfg ExecConfi
 	return out.String(), errOut.String(), code
 }
 
+// privateFIFODir points the FIFO directories of the test's execs at a
+// directory of its own, whoever runs the test, and returns it.
+func privateFIFODir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+	orig := rootFIFODir
+	rootFIFODir = filepath.Join(dir, "hull", "fifo")
+	t.Cleanup(func() { rootFIFODir = orig })
+	return filepath.Join(dir, "hull", "fifo")
+}
+
 func TestExecInstanceThroughDaemon(t *testing.T) {
+	privateFIFODir(t)
 	c := instancesClient(t)
 	ctx := context.Background()
 	_, task := containerdtest.StartTask(ctx, t, c, "vm", "sleep", "300")
@@ -80,11 +93,10 @@ func TestExecInstanceThroughDaemon(t *testing.T) {
 	stdinR, stdinW := io.Pipe()
 	var late bytes.Buffer
 	e, err := ExecInstance(ctx, c, "vm", ExecConfig{
-		Args:    []string{"cat"},
-		Stdin:   stdinR,
-		Stdout:  &late,
-		Stderr:  io.Discard,
-		FIFODir: t.TempDir(),
+		Args:   []string{"cat"},
+		Stdin:  stdinR,
+		Stdout: &late,
+		Stderr: io.Discard,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -125,7 +137,7 @@ func TestExecInstanceThroughDaemon(t *testing.T) {
 	}
 
 	// Wait deletes the process, so the shim keeps nothing of it.
-	e, err = ExecInstance(ctx, c, "vm", ExecConfig{Args: []string{"true"}, FIFODir: t.TempDir()})
+	e, err = ExecInstance(ctx, c, "vm", ExecConfig{Args: []string{"true"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,6 +152,7 @@ func TestExecInstanceThroughDaemon(t *testing.T) {
 }
 
 func TestExecInstanceRefusals(t *testing.T) {
+	fifoBase := privateFIFODir(t)
 	c := instancesClient(t)
 	ctx := context.Background()
 	newIdleContainer(ctx, t, c, "idle")
@@ -157,6 +170,10 @@ func TestExecInstanceRefusals(t *testing.T) {
 	_, err = ExecInstance(ctx, c, "vm", ExecConfig{Args: []string{"true"}, User: "nobody"})
 	if err == nil || !strings.Contains(err.Error(), "takes only a numeric uid and gid, or root") {
 		t.Errorf("exec as a user name: error = %v, want a refusal", err)
+	}
+	_, err = os.Stat(fifoBase)
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a refused exec made a FIFO directory: %v", err)
 	}
 }
 
@@ -198,32 +215,34 @@ func TestExecFIFODir(t *testing.T) {
 		euid       int
 		want       string
 	}{
-		{name: "root uses containerd's default", euid: 0, runtimeDir: "/run/user/0", want: ""},
-		{name: "user uses XDG_RUNTIME_DIR", euid: 1000, runtimeDir: "/tmp/rt", want: "/tmp/rt/hull/fifo"},
-		{name: "user without XDG_RUNTIME_DIR", euid: 1000, want: "/run/user/1000/hull/fifo"},
-		{name: "user with a relative XDG_RUNTIME_DIR", euid: 1000, runtimeDir: "rt", want: "/run/user/1000/hull/fifo"},
+		{name: "root uses /run/hull", euid: 0, runtimeDir: "/run/user/0", want: "/run/hull/fifo/ns/vm"},
+		{name: "user uses XDG_RUNTIME_DIR", euid: 1000, runtimeDir: "/tmp/rt", want: "/tmp/rt/hull/fifo/ns/vm"},
+		{name: "user without XDG_RUNTIME_DIR", euid: 1000, want: "/run/user/1000/hull/fifo/ns/vm"},
+		{name: "user with a relative XDG_RUNTIME_DIR", euid: 1000, runtimeDir: "rt", want: "/run/user/1000/hull/fifo/ns/vm"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fakeIDs(t, tc.euid, 1000)
 			t.Setenv("XDG_RUNTIME_DIR", tc.runtimeDir)
-			got := ExecFIFODir()
+			got := ExecFIFODir("ns", "vm")
 			if got != tc.want {
-				t.Fatalf("ExecFIFODir() = %q, want %q", got, tc.want)
+				t.Fatalf("ExecFIFODir(ns, vm) = %q, want %q", got, tc.want)
 			}
 		})
 	}
 }
 
-// undeletable is a process the shim can no longer delete, as when the shim
-// or the task is gone.
+// undeletable is a process the shim does not delete, failing with err: not
+// found when the shim, the task or the process is gone, and unavailable
+// when the shim cannot be reached.
 type undeletable struct {
 	client.Process
-	io cio.IO
+	io  cio.IO
+	err error
 }
 
 func (p undeletable) Delete(context.Context, ...client.ProcessDeleteOpts) (*client.ExitStatus, error) {
-	return nil, errdefs.ErrNotFound
+	return nil, p.err
 }
 
 func (p undeletable) IO() cio.IO { return p.io }
@@ -237,7 +256,7 @@ func TestDeleteExecRemovesTheFIFOsWhenDeleteFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = deleteExec(context.Background(), undeletable{io: pio})
+	err = deleteExec(context.Background(), undeletable{io: pio, err: errdefs.ErrNotFound})
 	if !errors.Is(err, errdefs.ErrNotFound) {
 		t.Errorf("deleteExec = %v, want the error Delete returned", err)
 	}
@@ -258,9 +277,369 @@ func TestWaitKeepsTheStatusWhenDeleteFails(t *testing.T) {
 	pio.Cancel()
 	exited := make(chan client.ExitStatus, 1)
 	exited <- *client.NewExitStatus(3, time.Now(), nil)
-	e := &Exec{process: undeletable{io: pio}, exited: exited}
+	e := &Exec{process: undeletable{io: pio, err: errdefs.ErrUnavailable}, exited: exited}
 	code, err := e.Wait(context.Background())
-	if code != 3 || !errors.Is(err, ErrExecNotDeleted) || !errors.Is(err, errdefs.ErrNotFound) {
+	if code != 3 || !errors.Is(err, ErrExecNotDeleted) || !errors.Is(err, errdefs.ErrUnavailable) {
 		t.Errorf("Wait = %d, %v; want 3 and an error that is ErrExecNotDeleted and the delete's", code, err)
+	}
+
+	// A process that is not found was deleted by a stop or rm of its
+	// instance, and is not left in the shim.
+	exited <- *client.NewExitStatus(137, time.Now(), nil)
+	e = &Exec{process: undeletable{io: pio, err: errdefs.ErrNotFound}, exited: exited}
+	code, err = e.Wait(context.Background())
+	if code != 137 || err != nil {
+		t.Errorf("Wait for a process deleted already = %d, %v; want 137 and no error", code, err)
+	}
+}
+
+func TestFIFOExecIDs(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"a/hull-1-stdin", "a/hull-1-stdout", "a/hull-1-stderr", "b/hull-2-stdout", "c/other", "stray"} {
+		err := os.MkdirAll(filepath.Join(dir, filepath.Dir(name)), 0o700)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = os.WriteFile(filepath.Join(dir, name), nil, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	ids, err := fifoExecIDs(dir)
+	if err != nil || strings.Join(ids, " ") != "hull-1 hull-2" {
+		t.Errorf("fifoExecIDs = %q, %v; want hull-1 and hull-2", ids, err)
+	}
+	ids, err = fifoExecIDs(filepath.Join(dir, "missing"))
+	if err != nil || len(ids) != 0 {
+		t.Errorf("fifoExecIDs of a missing directory = %q, %v; want none", ids, err)
+	}
+}
+
+// The execs a killed hull left in an instance keep it from stopping under
+// urunc, so stop and rm kill and delete them, and remove their FIFOs. runc
+// ends them along with the task, so endExecs is called on its own first,
+// on a task that keeps running.
+func TestStopAndRemoveEndTheExecsLeftBehind(t *testing.T) {
+	privateFIFODir(t)
+	c := instancesClient(t)
+	ctx := context.Background()
+	_, task := containerdtest.StartTask(ctx, t, c, "vm", "sleep", "300")
+	fifoDir := ExecFIFODir(c.DefaultNamespace(), "vm")
+
+	// A hull still waiting for its exec gets the command's kill as its
+	// status, with no warning that the exec was not deleted.
+	e, err := ExecInstance(ctx, c, "vm", ExecConfig{Args: []string{"sleep", "300"}, Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waited := make(chan error, 1)
+	go func() {
+		code, err := e.Wait(ctx)
+		if err == nil && code != 137 {
+			err = fmt.Errorf("exit status %d, want 137", code)
+		}
+		waited <- err
+	}()
+	// The FIFOs of an exec whose process is gone already.
+	err = os.MkdirAll(filepath.Join(fifoDir, "gone"), 0o700)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = os.WriteFile(filepath.Join(fifoDir, "gone", "hull-0000000000000000-stdout"), nil, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = endExecs(ctx, task, fifoDir, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = task.LoadProcess(ctx, e.process.ID(), nil)
+	if !errdefs.IsNotFound(err) {
+		t.Errorf("load the exec after endExecs: error = %v, want not found", err)
+	}
+	select {
+	case err = <-waited:
+		if err != nil {
+			t.Errorf("Wait for the exec endExecs ended: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Error("Wait for the exec endExecs ended did not return")
+	}
+	_, err = os.Stat(fifoDir)
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the FIFO directory after endExecs: %v, want it gone", err)
+	}
+
+	// An exec left behind by a hull that no longer reads its output. Its
+	// copying blocks once the FIFO is full, as a killed hull's would, and
+	// the shim then waits 10 seconds to delete it unless endExecs drains the
+	// FIFO.
+	unread, stalled := io.Pipe()
+	t.Cleanup(func() { _ = unread.Close() })
+	_, err = ExecInstance(ctx, c, "vm", ExecConfig{Args: []string{"yes"}, Stdout: stalled, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// rm without --force refuses a running instance and leaves its execs.
+	err = RemoveInstance(ctx, c, "vm", false, 5*time.Second)
+	if !errors.Is(err, ErrInstanceRunning) {
+		t.Fatalf("rm of a running instance: error = %v, want ErrInstanceRunning", err)
+	}
+	ids, err := fifoExecIDs(fifoDir)
+	if err != nil || len(ids) != 1 {
+		t.Errorf("the execs after a refused rm = %q, %v; want the one left behind", ids, err)
+	}
+	start := time.Now()
+	_, err = StopInstance(ctx, c, "vm", time.Second, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The stop's own wait for the task is the 1 second timeout, then the
+	// SIGKILL.
+	took := time.Since(start)
+	if took > 5*time.Second {
+		t.Errorf("stop took %v with an exec whose output nobody read; want it drained", took)
+	}
+	_, err = os.Stat(fifoDir)
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the FIFO directory after stop: %v, want it gone", err)
+	}
+
+	containerdtest.StartTask(ctx, t, c, "vm2", "sleep", "300")
+	fifoDir = ExecFIFODir(c.DefaultNamespace(), "vm2")
+	_, err = ExecInstance(ctx, c, "vm2", ExecConfig{Args: []string{"sleep", "300"}, Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = RemoveInstance(ctx, c, "vm2", true, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = os.Stat(fifoDir)
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the FIFO directory after rm --force: %v, want it gone", err)
+	}
+}
+
+// An exec the shim created but never started, as one is when its hull is
+// killed between the two, has no process to kill, and stop and rm delete it.
+func TestStopAndRemoveDeleteAnExecNeverStarted(t *testing.T) {
+	privateFIFODir(t)
+	c := instancesClient(t)
+	ctx := context.Background()
+	for _, stop := range []bool{true, false} {
+		ctr, task := containerdtest.StartTask(ctx, t, c, "vm", "sleep", "300")
+		fifoDir := ExecFIFODir(c.DefaultNamespace(), "vm")
+		spec, err := ctr.Spec(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		proc, err := execProcess(spec.Process, ExecConfig{Args: []string{"true"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = os.MkdirAll(fifoDir, 0o700)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := task.Exec(ctx, "hull-0000000000000001", proc,
+			cio.NewCreator(cio.WithStreams(nil, io.Discard, io.Discard), cio.WithFIFODir(fifoDir)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = p.IO().Close() })
+		if stop {
+			_, err = StopInstance(ctx, c, "vm", time.Second, 5*time.Second)
+		} else {
+			err = RemoveInstance(ctx, c, "vm", true, 5*time.Second)
+		}
+		if err != nil {
+			t.Fatalf("stop %v: %v", stop, err)
+		}
+		_, err = os.Stat(fifoDir)
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("the FIFO directory after stop %v: %v, want it gone", stop, err)
+		}
+		if stop {
+			err = RemoveInstance(ctx, c, "vm", false, 5*time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
+// An exec whose hull deletes it between the shim's answer and the attach
+// takes its FIFOs with it, and is gone, not a failure.
+func TestEndExecSkipsAnExecWhoseFIFOsWent(t *testing.T) {
+	privateFIFODir(t)
+	c := instancesClient(t)
+	ctx := context.Background()
+	_, task := containerdtest.StartTask(ctx, t, c, "vm", "sleep", "300")
+	e, err := ExecInstance(ctx, c, "vm", ExecConfig{Args: []string{"sleep", "300"}, Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fifoDir := ExecFIFODir(c.DefaultNamespace(), "vm")
+	err = os.RemoveAll(fifoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = endExec(ctx, task, e.process.ID(), 5*time.Second)
+	if err != nil {
+		t.Errorf("endExec of an exec with no FIFOs: %v", err)
+	}
+	err = e.process.Kill(ctx, syscall.SIGKILL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = e.Wait(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// startingTask is a task whose shim does not answer about an exec, as the
+// shim does not while it starts one.
+type startingTask struct {
+	client.Task
+}
+
+func (startingTask) LoadProcess(ctx context.Context, _ string, _ cio.Attach) (client.Process, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// An exec still starting is left alone after grace, so it does not hold
+// off the end of its instance, and its FIFOs stay for a later stop or rm.
+// A stop whose own context ends fails.
+func TestEndExecLeavesAnExecStillStarting(t *testing.T) {
+	fifoDir := t.TempDir()
+	fifo := filepath.Join(fifoDir, "set", "hull-test-stdout")
+	err := os.MkdirAll(filepath.Dir(fifo), 0o700)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = os.WriteFile(fifo, nil, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	err = endExecs(context.Background(), startingTask{}, fifoDir, 100*time.Millisecond)
+	if err != nil {
+		t.Errorf("endExecs with an exec still starting: %v", err)
+	}
+	took := time.Since(start)
+	if took > 5*time.Second {
+		t.Errorf("endExecs with an exec still starting took %v, want about the grace", took)
+	}
+	_, err = os.Stat(fifo)
+	if err != nil {
+		t.Errorf("the FIFOs of the exec left alone: %v, want them kept", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = endExec(ctx, startingTask{}, "hull-test", 5*time.Second)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("endExec with its context done = %v, want context.Canceled", err)
+	}
+}
+
+// leftExec is an exec left behind, attached to FIFOs nothing writes to, so
+// the attach's copying ends only when it is cancelled. It exits on SIGKILL
+// only if exits is set, and its delete fails with deleteErr.
+type leftExec struct {
+	client.Process
+	io        cio.IO
+	exits     bool
+	deleteErr error
+}
+
+func (p *leftExec) Wait(ctx context.Context) (<-chan client.ExitStatus, error) {
+	exited := make(chan client.ExitStatus, 1)
+	if p.exits {
+		exited <- *client.NewExitStatus(137, time.Now(), nil)
+		return exited, nil
+	}
+	go func() {
+		<-ctx.Done()
+		exited <- *client.NewExitStatus(client.UnknownExitStatus, time.Time{}, ctx.Err())
+	}()
+	return exited, nil
+}
+
+func (*leftExec) Kill(context.Context, syscall.Signal, ...client.KillOpts) error { return nil }
+
+func (p *leftExec) Delete(context.Context, ...client.ProcessDeleteOpts) (*client.ExitStatus, error) {
+	return nil, p.deleteErr
+}
+
+func (p *leftExec) IO() cio.IO { return p.io }
+
+// leftTask is a task whose one exec is exec, with its FIFOs in dir.
+type leftTask struct {
+	client.Task
+	dir  string
+	exec *leftExec
+}
+
+func (t leftTask) LoadProcess(_ context.Context, id string, attach cio.Attach) (client.Process, error) {
+	fifos, err := cio.NewFIFOSetInDir(t.dir, id, false)
+	if err != nil {
+		return nil, err
+	}
+	t.exec.io, err = attach(fifos)
+	if err != nil {
+		return nil, err
+	}
+	return t.exec, nil
+}
+
+// An exec that stop or rm cannot kill or delete may still be there. Its
+// FIFOs stay for a later stop or rm to find it by, and the copying that
+// held them open ends. One the shim no longer has goes with its FIFOs.
+func TestEndExecKeepsTheFIFOsOfAnExecItCannotEnd(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		exec      leftExec
+		wantErr   string
+		wantFIFOs bool
+	}{
+		{"still running", leftExec{}, "still running 50ms after SIGKILL", true},
+		{"undeletable", leftExec{exits: true, deleteErr: errdefs.ErrUnavailable}, "delete: unavailable", true},
+		{"gone", leftExec{exits: true, deleteErr: errdefs.ErrNotFound}, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			task := leftTask{dir: dir, exec: &tc.exec}
+			err := endExec(context.Background(), task, "hull-test", 50*time.Millisecond)
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Errorf("endExec = %v, want no error", err)
+			case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+				t.Errorf("endExec = %v, want an error containing %q", err, tc.wantErr)
+			}
+			copied := make(chan struct{})
+			go func() {
+				tc.exec.io.Wait()
+				close(copied)
+			}()
+			select {
+			case <-copied:
+			case <-time.After(5 * time.Second):
+				t.Error("the attach's copying still runs after endExec")
+				tc.exec.io.Cancel()
+			}
+			ids, err := fifoExecIDs(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantFIFOs && len(ids) != 1 {
+				t.Errorf("the execs with FIFOs after endExec = %q, want the exec's FIFOs kept", ids)
+			}
+			if !tc.wantFIFOs && len(ids) != 0 {
+				t.Errorf("the execs with FIFOs after endExec = %q, want the exec's FIFOs removed", ids)
+			}
+		})
 	}
 }
