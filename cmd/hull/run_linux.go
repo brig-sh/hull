@@ -75,6 +75,10 @@ func runCommand() *cli.Command {
 				Usage: "do not boot a generic kernel and initrd: the image or --annotation must name a whole unikernel",
 			},
 			envFlag(),
+			&cli.StringSliceFlag{
+				Name:  "env-file",
+				Usage: "read environment variables from a file of KEY=VALUE lines, or bare KEYs to inherit; --env wins over it (repeatable)",
+			},
 			&cli.StringFlag{
 				Name:  "snapshotter",
 				Usage: "containerd snapshotter for the instance's root filesystem, such as 'devmapper' (default: the namespace's)",
@@ -116,7 +120,7 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 			return fmt.Errorf("--hypervisor %s: %w", hypervisor, err)
 		}
 	}
-	env, err := resolveEnvEntries(cmd.StringSlice("env"), os.LookupEnv)
+	env, err := runEnv(cmd.StringSlice("env-file"), cmd.StringSlice("env"), os.LookupEnv)
 	if err != nil {
 		return err
 	}
