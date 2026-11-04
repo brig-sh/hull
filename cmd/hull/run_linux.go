@@ -75,6 +75,10 @@ func runCommand() *cli.Command {
 				Usage: "do not boot a generic kernel and initrd: the image or --annotation must name a whole unikernel",
 			},
 			envFlag(),
+			&cli.StringFlag{
+				Name:  "snapshotter",
+				Usage: "containerd snapshotter for the instance's root filesystem, such as 'devmapper' (default: the namespace's)",
+			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			return runInstance(ctx, cmd)
@@ -135,7 +139,7 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	}
 	defer func() { _ = c.Close() }()
 
-	img, err := containerd.ImageForRun(ctx, c, imageRef, pullPolicy, platform, cmd.ErrWriter)
+	img, err := containerd.ImageForRun(ctx, c, imageRef, pullPolicy, platform, cmd.String("snapshotter"), cmd.ErrWriter)
 	if err != nil {
 		return err
 	}
@@ -176,7 +180,7 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 	defer unlock()
-	err = containerd.CreateInstance(ctx, c, image, containerd.RunConfig{
+	err = createInstance(ctx, c, image, containerd.RunConfig{
 		ID:          name,
 		Args:        args.Tail(),
 		Env:         env,
@@ -185,6 +189,7 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 		Annotations: annotations,
 		Backend:     backend,
 		LogFile:     logFile,
+		Snapshotter: cmd.String("snapshotter"),
 	})
 	if errdefs.IsAlreadyExists(err) {
 		return fmt.Errorf("%w: %s", store.ErrInstanceExists, name)
@@ -302,6 +307,11 @@ func verifyBootFiles(kernel, initrd string) error {
 	// SHA256SUMS vouched for is not looked for in a provenance record too.
 	return verifyContainerBootAssets(kernel, initrd)
 }
+
+// createInstance creates and starts the instance a run describes. A
+// variable, so tests can see the configuration a run arrives at without
+// booting a VM.
+var createInstance = containerd.CreateInstance
 
 // bundleGuest finds the runtime bundle's guest files. A variable, so tests
 // can stand in for a host with no bundle installed.

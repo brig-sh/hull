@@ -72,7 +72,7 @@ func pullImage(ctx context.Context, cmd *cli.Command) error {
 	if err != nil {
 		return err
 	}
-	img, err := containerd.Pull(ctx, c, imageRef, platform, cmd.ErrWriter)
+	img, err := containerd.Pull(ctx, c, imageRef, platform, "", cmd.ErrWriter)
 	if err != nil {
 		return err
 	}

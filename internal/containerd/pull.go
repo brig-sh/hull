@@ -53,8 +53,8 @@ func NormalizeRef(ref string) (string, error) {
 }
 
 // Pull fetches the image ref names for platform into containerd's content
-// store, unpacks it into the default snapshotter, and describes it as that
-// platform's image. Progress, when not nil, receives a report of the
+// store, unpacks it into snapshotter, "" for the namespace's default, and
+// describes it as that platform's image. Progress, when not nil, receives a report of the
 // download as it goes.
 //
 // The pull runs in hull's process, through containerd's client, rather than
@@ -65,7 +65,7 @@ func NormalizeRef(ref string) (string, error) {
 // A platform must match exactly, variant included, so an index with no
 // image for it fails the pull rather than falling back to a compatible one,
 // as the macOS pull does.
-func Pull(ctx context.Context, c *client.Client, ref string, platform ocispec.Platform, progress io.Writer) (Image, error) {
+func Pull(ctx context.Context, c *client.Client, ref string, platform ocispec.Platform, snapshotter string, progress io.Writer) (Image, error) {
 	name, err := NormalizeRef(ref)
 	if err != nil {
 		return Image{}, err
@@ -75,6 +75,7 @@ func Pull(ctx context.Context, c *client.Client, ref string, platform ocispec.Pl
 		client.WithResolver(newResolver(authn.DefaultKeychain)),
 		client.WithPlatformMatcher(matcher),
 		client.WithPullUnpack,
+		client.WithPullSnapshotter(snapshotter),
 	}
 	prog := newPullProgress(progress)
 	if prog != nil {

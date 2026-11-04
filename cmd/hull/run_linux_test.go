@@ -448,3 +448,57 @@ func TestRunRefusalsAgainstDaemon(t *testing.T) {
 		t.Errorf("a leftover snapshot: error = %v, want the snapshot named", err)
 	}
 }
+
+// runConfigOf runs `hull run -d` with args against f's daemon, and returns
+// the configuration the run would create its instance with, creating none.
+func runConfigOf(t *testing.T, f *instanceFixture, args ...string) containerd.RunConfig {
+	t.Helper()
+	var got containerd.RunConfig
+	old := createInstance
+	createInstance = func(_ context.Context, _ *client.Client, _ containerd.RunImage, cfg containerd.RunConfig) error {
+		got = cfg
+		return nil
+	}
+	t.Cleanup(func() { createInstance = old })
+	argv := append([]string{"run", "-d", "--name", "vm"}, args...)
+	_, err := f.run(f.ns, append(argv, containerdtest.TaskImage)...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+// bootFileArgs returns the --annotation flags that boot a run on a kernel
+// and initrd of the test's own, so it needs no bundle.
+func bootFileArgs(t *testing.T) []string {
+	t.Helper()
+	boot := t.TempDir()
+	for _, name := range []string{"kernel", "initrd"} {
+		err := os.WriteFile(filepath.Join(boot, name), []byte(name), 0o644)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return []string{
+		"--annotation", ociclient.BootKernelAnnotation + "=" + filepath.Join(boot, "kernel"),
+		"--annotation", ociclient.BootInitrdAnnotation + "=" + filepath.Join(boot, "initrd"),
+	}
+}
+
+func TestRunPassesTheSnapshotter(t *testing.T) {
+	privateLogDirs(t)
+	f := newInstanceFixture(t)
+	cfg := runConfigOf(t, f, append([]string{"--snapshotter", "native"}, bootFileArgs(t)...)...)
+	if cfg.Snapshotter != "native" {
+		t.Errorf("snapshotter = %q, want native", cfg.Snapshotter)
+	}
+	// The run pulled the image, into the snapshotter it named.
+	img, err := f.c.GetImage(context.Background(), containerdtest.TaskImage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unpacked, err := img.IsUnpacked(context.Background(), "native")
+	if err != nil || !unpacked {
+		t.Errorf("unpacked into native = %v, %v; want true", unpacked, err)
+	}
+}

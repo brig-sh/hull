@@ -25,9 +25,11 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/defaults"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/platforms"
 	"github.com/opencontainers/go-digest"
@@ -167,7 +169,7 @@ func TestNewContainerThroughDaemon(t *testing.T) {
 		ociclient.BootInitrdAnnotation: "/etc/shadow",
 		ociclient.HypervisorAnnotation: "firecracker",
 	})
-	img, err := ImageForRun(ctx, c, name, "never", runPlatform(t), nil)
+	img, err := ImageForRun(ctx, c, name, "never", runPlatform(t), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +254,7 @@ func TestNewContainerThroughDaemon(t *testing.T) {
 func TestCreateInstanceRemovesAContainerWhoseTaskFails(t *testing.T) {
 	c := instancesClient(t)
 	ctx := context.Background()
-	img, err := ImageForRun(ctx, c, containerdtest.TaskImage, "missing", runPlatform(t), nil)
+	img, err := ImageForRun(ctx, c, containerdtest.TaskImage, "missing", runPlatform(t), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -357,7 +359,7 @@ func TestCheckCRIKeys(t *testing.T) {
 func TestCreateInstanceRefusesWhatWouldNotBootAVM(t *testing.T) {
 	c := instancesClient(t)
 	ctx := context.Background()
-	img, err := ImageForRun(ctx, c, containerdtest.TaskImage, "missing", runPlatform(t), nil)
+	img, err := ImageForRun(ctx, c, containerdtest.TaskImage, "missing", runPlatform(t), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -380,15 +382,15 @@ func TestCreateInstanceRefusesWhatWouldNotBootAVM(t *testing.T) {
 func TestImageForRunPolicies(t *testing.T) {
 	c := instancesClient(t)
 	ctx := context.Background()
-	_, err := ImageForRun(ctx, c, containerdtest.TaskImage, "never", runPlatform(t), nil)
+	_, err := ImageForRun(ctx, c, containerdtest.TaskImage, "never", runPlatform(t), "", nil)
 	if err == nil || !strings.Contains(err.Error(), "--pull never") {
 		t.Errorf("never, not pulled: error = %v, want a refusal", err)
 	}
-	img, err := ImageForRun(ctx, c, containerdtest.TaskImage, "missing", runPlatform(t), nil)
+	img, err := ImageForRun(ctx, c, containerdtest.TaskImage, "missing", runPlatform(t), "", nil)
 	if err != nil {
 		t.Fatalf("missing: %v", err)
 	}
-	again, err := ImageForRun(ctx, c, containerdtest.TaskImage, "never", runPlatform(t), nil)
+	again, err := ImageForRun(ctx, c, containerdtest.TaskImage, "never", runPlatform(t), "", nil)
 	if err != nil || again.Target().Digest != img.Target().Digest {
 		t.Errorf("never, pulled: %v, %v; want the pulled image", again, err)
 	}
@@ -399,17 +401,17 @@ func TestImageForRunPolicies(t *testing.T) {
 func TestImageForRunFindsADigestPulledByTag(t *testing.T) {
 	c := instancesClient(t)
 	ctx := context.Background()
-	img, err := ImageForRun(ctx, c, containerdtest.TaskImage, "missing", runPlatform(t), nil)
+	img, err := ImageForRun(ctx, c, containerdtest.TaskImage, "missing", runPlatform(t), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	pinned := containerdtest.TaskImage + "@" + img.Target().Digest.String()
-	got, err := ImageForRun(ctx, c, pinned, "never", runPlatform(t), nil)
+	got, err := ImageForRun(ctx, c, pinned, "never", runPlatform(t), "", nil)
 	if err != nil || got.Name() != img.Name() {
 		t.Fatalf("never, %s: %v, %v; want the image pulled by its tag", pinned, got, err)
 	}
 	other := "ghcr.io/containerd/other@" + img.Target().Digest.String()
-	_, err = ImageForRun(ctx, c, other, "never", runPlatform(t), nil)
+	_, err = ImageForRun(ctx, c, other, "never", runPlatform(t), "", nil)
 	if err == nil {
 		t.Errorf("never, %s: found an image of another repository", other)
 	}
@@ -440,11 +442,11 @@ func TestImageForRunWantsTheHostPlatform(t *testing.T) {
 	})
 	containerdtest.CreateImage(ctx, t, c, containerdtest.TaskImage, index)
 
-	_, err := ImageForRun(ctx, c, containerdtest.TaskImage, "never", host, nil)
+	_, err := ImageForRun(ctx, c, containerdtest.TaskImage, "never", host, "", nil)
 	if err == nil || !strings.Contains(err.Error(), "has not been pulled for "+platforms.Format(host)) {
 		t.Errorf("never: error = %v, want a refusal naming %s", err, platforms.Format(host))
 	}
-	img, err := ImageForRun(ctx, c, containerdtest.TaskImage, "missing", host, nil)
+	img, err := ImageForRun(ctx, c, containerdtest.TaskImage, "missing", host, "", nil)
 	if err != nil {
 		t.Fatalf("missing: %v", err)
 	}
@@ -459,7 +461,7 @@ func TestImageForRunWantsTheHostPlatform(t *testing.T) {
 func TestCreateInstanceNamesALeftoverSnapshot(t *testing.T) {
 	c := instancesClient(t)
 	ctx := containerdtest.Lease(context.Background(), t, c)
-	img, err := ImageForRun(ctx, c, containerdtest.TaskImage, "missing", runPlatform(t), nil)
+	img, err := ImageForRun(ctx, c, containerdtest.TaskImage, "missing", runPlatform(t), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -484,8 +486,154 @@ func TestCreateInstanceNamesALeftoverSnapshot(t *testing.T) {
 		},
 		LogFile: filepath.Join(t.TempDir(), "vm.log"),
 	})
-	if err == nil || errdefs.IsAlreadyExists(err) || !strings.Contains(err.Error(), "a snapshot with no container") {
-		t.Errorf("CreateInstance: error = %v, want the snapshot named, and not AlreadyExists", err)
+	want := "remove it with ctr -n " + c.DefaultNamespace() + " snapshots --snapshotter " + defaults.DefaultSnapshotter + " rm vm"
+	if err == nil || errdefs.IsAlreadyExists(err) || !strings.Contains(err.Error(), want) {
+		t.Errorf("CreateInstance: error = %v, want the snapshot named, with %q, and not AlreadyExists", err, want)
 	}
 	assertNoContainer(ctx, t, c, "vm")
+}
+
+// An instance's root filesystem is a snapshot in the snapshotter the run
+// names, pulled and unpacked there for it, even in a namespace whose own
+// default snapshotter does not exist, and hull rm deletes it from there.
+func TestRunsSnapshotterHoldsTheInstance(t *testing.T) {
+	privateFIFODir(t)
+	c := instancesClient(t)
+	ctx := containerdtest.Lease(context.Background(), t, c)
+	err := c.NamespaceService().SetLabel(ctx, c.DefaultNamespace(), defaults.DefaultSnapshotterNSLabel, "hull-test-nosuch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, err := ImageForRun(ctx, c, containerdtest.TaskImage, "missing", runPlatform(t), "native", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unpacked, err := img.IsUnpacked(ctx, "native")
+	if err != nil || !unpacked {
+		t.Errorf("unpacked into native by the pull = %v, %v; want true", unpacked, err)
+	}
+	image, err := LoadRunImage(ctx, img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := snapshotterRunConfig(t, "vm", "native")
+	_, err = newSnapshotterContainer(ctx, t, c, image, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctr, err := c.LoadContainer(ctx, "vm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := ctr.Info(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Snapshotter != "native" {
+		t.Errorf("snapshotter = %q, want native", info.Snapshotter)
+	}
+	snapshots := c.SnapshotService("native")
+	_, err = snapshots.Stat(ctx, "vm")
+	if err != nil {
+		t.Errorf("snapshot vm in native: %v", err)
+	}
+
+	// A snapshot left under another name in that snapshotter is named with
+	// the namespace and the snapshotter that hold it, which ctr must be
+	// given to remove it.
+	_, err = snapshots.Prepare(ctx, "leftover", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = snapshots.Remove(ctx, "leftover") })
+	_, err = newSnapshotterContainer(ctx, t, c, image, snapshotterRunConfig(t, "leftover", "native"))
+	want := "ctr -n " + c.DefaultNamespace() + " snapshots --snapshotter native rm leftover"
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("a leftover snapshot in native: error = %v, want %q", err, want)
+	}
+
+	// A snapshotter the daemon has not loaded fails the run with its name,
+	// before any container exists.
+	_, err = newSnapshotterContainer(ctx, t, c, image, snapshotterRunConfig(t, "nosuch", "hull-test-nosuch"))
+	if err == nil || !strings.Contains(err.Error(), "hull-test-nosuch") {
+		t.Errorf("an unknown snapshotter: error = %v, want it named", err)
+	}
+	assertNoContainer(ctx, t, c, "nosuch")
+
+	err = RemoveInstance(ctx, c, "vm", false, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = snapshots.Stat(ctx, "vm")
+	if !errdefs.IsNotFound(err) {
+		t.Errorf("snapshot vm in native after rm: error = %v, want it removed", err)
+	}
+}
+
+// With no snapshotter named, an instance gets the one the namespace's label
+// names, and a leftover snapshot is reported in that one too, which ctr
+// would not look in by itself.
+func TestNamespacesSnapshotterHoldsTheInstance(t *testing.T) {
+	c := instancesClient(t)
+	ctx := containerdtest.Lease(context.Background(), t, c)
+	err := c.NamespaceService().SetLabel(ctx, c.DefaultNamespace(), defaults.DefaultSnapshotterNSLabel, "native")
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, err := ImageForRun(ctx, c, containerdtest.TaskImage, "missing", runPlatform(t), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := LoadRunImage(ctx, img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctr, err := newSnapshotterContainer(ctx, t, c, image, snapshotterRunConfig(t, "vm", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := ctr.Info(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Snapshotter != "native" {
+		t.Errorf("snapshotter = %q, want native, the namespace's", info.Snapshotter)
+	}
+	snapshots := c.SnapshotService("native")
+	_, err = snapshots.Prepare(ctx, "leftover", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = snapshots.Remove(ctx, "leftover") })
+	_, err = newSnapshotterContainer(ctx, t, c, image, snapshotterRunConfig(t, "leftover", ""))
+	want := "ctr -n " + c.DefaultNamespace() + " snapshots --snapshotter native rm leftover"
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("a leftover snapshot in native: error = %v, want %q", err, want)
+	}
+}
+
+func snapshotterRunConfig(t *testing.T, id, snapshotter string) RunConfig {
+	return RunConfig{
+		ID:   id,
+		Args: []string{"true"},
+		Annotations: map[string]string{
+			ociclient.BootKernelAnnotation:    "/boot/kernel",
+			ociclient.BootInitrdAnnotation:    "/boot/initrd",
+			ociclient.UnikernelTypeAnnotation: "linux",
+			ociclient.HypervisorAnnotation:    "cloud-hypervisor",
+		},
+		LogFile:     filepath.Join(t.TempDir(), id+".log"),
+		Snapshotter: snapshotter,
+	}
+}
+
+// newSnapshotterContainer calls newContainer, and removes a container it
+// should have refused to create when the test ends.
+func newSnapshotterContainer(ctx context.Context, t *testing.T, c *client.Client, image RunImage, cfg RunConfig) (client.Container, error) {
+	t.Helper()
+	ctr, err := newContainer(ctx, c, image, cfg)
+	if err == nil {
+		t.Cleanup(func() { _ = ctr.Delete(context.Background(), client.WithSnapshotCleanup) })
+	}
+	return ctr, err
 }
