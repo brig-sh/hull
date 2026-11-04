@@ -62,6 +62,7 @@ func privateFIFODir(t *testing.T) {
 // file on stdin.
 func TestExecCommandAgainstDaemon(t *testing.T) {
 	privateFIFODir(t)
+	privateLogDirs(t)
 	f := newInstanceFixture(t)
 	ctx := context.Background()
 	containerdtest.StartTask(ctx, t, f.c, "vm", "sleep", "300")
