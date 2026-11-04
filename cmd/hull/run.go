@@ -54,6 +54,10 @@ func runCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "run",
 		Usage: "create and run a unikernel",
+		// urfave/cli splits a slice flag's value on commas unless told not
+		// to, and docker does not split one. A comma belongs to the value,
+		// as in --env NO_PROXY=a,b or an annotation's value.
+		DisableSliceFlagSeparator: true,
 		Flags: []cli.Flag{
 			&cli.BoolFlag{
 				Name:    "detach",
