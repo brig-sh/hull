@@ -464,7 +464,7 @@ func TestPullThroughDaemon(t *testing.T) {
 	// What hull pull asks for by default: the host's architecture, with no
 	// variant.
 	platform := ocispec.Platform{OS: "linux", Architecture: runtime.GOARCH}
-	got, err := Pull(ctx, c, testPullImage, platform, nil)
+	got, err := Pull(ctx, c, testPullImage, platform, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -506,7 +506,7 @@ func TestPullThroughDaemon(t *testing.T) {
 
 	// A second pull of an image already present succeeds without fetching
 	// its layers again.
-	again, err := Pull(ctx, c, testPullImage, platform, nil)
+	again, err := Pull(ctx, c, testPullImage, platform, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

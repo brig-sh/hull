@@ -402,11 +402,25 @@ ways:
   `cloud-hypervisor`, since the bundle ships no qemu, urunc's own default.
   The monitor must also be installed where urunc's configuration says; the
   bundle ships `cloud-hypervisor` and `firecracker`.
-- A plain image boots on `firecracker` only when containerd's default
-  snapshotter gives the container a block device, as devmapper does.
-  firecracker has no shared filesystem, so on overlayfs, the bundle's
-  default, urunc refuses to start the instance. hull has no flag to choose
-  the snapshotter.
+- `--snapshotter` names the containerd snapshotter that holds the
+  instance's root filesystem, such as `devmapper`. Without it, the instance
+  gets the namespace's default snapshotter, the one `hull pull` unpacks
+  into. The daemon must have the snapshotter loaded. One it does not have,
+  or one it skipped for want of configuration, as it skips devmapper by
+  default, fails the run with containerd's error, which names the
+  snapshotter, before any instance exists. A pull the run makes itself
+  unpacks the image into this snapshotter, and not into the default one. An
+  image already unpacked into another snapshotter, by `hull pull` or an
+  earlier run, is unpacked again into this one, and then takes the disk
+  space of both. `hull pull` has no `--snapshotter`, so a namespace that
+  runs everything on one snapshotter should name it in its
+  `containerd.io/defaults/snapshotter` label instead, which pulls follow
+  too. `hull rm` removes the instance's snapshot from the snapshotter that
+  holds it, and `hull rmi` the image's layers from every snapshotter.
+- A plain image boots on `firecracker` only when the snapshotter gives the
+  container a block device, as devmapper does. firecracker has no shared
+  filesystem, so on overlayfs, the bundle's default, urunc refuses to
+  start the instance.
 - A plain image, one that names no unikernel binary in its annotations or
   in `--annotation`, boots a generic kernel and initrd. With the bundle
   installed, they are the bundle's own: under

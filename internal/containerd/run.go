@@ -27,6 +27,7 @@ import (
 
 	"github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/defaults"
 	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/containerd/errdefs"
@@ -45,8 +46,10 @@ const (
 // ImageForRun returns the image ref names, for platform, pulling it as
 // policy says: "missing" pulls only an image the namespace does not have,
 // "always" pulls it whatever is there, and "never" fails when it is not
-// there. Progress, when not nil, receives the report of a pull.
-func ImageForRun(ctx context.Context, c *client.Client, ref, policy string, platform ocispec.Platform, progress io.Writer) (client.Image, error) {
+// there. A pull unpacks into snapshotter, the one the run's instance will
+// use, so that the namespace's default snapshotter need not work for it.
+// Progress, when not nil, receives the report of a pull.
+func ImageForRun(ctx context.Context, c *client.Client, ref, policy string, platform ocispec.Platform, snapshotter string, progress io.Writer) (client.Image, error) {
 	name, err := NormalizeRef(ref)
 	if err != nil {
 		return nil, err
@@ -65,7 +68,7 @@ func ImageForRun(ctx context.Context, c *client.Client, ref, policy string, plat
 				ref, platforms.Format(platform))
 		}
 	}
-	_, err = Pull(ctx, c, ref, platform, progress)
+	_, err = Pull(ctx, c, ref, platform, snapshotter, progress)
 	if err != nil {
 		return nil, err
 	}
@@ -175,6 +178,9 @@ type RunConfig struct {
 	// LogFile is where the shim writes the guest's console. Its directory
 	// must exist.
 	LogFile string
+	// Snapshotter holds the instance's root filesystem. Empty means the
+	// namespace's default, the one a pull unpacks into.
+	Snapshotter string
 }
 
 // cpuPeriod is the CFS period a CPU count is expressed in. urunc sizes the
@@ -250,7 +256,7 @@ func newContainer(ctx context.Context, c *client.Client, image RunImage, cfg Run
 		return nil, err
 	}
 	img := image.Image
-	err = unpack(ctx, img)
+	err = unpack(ctx, img, cfg.Snapshotter)
 	if err != nil {
 		return nil, err
 	}
@@ -278,6 +284,9 @@ func newContainer(ctx context.Context, c *client.Client, image RunImage, cfg Run
 
 	ctr, err := c.NewContainer(ctx, cfg.ID,
 		client.WithImage(img),
+		// Before WithNewSnapshot, which prepares the snapshot in the
+		// container's snapshotter.
+		client.WithSnapshotter(cfg.Snapshotter),
 		client.WithNewSnapshot(cfg.ID, img),
 		client.WithRuntime(RuntimeName, nil),
 		client.WithNewSpec(specOpts...),
@@ -297,8 +306,16 @@ func newContainer(ctx context.Context, c *client.Client, image RunImage, cfg Run
 		// finds no instance to remove then, so name the snapshot.
 		_, lerr := c.LoadContainer(ctx, cfg.ID)
 		if errdefs.IsNotFound(lerr) {
+			// ctr reads neither the namespace hull uses nor the namespace's
+			// default snapshotter, so the command names both.
+			sn, serr := snapshotterName(ctx, c, cfg.Snapshotter)
+			if serr != nil {
+				return nil, fmt.Errorf("create container %s: no instance has that name, but a snapshot "+
+					"with no container does: %v; and its snapshotter is unknown: %w", cfg.ID, err, serr)
+			}
 			return nil, fmt.Errorf("create container %s: no instance has that name, but a snapshot "+
-				"with no container does; remove it with ctr snapshots rm %s: %v", cfg.ID, cfg.ID, err)
+				"with no container does; remove it with ctr -n %s snapshots --snapshotter %s rm %s: %v",
+				cfg.ID, c.DefaultNamespace(), sn, cfg.ID, err)
 		}
 	}
 	if err != nil {
@@ -307,18 +324,37 @@ func newContainer(ctx context.Context, c *client.Client, image RunImage, cfg Run
 	return ctr, nil
 }
 
-// unpack unpacks img into the snapshotter a new snapshot will use, when a
-// pull has not already. A pull through hull unpacks, and one through ctr
-// may not have.
-func unpack(ctx context.Context, img client.Image) error {
-	unpacked, err := img.IsUnpacked(ctx, "")
+// snapshotterName returns the snapshotter name stands for, the way
+// containerd's client resolves it: "" is the one the namespace's
+// containerd.io/defaults/snapshotter label names, or else containerd's
+// default.
+func snapshotterName(ctx context.Context, c *client.Client, name string) (string, error) {
+	if name != "" {
+		return name, nil
+	}
+	label, err := c.GetLabel(ctx, defaults.DefaultSnapshotterNSLabel)
+	if err != nil {
+		return "", err
+	}
+	if label != "" {
+		return label, nil
+	}
+	return defaults.DefaultSnapshotter, nil
+}
+
+// unpack unpacks img into snapshotter, "" for the namespace's default, when
+// a pull has not already. A run's own pull unpacks into the run's
+// snapshotter, but hull pull unpacks into the namespace's default, and a
+// pull through ctr may not have unpacked at all.
+func unpack(ctx context.Context, img client.Image, snapshotter string) error {
+	unpacked, err := img.IsUnpacked(ctx, snapshotter)
 	if err != nil {
 		return fmt.Errorf("check whether %s is unpacked: %w", img.Name(), err)
 	}
 	if unpacked {
 		return nil
 	}
-	err = img.Unpack(ctx, "")
+	err = img.Unpack(ctx, snapshotter)
 	if err != nil {
 		return fmt.Errorf("unpack %s: %w", img.Name(), err)
 	}
