@@ -29,19 +29,6 @@ import (
 	"github.com/brig-sh/hull/pkg/store"
 )
 
-func stopCommand() *cli.Command {
-	return &cli.Command{
-		Name:  "stop",
-		Usage: "stop a running instance",
-		Flags: []cli.Flag{
-			stopTimeoutFlag(),
-		},
-		Action: func(ctx context.Context, cmd *cli.Command) error {
-			return stopInstance(ctx, cmd)
-		},
-	}
-}
-
 // stopInstance ends an instance's task and deletes it, in the words macOS
 // uses. The container, its snapshot and its log stay until hull rm.
 func stopInstance(ctx context.Context, cmd *cli.Command) error {

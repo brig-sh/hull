@@ -34,19 +34,6 @@ import (
 	"github.com/urunc-dev/urunc/pkg/qmp"
 )
 
-func stopCommand() *cli.Command {
-	return &cli.Command{
-		Name:  "stop",
-		Usage: "stop a running instance",
-		Flags: []cli.Flag{
-			stopTimeoutFlag(),
-		},
-		Action: func(ctx context.Context, cmd *cli.Command) error {
-			return stopInstance(ctx, cmd)
-		},
-	}
-}
-
 // markStopped records a deliberate stop: the instance ended, and it ended
 // because someone asked. Every stop path goes through here so the
 // StoppedByUser marker cannot be forgotten on one of them — the project

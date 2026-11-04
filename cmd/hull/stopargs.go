@@ -14,7 +14,24 @@
 
 package main
 
-import "github.com/urfave/cli/v3"
+import (
+	"context"
+
+	"github.com/urfave/cli/v3"
+)
+
+func stopCommand() *cli.Command {
+	return &cli.Command{
+		Name:  "stop",
+		Usage: "stop a running instance",
+		Flags: []cli.Flag{
+			stopTimeoutFlag(),
+		},
+		Action: func(ctx context.Context, cmd *cli.Command) error {
+			return stopInstance(ctx, cmd)
+		},
+	}
+}
 
 // stopTimeoutFlag is the --timeout of hull stop, whose meaning is the same
 // on every OS.

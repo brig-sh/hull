@@ -38,23 +38,6 @@ import (
 // gone.
 const forceKillGrace = 5 * time.Second
 
-func rmCommand() *cli.Command {
-	return &cli.Command{
-		Name:  "rm",
-		Usage: "remove a stopped instance",
-		Flags: []cli.Flag{
-			&cli.BoolFlag{
-				Name:    "force",
-				Aliases: []string{"f"},
-				Usage:   "force stop running instance before removal",
-			},
-		},
-		Action: func(ctx context.Context, cmd *cli.Command) error {
-			return removeInstance(ctx, cmd)
-		},
-	}
-}
-
 // removeInstance deletes an instance's container, with its task and its
 // snapshot, and its log, and refuses a running one without --force, in the
 // words macOS uses.
