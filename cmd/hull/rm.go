@@ -36,23 +36,6 @@ import (
 // worse outcome than a slow `rm`.
 const forceKillGrace = 5 * time.Second
 
-func rmCommand() *cli.Command {
-	return &cli.Command{
-		Name:  "rm",
-		Usage: "remove a stopped instance",
-		Flags: []cli.Flag{
-			&cli.BoolFlag{
-				Name:    "force",
-				Aliases: []string{"f"},
-				Usage:   "force stop running instance before removal",
-			},
-		},
-		Action: func(ctx context.Context, cmd *cli.Command) error {
-			return removeInstance(ctx, cmd)
-		},
-	}
-}
-
 func removeInstance(ctx context.Context, cmd *cli.Command) error {
 	args := cmd.Args()
 	if args.Len() == 0 {
