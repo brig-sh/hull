@@ -54,6 +54,7 @@ func TestRunRefusesBeforeDialling(t *testing.T) {
 		{[]string{"-d", "--hypervisor", "kvm", "busybox"}, "urunc has no such monitor"},
 		{[]string{"-d", "--annotation", "novalue", "busybox"}, `invalid --annotation "novalue"`},
 		{[]string{"-d", "--name", "../x", "busybox"}, "--name: invalid instance name"},
+		{[]string{"-d", "--env-file", "/nonexistent/env", "busybox"}, "--env-file: open /nonexistent/env"},
 		{[]string{"-d"}, "image reference required"},
 	} {
 		app := newApp()
@@ -500,5 +501,23 @@ func TestRunPassesTheSnapshotter(t *testing.T) {
 	unpacked, err := img.IsUnpacked(context.Background(), "native")
 	if err != nil || !unpacked {
 		t.Errorf("unpacked into native = %v, %v; want true", unpacked, err)
+	}
+}
+
+// A variable set in an --env-file and again with --env reaches the instance
+// once, with --env's value, and a comma is part of a path and of a value.
+func TestRunPassesTheEnvironment(t *testing.T) {
+	privateLogDirs(t)
+	f := newInstanceFixture(t)
+	envFile := filepath.Join(t.TempDir(), "a,b.env")
+	err := os.WriteFile(envFile, []byte("A=file\nB=file\n"), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"--env-file", envFile, "-e", "A=flag", "-e", "C=x,y"}
+	cfg := runConfigOf(t, f, append(args, bootFileArgs(t)...)...)
+	want := []string{"A=flag", "B=file", "C=x,y"}
+	if !reflect.DeepEqual(cfg.Env, want) {
+		t.Errorf("env = %q, want %q", cfg.Env, want)
 	}
 }

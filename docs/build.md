@@ -387,6 +387,19 @@ ways:
   and under `/var/log/hull/<namespace>` for root.
 - `--net` takes only `none`, its default: the instance has no network.
   Neither `--net shared` nor the network gateway exists on Linux yet.
+- `--env-file` adds the variables of a file, and is Linux only: macOS
+  `hull run` does not take it. It follows `docker run --env-file`. Each
+  line is `KEY=VALUE`, taken as written once its leading white space is
+  gone, quotes and trailing white space included, or a bare `KEY`,
+  inherited from hull's environment and dropped when hull has none, as a
+  bare `--env KEY` is. An empty line, and a line whose first character
+  other than white space is `#`, is skipped; a `#` after a value is part of
+  the value. A comma in the path is part of the path. A key with white
+  space in it, a line with no key, and a line that is not UTF-8 fail the
+  run. The flag can be repeated. The files are read in order and `--env`
+  comes after them, and the last value given for a variable wins, `--env`
+  given twice included. hull reads the file, so a relative path is taken
+  from the current directory.
 - An image is looked up under the name it was pulled by. A reference pinned
   to a digest, `repo@sha256:…` or `repo:tag@sha256:…`, also finds an image
   of the same repository pulled by its tag when that image is the digest,
