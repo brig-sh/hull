@@ -259,6 +259,37 @@ first boot and costs only what the guest writes. `hull rmi` and `hull prune`
 remove the lower with the image. `hull prune` counts the cached lower at its
 allocated size; `hull images` does not include it.
 
+### Extra image disks: `--image-disk`
+
+`hull run --image-disk IMAGE` (repeatable) attaches another image's cached
+read-only lower as a disk, for a guest supervisor that runs several images in
+one VM. hull pulls the image as `--pull` says and builds or reuses
+`<image>/rootfs.ext4` exactly as for the root. It applies to container boots on
+`hvi` and `vz`, and does not combine with `--rootfs-type block` or
+`HULL_HVI_ROOTFS_UPPER`.
+
+The VMM attaches four disks at most, `--disk` and `--disk-ro` together, so an
+overlay-block root (two disks) leaves room for two images, and a root that is
+not on disks leaves four. hull refuses a larger request before it pulls.
+Writable space is not attached per image: the guest uses the root's upper disk,
+which is the only writable disk, and keeps each image's upper and work
+directories in directories of their own on it.
+
+Serials follow argv order: the root pair first (`disk0` lower, `disk1` upper,
+when overlay-block), then the `--image-disk` images in the order given. hull
+writes `<instance>/disks.json` before it starts the VMM:
+
+```json
+{"disks": [
+  {"serial": "disk0", "role": "rootfs-lower", "path": "...", "readOnly": true, "image": "busybox", "digest": "sha256:..."},
+  {"serial": "disk1", "role": "rootfs-upper", "path": "...", "readOnly": false},
+  {"serial": "disk2", "role": "image-lower", "path": "...", "readOnly": true, "image": "nginx:alpine", "digest": "sha256:..."}
+]}
+```
+
+The lower's size counts a file once however many hard links name it, so a
+busybox image is a few tens of MiB apparent, not hundreds.
+
 ## Credentials on disk: read this before forwarding a secret
 
 `--env KEY` without a value inherits `KEY` from hull's own environment. It does
