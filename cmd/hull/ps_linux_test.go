@@ -53,9 +53,10 @@ func TestInstanceRecord(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			rec := instanceRecord(containerd.Instance{ID: "vm", CreatedAt: created, Task: tc.task})
-			if rec.ID != "vm" || !rec.StartTime.Equal(created) {
-				t.Errorf("id %q, start time %v; want vm, %v", rec.ID, rec.StartTime, created)
+			rec := instanceRecord(containerd.Instance{ID: "vm", ContainerID: "c0ffee", CreatedAt: created, Task: tc.task})
+			if rec.ID != "vm" || rec.ContainerID != "c0ffee" || !rec.StartTime.Equal(created) {
+				t.Errorf("id %q, container ID %q, start time %v; want vm, c0ffee, %v",
+					rec.ID, rec.ContainerID, rec.StartTime, created)
 			}
 			if rec.StartTime.Location() != time.Local {
 				t.Errorf("start time in %v, want local", rec.StartTime.Location())
@@ -183,6 +184,26 @@ func TestInstanceCommandsAgainstDaemon(t *testing.T) {
 		t.Errorf("inspect = %+v, want running with a pid and a start time", state)
 	}
 
+	web, err := f.c.NewContainer(ctx, "ctr-web", client.WithSpec(&oci.Spec{}),
+		client.WithContainerLabels(map[string]string{containerd.LabelName: "web"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = web.Delete(ctx) })
+	out, err = f.run(f.ns, "inspect", "web")
+	if err != nil {
+		t.Fatalf("inspect web: %v", err)
+	}
+	var raw map[string]any
+	err = json.Unmarshal([]byte(out), &raw)
+	if err != nil || raw["id"] != "web" || raw["containerId"] != "ctr-web" {
+		t.Errorf("inspect web printed %s (%v), want id web and containerId ctr-web", out, err)
+	}
+	out, err = f.run(f.ns, "rm", "web")
+	if err != nil || out != "Instance web removed\n" {
+		t.Errorf("rm web = %q, %v", out, err)
+	}
+
 	_, err = f.run(f.ns, "inspect", "missing")
 	if err == nil || err.Error() != "instance not found: missing" {
 		t.Errorf("inspect missing: error = %v, want instance not found: missing", err)
@@ -225,6 +246,28 @@ func TestInstanceCommandsRefuseBadNames(t *testing.T) {
 		err = app.Run(context.Background(), []string{"hull", verb})
 		if err == nil || err.Error() != "instance ID required" {
 			t.Errorf("%s with no name: error = %v, want instance ID required", verb, err)
+		}
+	}
+}
+
+// Every verb fails on a name two containers carry, with the error that names
+// both, and says the name once.
+func TestInstanceCommandsReportADuplicateName(t *testing.T) {
+	f := newInstanceFixture(t)
+	ctx := context.Background()
+	for _, id := range []string{"dupa", "dupb"} {
+		ctr, err := f.c.NewContainer(ctx, id, client.WithSpec(&oci.Spec{}),
+			client.WithContainerLabels(map[string]string{containerd.LabelName: "dup"}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = ctr.Delete(ctx) })
+	}
+	for _, verb := range []string{"inspect", "logs", "rm", "stop"} {
+		_, err := f.run(f.ns, verb, "dup")
+		if err == nil || !strings.Contains(err.Error(), "instance dup is held by 2 containers, dupa, dupb:") ||
+			strings.Count(err.Error(), "instance dup") != 1 {
+			t.Errorf("%s dup: error = %v, want the duplicate named once", verb, err)
 		}
 	}
 }

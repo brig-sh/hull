@@ -197,11 +197,44 @@ install it yourself, as
 describes. Without it a fetch warns that it took the assets unchecked, and
 `HULL_VERIFY=require` refuses the fetch.
 
-An instance is a containerd container in hull's namespace, named by its
-container ID. `hull run` creates one, and `hull ps`, `hull inspect`,
-`hull exec`, `hull logs`, `hull stop` and `hull rm` act on any container
-there, including those `ctr` or nerdctl created. They print what they print
-on macOS, with these differences:
+An instance is a containerd container in hull's namespace. `hull run` gives
+the container an ID of its own, 16 random hex digits, and keeps the
+instance's name in its `sh.brig.hull/name` label, so a name run again never
+meets what containerd, urunc or a plugin kept under the last instance's ID.
+Any other container, such as one `ctr` or nerdctl created, or an older hull,
+is the instance its ID names. `hull ps`, `hull inspect`, `hull exec`,
+`hull logs`, `hull stop` and `hull rm` take the name and act on any
+container there, and `hull run` refuses a name either kind holds. A label
+that is not a valid name, which another client can set, counts as no label.
+Two runs of one name at once under the same log directory, as one user's
+are, take its lock in turn, so the second finds the name taken. Two under
+different log directories, as root's and a user's are, or a user's with two
+`$XDG_STATE_HOME`s, can both get past that check, and each checks again
+after creating its container. A run that then finds another container
+holding the name removes its own and fails with `instance already exists`.
+The run whose second check comes after the other's create fails; when both
+creates come first, as they usually do for two runs started together, both
+fail, and neither holds the name: run again. They never both succeed. A run
+killed between its create and its removal of its own container leaves both.
+Every command that acts on the name then fails, naming the two container IDs
+and the `ctr` commands that remove one, but `hull ps` does not: it lists
+both containers under the name, so brig, which reads `hull ps`, still finds
+the instance. A name on Linux must also be a containerd identifier, as
+every name was while it was the container's ID: at most 76 characters, with
+no two of `.`, `_` and `-` in a row, and ending in a letter or digit.
+`hull inspect <name>` prints an instance's container ID as `containerId`.
+When inspect fails, as it does for an instance whose task containerd cannot
+read, this shows it:
+
+```bash
+ctr -n <namespace> containers ls 'labels."sh.brig.hull/name"==<name>'
+```
+
+urunc listens on two sockets in `/run/containerd/runc/<namespace>/<id>`,
+`urunc.sock` and `reexec.sock`, and a socket's path must fit in 107 bytes,
+so an instance cannot start in a namespace longer than 57 characters.
+`hull run` refuses one. The commands print what they print on macOS, with
+these differences:
 
 - The status comes from the container's task. A container with no task is
   `stopped`: containerd cannot tell one that was never started from one whose
@@ -215,10 +248,11 @@ on macOS, with these differences:
 - CREATED, and `startTime` in `hull inspect`, is when the container was
   created. PID is the process ID containerd reports for the task. IP is
   always `-`.
-- `hull inspect` prints the macOS fields. `imageDigest`, `backend` and
-  `logFile` come from labels `hull run` sets, so they are empty for a
-  container another client created. Those containerd has no counterpart for,
-  among them `cmdLine` and `bundleDir`, are always empty.
+- `hull inspect` prints the macOS fields, and `containerId`, the
+  container's ID, which the `ctr` commands below take. `imageDigest`,
+  `backend` and `logFile` come from labels `hull run` sets, so they are
+  empty for a container another client created. Those containerd has no
+  counterpart for, among them `cmdLine` and `bundleDir`, are always empty.
 - `hull rm` deletes the container's task, the container and its snapshot,
   the instance's log, and the exec processes and FIFOs a killed `hull exec`
   left, described below. A task that has not stopped is refused without
@@ -320,9 +354,10 @@ on macOS, with these differences:
   from the daemon's environment, so neither `HULL_TERMINAL_FILTER` nor an
   `--env` passed to the command turns it off.
 - The FIFOs that carry the command's input and output go in a directory
-  of the instance's own: `/run/hull/fifo/<namespace>/<instance>` for
-  root, and `$XDG_RUNTIME_DIR/hull/fifo/<namespace>/<instance>` for anyone
-  else, where a rootless daemon's shim can open them too. hull killed with
+  of the instance's own, named after its container ID:
+  `/run/hull/fifo/<namespace>/<container-id>` for root, and
+  `$XDG_RUNTIME_DIR/hull/fifo/<namespace>/<container-id>` for anyone else,
+  where a rootless daemon's shim can open them too. hull killed with
   SIGKILL leaves its FIFOs there, the command running in the guest, and
   its exec process undeleted in the shim.
 - `hull stop` and `hull rm` kill and delete the exec processes whose FIFOs
@@ -344,13 +379,14 @@ on macOS, with these differences:
   and the `ctr` commands below can read its exec ID.
 - Stop and rm look for the directory as `hull exec` does, so one run as
   another user, or with another `$XDG_RUNTIME_DIR`, does not find the exec
-  processes. The directory is named after the namespace and the instance,
-  not the daemon: with two daemons that both have the same instance in the
-  same namespace, a stop or rm through one removes the other's FIFOs, and
-  the other's stop can then no longer find its exec processes. An instance
-  removed by another client, such as `ctr`, leaves its directory behind,
-  and an exec that fails leaves an empty one until the instance is stopped
-  or removed.
+  processes. The directory is named after the namespace and the container's
+  ID, not the daemon. The IDs hull gives its containers never repeat, but
+  two daemons that both have a container of one ID in one namespace, as
+  another client may create, share it: a stop or rm through one removes the
+  other's FIFOs, and the other's stop can then no longer find its exec
+  processes. An instance removed by another client, such as `ctr`, leaves
+  its directory behind, and an exec that fails leaves an empty one until the
+  instance is stopped or removed.
 - The exec processes have to go first: a command that goes on writing
   after hull is killed with SIGKILL fills its FIFO, and urunc's exec
   process then blocks for good. The shim reports the instance stopped
@@ -359,14 +395,14 @@ on macOS, with these differences:
   exec process, killing it through containerd frees the instance:
 
   ```bash
-  ctr -a <socket> -n <namespace> task kill -s SIGKILL --exec-id <exec-id> <instance>
+  ctr -a <socket> -n <namespace> task kill -s SIGKILL --exec-id <exec-id> <container-id>
   ```
 
   where `<socket>` is the daemon's socket, as `--containerd-address`
   names it, and the exec ID, `hull-` and 16 hex digits, is in the names
   of the FIFOs hull left. An exec process hull was killed before starting
   cannot be signalled, and the kill fails with `process not created`;
-  `ctr ... task delete --exec-id <exec-id> <instance>` deletes it instead.
+  `ctr ... task delete --exec-id <exec-id> <container-id>` deletes it instead.
 
 `hull run` boots an image as a VM through urunc, as the containerd runtime
 `io.containerd.urunc.v2`. It needs urunc's shim installed where the daemon
@@ -489,10 +525,14 @@ ways:
   not list. macOS reads the image's `/etc/passwd`, so it takes a listed
   uid's group from there, and gives an unlisted uid its own value as its
   gid.
-- A container's snapshot is named after it, so a snapshot left behind with
-  no container, as a failed client may leave one, keeps its name from a
-  run. The run fails and names the snapshot. `hull rm` cannot remove it,
-  since there is no instance; `ctr snapshots rm` can.
+- A container's snapshot takes the container's ID as its key, so a snapshot
+  left behind with no container holds no name, and nothing reports it. A
+  snapshot that a `hull run` killed while creating the container leaves is
+  held by containerd's lease for the create, and containerd's garbage
+  collector removes it when the lease expires, after 24 hours. One that
+  another client leaves outside a lease stays: `hull rm` cannot remove it,
+  since there is no instance, and
+  `ctr -n <namespace> snapshots --snapshotter <snapshotter> rm <key>` can.
 
 `make test` runs on Linux too. The `internal/` and `pkg/` packages build and
 test natively. Of `cmd/hull`, only the files with no darwin dependency compile

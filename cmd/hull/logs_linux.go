@@ -50,13 +50,14 @@ func viewLogs(ctx context.Context, cmd *cli.Command) error {
 	if err != nil {
 		return err
 	}
-	_, err = c.LoadContainer(ctx, instanceID)
+	_, err = containerd.LoadNamed(ctx, c, instanceID)
 	_ = c.Close()
 	switch {
 	case errdefs.IsNotFound(err):
 		return fmt.Errorf("instance not found: %s", instanceID)
 	case err != nil:
-		return fmt.Errorf("instance %s: %w", instanceID, err)
+		// LoadNamed's errors already name the instance or its container.
+		return err
 	}
 
 	logFile, err := instanceLogPath(containerd.ResolveNamespace(cmd.String("namespace")), instanceID)

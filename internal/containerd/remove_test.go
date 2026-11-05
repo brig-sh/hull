@@ -18,6 +18,7 @@ package containerd
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	"github.com/brig-sh/hull/internal/containerd/containerdtest"
@@ -152,13 +153,21 @@ func TestImageHoldersThroughDaemon(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ctr.Delete(ctx) })
+	// One hull run created, under an ID of its own.
+	labeled, err := c.NewContainer(ctx, "0123456789abcdef", client.WithImageName(name), client.WithSpec(&oci.Spec{}),
+		client.WithContainerLabels(map[string]string{LabelName: "web"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = labeled.Delete(ctx) })
 
 	holders, err := ImageHolders(ctx, c, name)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(holders) != 1 || holders[0].ID != "holder" || holders[0].Running {
-		t.Errorf("ImageHolders(%s) = %+v, want holder, not running", name, holders)
+	want := []Holder{{ID: "holder"}, {ID: "web"}}
+	if !slices.Equal(holders, want) {
+		t.Errorf("ImageHolders(%s) = %+v, want %+v: the instances' names, not running", name, holders, want)
 	}
 
 	holders, err = ImageHolders(ctx, c, "example.com/hull/other:1")

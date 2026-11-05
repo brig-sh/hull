@@ -170,6 +170,7 @@ func collectGarbage(ctx context.Context, c *client.Client) error {
 
 // Holder is a container whose image is the one asked about.
 type Holder struct {
+	// ID is the name of the instance the container is; see instanceName.
 	ID string
 	// Running is true when the container has a task that has not stopped:
 	// created, running, paused or pausing.
@@ -177,7 +178,7 @@ type Holder struct {
 }
 
 // ImageHolders returns the containers in the client's namespace that were
-// created from the image name, sorted by ID.
+// created from the image name, sorted by instance name.
 func ImageHolders(ctx context.Context, c *client.Client, name string) ([]Holder, error) {
 	containers, err := c.Containers(ctx, fmt.Sprintf("image==%q", name))
 	if err != nil {
@@ -185,11 +186,17 @@ func ImageHolders(ctx context.Context, c *client.Client, name string) ([]Holder,
 	}
 	holders := make([]Holder, 0, len(containers))
 	for _, ctr := range containers {
+		// Read the record the listing fetched, rather than ask the daemon
+		// again for each container.
+		info, err := ctr.Info(ctx, client.WithoutRefreshedMetadata)
+		if err != nil {
+			return nil, fmt.Errorf("container %s: %w", ctr.ID(), err)
+		}
 		running, err := taskRunning(ctx, ctr)
 		if err != nil {
 			return nil, err
 		}
-		holders = append(holders, Holder{ID: ctr.ID(), Running: running})
+		holders = append(holders, Holder{ID: instanceName(ctr.ID(), info.Labels), Running: running})
 	}
 	sort.Slice(holders, func(i, j int) bool { return holders[i].ID < holders[j].ID })
 	return holders, nil

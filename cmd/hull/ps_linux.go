@@ -78,6 +78,7 @@ func listInstances(ctx context.Context, cmd *cli.Command) error {
 func instanceRecord(inst containerd.Instance) *store.InstanceState {
 	rec := &store.InstanceState{
 		ID:          inst.ID,
+		ContainerID: inst.ContainerID,
 		Status:      "stopped",
 		StartTime:   inst.CreatedAt.Local(),
 		ImageDigest: inst.Labels[containerd.LabelImageDigest],

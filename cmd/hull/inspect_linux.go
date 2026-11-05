@@ -61,10 +61,12 @@ func inspectInstance(ctx context.Context, cmd *cli.Command) error {
 	if errdefs.IsNotFound(err) {
 		// instanceReadError reports only this error as "instance not
 		// found", the words brig matches to decide an instance is gone.
-		err = store.ErrInstanceNotFound
+		return instanceReadError(instanceID, store.ErrInstanceNotFound)
 	}
 	if err != nil {
-		return instanceReadError(instanceID, err)
+		// LoadInstance's errors already name the instance or its
+		// container; instanceReadError would put the name in front again.
+		return err
 	}
 	return printJSON(cmd.Writer, instanceRecord(inst))
 }

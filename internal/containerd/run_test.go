@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -30,6 +31,7 @@ import (
 	"github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/defaults"
+	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/platforms"
 	"github.com/opencontainers/go-digest"
@@ -39,6 +41,7 @@ import (
 	"github.com/brig-sh/hull/internal/containerd/containerdtest"
 	"github.com/brig-sh/hull/internal/imageplatform"
 	"github.com/brig-sh/hull/pkg/ociclient"
+	"github.com/brig-sh/hull/pkg/store"
 )
 
 func TestUruncAnnotations(t *testing.T) {
@@ -179,7 +182,7 @@ func TestNewContainerThroughDaemon(t *testing.T) {
 	}
 	logFile := filepath.Join(t.TempDir(), "vm.log")
 	ctr, err := newContainer(ctx, c, image, RunConfig{
-		ID:       "vm",
+		Name:     "vm",
 		Args:     []string{"sleep", "1"},
 		Env:      []string{"PATH=/custom", "FOO=bar"},
 		MemoryMB: 256,
@@ -204,7 +207,25 @@ func TestNewContainerThroughDaemon(t *testing.T) {
 	if info.Runtime.Name != RuntimeName {
 		t.Errorf("runtime = %q, want %q", info.Runtime.Name, RuntimeName)
 	}
+	// The name is a label, and the ID one of the container's own, new for
+	// each run of the name.
+	if !regexp.MustCompile(`^[0-9a-f]{16}$`).MatchString(ctr.ID()) {
+		t.Errorf("container ID = %q, want 16 hex digits", ctr.ID())
+	}
+	again, err := newContainer(ctx, c, image, RunConfig{Name: "vm", Args: []string{"true"}, Annotations: map[string]string{
+		ociclient.BootKernelAnnotation:    "/run/kernel",
+		ociclient.BootInitrdAnnotation:    "/run/initrd",
+		ociclient.UnikernelTypeAnnotation: "linux",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = again.Delete(context.Background(), client.WithSnapshotCleanup) })
+	if again.ID() == ctr.ID() {
+		t.Errorf("a second container of vm has the first's ID, %s", ctr.ID())
+	}
 	wantLabels := map[string]string{
+		LabelName:        "vm",
 		LabelBackend:     "firecracker",
 		LabelImageDigest: img.Target().Digest.String(),
 		LabelLogFile:     logFile,
@@ -272,7 +293,7 @@ func TestCreateInstanceRemovesAContainerWhoseTaskFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = CreateInstance(ctx, c, image, RunConfig{
-		ID:   "vm",
+		Name: "vm",
 		Args: []string{"true"},
 		Annotations: map[string]string{
 			ociclient.BootInitrdAnnotation:    "/nonexistent/initrd",
@@ -289,11 +310,7 @@ func TestCreateInstanceRemovesAContainerWhoseTaskFails(t *testing.T) {
 	if !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("log %s: error = %v, want it removed", logFile, err)
 	}
-	snapshotter := c.SnapshotService("")
-	_, err = snapshotter.Stat(ctx, "vm")
-	if !errdefs.IsNotFound(err) {
-		t.Errorf("snapshot vm: error = %v, want it removed", err)
-	}
+	assertNoActiveSnapshot(ctx, t, c)
 }
 
 func TestCheckBootsVM(t *testing.T) {
@@ -368,7 +385,7 @@ func TestCreateInstanceRefusesWhatWouldNotBootAVM(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = CreateInstance(ctx, c, image, RunConfig{
-		ID:          "vm",
+		Name:        "vm",
 		Args:        []string{"true"},
 		Annotations: map[string]string{ociclient.UnikernelBinaryAnnotation: "/bin/sh"},
 		LogFile:     filepath.Join(t.TempDir(), "vm.log"),
@@ -456,9 +473,10 @@ func TestImageForRunWantsTheHostPlatform(t *testing.T) {
 	}
 }
 
-// A snapshot left under a name, with no container, is reported as what it
-// is: hull rm finds no instance of that name to remove.
-func TestCreateInstanceNamesALeftoverSnapshot(t *testing.T) {
+// A name an instance holds is refused before anything is created: one
+// labeled with it, or a container of that ID with no label, as ctr, nerdctl
+// or an older hull creates.
+func TestCreateInstanceRefusesANameInUse(t *testing.T) {
 	c := instancesClient(t)
 	ctx := containerdtest.Lease(context.Background(), t, c)
 	img, err := ImageForRun(ctx, c, containerdtest.TaskImage, "missing", runPlatform(t), "", nil)
@@ -469,14 +487,68 @@ func TestCreateInstanceNamesALeftoverSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshots := c.SnapshotService("")
-	_, err = snapshots.Prepare(ctx, "vm", "")
+	labeledContainer(ctx, t, c, "web")
+	plain, err := c.NewContainer(ctx, "db", client.WithSpec(&oci.Spec{}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = snapshots.Remove(ctx, "vm") })
+	t.Cleanup(func() { _ = plain.Delete(context.Background()) })
+	for _, name := range []string{"web", "db"} {
+		err = CreateInstance(ctx, c, image, RunConfig{
+			Name: name,
+			Args: []string{"true"},
+			Annotations: map[string]string{
+				ociclient.BootKernelAnnotation:    "/boot/kernel",
+				ociclient.BootInitrdAnnotation:    "/boot/initrd",
+				ociclient.UnikernelTypeAnnotation: "linux",
+				ociclient.HypervisorAnnotation:    "cloud-hypervisor",
+			},
+			LogFile: filepath.Join(t.TempDir(), name+".log"),
+		})
+		if !errdefs.IsAlreadyExists(err) {
+			t.Errorf("CreateInstance(%s): error = %v, want AlreadyExists", name, err)
+		}
+	}
+	// A name that is no containerd identifier is refused too.
+	err = CreateInstance(ctx, c, image, RunConfig{Name: "web-", Args: []string{"true"}, LogFile: filepath.Join(t.TempDir(), "web-.log")})
+	if !errors.Is(err, store.ErrInvalidInstanceID) {
+		t.Errorf("CreateInstance(web-): error = %v, want ErrInvalidInstanceID", err)
+	}
+	containers, err := c.Containers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(containers) != 2 {
+		t.Errorf("%d containers, want only the two that hold the names", len(containers))
+	}
+	assertNoActiveSnapshot(ctx, t, c)
+}
+
+// Two runs of one name that both pass the first check, as two under
+// different locks can, do not both get an instance: a run that finds
+// another container of its name after creating its own removes its own,
+// and leaves the log at its path alone.
+func TestCreateInstanceLosesARaceForTheName(t *testing.T) {
+	c := instancesClient(t)
+	ctx := containerdtest.Lease(context.Background(), t, c)
+	img, err := ImageForRun(ctx, c, containerdtest.TaskImage, "missing", runPlatform(t), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := LoadRunImage(ctx, img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var other client.Container
+	afterCreate = func() { other = labeledContainer(ctx, t, c, "web") }
+	t.Cleanup(func() { afterCreate = func() {} })
+	logFile := filepath.Join(t.TempDir(), "web.log")
+	err = os.WriteFile(logFile, []byte("an earlier instance's console\n"), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
 	err = CreateInstance(ctx, c, image, RunConfig{
-		ID:   "vm",
+		Name: "web",
 		Args: []string{"true"},
 		Annotations: map[string]string{
 			ociclient.BootKernelAnnotation:    "/boot/kernel",
@@ -484,13 +556,73 @@ func TestCreateInstanceNamesALeftoverSnapshot(t *testing.T) {
 			ociclient.UnikernelTypeAnnotation: "linux",
 			ociclient.HypervisorAnnotation:    "cloud-hypervisor",
 		},
-		LogFile: filepath.Join(t.TempDir(), "vm.log"),
+		LogFile: logFile,
 	})
-	want := "remove it with ctr -n " + c.DefaultNamespace() + " snapshots --snapshotter " + defaults.DefaultSnapshotter + " rm vm"
-	if err == nil || errdefs.IsAlreadyExists(err) || !strings.Contains(err.Error(), want) {
-		t.Errorf("CreateInstance: error = %v, want the snapshot named, with %q, and not AlreadyExists", err, want)
+	if !errdefs.IsAlreadyExists(err) {
+		t.Errorf("CreateInstance that loses the race: error = %v, want AlreadyExists", err)
 	}
-	assertNoContainer(ctx, t, c, "vm")
+	got, err := LoadNamed(ctx, c, "web")
+	if err != nil || got.ID() != other.ID() {
+		t.Errorf("instance web = %v, %v; want the other run's container alone", got, err)
+	}
+	assertNoActiveSnapshot(ctx, t, c)
+	log, err := os.ReadFile(logFile)
+	if err != nil || string(log) != "an earlier instance's console\n" {
+		t.Errorf("log = %q, %v; want it left alone", log, err)
+	}
+
+	// A container of the name's ID with no label, as another client
+	// creates, holds the name too.
+	afterCreate = func() {
+		plain, err := c.NewContainer(ctx, "db", client.WithSpec(&oci.Spec{}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = plain.Delete(context.Background()) })
+	}
+	err = CreateInstance(ctx, c, image, RunConfig{
+		Name:        "db",
+		Args:        []string{"true"},
+		Annotations: map[string]string{ociclient.BootKernelAnnotation: "/boot/kernel", ociclient.BootInitrdAnnotation: "/boot/initrd", ociclient.UnikernelTypeAnnotation: "linux", ociclient.HypervisorAnnotation: "cloud-hypervisor"},
+		LogFile:     filepath.Join(t.TempDir(), "db.log"),
+	})
+	if !errdefs.IsAlreadyExists(err) {
+		t.Errorf("CreateInstance that loses the race to an unlabeled container: error = %v, want AlreadyExists", err)
+	}
+	got, err = LoadNamed(ctx, c, "db")
+	if err != nil || got.ID() != "db" {
+		t.Errorf("instance db = %v, %v; want the unlabeled container alone", got, err)
+	}
+	assertNoActiveSnapshot(ctx, t, c)
+}
+
+// CreateInstance refuses a namespace too long for urunc's sockets before it
+// asks the daemon anything, so the namespace need not exist.
+func TestCreateInstanceRefusesALongNamespace(t *testing.T) {
+	addr := containerdtest.DaemonAddress(t)
+	c, err := Connect(context.Background(), addr, strings.Repeat("n", 58))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	err = CreateInstance(context.Background(), c, RunImage{}, RunConfig{Name: "web"})
+	if err == nil || !strings.Contains(err.Error(), "at most 57") {
+		t.Errorf("CreateInstance in a 58-character namespace: error = %v", err)
+	}
+}
+
+func TestValidateRunNamespace(t *testing.T) {
+	if maxNamespaceLen != 57 {
+		t.Errorf("maxNamespaceLen = %d, want 57", maxNamespaceLen)
+	}
+	err := ValidateRunNamespace(strings.Repeat("n", 57))
+	if err != nil {
+		t.Errorf("a 57-character namespace: %v", err)
+	}
+	err = ValidateRunNamespace(strings.Repeat("n", 58))
+	if err == nil {
+		t.Error("a 58-character namespace was taken")
+	}
 }
 
 // An instance's root filesystem is a snapshot in the snapshotter the run
@@ -517,11 +649,7 @@ func TestRunsSnapshotterHoldsTheInstance(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := snapshotterRunConfig(t, "vm", "native")
-	_, err = newSnapshotterContainer(ctx, t, c, image, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctr, err := c.LoadContainer(ctx, "vm")
+	ctr, err := newSnapshotterContainer(ctx, t, c, image, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -533,23 +661,9 @@ func TestRunsSnapshotterHoldsTheInstance(t *testing.T) {
 		t.Errorf("snapshotter = %q, want native", info.Snapshotter)
 	}
 	snapshots := c.SnapshotService("native")
-	_, err = snapshots.Stat(ctx, "vm")
+	_, err = snapshots.Stat(ctx, ctr.ID())
 	if err != nil {
-		t.Errorf("snapshot vm in native: %v", err)
-	}
-
-	// A snapshot left under another name in that snapshotter is named with
-	// the namespace and the snapshotter that hold it, which ctr must be
-	// given to remove it.
-	_, err = snapshots.Prepare(ctx, "leftover", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = snapshots.Remove(ctx, "leftover") })
-	_, err = newSnapshotterContainer(ctx, t, c, image, snapshotterRunConfig(t, "leftover", "native"))
-	want := "ctr -n " + c.DefaultNamespace() + " snapshots --snapshotter native rm leftover"
-	if err == nil || !strings.Contains(err.Error(), want) {
-		t.Errorf("a leftover snapshot in native: error = %v, want %q", err, want)
+		t.Errorf("snapshot %s in native: %v", ctr.ID(), err)
 	}
 
 	// A snapshotter the daemon has not loaded fails the run with its name,
@@ -564,15 +678,14 @@ func TestRunsSnapshotterHoldsTheInstance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = snapshots.Stat(ctx, "vm")
+	_, err = snapshots.Stat(ctx, ctr.ID())
 	if !errdefs.IsNotFound(err) {
-		t.Errorf("snapshot vm in native after rm: error = %v, want it removed", err)
+		t.Errorf("snapshot %s in native after rm: error = %v, want it removed", ctr.ID(), err)
 	}
 }
 
 // With no snapshotter named, an instance gets the one the namespace's label
-// names, and a leftover snapshot is reported in that one too, which ctr
-// would not look in by itself.
+// names.
 func TestNamespacesSnapshotterHoldsTheInstance(t *testing.T) {
 	c := instancesClient(t)
 	ctx := containerdtest.Lease(context.Background(), t, c)
@@ -599,22 +712,15 @@ func TestNamespacesSnapshotterHoldsTheInstance(t *testing.T) {
 	if info.Snapshotter != "native" {
 		t.Errorf("snapshotter = %q, want native, the namespace's", info.Snapshotter)
 	}
-	snapshots := c.SnapshotService("native")
-	_, err = snapshots.Prepare(ctx, "leftover", "")
+	_, err = c.SnapshotService("native").Stat(ctx, ctr.ID())
 	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = snapshots.Remove(ctx, "leftover") })
-	_, err = newSnapshotterContainer(ctx, t, c, image, snapshotterRunConfig(t, "leftover", ""))
-	want := "ctr -n " + c.DefaultNamespace() + " snapshots --snapshotter native rm leftover"
-	if err == nil || !strings.Contains(err.Error(), want) {
-		t.Errorf("a leftover snapshot in native: error = %v, want %q", err, want)
+		t.Errorf("snapshot %s in native: %v", ctr.ID(), err)
 	}
 }
 
-func snapshotterRunConfig(t *testing.T, id, snapshotter string) RunConfig {
+func snapshotterRunConfig(t *testing.T, name, snapshotter string) RunConfig {
 	return RunConfig{
-		ID:   id,
+		Name: name,
 		Args: []string{"true"},
 		Annotations: map[string]string{
 			ociclient.BootKernelAnnotation:    "/boot/kernel",
@@ -622,7 +728,7 @@ func snapshotterRunConfig(t *testing.T, id, snapshotter string) RunConfig {
 			ociclient.UnikernelTypeAnnotation: "linux",
 			ociclient.HypervisorAnnotation:    "cloud-hypervisor",
 		},
-		LogFile:     filepath.Join(t.TempDir(), id+".log"),
+		LogFile:     filepath.Join(t.TempDir(), name+".log"),
 		Snapshotter: snapshotter,
 	}
 }

@@ -54,6 +54,8 @@ func TestRunRefusesBeforeDialling(t *testing.T) {
 		{[]string{"-d", "--hypervisor", "kvm", "busybox"}, "urunc has no such monitor"},
 		{[]string{"-d", "--annotation", "novalue", "busybox"}, `invalid --annotation "novalue"`},
 		{[]string{"-d", "--name", "../x", "busybox"}, "--name: invalid instance name"},
+		// A name hull takes elsewhere, but not a containerd identifier.
+		{[]string{"-d", "--name", "web-", "busybox"}, "--name: invalid instance name"},
 		{[]string{"-d", "--env-file", "/nonexistent/env", "busybox"}, "--env-file: open /nonexistent/env"},
 		{[]string{"-d"}, "image reference required"},
 	} {
@@ -64,6 +66,14 @@ func TestRunRefusesBeforeDialling(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("run %v: error = %v, want %q", tc.args, err, tc.want)
 		}
+	}
+	// A namespace too long for urunc's sockets, before anything is pulled.
+	app := newApp()
+	app.Writer = &bytes.Buffer{}
+	err := app.Run(context.Background(), []string{"hull", "--containerd-address", "/nonexistent.sock",
+		"--namespace", strings.Repeat("n", 58), "run", "-d", "busybox"})
+	if err == nil || !strings.Contains(err.Error(), "an instance can start only in one of at most 57") {
+		t.Errorf("run in a 58-character namespace: error = %v", err)
 	}
 }
 
@@ -438,15 +448,22 @@ func TestRunRefusalsAgainstDaemon(t *testing.T) {
 		t.Errorf("a name in use: error = %v, want instance already exists: held", err)
 	}
 
-	// A snapshot alone is no instance.
+	// A snapshot alone is no instance, and does not hold its key as a name:
+	// the run's container and snapshot take an ID of their own. The run
+	// gets past the name, and fails later or not, on the fake boot files.
 	_, err = snapshots.Prepare(ctx, "leftover", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = snapshots.Remove(ctx, "leftover") })
 	err = run(append([]string{"--pull", "never", "--name", "leftover"}, bootFiles...)...)
-	if err == nil || errors.Is(err, store.ErrInstanceExists) || !strings.Contains(err.Error(), "a snapshot with no container") {
-		t.Errorf("a leftover snapshot: error = %v, want the snapshot named", err)
+	t.Cleanup(func() { _, _ = f.run(f.ns, "rm", "--force", "leftover") })
+	if errors.Is(err, store.ErrInstanceExists) {
+		t.Errorf("a leftover snapshot: error = %v, want the name free", err)
+	}
+	_, err = snapshots.Stat(ctx, "leftover")
+	if err != nil {
+		t.Errorf("the leftover snapshot: %v, want it left alone", err)
 	}
 }
 
