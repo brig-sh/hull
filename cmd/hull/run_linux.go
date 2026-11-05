@@ -128,9 +128,13 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	if name == "" {
 		name = generateID(8)
 	}
-	err = store.ValidateInstanceID(name)
+	err = containerd.ValidateName(name)
 	if err != nil {
 		return fmt.Errorf("--name: %w", err)
+	}
+	err = containerd.ValidateRunNamespace(containerd.ResolveNamespace(cmd.String("namespace")))
+	if err != nil {
+		return err
 	}
 	platform, err := imageplatform.Parse(defaultPlatform)
 	if err != nil {
@@ -185,7 +189,7 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	}
 	defer unlock()
 	err = createInstance(ctx, c, image, containerd.RunConfig{
-		ID:          name,
+		Name:        name,
 		Args:        args.Tail(),
 		Env:         env,
 		MemoryMB:    int(cmd.Int("mem")),
@@ -369,8 +373,11 @@ var rootLogDir = "/var/log/hull"
 // hull run holds it from creating an instance until the instance's shim
 // has opened its log, and hull rm from removing an instance until its log
 // is gone. A run of a name whose old instance rm has removed, but whose old
-// log it has not, would otherwise have its new log deleted by that rm. The
-// lock is flock(2)'s, so it goes when the process does.
+// log it has not, would otherwise have its new log deleted by that rm. It
+// also keeps two runs of one name from both getting past
+// containerd.CreateInstance's first check of the name, after which the
+// second check fails one of them, and often both. The lock is flock(2)'s,
+// so it goes when the process does.
 func lockLogDir(dir string) (unlock func(), err error) {
 	f, err := os.Open(dir)
 	if err != nil {

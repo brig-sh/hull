@@ -60,7 +60,11 @@ type ImageMetadata struct {
 
 // InstanceState holds the state of a running or stopped instance
 type InstanceState struct {
-	ID          string    `json:"id"`
+	ID string `json:"id"`
+	// ContainerID is the ID of the instance's containerd container on
+	// Linux, which ctr's commands take where hull's take the name. It is
+	// empty on macOS, which has no container.
+	ContainerID string    `json:"containerId,omitempty"`
 	ImageDigest string    `json:"imageDigest"`
 	PID         int       `json:"pid"`
 	QMPSocket   string    `json:"qmpSocket"`

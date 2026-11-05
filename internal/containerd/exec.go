@@ -62,8 +62,8 @@ type ExecConfig struct {
 var rootFIFODir = "/run/hull/fifo"
 
 // ExecFIFODir returns the directory that holds the FIFOs carrying the I/O of
-// the execs in instance id of namespace to and from the shim. Each instance
-// has one of its own, so that stopping or removing it can find the execs a
+// the execs in the container id of namespace to and from the shim. Each
+// container has one of its own, so that stopping or removing it can find the execs a
 // killed hull left in it; see endExecs. Root's are under /run/hull/fifo.
 // Anyone else's are in the runtime directory, where a rootless daemon's
 // shim, running as the same user, can open them too; see runtimeDir.
@@ -85,15 +85,15 @@ type Exec struct {
 
 // ExecInstance starts cfg's process in the running task of instance id. The
 // caller must call Wait. An error that errdefs.IsNotFound accepts means no
-// container has that ID in the client's namespace.
+// instance has that name in the client's namespace.
 //
 // Under urunc the process runs in the guest: the shim runs `urunc exec`,
 // which relays the I/O to the guest's urunit-agent and exits with the
 // guest process's status.
 func ExecInstance(ctx context.Context, c *client.Client, id string, cfg ExecConfig) (*Exec, error) {
-	ctr, err := c.LoadContainer(ctx, id)
+	ctr, err := LoadNamed(ctx, c, id)
 	if err != nil {
-		return nil, fmt.Errorf("load container %s: %w", id, err)
+		return nil, err
 	}
 	task, status, err := loadTask(ctx, ctr)
 	if err != nil {
@@ -108,7 +108,7 @@ func ExecInstance(ctx context.Context, c *client.Client, id string, cfg ExecConf
 	}
 	spec, err := ctr.Spec(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("spec of container %s: %w", id, err)
+		return nil, fmt.Errorf("spec of container %s: %w", ctr.ID(), err)
 	}
 	proc, err := execProcess(spec.Process, cfg)
 	if err != nil {
@@ -138,7 +138,7 @@ func ExecInstance(ctx context.Context, c *client.Client, id string, cfg ExecConf
 	// leaves it empty: removing it could pull it from under another
 	// `hull exec` about to make its FIFOs in it. Stop and rm remove it. A
 	// container that loads has a valid ID.
-	fifoDir := ExecFIFODir(c.DefaultNamespace(), id)
+	fifoDir := ExecFIFODir(c.DefaultNamespace(), ctr.ID())
 	err = os.MkdirAll(fifoDir, 0o700)
 	if err != nil {
 		return nil, fmt.Errorf("create the exec FIFO directory: %w", err)

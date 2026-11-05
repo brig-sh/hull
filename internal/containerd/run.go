@@ -18,6 +18,8 @@ package containerd
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -27,7 +29,6 @@ import (
 
 	"github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/images"
-	"github.com/containerd/containerd/v2/defaults"
 	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/containerd/errdefs"
@@ -42,6 +43,10 @@ const (
 	LabelImageDigest = "sh.brig.hull/image-digest"
 	LabelLogFile     = "sh.brig.hull/log-file"
 )
+
+// LabelName is the label that holds the name of the instance a container
+// hull created is. The container's ID is one of its own; see newContainerID.
+const LabelName = "sh.brig.hull/name"
 
 // ImageForRun returns the image ref names, for platform, pulling it as
 // policy says: "missing" pulls only an image the namespace does not have,
@@ -163,7 +168,9 @@ func LoadRunImage(ctx context.Context, img client.Image) (RunImage, error) {
 
 // RunConfig describes an instance to create.
 type RunConfig struct {
-	ID string
+	// Name is the instance's name, which hull's commands take. It is the
+	// guest's hostname too.
+	Name string
 	// Args replaces the image's Cmd when it is not empty. The image's
 	// Entrypoint is kept, as docker run keeps it.
 	Args []string
@@ -183,20 +190,91 @@ type RunConfig struct {
 	Snapshotter string
 }
 
+// afterCreate runs between CreateInstance's create of the container and its
+// second check of the name. A variable, so a test can create a container of
+// the name there, as a run under another lock could.
+var afterCreate = func() {}
+
+// containerIDLen is the length of the IDs newContainerID makes.
+const containerIDLen = 16
+
+// maxNamespaceLen is the longest namespace an instance can start in. urunc
+// listens on two sockets in the runc shim's default root,
+// /run/containerd/runc/<namespace>/<id>/urunc.sock and reexec.sock, the
+// longer, and Go's listener takes a path of at most 107 bytes: a socket
+// address holds 108, the last a NUL. A namespace one character longer
+// fails the start with no word of why.
+const maxNamespaceLen = 107 - len("/run/containerd/runc/"+"/"+"/reexec.sock") - containerIDLen
+
+// ValidateRunNamespace checks that an instance can start in namespace; see
+// maxNamespaceLen.
+func ValidateRunNamespace(namespace string) error {
+	if len(namespace) > maxNamespaceLen {
+		return fmt.Errorf("namespace %s is %d characters, and an instance can start only in one of at most %d: "+
+			"urunc's sockets under /run/containerd/runc/<namespace>/<id> would not fit in a socket address",
+			namespace, len(namespace), maxNamespaceLen)
+	}
+	return nil
+}
+
 // cpuPeriod is the CFS period a CPU count is expressed in. urunc sizes the
 // guest's vCPUs from the quota over the period, rounded up.
 const cpuPeriod = 100000
 
-// CreateInstance creates the container cfg.ID from image, with urunc as its
-// runtime and a new snapshot of the image as its root filesystem, and
-// starts its task with the console written to cfg.LogFile. An error that
-// errdefs.IsAlreadyExists accepts means a container already has that ID.
+// CreateInstance creates the instance cfg.Name from image: a container of
+// its own ID, with urunc as its runtime and a new snapshot of the image as
+// its root filesystem, and starts its task with the console written to
+// cfg.LogFile. An error that errdefs.IsAlreadyExists accepts means an
+// instance already has that name.
 //
-// Whatever fails after the container exists removes it again, with its
-// snapshot and its log, so a failed run does not hold the name.
+// containerd keeps container IDs unique, but not labels, so the name is
+// checked twice. Before the container is created, so a name in use costs
+// nothing; hull run holds the namespace's log directory lock meanwhile, so
+// no other run of the name under the same lock gets past the check. And
+// after, since two runs under different locks, as root's and a user's are,
+// can both pass the first check: a run that then finds another container
+// holding its name removes its own and fails. The run whose second check
+// comes after the other's create fails, and when both creates come before
+// either second check, both fail; they never both succeed. A run killed
+// between its create and its removal leaves both containers, and every
+// command that acts on the name then fails until one is removed with ctr;
+// see LoadNamed. Instances lists both under the name.
+//
+// Whatever fails after the container exists, and after the second check,
+// removes it again, with its snapshot and its log, so a failed run does not
+// hold the name.
 func CreateInstance(ctx context.Context, c *client.Client, image RunImage, cfg RunConfig) (err error) {
+	err = ValidateName(cfg.Name)
+	if err != nil {
+		return err
+	}
+	err = ValidateRunNamespace(c.DefaultNamespace())
+	if err != nil {
+		return err
+	}
+	_, err = LoadNamed(ctx, c, cfg.Name)
+	if err == nil {
+		return fmt.Errorf("instance %s: %w", cfg.Name, errdefs.ErrAlreadyExists)
+	}
+	if !errdefs.IsNotFound(err) {
+		return err
+	}
 	ctr, err := newContainer(ctx, c, image, cfg)
 	if err != nil {
+		return err
+	}
+	afterCreate()
+	holders, err := nameHolders(ctx, c, cfg.Name)
+	if err == nil && len(holders) > 1 {
+		err = fmt.Errorf("instance %s: %w", cfg.Name, errdefs.ErrAlreadyExists)
+	}
+	if err != nil {
+		// Not the log: nothing of this run is at its path yet, and an old
+		// log there goes only once the name is this container's alone.
+		derr := ctr.Delete(context.WithoutCancel(ctx), client.WithSnapshotCleanup)
+		if derr != nil {
+			err = errors.Join(err, fmt.Errorf("remove the container %s of %s: %w", ctr.ID(), cfg.Name, derr))
+		}
 		return err
 	}
 	defer func() {
@@ -205,37 +283,37 @@ func CreateInstance(ctx context.Context, c *client.Client, image RunImage, cfg R
 			cleanup := context.WithoutCancel(ctx)
 			derr := ctr.Delete(cleanup, client.WithSnapshotCleanup)
 			if derr != nil {
-				err = errors.Join(err, fmt.Errorf("remove the container %s: %w", cfg.ID, derr))
+				err = errors.Join(err, fmt.Errorf("remove the container %s of %s: %w", ctr.ID(), cfg.Name, derr))
 			}
 			derr = os.Remove(cfg.LogFile)
 			if derr != nil && !errors.Is(derr, os.ErrNotExist) {
-				err = errors.Join(err, fmt.Errorf("remove the log of %s: %w", cfg.ID, derr))
+				err = errors.Join(err, fmt.Errorf("remove the log of %s: %w", cfg.Name, derr))
 			}
 		}
 	}()
 
 	// The shim appends to the log, and a name can be used again once its
-	// instance is removed. Only now, with the name taken by this container,
-	// is a log left at the path not another live instance's.
+	// instance is removed. Only now, with the name held by this container
+	// alone, is a log left at the path not another live instance's.
 	err = os.Remove(cfg.LogFile)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("remove the old log of %s: %w", cfg.ID, err)
+		return fmt.Errorf("remove the old log of %s: %w", cfg.Name, err)
 	}
 	task, err := ctr.NewTask(ctx, cio.LogFile(cfg.LogFile))
 	if err != nil {
-		return fmt.Errorf("create the task of %s: %w", cfg.ID, err)
+		return fmt.Errorf("create the task of %s: %w", cfg.Name, err)
 	}
 	defer func() {
 		if err != nil {
 			_, derr := task.Delete(context.WithoutCancel(ctx), client.WithProcessKill)
 			if derr != nil {
-				err = errors.Join(err, fmt.Errorf("remove the task of %s: %w", cfg.ID, derr))
+				err = errors.Join(err, fmt.Errorf("remove the task of %s: %w", cfg.Name, derr))
 			}
 		}
 	}()
 	err = task.Start(ctx)
 	if err != nil {
-		return fmt.Errorf("start %s: %w", cfg.ID, err)
+		return fmt.Errorf("start %s: %w", cfg.Name, err)
 	}
 	return nil
 }
@@ -262,7 +340,7 @@ func newContainer(ctx context.Context, c *client.Client, image RunImage, cfg Run
 	}
 
 	specOpts := []oci.SpecOpts{
-		oci.WithHostname(cfg.ID),
+		oci.WithHostname(cfg.Name),
 		oci.WithProcessArgs(process.Args...),
 		// The default PATH first, as docker gives an image that sets none,
 		// so the image's own replaces it.
@@ -282,64 +360,49 @@ func newContainer(ctx context.Context, c *client.Client, image RunImage, cfg Run
 		specOpts = append(specOpts, oci.WithCPUCFS(int64(cfg.CPUs)*cpuPeriod, cpuPeriod))
 	}
 
-	ctr, err := c.NewContainer(ctx, cfg.ID,
+	id, err := newContainerID()
+	if err != nil {
+		return nil, err
+	}
+	ctr, err := c.NewContainer(ctx, id,
 		client.WithImage(img),
 		// Before WithNewSnapshot, which prepares the snapshot in the
 		// container's snapshotter.
 		client.WithSnapshotter(cfg.Snapshotter),
-		client.WithNewSnapshot(cfg.ID, img),
+		client.WithNewSnapshot(id, img),
 		client.WithRuntime(RuntimeName, nil),
 		client.WithNewSpec(specOpts...),
 		// Not client.WithImageConfigLabels: urunc's shim copies a
 		// container's com.urunc.unikernel.* labels into the spec, and the
 		// image's labels are the image's to set.
 		client.WithContainerLabels(map[string]string{
+			LabelName:        cfg.Name,
 			LabelBackend:     cfg.Backend,
 			LabelImageDigest: img.Target().Digest.String(),
 			LabelLogFile:     cfg.LogFile,
 		}),
 	)
-	if errdefs.IsAlreadyExists(err) {
-		// The snapshot takes the container's ID as its key, and is prepared
-		// before the container is created, so a snapshot left behind under
-		// that key fails the run as an instance of that name would. hull rm
-		// finds no instance to remove then, so name the snapshot.
-		_, lerr := c.LoadContainer(ctx, cfg.ID)
-		if errdefs.IsNotFound(lerr) {
-			// ctr reads neither the namespace hull uses nor the namespace's
-			// default snapshotter, so the command names both.
-			sn, serr := snapshotterName(ctx, c, cfg.Snapshotter)
-			if serr != nil {
-				return nil, fmt.Errorf("create container %s: no instance has that name, but a snapshot "+
-					"with no container does: %v; and its snapshotter is unknown: %w", cfg.ID, err, serr)
-			}
-			return nil, fmt.Errorf("create container %s: no instance has that name, but a snapshot "+
-				"with no container does; remove it with ctr -n %s snapshots --snapshotter %s rm %s: %v",
-				cfg.ID, c.DefaultNamespace(), sn, cfg.ID, err)
-		}
-	}
 	if err != nil {
-		return nil, fmt.Errorf("create container %s: %w", cfg.ID, err)
+		return nil, fmt.Errorf("create container for %s: %w", cfg.Name, err)
 	}
 	return ctr, nil
 }
 
-// snapshotterName returns the snapshotter name stands for, the way
-// containerd's client resolves it: "" is the one the namespace's
-// containerd.io/defaults/snapshotter label names, or else containerd's
-// default.
-func snapshotterName(ctx context.Context, c *client.Client, name string) (string, error) {
-	if name != "" {
-		return name, nil
-	}
-	label, err := c.GetLabel(ctx, defaults.DefaultSnapshotterNSLabel)
+// newContainerID returns a new container ID: containerIDLen random hex
+// digits. A name that is run again gets a new ID, so nothing kept under an
+// earlier instance's ID, such as its snapshot, the runtime's state or a CNI
+// plugin's, is mistaken for the new instance's.
+//
+// nerdctl's IDs have 64 digits, but the ID is part of urunc's socket paths
+// (see maxNamespaceLen): with 64 digits, an instance could not start in a
+// namespace longer than 9 characters. 16 leave it 57.
+func newContainerID() (string, error) {
+	b := make([]byte, containerIDLen/2)
+	_, err := rand.Read(b)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("make a container ID: %w", err)
 	}
-	if label != "" {
-		return label, nil
-	}
-	return defaults.DefaultSnapshotter, nil
+	return hex.EncodeToString(b), nil
 }
 
 // unpack unpacks img into snapshotter, "" for the namespace's default, when

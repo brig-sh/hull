@@ -34,9 +34,10 @@ import (
 	"github.com/brig-sh/hull/internal/containerd"
 )
 
-// newLoggedInstance creates the container id in the fixture's namespace and
-// writes log to the path hull run gives its log. Its log-file label names a
-// decoy, which logs must not print.
+// newLoggedInstance creates instance id in the fixture's namespace, as hull
+// run does, under a container ID other than the name, and writes log to the
+// path hull run gives its log. Its log-file label names a decoy, which logs
+// must not print.
 func newLoggedInstance(t *testing.T, f *instanceFixture, id, log string) string {
 	t.Helper()
 	ctx := context.Background()
@@ -45,8 +46,8 @@ func newLoggedInstance(t *testing.T, f *instanceFixture, id, log string) string 
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctr, err := f.c.NewContainer(ctx, id, client.WithSpec(&oci.Spec{}),
-		client.WithContainerLabels(map[string]string{containerd.LabelLogFile: decoy}))
+	ctr, err := f.c.NewContainer(ctx, "ctr-"+id, client.WithSpec(&oci.Spec{}),
+		client.WithContainerLabels(map[string]string{containerd.LabelName: id, containerd.LabelLogFile: decoy}))
 	if err != nil {
 		t.Fatal(err)
 	}

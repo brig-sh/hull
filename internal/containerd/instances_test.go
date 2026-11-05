@@ -19,6 +19,8 @@ package containerd
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"syscall"
@@ -27,11 +29,13 @@ import (
 
 	"github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/containers"
+	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/containerd/errdefs"
 
 	"github.com/brig-sh/hull/internal/containerd/containerdtest"
+	"github.com/brig-sh/hull/pkg/store"
 )
 
 // instancesClient connects to the test daemon in a namespace of the test's
@@ -362,10 +366,219 @@ func TestEndTaskFailsWhenTheGraceEnds(t *testing.T) {
 	}
 }
 
-func assertNoContainer(ctx context.Context, t *testing.T, c *client.Client, id string) {
+// assertNoContainer checks that no container is the instance name, nor has
+// that ID.
+func assertNoContainer(ctx context.Context, t *testing.T, c *client.Client, name string) {
 	t.Helper()
-	_, err := c.LoadContainer(ctx, id)
+	_, err := LoadNamed(ctx, c, name)
+	if !errdefs.IsNotFound(err) {
+		t.Errorf("instance %s: error = %v, want it removed", name, err)
+	}
+	_, err = c.LoadContainer(ctx, name)
+	if !errdefs.IsNotFound(err) {
+		t.Errorf("container %s: error = %v, want it removed", name, err)
+	}
+}
+
+// assertNoActiveSnapshot checks that no container's snapshot is left in the
+// client's namespace; the image's own are committed ones.
+func assertNoActiveSnapshot(ctx context.Context, t *testing.T, c *client.Client) {
+	t.Helper()
+	var active []string
+	err := c.SnapshotService("").Walk(ctx, func(_ context.Context, info snapshots.Info) error {
+		if info.Kind == snapshots.KindActive {
+			active = append(active, info.Name)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 0 {
+		t.Errorf("active snapshots %q, want none", active)
+	}
+}
+
+// labeledContainer creates a container, with no task, of a random ID that
+// is labeled as instance name, as CreateInstance's are.
+func labeledContainer(ctx context.Context, t *testing.T, c *client.Client, name string) client.Container {
+	t.Helper()
+	id, err := newContainerID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctr, err := c.NewContainer(ctx, id, client.WithSpec(&oci.Spec{}),
+		client.WithContainerLabels(map[string]string{LabelName: name}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ctr.Delete(context.Background()) })
+	return ctr
+}
+
+func TestLoadNamed(t *testing.T) {
+	c := instancesClient(t)
+	ctx := context.Background()
+	labeled := labeledContainer(ctx, t, c, "web")
+	// One ctr or nerdctl created, or an older hull, under the name itself.
+	plain, err := c.NewContainer(ctx, "db", client.WithSpec(&oci.Spec{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = plain.Delete(context.Background()) })
+
+	got, err := LoadNamed(ctx, c, "web")
+	if err != nil || got.ID() != labeled.ID() {
+		t.Errorf("LoadNamed(web) = %v, %v; want the container labeled web, %s", got, err, labeled.ID())
+	}
+	got, err = LoadNamed(ctx, c, "db")
+	if err != nil || got.ID() != "db" {
+		t.Errorf("LoadNamed(db) = %v, %v; want the unlabeled container db", got, err)
+	}
+	// The labeled container is instance web, not the instance its ID names.
+	_, err = LoadNamed(ctx, c, labeled.ID())
+	if !errdefs.IsNotFound(err) {
+		t.Errorf("LoadNamed of a labeled container's ID: error = %v, want not found", err)
+	}
+	_, err = LoadNamed(ctx, c, "missing")
+	if !errdefs.IsNotFound(err) {
+		t.Errorf("LoadNamed(missing): error = %v, want not found", err)
+	}
+
+	second := labeledContainer(ctx, t, c, "web")
+	_, err = LoadNamed(ctx, c, "web")
+	if err == nil || !strings.Contains(err.Error(), "instance web is held by 2 containers") ||
+		!strings.Contains(err.Error(), labeled.ID()) || !strings.Contains(err.Error(), second.ID()) ||
+		!strings.Contains(err.Error(), "ctr -n "+c.DefaultNamespace()+" containers rm <id>") {
+		t.Errorf("LoadNamed of a name two containers carry = %v; want both IDs and how to remove one", err)
+	}
+
+	// A label that is no valid name, as another client may set, is no
+	// label: the container is listed and found under its ID, and its label
+	// names nothing.
+	for id, label := range map[string]string{
+		"forged": "x\tstopped\t-\t-\t-\t-\nvictim",
+		"empty":  "",
+		"dash":   "web-",
+	} {
+		ctr, err := c.NewContainer(ctx, id, client.WithSpec(&oci.Spec{}),
+			client.WithContainerLabels(map[string]string{LabelName: label}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = ctr.Delete(context.Background()) })
+		got, err := LoadNamed(ctx, c, id)
+		if err != nil || got.ID() != id {
+			t.Errorf("LoadNamed(%s), labeled %q = %v, %v; want the container %s", id, label, got, err, id)
+		}
+	}
+	_, err = LoadNamed(ctx, c, "web-")
+	if !errdefs.IsNotFound(err) {
+		t.Errorf("LoadNamed(web-), a label that is no valid name: error = %v, want not found", err)
+	}
+
+	instances, err := Instances(ctx, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, inst := range instances {
+		names = append(names, inst.ID)
+		if inst.ID == "db" && inst.ContainerID != "db" {
+			t.Errorf("db's container ID = %q, want db", inst.ContainerID)
+		}
+		if inst.ID == "web" && len(inst.ContainerID) != 16 {
+			t.Errorf("web's container ID = %q, want 16 hex digits", inst.ContainerID)
+		}
+	}
+	if !slices.Equal(names, []string{"dash", "db", "empty", "forged", "web", "web"}) {
+		t.Errorf("Instances = %q, want the names, sorted", names)
+	}
+}
+
+// The instance verbs take the name an instance is labeled with, and work
+// on the container of an ID of its own, its exec FIFOs included.
+func TestInstanceVerbsFindALabeledContainer(t *testing.T) {
+	fifos := privateFIFODir(t)
+	c := instancesClient(t)
+	ctx := context.Background()
+	id, err := newContainerID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctr, _ := containerdtest.StartTask(ctx, t, c, id, "sleep", "300")
+	_, err = ctr.SetLabels(ctx, map[string]string{LabelName: "web"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	inst, err := LoadInstance(ctx, c, "web")
+	if err != nil || inst.ID != "web" || inst.ContainerID != id || inst.Task == nil || inst.Task.Status != client.Running {
+		t.Errorf("LoadInstance(web) = %+v, %v; want web, container %s, running", inst, err, id)
+	}
+	out, _, code := execAndWait(t, c, "web", "", ExecConfig{Args: []string{"echo", "hi"}})
+	if out != "hi\n" || code != 0 {
+		t.Errorf("exec in web = %q, %d", out, code)
+	}
+	// stop and rm look for the execs a killed hull left under the same ID.
+	_, err = os.Stat(filepath.Join(fifos, c.DefaultNamespace(), id))
+	if err != nil {
+		t.Errorf("the exec FIFO directory under the container ID: %v", err)
+	}
+	_, err = os.Stat(filepath.Join(fifos, c.DefaultNamespace(), "web"))
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("an exec FIFO directory under the name: error = %v, want none", err)
+	}
+	running, err := StopInstance(ctx, c, "web", time.Second, 5*time.Second)
+	if err != nil || !running {
+		t.Errorf("StopInstance(web) = %v, %v; want it stopped", running, err)
+	}
+	_, err = os.Stat(filepath.Join(fifos, c.DefaultNamespace(), id))
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the exec FIFO directory after stop: error = %v, want it removed", err)
+	}
+	err = RemoveInstance(ctx, c, "web", false, 5*time.Second)
+	if err != nil {
+		t.Fatalf("RemoveInstance(web): %v", err)
+	}
+	assertNoContainer(ctx, t, c, "web")
+	_, err = c.LoadContainer(ctx, id)
 	if !errdefs.IsNotFound(err) {
 		t.Errorf("container %s: error = %v, want it removed", id, err)
+	}
+
+	// rm --force of a running one finds its execs' directory too.
+	id, err = newContainerID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctr, _ = containerdtest.StartTask(ctx, t, c, id, "sleep", "300")
+	_, err = ctr.SetLabels(ctx, map[string]string{LabelName: "api"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	execAndWait(t, c, "api", "", ExecConfig{Args: []string{"true"}})
+	err = RemoveInstance(ctx, c, "api", true, 5*time.Second)
+	if err != nil {
+		t.Fatalf("RemoveInstance(api, kill): %v", err)
+	}
+	_, err = os.Stat(filepath.Join(fifos, c.DefaultNamespace(), id))
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the exec FIFO directory after rm: error = %v, want it removed", err)
+	}
+}
+
+func TestValidateName(t *testing.T) {
+	for _, name := range []string{"web", "a.b_c-d", "0", strings.Repeat("a", 76)} {
+		err := ValidateName(name)
+		if err != nil {
+			t.Errorf("ValidateName(%q) = %v, want nil", name, err)
+		}
+	}
+	for _, name := range []string{"", "../x", "my app", "a\tb", "web-", "a..b", "a_-b", strings.Repeat("a", 77)} {
+		err := ValidateName(name)
+		if !errors.Is(err, store.ErrInvalidInstanceID) {
+			t.Errorf("ValidateName(%q) = %v, want ErrInvalidInstanceID", name, err)
+		}
 	}
 }
