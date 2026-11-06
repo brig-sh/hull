@@ -26,16 +26,6 @@ import (
 	"github.com/brig-sh/hull/pkg/store"
 )
 
-func psCommand() *cli.Command {
-	return &cli.Command{
-		Name:  "ps",
-		Usage: "list running instances",
-		Action: func(ctx context.Context, cmd *cli.Command) error {
-			return listInstances(ctx, cmd)
-		},
-	}
-}
-
 // listInstances prints the containers in hull's containerd namespace, in
 // the same table as on macOS.
 func listInstances(ctx context.Context, cmd *cli.Command) error {
