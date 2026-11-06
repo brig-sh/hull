@@ -29,17 +29,17 @@ import (
 // beside its guest kernel and initrd, in sha256sum's format.
 const bundleSums = "SHA256SUMS"
 
-// systemBundleGuest is where a system install of the bundle keeps its guest
-// files. A variable, so tests can point it at a directory of their own.
-var systemBundleGuest = "/var/lib/brig/data/share/guest"
+// systemBundle is where a system install of the bundle lives. A variable,
+// so tests can point it at a directory of their own.
+var systemBundle = "/var/lib/brig/data"
 
-// bundleGuestDirs returns where a brig-standalone-linux bundle keeps its
-// guest kernel and initrd, in the order to look: the bundle installed under
-// this user's home, then the one installed for the whole host. A user
-// install lives under $XDG_DATA_HOME/brig/data, or ~/.local/share/brig/data,
-// and a system install under /var/lib/brig/data (the bundle's install.sh).
-// root has only the system install.
-func bundleGuestDirs() []string {
+// BundleDirs returns where a brig-standalone-linux bundle is installed, in
+// the order to look: the bundle installed under this user's home, then the
+// one installed for the whole host. A user install lives under
+// $XDG_DATA_HOME/brig/data, or ~/.local/share/brig/data, and a system
+// install under /var/lib/brig/data (the bundle's install.sh). root has only
+// the system install. The directories need not exist.
+func BundleDirs() []string {
 	var dirs []string
 	if os.Geteuid() != 0 {
 		share := os.Getenv("XDG_DATA_HOME")
@@ -50,10 +50,20 @@ func bundleGuestDirs() []string {
 			}
 		}
 		if share != "" {
-			dirs = append(dirs, filepath.Join(share, "brig", "data", "share", "guest"))
+			dirs = append(dirs, filepath.Join(share, "brig", "data"))
 		}
 	}
-	return append(dirs, systemBundleGuest)
+	return append(dirs, systemBundle)
+}
+
+// bundleGuestDirs returns where the bundles BundleDirs names keep their
+// guest kernel and initrd, in the same order.
+func bundleGuestDirs() []string {
+	dirs := BundleDirs()
+	for i, dir := range dirs {
+		dirs[i] = filepath.Join(dir, "share", "guest")
+	}
+	return dirs
 }
 
 // BundleGuest returns where an installed brig-standalone-linux bundle keeps

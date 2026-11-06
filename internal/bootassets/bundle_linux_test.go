@@ -63,10 +63,11 @@ func bundleHost(t *testing.T) (userGuest, systemGuest string) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_DATA_HOME", "")
 	t.Setenv("HULL_BOOT_ASSETS", "")
-	old := systemBundleGuest
-	systemBundleGuest = filepath.Join(t.TempDir(), "guest")
-	t.Cleanup(func() { systemBundleGuest = old })
-	return filepath.Join(home, ".local", "share", "brig", "data", "share", "guest"), systemBundleGuest
+	old := systemBundle
+	systemBundle = t.TempDir()
+	t.Cleanup(func() { systemBundle = old })
+	return filepath.Join(home, ".local", "share", "brig", "data", "share", "guest"),
+		filepath.Join(systemBundle, "share", "guest")
 }
 
 func TestBundleGuest(t *testing.T) {
