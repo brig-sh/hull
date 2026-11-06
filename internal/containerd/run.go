@@ -54,6 +54,13 @@ const (
 // hull created is. The container's ID is one of its own; see newContainerID.
 const LabelName = "sh.brig.hull/name"
 
+// LabelNetwork holds the network a container hull created was run with:
+// none, or the --net mode of its RunConfig.Network. The attachment's own
+// record goes when the task does, and a label is still there for a stopped
+// instance, as nerdctl keeps a container's networks in its nerdctl/networks
+// label.
+const LabelNetwork = "sh.brig.hull/network"
+
 // ImageForRun returns the image ref names, for platform, pulling it as
 // policy says: "missing" pulls only an image the namespace does not have,
 // "always" pulls it whatever is there, and "never" fails when it is not
@@ -231,6 +238,9 @@ func ValidateRunNamespace(namespace string) error {
 // and before urunc's start reads the interface from it, and at postStop,
 // when the task is deleted.
 type Network struct {
+	// Mode is the --net the run attaches the instance with, such as
+	// shared, which the container's LabelNetwork keeps.
+	Mode string
 	// Hook is the command the runtime runs, with "createRuntime" or
 	// "postStop" appended to its arguments.
 	Hook specs.Hook
@@ -422,8 +432,10 @@ func newContainer(ctx context.Context, c *client.Client, image RunImage, cfg Run
 	if cfg.CPUs > 0 {
 		specOpts = append(specOpts, oci.WithCPUCFS(int64(cfg.CPUs)*cpuPeriod, cpuPeriod))
 	}
+	network := "none"
 	if cfg.Network != nil {
 		specOpts = append(specOpts, withNetwork(cfg.Network))
+		network = cfg.Network.Mode
 	}
 
 	id, err := newContainerID()
@@ -446,6 +458,7 @@ func newContainer(ctx context.Context, c *client.Client, image RunImage, cfg Run
 			LabelBackend:     cfg.Backend,
 			LabelImageDigest: img.Target().Digest.String(),
 			LabelLogFile:     cfg.LogFile,
+			LabelNetwork:     network,
 		}),
 	)
 	if err != nil {

@@ -51,9 +51,9 @@ func listInstances(ctx context.Context, cmd *cli.Command) error {
 
 // instanceRecord turns a container into the record the macOS store keeps,
 // so ps and inspect print the same fields with the same meaning. StartTime
-// is when the container was created. The image digest, backend and log file
-// come from the labels hull run sets, so a container another client created
-// has none of them.
+// is when the container was created. The image digest, backend, log file
+// and network come from the labels hull run sets, so a container another
+// client created has none of them.
 //
 // containerd's client returns every timestamp in UTC, and macOS records them
 // in local time. They are converted to local time here, or the ps table,
@@ -77,6 +77,7 @@ func instanceRecord(inst containerd.Instance) *store.InstanceState {
 		ImageDigest: inst.Labels[containerd.LabelImageDigest],
 		Backend:     inst.Labels[containerd.LabelBackend],
 		LogFile:     inst.Labels[containerd.LabelLogFile],
+		Network:     inst.Labels[containerd.LabelNetwork],
 	}
 	if inst.Err != nil {
 		rec.Status = store.StatusUnreadable

@@ -226,6 +226,9 @@ func TestRunNetwork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if n.Mode != "shared" {
+		t.Errorf("mode = %q, want shared, for the container's network label", n.Mode)
+	}
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)

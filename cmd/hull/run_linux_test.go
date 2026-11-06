@@ -145,9 +145,11 @@ func TestInstanceRecordReadsHullLabels(t *testing.T) {
 		containerd.LabelBackend:     "cloud-hypervisor",
 		containerd.LabelImageDigest: "sha256:abc",
 		containerd.LabelLogFile:     "/logs/vm.log",
+		containerd.LabelNetwork:     "shared",
 	}})
-	if rec.Backend != "cloud-hypervisor" || rec.ImageDigest != "sha256:abc" || rec.LogFile != "/logs/vm.log" {
-		t.Errorf("record = %+v, want the backend, digest and log file from the labels", rec)
+	if rec.Backend != "cloud-hypervisor" || rec.ImageDigest != "sha256:abc" || rec.LogFile != "/logs/vm.log" ||
+		rec.Network != "shared" {
+		t.Errorf("record = %+v, want the backend, digest, log file and network from the labels", rec)
 	}
 }
 
