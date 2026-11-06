@@ -18,6 +18,7 @@ package containerd
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,13 +56,136 @@ func TestResolveAddress(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fakeIDs(t, tc.euid, 1000)
-			t.Setenv(AddressEnv, tc.env)
+			// No rootlesskit, whatever runs on the host; see
+			// TestResolveAddressInRootlessKit.
+			t.Setenv("ROOTLESSKIT_STATE_DIR", filepath.Join(t.TempDir(), "none"))
+			// The variable nerdctl and ctr read.
+			t.Setenv("CONTAINERD_ADDRESS", tc.env)
 			t.Setenv("XDG_RUNTIME_DIR", tc.runtimeDir)
-			got := ResolveAddress(tc.explicit)
-			if got != tc.want {
-				t.Fatalf("ResolveAddress(%q) = %q, want %q", tc.explicit, got, tc.want)
+			got, err := ResolveAddress(tc.explicit)
+			if err != nil || got != tc.want {
+				t.Fatalf("ResolveAddress(%q) = %q, %v; want %q", tc.explicit, got, err, tc.want)
 			}
 		})
+	}
+}
+
+// With a rootlesskit running, a given address is a path in its mount
+// namespace, as nerdctl, which runs there, reads it.
+func TestResolveAddressInRootlessKit(t *testing.T) {
+	fakeIDs(t, 1000, 1000)
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	stateDir := t.TempDir()
+	t.Setenv("ROOTLESSKIT_STATE_DIR", stateDir)
+	err := os.WriteFile(filepath.Join(stateDir, "child_pid"), []byte("4242\n"), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A directory stands in for the child's root. Its /var/run is an
+	// absolute link to /run, as on most distributions, which the kernel
+	// would follow to the host's /run.
+	root := t.TempDir()
+	err = os.MkdirAll(filepath.Join(root, "var"), 0o755)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = os.Symlink("/run", filepath.Join(root, "var", "run"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	origRoot, origNS := childRoot, userNamespace
+	t.Cleanup(func() { childRoot, userNamespace = origRoot, origNS })
+	childRoot = func(pid int) string {
+		if pid != 4242 {
+			t.Errorf("childRoot(%d), want the pid in child_pid, 4242", pid)
+		}
+		return root
+	}
+	// rootlesskit's child is in a user namespace of its own.
+	namespaces := map[string]string{"self": "user:[1]", "4242": "user:[2]"}
+	userNamespace = func(proc string) (string, error) {
+		ns, ok := namespaces[proc]
+		if !ok {
+			return "", os.ErrNotExist
+		}
+		return ns, nil
+	}
+	for _, tc := range []struct {
+		name, explicit, env, want string
+	}{
+		{name: "the environment", env: "unix:///run/containerd/containerd.sock", want: root + "/run/containerd/containerd.sock"},
+		{name: "the flag", explicit: "/run/containerd/containerd.sock", want: root + "/run/containerd/containerd.sock"},
+		{name: "a link in the namespace", env: "/var/run/containerd/containerd.sock", want: root + "/run/containerd/containerd.sock"},
+		// nerdctl takes a relative one from the working directory it keeps
+		// in rootlesskit's namespace, which is hull's.
+		{name: "a relative path", env: "c.sock", want: "c.sock"},
+		{name: "the default", want: filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "containerd", "containerd.sock")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CONTAINERD_ADDRESS", tc.env)
+			got, err := ResolveAddress(tc.explicit)
+			if err != nil || got != tc.want {
+				t.Errorf("ResolveAddress(%q) = %q, %v; want %q", tc.explicit, got, err, tc.want)
+			}
+		})
+	}
+
+	// A stopped rootlesskit leaves its state directory, with a child that
+	// is gone, and nerdctl fails then rather than reach the system daemon.
+	t.Setenv("CONTAINERD_ADDRESS", "/run/containerd/containerd.sock")
+	delete(namespaces, "4242")
+	_, err = ResolveAddress("")
+	if err == nil || !strings.Contains(err.Error(), "rootless containerd not running? rootlesskit's child, process 4242") {
+		t.Errorf("with rootlesskit's child gone: error = %v, want rootless containerd not running", err)
+	}
+	// Its child's ID may go to a process of this user on the host, in hull's
+	// own user namespace, whose root is the host's.
+	namespaces["4242"] = namespaces["self"]
+	_, err = ResolveAddress("")
+	if err == nil || !strings.Contains(err.Error(), "process 4242 in "+filepath.Join(stateDir, "child_pid")+
+		" is not rootlesskit's child: it shares hull's user namespace") {
+		t.Errorf("with the child's ID taken by a host process: error = %v, want it refused", err)
+	}
+	for _, content := range []string{"", "x\n", "0\n"} {
+		err = os.WriteFile(filepath.Join(stateDir, "child_pid"), []byte(content), 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = ResolveAddress("")
+		if err == nil || !strings.Contains(err.Error(), "holds no process ID") {
+			t.Errorf("child_pid %q: error = %v, want it refused", content, err)
+		}
+	}
+	err = os.Remove(filepath.Join(stateDir, "child_pid"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = ResolveAddress("")
+	if err == nil || !strings.Contains(err.Error(), "rootless containerd not running?") {
+		t.Errorf("with no child_pid: error = %v, want rootless containerd not running", err)
+	}
+	// Root drives the system daemon, and no rootlesskit runs for it.
+	fakeIDs(t, 0, 0)
+	got, err := ResolveAddress("")
+	if err != nil || got != "/run/containerd/containerd.sock" {
+		t.Errorf("as root: ResolveAddress = %q, %v; want the address unchanged", got, err)
+	}
+}
+
+// The same refusal through the real /proc: this process, named as the
+// child, is on the host in hull's own user namespace, as a process that took
+// a stopped rootlesskit's child's ID would be.
+func TestResolveAddressRefusesAHostProcess(t *testing.T) {
+	fakeIDs(t, 1000, 1000)
+	stateDir := t.TempDir()
+	t.Setenv("ROOTLESSKIT_STATE_DIR", stateDir)
+	err := os.WriteFile(filepath.Join(stateDir, "child_pid"), []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = ResolveAddress("/run/containerd/containerd.sock")
+	if err == nil || !strings.Contains(err.Error(), "it shares hull's user namespace") {
+		t.Errorf("with this process as the child: error = %v, want it refused", err)
 	}
 }
 
@@ -116,7 +240,8 @@ func TestResolveNamespace(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv(NamespaceEnv, tc.env)
+			// The variable nerdctl and ctr read.
+			t.Setenv("CONTAINERD_NAMESPACE", tc.env)
 			got := ResolveNamespace(tc.explicit)
 			if got != tc.want {
 				t.Fatalf("ResolveNamespace(%q) = %q, want %q", tc.explicit, got, tc.want)

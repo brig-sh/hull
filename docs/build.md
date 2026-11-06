@@ -108,15 +108,39 @@ them, with the same output as on macOS. All three need a running containerd, whi
 start. hull looks for its socket in this order:
 
 1. `--containerd-address`
-2. `$HULL_CONTAINERD_ADDRESS`
+2. `$CONTAINERD_ADDRESS`, which nerdctl and ctr read too, with or without
+   `unix://` in front
 3. `/run/containerd/containerd.sock` when run as root, and
    `$XDG_RUNTIME_DIR/containerd/containerd.sock`, where a rootless containerd
    puts it, for any other user. With `$XDG_RUNTIME_DIR` unset or not an
    absolute path, `/run/user/<uid>` takes its place.
 
+For a user whose rootless containerd is running under rootlesskit, an
+absolute address from `--containerd-address` or `$CONTAINERD_ADDRESS` is a
+path in rootlesskit's mount namespace, as it is for nerdctl, which runs
+there. `containerd-rootless.sh` mounts `$XDG_RUNTIME_DIR/containerd` over
+`/run/containerd` in that namespace, so `unix:///run/containerd/containerd.sock`,
+the address the brig bundle's `brig-env.sh` sets for such a user, is the
+rootless daemon's socket and not the system daemon's. hull stays on the host
+and opens the path through `/proc/<pid>/root` of rootlesskit's child, a path
+its errors name, resolving any symbolic link on it inside that root, as a
+process in the namespace would: `/var/run`, a link to `/run`, leads to the
+rootless daemon too. A path rootlesskit's namespace does not replace, such
+as one under `$XDG_RUNTIME_DIR`, is the same file either way. When the
+state directory is a stopped rootlesskit's, whose child is gone, hull fails
+with "rootless containerd not running?", as nerdctl does, rather than reach
+the system daemon at the same path on the host. It fails the same way when
+the child's process ID, left behind by a rootlesskit that did not stop
+cleanly, now names a process of yours on the host: rootlesskit's child is
+always in a user namespace of its own, and that process is in hull's.
+Remove the state directory, or point `$ROOTLESSKIT_STATE_DIR` at a
+directory that does not exist, to use the host's path. Root leaves the
+address as given.
+
 There is no store directory on Linux, and no `--store-dir`. Isolation comes
 from the containerd namespace instead: `--namespace`, then
-`$HULL_NAMESPACE`, then `hull`. Two namespaces see none of each other's
+`$CONTAINERD_NAMESPACE`, which nerdctl and ctr read too, then `hull`.
+Two namespaces see none of each other's
 images, and `ctr -n hull images ls` shows what hull sees.
 
 containerd keeps one record per image name, and it may hold several
@@ -598,19 +622,13 @@ ways:
   config for the host's platform. One pulled only for another platform is
   pulled again with `--pull missing`, and refused with `--pull never`.
 - `--hypervisor` names one of the monitors urunc knows: `cloud-hypervisor`,
-  `firecracker`, `qemu`, `hvi`, `hvt`, `spt` or `hyperlight-unikraft`. Any
-  other name is refused, `vz` among them, whether `--hypervisor` or the
+  `firecracker`, `qemu`, `hvt`, `spt` or `hyperlight-unikraft`. Any other
+  name is refused, `vz` and `hvi` among them, whether `--hypervisor` or the
   `com.urunc.unikernel.hypervisor` annotation gives it. Without the flag,
   the monitor comes from that annotation, and a plain image boots on
   `cloud-hypervisor`, since the bundle ships no qemu, urunc's own default.
   The monitor must also be installed where urunc's configuration says; the
-  bundle ships `cloud-hypervisor` and `firecracker`, and `hvi` from
-  v0.1.0-rc21.
-- `hvi` here is urunc's monitor of that name, which boots the guest on KVM,
-  not the macOS backend. Only the urunc of the bundle from v0.1.0-rc21 runs
-  it. An older urunc refuses it as an unsupported monitor when the task is
-  created, after the container exists, and hull cannot tell which urunc the
-  shim runs, so it cannot refuse the run sooner.
+  bundle ships `cloud-hypervisor` and `firecracker`.
 - `--snapshotter` names the containerd snapshotter that holds the
   instance's root filesystem, such as `devmapper`. Without it, the instance
   gets the namespace's default snapshotter, the one `hull pull` unpacks
@@ -658,8 +676,8 @@ ways:
   container's spec, empty for one that is not set. urunc's shim copies any of
   them the spec lacks from the image's manifest, and an image could
   otherwise name a host file as the kernel or initrd to boot. The image's
-  annotations are still honored, except `bootKernel`, `bootInitrd`,
-  `rootfsMode`, `vAccel` and `RPCAddress`, which only `--annotation` sets.
+  annotations are still honored, except `bootKernel`, `bootInitrd`, `vAccel`
+  and `RPCAddress`, which only `--annotation` sets.
 - `hull run` refuses a run urunc would not boot as a VM. urunc needs a
   unikernel type and a monitor in the annotations, and a binary unless a
   boot kernel and initrd are given. When one is missing it looks for a

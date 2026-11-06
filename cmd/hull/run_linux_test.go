@@ -55,6 +55,7 @@ func TestRunRefusesBeforeDialling(t *testing.T) {
 		{[]string{"-d", "--net", "shared", "busybox"}, "load CNI network bridge"},
 		{[]string{"-d", "--pull", "sometimes", "busybox"}, `invalid --pull "sometimes"`},
 		{[]string{"-d", "--hypervisor", "vz", "busybox"}, "--hypervisor vz: macOS only"},
+		{[]string{"-d", "--hypervisor", "hvi", "busybox"}, "--hypervisor hvi: macOS only"},
 		{[]string{"-d", "--hypervisor", "kvm", "busybox"}, "urunc has no such monitor"},
 		{[]string{"-d", "--annotation", "novalue", "busybox"}, `invalid --annotation "novalue"`},
 		{[]string{"-d", "--name", "../x", "busybox"}, "--name: invalid instance name"},
@@ -429,9 +430,9 @@ func TestRunRefusalsAgainstDaemon(t *testing.T) {
 	if !errors.Is(err, containerd.ErrNotVM) || !strings.Contains(err.Error(), "with --annotation") {
 		t.Errorf("--no-boot-assets of a plain image: error = %v, want ErrNotVM and how to name a unikernel", err)
 	}
-	err = run(append([]string{"--pull", "never", "--annotation", ociclient.HypervisorAnnotation + "=vz"}, bootFiles...)...)
-	if err == nil || !strings.Contains(err.Error(), ociclient.HypervisorAnnotation+"=vz: macOS only") {
-		t.Errorf("vz named by an annotation: error = %v, want it refused", err)
+	err = run(append([]string{"--pull", "never", "--annotation", ociclient.HypervisorAnnotation + "=hvi"}, bootFiles...)...)
+	if err == nil || !strings.Contains(err.Error(), ociclient.HypervisorAnnotation+"=hvi: macOS only") {
+		t.Errorf("hvi named by an annotation: error = %v, want it refused", err)
 	}
 	// A share urunc would leave out of the guest is refused: on a monitor
 	// that cannot share a directory, and for an image that boots its own
@@ -552,18 +553,6 @@ func TestRunPassesTheShares(t *testing.T) {
 	want := []specs.Mount{{Type: "bind", Source: dir, Destination: "/workspace", Options: []string{"rbind", "rprivate", "ro"}}}
 	if !reflect.DeepEqual(cfg.Mounts, want) {
 		t.Errorf("mounts = %+v, want %+v", cfg.Mounts, want)
-	}
-}
-
-// hvi names a macOS backend and a urunc monitor both. On Linux it is the
-// monitor, and reaches urunc as given, where vz is refused.
-func TestRunPassesTheMonitor(t *testing.T) {
-	privateLogDirs(t)
-	f := newInstanceFixture(t)
-	cfg := runConfigOf(t, f, append([]string{"--hypervisor", "hvi"}, bootFileArgs(t)...)...)
-	got := cfg.Annotations[ociclient.HypervisorAnnotation]
-	if got != "hvi" {
-		t.Errorf("monitor = %q, want hvi", got)
 	}
 }
 

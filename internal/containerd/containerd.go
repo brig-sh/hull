@@ -39,15 +39,18 @@ import (
 
 	"github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/pkg/identifiers"
+	securejoin "github.com/cyphar/filepath-securejoin"
 )
 
 // AddressEnv names the environment variable that overrides the socket
-// address when no address is passed explicitly.
-const AddressEnv = "HULL_CONTAINERD_ADDRESS"
+// address when no address is passed explicitly. It is the one nerdctl and
+// ctr read, so an environment set up for them points hull at the same
+// daemon.
+const AddressEnv = "CONTAINERD_ADDRESS"
 
 // NamespaceEnv names the environment variable that overrides the namespace
-// when no namespace is passed explicitly.
-const NamespaceEnv = "HULL_NAMESPACE"
+// when no namespace is passed explicitly, the one nerdctl and ctr read.
+const NamespaceEnv = "CONTAINERD_NAMESPACE"
 
 // DefaultNamespace is the namespace hull uses when nothing names another.
 const DefaultNamespace = "hull"
@@ -69,25 +72,108 @@ var (
 )
 
 // ResolveAddress picks the containerd socket address: the explicit address if
-// one was given (a command-line flag), then $HULL_CONTAINERD_ADDRESS, then
-// the default for the current user.
+// one was given (a command-line flag), then $CONTAINERD_ADDRESS, then the
+// default for the current user.
 //
 // The default for root is the system socket, /run/containerd/containerd.sock.
 // For any other user it is the socket a rootless containerd started by
 // containerd-rootless.sh exposes on the host,
 // $XDG_RUNTIME_DIR/containerd/containerd.sock.
-func ResolveAddress(explicit string) string {
+//
+// A given address is read as nerdctl reads it; see inRootlessKit.
+func ResolveAddress(explicit string) (string, error) {
 	if explicit != "" {
-		return explicit
+		return inRootlessKit(explicit)
 	}
 	env := os.Getenv(AddressEnv)
 	if env != "" {
-		return env
+		return inRootlessKit(env)
 	}
 	if geteuid() == 0 {
-		return rootfulAddress
+		return rootfulAddress, nil
 	}
-	return filepath.Join(runtimeDir(), "containerd", "containerd.sock")
+	return filepath.Join(runtimeDir(), "containerd", "containerd.sock"), nil
+}
+
+// childRoot is where hull finds the root directory of rootlesskit's child,
+// the process pid. Overridable in tests.
+var childRoot = func(pid int) string {
+	return filepath.Join("/proc", strconv.Itoa(pid), "root")
+}
+
+// userNamespace returns the user namespace of a process, proc being "self"
+// or a process ID, as /proc names it. Overridable in tests.
+var userNamespace = func(proc string) (string, error) {
+	return os.Readlink(filepath.Join("/proc", proc, "ns", "user"))
+}
+
+// inRootlessKit returns address as a path in the mount namespace of the
+// rootlesskit a rootless containerd runs under, when hull runs as a user
+// with a rootlesskit state directory, and address unchanged otherwise.
+//
+// nerdctl, run as a user, first re-executes itself in rootlesskit's
+// namespaces (rootlessutil.ParentMain), and only then reads its address.
+// There, containerd-rootless.sh has mounted $XDG_RUNTIME_DIR/containerd over
+// /run/containerd, so the address an environment set up for nerdctl
+// carries, unix:///run/containerd/containerd.sock, is the rootless daemon's
+// socket. On the host it is the system daemon's. hull stays on the host and
+// opens the path through /proc/<pid>/root of rootlesskit's child. The
+// kernel resolves an absolute symlink met on that path against hull's root,
+// the host's, so /var/run, a link to /run, would lead back to the system
+// daemon: the path is resolved inside the child's root first, as a process
+// in the namespace would. A path rootlesskit's namespace does not replace,
+// such as one under $XDG_RUNTIME_DIR, is the same file either way.
+//
+// A state directory whose child is gone is a stopped rootlesskit's, and
+// nerdctl fails then. So does hull, rather than dial the address on the
+// host, which names the system daemon: a user who can reach it would drive
+// it in place of the rootless one. A rootlesskit that did not stop cleanly
+// leaves child_pid behind, and the kernel may give that ID to another
+// process. One of another user, like one that is gone, has a namespace hull
+// cannot read. One of this user on the host has hull's user namespace and
+// the host's root, where the path names the system daemon again. nerdctl
+// fails on it too, since nsenter cannot enter the user namespace it is
+// already in. rootlesskit always gives its child a user namespace of its
+// own, so hull refuses a child that shares its own.
+func inRootlessKit(address string) (string, error) {
+	if geteuid() == 0 {
+		return address, nil
+	}
+	stateDir := RootlessKitStateDir()
+	if stateDir == "" {
+		return address, nil
+	}
+	path := strings.TrimPrefix(address, "unix://")
+	if !filepath.IsAbs(path) {
+		return address, nil
+	}
+	pidFile := filepath.Join(stateDir, "child_pid")
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		return "", fmt.Errorf("rootless containerd not running? %w", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return "", fmt.Errorf("rootless containerd not running? %s holds no process ID: %q", pidFile, data)
+	}
+	childNS, err := userNamespace(strconv.Itoa(pid))
+	if err != nil {
+		return "", fmt.Errorf("rootless containerd not running? rootlesskit's child, process %d in %s, "+
+			"is gone or not this user's: %w", pid, pidFile, err)
+	}
+	selfNS, err := userNamespace("self")
+	if err != nil {
+		return "", err
+	}
+	if childNS == selfNS {
+		return "", fmt.Errorf("rootless containerd not running? process %d in %s is not rootlesskit's "+
+			"child: it shares hull's user namespace", pid, pidFile)
+	}
+	resolved, err := securejoin.SecureJoin(childRoot(pid), path)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s in rootlesskit's mount namespace: %w", path, err)
+	}
+	return resolved, nil
 }
 
 // runtimeDir returns the user's runtime directory: $XDG_RUNTIME_DIR, or
@@ -131,7 +217,8 @@ func RootlessKitStateDir() string {
 }
 
 // ResolveNamespace picks the containerd namespace: the explicit namespace if
-// one was given (a command-line flag), then $HULL_NAMESPACE, then "hull".
+// one was given (a command-line flag), then $CONTAINERD_NAMESPACE, then
+// "hull".
 func ResolveNamespace(explicit string) string {
 	if explicit != "" {
 		return explicit
