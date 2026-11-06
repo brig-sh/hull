@@ -109,7 +109,10 @@ func newApp() *cli.Command {
 // connectContainerd opens a client to the containerd daemon the global flags
 // name, scoped to hull's namespace. The caller closes it.
 func connectContainerd(ctx context.Context, cmd *cli.Command) (*client.Client, error) {
-	address := containerd.ResolveAddress(cmd.String("containerd-address"))
+	address, err := containerd.ResolveAddress(cmd.String("containerd-address"))
+	if err != nil {
+		return nil, err
+	}
 	namespace := containerd.ResolveNamespace(cmd.String("namespace"))
 	return containerd.Connect(ctx, address, namespace)
 }

@@ -108,15 +108,35 @@ them, with the same output as on macOS. All three need a running containerd, whi
 start. hull looks for its socket in this order:
 
 1. `--containerd-address`
-2. `$HULL_CONTAINERD_ADDRESS`
+2. `$CONTAINERD_ADDRESS`, which nerdctl and ctr read too, with or without
+   `unix://` in front
 3. `/run/containerd/containerd.sock` when run as root, and
    `$XDG_RUNTIME_DIR/containerd/containerd.sock`, where a rootless containerd
    puts it, for any other user. With `$XDG_RUNTIME_DIR` unset or not an
    absolute path, `/run/user/<uid>` takes its place.
 
+For a user whose rootless containerd is running under rootlesskit, an
+absolute address from `--containerd-address` or `$CONTAINERD_ADDRESS` is a
+path in rootlesskit's mount namespace, as it is for nerdctl, which runs
+there. `containerd-rootless.sh` mounts `$XDG_RUNTIME_DIR/containerd` over
+`/run/containerd` in that namespace, so `unix:///run/containerd/containerd.sock`,
+the address the brig bundle's `brig-env.sh` sets for such a user, is the
+rootless daemon's socket and not the system daemon's. hull stays on the host
+and opens the path through `/proc/<pid>/root` of rootlesskit's child, a path
+its errors name, resolving any symbolic link on it inside that root, as a
+process in the namespace would: `/var/run`, a link to `/run`, leads to the
+rootless daemon too. A path rootlesskit's namespace does not replace, such
+as one under `$XDG_RUNTIME_DIR`, is the same file either way. When the
+state directory is a stopped rootlesskit's, whose child is gone, hull fails
+with "rootless containerd not running?", as nerdctl does, rather than reach
+the system daemon at the same path on the host. Remove the state directory,
+or point `$ROOTLESSKIT_STATE_DIR` at a directory that does not exist, to use
+the host's path. Root leaves the address as given.
+
 There is no store directory on Linux, and no `--store-dir`. Isolation comes
 from the containerd namespace instead: `--namespace`, then
-`$HULL_NAMESPACE`, then `hull`. Two namespaces see none of each other's
+`$CONTAINERD_NAMESPACE`, which nerdctl and ctr read too, then `hull`.
+Two namespaces see none of each other's
 images, and `ctr -n hull images ls` shows what hull sees.
 
 containerd keeps one record per image name, and it may hold several
