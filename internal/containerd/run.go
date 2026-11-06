@@ -32,6 +32,7 @@ import (
 	"github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/containers"
 	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/defaults"
 	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/containerd/errdefs"
@@ -204,6 +205,8 @@ type RunConfig struct {
 	// Network, when not nil, attaches the instance to a network. Without
 	// it, the instance has none.
 	Network *Network
+	// Mounts are added to the spec's, for urunc to take into the guest.
+	Mounts []specs.Mount
 }
 
 // afterCreate runs between CreateInstance's create of the container and its
@@ -432,6 +435,9 @@ func newContainer(ctx context.Context, c *client.Client, image RunImage, cfg Run
 	if cfg.CPUs > 0 {
 		specOpts = append(specOpts, oci.WithCPUCFS(int64(cfg.CPUs)*cpuPeriod, cpuPeriod))
 	}
+	if len(cfg.Mounts) > 0 {
+		specOpts = append(specOpts, oci.WithMounts(cfg.Mounts))
+	}
 	network := "none"
 	if cfg.Network != nil {
 		specOpts = append(specOpts, withNetwork(cfg.Network))
@@ -557,6 +563,24 @@ func writeNetworkFiles(n *Network) error {
 		return err
 	}
 	return os.Chmod(path, 0o644)
+}
+
+// ResolveSnapshotter returns the snapshotter a run given snapshotter, "" for
+// the namespace's default, creates its container in: the namespace's
+// containerd.io/defaults/snapshotter label, else containerd's default, as
+// the client resolves it when it unpacks and creates.
+func ResolveSnapshotter(ctx context.Context, c *client.Client, snapshotter string) (string, error) {
+	if snapshotter != "" {
+		return snapshotter, nil
+	}
+	label, err := c.GetLabel(ctx, defaults.DefaultSnapshotterNSLabel)
+	if err != nil {
+		return "", fmt.Errorf("read the namespace's default snapshotter: %w", err)
+	}
+	if label != "" {
+		return label, nil
+	}
+	return defaults.DefaultSnapshotter, nil
 }
 
 // unpack unpacks img into snapshotter, "" for the namespace's default, when

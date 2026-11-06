@@ -31,6 +31,7 @@ import (
 
 	"github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/pkg/oci"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 
 	"github.com/brig-sh/hull/internal/bootassets"
 	"github.com/brig-sh/hull/internal/containerd"
@@ -61,6 +62,7 @@ func TestRunRefusesBeforeDialling(t *testing.T) {
 		// A name hull takes elsewhere, but not a containerd identifier.
 		{[]string{"-d", "--name", "web-", "busybox"}, "--name: invalid instance name"},
 		{[]string{"-d", "--env-file", "/nonexistent/env", "busybox"}, "--env-file: open /nonexistent/env"},
+		{[]string{"-d", "--shared-dir", "/nonexistent:/mnt", "busybox"}, "shared directory not found: /nonexistent"},
 		{[]string{"-d"}, "image reference required"},
 	} {
 		app := newApp()
@@ -432,6 +434,22 @@ func TestRunRefusalsAgainstDaemon(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), ociclient.HypervisorAnnotation+"=hvi: macOS only") {
 		t.Errorf("hvi named by an annotation: error = %v, want it refused", err)
 	}
+	// A share urunc would leave out of the guest is refused: on a monitor
+	// that cannot share a directory, and for an image that boots its own
+	// kernel from a snapshot that may be a disk.
+	share := t.TempDir()
+	err = run(append([]string{"--pull", "never", "--shared-dir", share + ":/mnt", "--hypervisor", "firecracker"}, bootFiles...)...)
+	if err == nil || !strings.Contains(err.Error(), "and the run's is firecracker") {
+		t.Errorf("a share on firecracker: error = %v, want it refused", err)
+	}
+	err = run("--pull", "never", "--no-boot-assets", "--shared-dir", share+":/mnt", "--snapshotter", "native",
+		"--annotation", ociclient.UnikernelTypeAnnotation+"=linux",
+		"--annotation", ociclient.HypervisorAnnotation+"=cloud-hypervisor",
+		"--annotation", ociclient.UnikernelBinaryAnnotation+"=/unikernel",
+		"--annotation", "com.urunc.unikernel.mountRootfs=true")
+	if err == nil || !strings.Contains(err.Error(), "needs the overlayfs snapshotter, and the run's is native") {
+		t.Errorf("a share for an image's own kernel on native: error = %v, want it refused", err)
+	}
 	err = run(append([]string{"--pull", "never", "--annotation", "io.kubernetes.cri.container-name=queue-proxy"}, bootFiles...)...)
 	if err == nil || !strings.Contains(err.Error(), "io.kubernetes.cri.container-name is refused") {
 		t.Errorf("a CRI container name: error = %v, want it refused", err)
@@ -524,6 +542,17 @@ func TestRunPassesTheSnapshotter(t *testing.T) {
 	unpacked, err := img.IsUnpacked(context.Background(), "native")
 	if err != nil || !unpacked {
 		t.Errorf("unpacked into native = %v, %v; want true", unpacked, err)
+	}
+}
+
+func TestRunPassesTheShares(t *testing.T) {
+	privateLogDirs(t)
+	f := newInstanceFixture(t)
+	dir := t.TempDir()
+	cfg := runConfigOf(t, f, append([]string{"--shared-dir", dir + ":/workspace:ro"}, bootFileArgs(t)...)...)
+	want := []specs.Mount{{Type: "bind", Source: dir, Destination: "/workspace", Options: []string{"rbind", "rprivate", "ro"}}}
+	if !reflect.DeepEqual(cfg.Mounts, want) {
+		t.Errorf("mounts = %+v, want %+v", cfg.Mounts, want)
 	}
 }
 

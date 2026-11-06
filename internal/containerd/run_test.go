@@ -19,11 +19,13 @@ package containerd
 import (
 	"context"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +39,7 @@ import (
 	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	runtimespec "github.com/opencontainers/runtime-spec/specs-go"
 
 	"github.com/brig-sh/hull/internal/containerd/containerdtest"
 	"github.com/brig-sh/hull/internal/imageplatform"
@@ -194,6 +197,7 @@ func TestNewContainerThroughDaemon(t *testing.T) {
 		},
 		Backend: "firecracker",
 		LogFile: logFile,
+		Mounts:  []runtimespec.Mount{{Type: "bind", Source: "/srv/work", Destination: "/workspace", Options: []string{"rbind", "ro"}}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -244,6 +248,11 @@ func TestNewContainerThroughDaemon(t *testing.T) {
 	spec, err := ctr.Spec(ctx)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(spec.Mounts, func(m runtimespec.Mount) bool {
+		return m.Destination == "/workspace" && m.Source == "/srv/work" && slices.Equal(m.Options, []string{"rbind", "ro"})
+	}) {
+		t.Errorf("spec mounts = %+v, want the run's bind mount of /srv/work at /workspace", spec.Mounts)
 	}
 	for _, k := range uruncKeys {
 		_, ok := spec.Annotations[k]
@@ -750,4 +759,87 @@ func newSnapshotterContainer(ctx context.Context, t *testing.T, c *client.Client
 		t.Cleanup(func() { _ = ctr.Delete(context.Background(), client.WithSnapshotCleanup) })
 	}
 	return ctr, err
+}
+
+func TestCheckShares(t *testing.T) {
+	boot := map[string]string{
+		ociclient.HypervisorAnnotation: "cloud-hypervisor",
+		ociclient.BootKernelAnnotation: "/boot/kernel",
+		ociclient.BootInitrdAnnotation: "/boot/initrd",
+	}
+	own := map[string]string{
+		ociclient.HypervisorAnnotation:      "qemu",
+		ociclient.UnikernelBinaryAnnotation: "/unikernel",
+		"com.urunc.unikernel.mountRootfs":   "true",
+	}
+	with := func(spec, extra map[string]string) map[string]string {
+		spec = maps.Clone(spec)
+		maps.Copy(spec, extra)
+		return spec
+	}
+	for _, tc := range []struct {
+		name        string
+		spec        map[string]string
+		snapshotter string
+		want        string
+	}{
+		{"a container boot on overlayfs", boot, "overlayfs", ""},
+		{"a container boot on devmapper", boot, "devmapper", ""},
+		{"a container boot with only a kernel", with(boot, map[string]string{ociclient.BootInitrdAnnotation: ""}),
+			"devmapper", ""},
+		{"a container boot with only an initrd", with(boot, map[string]string{ociclient.BootKernelAnnotation: ""}),
+			"devmapper", ""},
+		{"a container boot on hvi", with(boot, map[string]string{ociclient.HypervisorAnnotation: "hvi"}), "devmapper", ""},
+		{"no monitor", map[string]string{}, "overlayfs", ""},
+		{"a container boot on firecracker", with(boot, map[string]string{ociclient.HypervisorAnnotation: "firecracker"}),
+			"overlayfs", "the run's is firecracker"},
+		{"an image's own kernel on hvt", with(own, map[string]string{ociclient.HypervisorAnnotation: "hvt"}), "overlayfs",
+			"the run's is hvt"},
+		{"an image's own kernel on overlayfs", own, "overlayfs", ""},
+		{"an image's own kernel on devmapper", own, "devmapper",
+			"needs the overlayfs snapshotter, and the run's is devmapper"},
+		{"an image's own kernel without mountRootfs", with(own, map[string]string{"com.urunc.unikernel.mountRootfs": ""}),
+			"overlayfs", `mountRootfs is ""`},
+		{"an image's own kernel with mountRootfs false", with(own, map[string]string{"com.urunc.unikernel.mountRootfs": "false"}),
+			"overlayfs", `mountRootfs is "false"`},
+		{"an image's own kernel with mountRootfs unparsable", with(own, map[string]string{"com.urunc.unikernel.mountRootfs": "yes"}),
+			"overlayfs", `mountRootfs is "yes"`},
+		{"an initrd root", with(own, map[string]string{ociclient.InitrdAnnotation: "/initrd"}), "overlayfs", "initrd"},
+		{"a block root", with(own, map[string]string{"com.urunc.unikernel.block": "/dev/vdb", "com.urunc.unikernel.blkMntPoint": "/"}),
+			"overlayfs", "block device mounted at /"},
+		{"a block elsewhere", with(own, map[string]string{"com.urunc.unikernel.block": "/dev/vdb", "com.urunc.unikernel.blkMntPoint": "/data"}),
+			"overlayfs", ""},
+	} {
+		err := CheckShares(tc.spec, tc.snapshotter)
+		if tc.want == "" {
+			if err != nil {
+				t.Errorf("%s: %v, want the shares taken", tc.name, err)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: error = %v, want %q", tc.name, err, tc.want)
+		}
+	}
+}
+
+func TestResolveSnapshotterThroughDaemon(t *testing.T) {
+	c := instancesClient(t)
+	ctx := context.Background()
+	got, err := ResolveSnapshotter(ctx, c, "devmapper")
+	if err != nil || got != "devmapper" {
+		t.Errorf("a named snapshotter: %q, %v; want devmapper", got, err)
+	}
+	got, err = ResolveSnapshotter(ctx, c, "")
+	if err != nil || got != defaults.DefaultSnapshotter {
+		t.Errorf("no label: %q, %v; want %s", got, err, defaults.DefaultSnapshotter)
+	}
+	err = c.NamespaceService().SetLabel(ctx, c.DefaultNamespace(), defaults.DefaultSnapshotterNSLabel, "native")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err = ResolveSnapshotter(ctx, c, "")
+	if err != nil || got != "native" {
+		t.Errorf("the namespace's label: %q, %v; want native", got, err)
+	}
 }

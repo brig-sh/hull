@@ -413,8 +413,9 @@ number can be named twice, and a failed parse closes only what hull took.
 The descriptor must survive the exec, so clear `FD_CLOEXEC` on it first. hull
 rejects the following before anything starts: a spec with no guest path, a
 non-numeric descriptor, a descriptor number below 3, a relative guest path, a
-descriptor naming a regular file rather than a directory, an unknown access
-mode, and a number the process does not hold. That last error names
+guest path of `/`, a guest path another share of the run takes, whichever flag
+named it, a descriptor naming a regular file rather than a directory, an
+unknown access mode, and a number the process does not hold. That last error names
 `FD_CLOEXEC` as the likely cause.
 
 Two consequences:
