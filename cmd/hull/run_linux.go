@@ -38,9 +38,8 @@ import (
 )
 
 // defaultHypervisor is the monitor a plain image boots on. The
-// brig-standalone-linux bundle ships no qemu, which is the monitor urunc
-// picks when none is named. It ships cloud-hypervisor in every release, and
-// hvi only from v0.1.0-rc21, so hvi is not the default.
+// brig-standalone-linux bundle ships cloud-hypervisor and firecracker, and
+// no qemu, which is the monitor urunc picks when none is named.
 const defaultHypervisor = "cloud-hypervisor"
 
 func runCommand() *cli.Command {
@@ -282,7 +281,7 @@ func planBoot(annotations, image map[string]string, noBootAssets bool,
 // checkMonitor refuses a monitor urunc would refuse only when the task is
 // created, after the container and its snapshot exist.
 func checkMonitor(name string) error {
-	if name == "vz" {
+	if name == "vz" || name == "hvi" {
 		return errors.New("macOS only. On Linux urunc boots the instance, with a monitor such as cloud-hypervisor")
 	}
 	if !slices.Contains(containerd.Monitors, name) {

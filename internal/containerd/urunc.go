@@ -32,8 +32,7 @@ const RuntimeName = "io.containerd.urunc.v2"
 const uruncPrefix = "com.urunc.unikernel."
 
 // uruncKeys is every annotation the urunc of the brig-standalone-linux bundle
-// reads, at urunc-dev/urunc@3c00b69 (pkg/unikontainers/annotations.go), the
-// urunc of the bundle from v0.1.0-rc21.
+// reads, at urunc-dev/urunc@0b1ef07 (pkg/unikontainers/annotations.go).
 //
 // urunc's containerd shim copies each com.urunc.unikernel.* key of the
 // image's manifest annotations and of the container's labels into the
@@ -50,33 +49,24 @@ var uruncKeys = []string{
 	ociclient.UnikernelBinaryAnnotation,
 	ociclient.HypervisorAnnotation,
 	ociclient.InitrdAnnotation,
-	"com.urunc.unikernel.snapshot",
 	"com.urunc.unikernel.block",
 	"com.urunc.unikernel.blkMntPoint",
 	"com.urunc.unikernel.mountRootfs",
 	ociclient.BootKernelAnnotation,
 	ociclient.BootInitrdAnnotation,
-	rootfsModeAnnotation,
 	"com.urunc.unikernel.solo5NetDev",
 	"com.urunc.unikernel.solo5BlkDev",
-	"com.urunc.unikernel.hyperlightPorts",
 	"com.urunc.unikernel.vAccel",
 	"com.urunc.unikernel.RPCAddress",
 }
 
-// rootfsModeAnnotation chooses how urunc builds the guest's root, such as
-// overlay-block, which takes two disks the host builds.
-const rootfsModeAnnotation = "com.urunc.unikernel.rootfsMode"
-
 // hostKeys name things on the host rather than in the image: the boot
-// kernel and initrd are host paths, vAccel and RPCAddress configure a host
-// service, and the root mode is how the host builds the guest's root. Only
-// the invocation sets them, never the image. urunc itself keeps them out of
-// an image's urunc.json for the same reason.
+// kernel and initrd are host paths, and vAccel and RPCAddress configure a
+// host service. Only the invocation sets them, never the image. urunc
+// itself keeps them out of an image's urunc.json for the same reason.
 var hostKeys = map[string]bool{
 	ociclient.BootKernelAnnotation:   true,
 	ociclient.BootInitrdAnnotation:   true,
-	rootfsModeAnnotation:             true,
 	"com.urunc.unikernel.vAccel":     true,
 	"com.urunc.unikernel.RPCAddress": true,
 }
@@ -115,12 +105,10 @@ func UruncAnnotations(explicit, image map[string]string) map[string]string {
 	return out
 }
 
-// Monitors are the monitors urunc boots a guest on, at urunc-dev/urunc@3c00b69
-// (supportedGuestMonitorPairs in pkg/unikontainers/annotations.go), the urunc
-// of the brig-standalone-linux bundle from v0.1.0-rc21. urunc refuses any
-// other only when the task is created. hvi is new there: the urunc of an
-// older bundle refuses it at that point too, as an unsupported pair.
-var Monitors = []string{"cloud-hypervisor", "firecracker", "qemu", "hvi", "hvt", "spt", "hyperlight-unikraft"}
+// Monitors are the monitors urunc boots a guest on, at the commit uruncKeys
+// names (supportedGuestMonitorPairs in pkg/unikontainers/annotations.go).
+// urunc refuses any other only when the task is created.
+var Monitors = []string{"cloud-hypervisor", "firecracker", "qemu", "hvt", "spt", "hyperlight-unikraft"}
 
 // criContainerName is the annotation the CRI plugin names a pod's container
 // with. urunc reads it before any annotation of its own: it hands a
