@@ -28,6 +28,7 @@ func TestShortFlagsParse(t *testing.T) {
 		{restoreCommand, []string{"restore", "-d", "inst"}, "detach", func(c *cli.Command) bool { return c.Bool("detach") }},
 		{logsCommand, []string{"logs", "-f", "inst"}, "follow", func(c *cli.Command) bool { return c.Bool("follow") }},
 		{logsCommand, []string{"logs", "-n", "7", "inst"}, "tail", func(c *cli.Command) bool { return c.Int("tail") == 7 }},
+		{psCommand, []string{"ps", "-a"}, "all", func(c *cli.Command) bool { return c.Bool("all") }},
 		{rmCommand, []string{"rm", "-f", "inst"}, "force", func(c *cli.Command) bool { return c.Bool("force") }},
 		{stopCommand, []string{"stop", "-t", "3", "inst"}, "timeout", func(c *cli.Command) bool { return c.Int("timeout") == 3 }},
 	}
