@@ -73,10 +73,7 @@ func runCommand() *cli.Command {
 			memFlag(),
 			cpusFlag(),
 			nameFlag(),
-			&cli.StringSliceFlag{
-				Name:  "shared-dir",
-				Usage: "share a host directory with the guest: /host/path:/guest/path[:ro|rw] (repeatable)",
-			},
+			sharedDirFlag(),
 			&cli.StringSliceFlag{
 				Name: "shared-dir-fd",
 				Usage: "share a directory the caller already holds open: FD:/guest/path[:ro|rw] (repeatable). " +
@@ -1575,6 +1572,7 @@ type hostShare struct {
 func parseShares(pathSpecs, fdSpecs []string, vmmName string) ([]hostShare, []*os.File, error) {
 	var shares []hostShare
 	var files []*os.File
+	taken := map[string]bool{}
 	closeAll := func() {
 		for _, f := range files {
 			_ = f.Close()
@@ -1582,32 +1580,31 @@ func parseShares(pathSpecs, fdSpecs []string, vmmName string) ([]hostShare, []*o
 	}
 
 	for _, spec := range pathSpecs {
-		parts, readOnly, err := splitShareSpec("shared-dir", spec, vmmName)
+		parts, readOnly, err := splitShareSpec("shared-dir", spec)
+		if err != nil {
+			return nil, nil, err
+		}
+		err = checkShareMode("shared-dir", spec, vmmName, readOnly)
 		if err != nil {
 			return nil, nil, err
 		}
 		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 			return nil, nil, fmt.Errorf("invalid shared-dir %q, expected /host/path:/guest/path[:mode]", spec)
 		}
-		hostPath, guestPath := parts[0], parts[1]
-		if !strings.HasPrefix(hostPath, "/") && !strings.HasPrefix(hostPath, ".") && !strings.HasPrefix(hostPath, "~") {
-			return nil, nil, fmt.Errorf("named volumes are not supported (%q): only bind mounts of host paths", hostPath)
-		}
-		if strings.HasPrefix(hostPath, "~") {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				return nil, nil, fmt.Errorf("failed to expand home directory: %w", err)
-			}
-			hostPath = filepath.Join(home, hostPath[1:])
-		}
-		info, err := os.Stat(hostPath)
+		hostPath, err := resolveShareHost(parts[0])
 		if err != nil {
-			return nil, nil, fmt.Errorf("shared directory not found: %s", hostPath)
+			return nil, nil, err
 		}
-		if !info.IsDir() {
-			return nil, nil, fmt.Errorf("%s is a file: file bind mounts are not supported (virtiofs/9p share directories)", hostPath)
-		}
+		guestPath := parts[1]
 		if err := validateGuestPath(guestPath); err != nil {
+			return nil, nil, err
+		}
+		err = checkScriptGuestPath(guestPath)
+		if err != nil {
+			return nil, nil, err
+		}
+		err = claimGuestPath(taken, guestPath)
+		if err != nil {
 			return nil, nil, err
 		}
 		shares = append(shares, hostShare{
@@ -1616,7 +1613,12 @@ func parseShares(pathSpecs, fdSpecs []string, vmmName string) ([]hostShare, []*o
 	}
 
 	for _, spec := range fdSpecs {
-		parts, readOnly, err := splitShareSpec("shared-dir-fd", spec, vmmName)
+		parts, readOnly, err := splitShareSpec("shared-dir-fd", spec)
+		if err != nil {
+			closeAll()
+			return nil, nil, err
+		}
+		err = checkShareMode("shared-dir-fd", spec, vmmName, readOnly)
 		if err != nil {
 			closeAll()
 			return nil, nil, err
@@ -1635,6 +1637,16 @@ func parseShares(pathSpecs, fdSpecs []string, vmmName string) ([]hostShare, []*o
 				spec, parts[0])
 		}
 		if err := validateGuestPath(parts[1]); err != nil {
+			closeAll()
+			return nil, nil, err
+		}
+		err = checkScriptGuestPath(parts[1])
+		if err != nil {
+			closeAll()
+			return nil, nil, err
+		}
+		err = claimGuestPath(taken, parts[1])
+		if err != nil {
 			closeAll()
 			return nil, nil, err
 		}
@@ -1678,36 +1690,25 @@ func parseShares(pathSpecs, fdSpecs []string, vmmName string) ([]hostShare, []*o
 
 func shareTag(i int) string { return fmt.Sprintf("share%d", i) }
 
-// splitShareSpec pulls the optional access mode off a share and returns what
-// is left of it. Both flags come through here, so each carries its own name:
-// an error naming a flag the caller did not pass sends them looking in the
-// wrong place.
-func splitShareSpec(flag, spec, vmmName string) ([]string, bool, error) {
-	parts := strings.Split(spec, ":")
-	if len(parts) != 3 {
-		return parts, false, nil
+// checkShareMode refuses a read-only share on a backend that cannot hold it
+// read-only. flag names the flag the share came from, as splitShareSpec's
+// errors do.
+func checkShareMode(flag, spec, vmmName string, readOnly bool) error {
+	// Vz and HVI can hold this read-only. QEMU shares over 9p here with
+	// no equivalent, and mounting read-write while the caller asked for
+	// read-only is the one outcome worth refusing outright -- a share you
+	// believe is protected and is not is worse than no share at all.
+	if readOnly && vmmName == "qemu" {
+		return fmt.Errorf("%s %q: read-only shares are not supported on the qemu backend; "+
+			"use --hypervisor vz, or drop the :ro suffix to mount it read-write", flag, spec)
 	}
-	switch parts[2] {
-	case "ro":
-		// Vz and HVI can hold this read-only. QEMU shares over 9p here with
-		// no equivalent, and mounting read-write while the caller asked for
-		// read-only is the one outcome worth refusing outright -- a share you
-		// believe is protected and is not is worse than no share at all.
-		if vmmName == "qemu" {
-			return nil, false, fmt.Errorf("%s %q: read-only shares are not supported on the qemu backend; "+
-				"use --hypervisor vz, or drop the :ro suffix to mount it read-write", flag, spec)
-		}
-		return parts[:2], true, nil
-	case "rw":
-		return parts[:2], false, nil
-	}
-	return nil, false, fmt.Errorf("invalid %s mode %q in %q (want ro or rw)", flag, parts[2], spec)
+	return nil
 }
 
-func validateGuestPath(guestPath string) error {
-	if !strings.HasPrefix(guestPath, "/") {
-		return fmt.Errorf("guest path %q must be absolute", guestPath)
-	}
+// checkScriptGuestPath refuses a guest path the guest's init script cannot
+// carry: the script that mounts the shares names the path unquoted, so a
+// space or a tab would split it and a quote would open a string.
+func checkScriptGuestPath(guestPath string) error {
 	if strings.ContainsAny(guestPath, " \t'\"") {
 		return fmt.Errorf("guest path %q must not contain spaces or quotes", guestPath)
 	}

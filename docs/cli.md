@@ -71,7 +71,7 @@ Twenty-three flags:
 | `--mem <MB>` | 512 | memory in MB |
 | `--cpus <n>` | 1 | number of vCPUs |
 | `--name <name>` | auto-generated | instance name |
-| `--shared-dir <spec>` | | share a host directory: `/host/path:/guest/path[:ro\|rw]`. Repeatable |
+| `--shared-dir <spec>` | | share a host directory: `/host/path:/guest/path[:ro\|rw]`. Repeatable, one share per guest path, and none at `/` |
 | `--shared-dir-fd <spec>` | | share a directory the caller already holds open: `FD:/guest/path[:ro\|rw]`. Clear `FD_CLOEXEC` first. Repeatable |
 | `--hypervisor <name>` | from image annotation, else `qemu` | `vz`, `hvi`, `qemu`, or `qemu-hvf` |
 | `--qemu-path <path>` | auto-detect, prefers a signed copy | path to `qemu-system-aarch64` |

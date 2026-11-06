@@ -19,6 +19,7 @@ package containerd
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/brig-sh/hull/pkg/ociclient"
@@ -123,6 +124,78 @@ func checkCRIKeys(annotations map[string]string) error {
 	if ok {
 		return fmt.Errorf("annotation %s is refused: urunc takes it from Kubernetes, and runs a "+
 			"container named queue-proxy with runc, on the host's kernel", criContainerName)
+	}
+	return nil
+}
+
+// sharedFSMonitors are the monitors urunc shares a host directory with a
+// guest on, over virtio-fs or 9p (SupportsSharedfs in
+// pkg/unikontainers/hypervisors at urunc-dev/urunc@3c00b69).
+var sharedFSMonitors = map[string]bool{"cloud-hypervisor": true, "hvi": true, "qemu": true}
+
+// CheckShares refuses bind mounts of directories, a run's shares, that urunc
+// would leave out of the guest with no error, given the run's spec
+// annotations and the snapshotter its root comes from. urunc takes such a
+// mount into the guest only on a root it shares from the host, over
+// virtio-fs or 9p, and on the overlay-block root (newRootfsBuilder in
+// pkg/unikontainers/unikontainers.go, ChooseRootfs in rootfs.go). Into a
+// root it boots from as an initrd or a disk it copies only files, and a
+// guest with no root from the host gets none of them.
+//
+// A container boot, of an image with no kernel of its own, has its root
+// shared from the host whenever the monitor can share one, on any
+// snapshotter. Only on a monitor that cannot, such as firecracker, does
+// urunc boot it from the snapshot as a disk (tryContainerRootfs). urunc
+// fails such a boot itself when it is given an initrd, a block image or
+// mountRootfs false (validateContainerBoot in annotations.go). The
+// overlay-block root is a container boot's too, on hvi, cloud-hypervisor or
+// qemu (validateRootfsMode), monitors that can share, so it passes the same
+// way and needs no check of its own.
+//
+// An image that boots its own kernel has a root from the host only with
+// mountRootfs true and neither an initrd nor a disk named for /. urunc then
+// boots it from the snapshot as a disk whenever the snapshot is a block
+// device, as devmapper's is, and shares it only otherwise. hull can tell
+// that the snapshot is no block device ahead of the run only for overlayfs.
+//
+// Both take the virtiofsd urunc is configured with to be present, as the
+// bundle ships it: without it urunc falls back to the snapshot as a disk on
+// cloud-hypervisor and hvi.
+func CheckShares(spec map[string]string, snapshotter string) error {
+	monitor := spec[ociclient.HypervisorAnnotation]
+	// checkBootsVM refuses a run that names no monitor, and says why.
+	if monitor == "" {
+		return nil
+	}
+	if !sharedFSMonitors[monitor] {
+		return fmt.Errorf("--shared-dir needs a monitor that shares a directory with the guest, cloud-hypervisor, "+
+			"hvi or qemu, and the run's is %s: urunc boots the guest on it from a disk or an initrd, and "+
+			"copies only files into it", monitor)
+	}
+	if spec[ociclient.BootKernelAnnotation] != "" || spec[ociclient.BootInitrdAnnotation] != "" {
+		return nil
+	}
+	if spec[ociclient.InitrdAnnotation] != "" {
+		return fmt.Errorf("--shared-dir cannot be used with %s: urunc then boots the guest from that initrd, "+
+			"and copies only files into it", ociclient.InitrdAnnotation)
+	}
+	if spec["com.urunc.unikernel.block"] != "" && spec["com.urunc.unikernel.blkMntPoint"] == "/" {
+		return errors.New("--shared-dir cannot be used with a block device mounted at /: urunc then boots the guest " +
+			"from that device, and copies only files into it")
+	}
+	// urunc takes a value it cannot parse as false.
+	mountRootfs := spec["com.urunc.unikernel.mountRootfs"]
+	mount, err := strconv.ParseBool(mountRootfs)
+	if err != nil || !mount {
+		return fmt.Errorf("--shared-dir needs urunc to mount the container's root for an image that boots its "+
+			"own kernel, and com.urunc.unikernel.mountRootfs is %q: urunc gives such a guest no root from "+
+			"the host, and so no share", mountRootfs)
+	}
+	if snapshotter != "overlayfs" {
+		return fmt.Errorf("--shared-dir for an image that boots its own kernel needs the overlayfs snapshotter, "+
+			"and the run's is %s: urunc boots such a guest from a snapshot that is a block device, as "+
+			"devmapper's is, and copies only files into it, and hull cannot tell ahead of the run what "+
+			"another snapshotter gives", snapshotter)
 	}
 	return nil
 }

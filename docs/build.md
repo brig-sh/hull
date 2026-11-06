@@ -526,6 +526,51 @@ ways:
   plugin's two `ACCEPT` rules for the address stay in the `CNI-FORWARD`
   chain: it removes its rules using the attach's result, and libcni records
   none for an attach that failed.
+- `--shared-dir` takes the macOS form, `/host/path:/guest/path[:ro|rw]`,
+  with the same refusals but one: the host path starts with `/`, `.` or `~`
+  and names a directory that exists, and the guest path is absolute, not
+  `/`, and no other share's. A space or a quote in the guest path, which
+  macOS refuses because its init script names the path unquoted, is taken:
+  urunc passes the path through no shell. With `--net shared` the guest
+  path cannot be `/etc/resolv.conf`, where hull puts the network's
+  resolver configuration. hull makes the host path absolute and puts it in the spec as a bind mount,
+  `rbind` and `rprivate` as `nerdctl run -v` makes one, with `ro` or `rw`,
+  and urunc takes it into the guest. As urunc 3c00b69 does it, that works on
+  two roots:
+  - On a root urunc shares from the host, over virtio-fs or 9p, the
+    directory is bind-mounted into the tree the guest shares. `ro` holds in
+    the guest, and a write reaches the host. A container boot gets this root
+    on cloud-hypervisor, hvi and qemu, on any snapshotter, devmapper too.
+  - On the overlay-block root (`com.urunc.unikernel.rootfsMode` set to
+    `overlay-block`), it is a virtio-fs export of its own, and `ro` holds
+    the same way.
+
+  On any other root urunc drops the directory with no error, because it
+  copies only files into a root it boots from as an initrd or a disk, and
+  gives a guest with no root from the host none. So hull refuses the share
+  before the instance exists:
+  - on a monitor that cannot share a directory, such as firecracker, where
+    urunc boots a container boot from the snapshot as a disk;
+  - for an image that boots its own kernel, unless
+    `com.urunc.unikernel.mountRootfs` is true, neither a
+    `com.urunc.unikernel.initrd` nor a block device mounted at `/` is
+    named, and the snapshotter is overlayfs. urunc boots such a guest from
+    the snapshot whenever that is a block device, as devmapper's is, and
+    hull can tell ahead of the run that it is not only for overlayfs.
+
+  urunc fails a container boot itself when it is given an initrd, a block
+  image or `com.urunc.unikernel.mountRootfs` false. All of this takes the
+  virtiofsd urunc is configured with to be there, as the bundle ships it:
+  without it, urunc boots a container boot on cloud-hypervisor or hvi from
+  a snapshot that is a block device, and drops the share.
+
+  `ro` is not recursive, as nerdctl's `:ro` is not either; hull has no
+  form of nerdctl's `:rro`, which is. urunc remounts only the top of the
+  bind read-only, so a file system mounted below a read-only share on the
+  host stays writable from the guest on a shared root, and is not shared
+  on the overlay-block root. hull checks the host path, and urunc opens it when the task is
+  created, so a directory put in its place in between is the one the
+  guest gets, as with nerdctl. `--shared-dir-fd` is macOS only.
 - `--env-file` adds the variables of a file, and is Linux only: macOS
   `hull run` does not take it. It follows `docker run --env-file`. Each
   line is `KEY=VALUE`, taken as written once its leading white space is

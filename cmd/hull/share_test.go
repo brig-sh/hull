@@ -266,6 +266,40 @@ func TestParseSharesErrorsNameTheirOwnFlag(t *testing.T) {
 	}
 }
 
+// A share at the guest's root is refused, and so are two at one guest path,
+// whichever flag named each.
+func TestParseSharesRefusesTheRootAndATakenPath(t *testing.T) {
+	dir := t.TempDir()
+	_, files, err := parseShares([]string{dir + ":/"}, nil, "vz")
+	closeShareFiles(files)
+	if err == nil || !strings.Contains(err.Error(), "is the guest's root") {
+		t.Errorf("a share at /: error = %v, want it refused", err)
+	}
+	_, files, err = parseShares([]string{dir + ":/mnt"}, []string{fdSpec(openDirFd(t, dir), "/mnt/")}, "vz")
+	closeShareFiles(files)
+	if err == nil || !strings.Contains(err.Error(), "guest path /mnt is shared twice") {
+		t.Errorf("two shares at /mnt: error = %v, want it refused", err)
+	}
+}
+
+// The init script names a guest path unquoted, so a path with a space or a
+// quote is refused from either flag.
+func TestParseSharesRefusesAPathTheScriptCannotCarry(t *testing.T) {
+	dir := t.TempDir()
+	for _, guest := range []string{"/my dir", "/it's", `/"q"`, "/a\tb"} {
+		_, files, err := parseShares([]string{dir + ":" + guest}, nil, "vz")
+		closeShareFiles(files)
+		if err == nil || !strings.Contains(err.Error(), "must not contain spaces or quotes") {
+			t.Errorf("--shared-dir at %q: error = %v, want it refused", guest, err)
+		}
+		_, files, err = parseShares(nil, []string{fdSpec(openDirFd(t, dir), guest)}, "vz")
+		closeShareFiles(files)
+		if err == nil || !strings.Contains(err.Error(), "must not contain spaces or quotes") {
+			t.Errorf("--shared-dir-fd at %q: error = %v, want it refused", guest, err)
+		}
+	}
+}
+
 // A read-only share on the 9p path is refused whichever flag named it, and the
 // refusal names that flag.
 func TestParseSharesFromFdReadOnlyRefusalNamesTheFlag(t *testing.T) {
