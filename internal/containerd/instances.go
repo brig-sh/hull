@@ -289,7 +289,12 @@ var ErrInstanceRunning = errors.New("instance is running")
 // for it to exit, so the snapshot is never removed from under a VMM that may
 // still be writing to it. An error that errdefs.IsNotFound accepts means no
 // instance has that name in the client's namespace.
-func RemoveInstance(ctx context.Context, c *client.Client, id string, kill bool, grace time.Duration) error {
+//
+// taskGone, when not nil, runs once the task is gone and before the
+// container is deleted, so it can still read the container. An error from
+// it keeps the container, and RemoveInstance returns the error.
+func RemoveInstance(ctx context.Context, c *client.Client, id string, kill bool, grace time.Duration,
+	taskGone func(context.Context, client.Container) error) error {
 	ctr, err := LoadNamed(ctx, c, id)
 	if err != nil {
 		return err
@@ -297,6 +302,12 @@ func RemoveInstance(ctx context.Context, c *client.Client, id string, kill bool,
 	err = deleteTask(ctx, ctr, ExecFIFODir(c.DefaultNamespace(), ctr.ID()), kill, grace)
 	if err != nil {
 		return err
+	}
+	if taskGone != nil {
+		err = taskGone(ctx, ctr)
+		if err != nil {
+			return err
+		}
 	}
 	err = ctr.Delete(ctx, client.WithSnapshotCleanup)
 	if err != nil {

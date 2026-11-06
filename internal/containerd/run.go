@@ -24,10 +24,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/containers"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/containerd/containerd/v2/pkg/oci"
@@ -35,6 +38,9 @@ import (
 	"github.com/containerd/platforms"
 	"github.com/distribution/reference"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
+
+	"github.com/brig-sh/hull/internal/cni"
 )
 
 // Labels hull sets on the containers it creates, for inspect to report.
@@ -188,6 +194,9 @@ type RunConfig struct {
 	// Snapshotter holds the instance's root filesystem. Empty means the
 	// namespace's default, the one a pull unpacks into.
 	Snapshotter string
+	// Network, when not nil, attaches the instance to a network. Without
+	// it, the instance has none.
+	Network *Network
 }
 
 // afterCreate runs between CreateInstance's create of the container and its
@@ -216,6 +225,40 @@ func ValidateRunNamespace(namespace string) error {
 	}
 	return nil
 }
+
+// Network attaches an instance to a network through OCI hooks: the runtime
+// runs Hook at createRuntime, once the instance's network namespace exists
+// and before urunc's start reads the interface from it, and at postStop,
+// when the task is deleted.
+type Network struct {
+	// Hook is the command the runtime runs, with "createRuntime" or
+	// "postStop" appended to its arguments.
+	Hook specs.Hook
+	// Dir holds the instance's network files: ResolvConf, which
+	// CreateInstance writes there as ResolvConfFile, and whatever the hook
+	// keeps. Its parent must exist. CreateInstance replaces a Dir that is
+	// left from an old instance, and removes it when the run fails.
+	//
+	// A hook that fails writes why to HookErrorFile there. At createRuntime,
+	// urunc puts a failed hook's output in its own error, but the shim
+	// reports only that urunc's child process went away, so CreateInstance
+	// adds the file to the error it returns. At postStop the hook succeeds
+	// anyway, and the file is all that is left of the error.
+	Dir        string
+	ResolvConf []byte
+}
+
+// ResolvConfFile is the file Network.Dir holds for the guest's
+// /etc/resolv.conf.
+const ResolvConfFile = "resolv.conf"
+
+// HookErrorFile is the file in Network.Dir the hook writes its error to,
+// when the attach at createRuntime or the detach at postStop fails.
+const HookErrorFile = "hook-error"
+
+// NetnsPinFile is the file in Network.Dir where the hook pins the
+// instance's network namespace while the instance is attached.
+const NetnsPinFile = "netns"
 
 // cpuPeriod is the CFS period a CPU count is expressed in. urunc sizes the
 // guest's vCPUs from the quota over the period, rounded up.
@@ -289,6 +332,12 @@ func CreateInstance(ctx context.Context, c *client.Client, image RunImage, cfg R
 			if derr != nil && !errors.Is(derr, os.ErrNotExist) {
 				err = errors.Join(err, fmt.Errorf("remove the log of %s: %w", cfg.Name, derr))
 			}
+			if cfg.Network != nil {
+				derr = RemoveNetworkDir(cfg.Network.Dir)
+				if derr != nil {
+					err = errors.Join(err, fmt.Errorf("remove the network files of %s: %w", cfg.Name, derr))
+				}
+			}
 		}
 	}()
 
@@ -299,9 +348,23 @@ func CreateInstance(ctx context.Context, c *client.Client, image RunImage, cfg R
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove the old log of %s: %w", cfg.Name, err)
 	}
+	// The network files are another live instance's until the name is
+	// taken, as the log is, and the resolver configuration must be in place
+	// before the task is created: on a block device root filesystem, urunc
+	// copies it into the guest's disk then.
+	if cfg.Network != nil {
+		err = writeNetworkFiles(cfg.Network)
+		if err != nil {
+			return fmt.Errorf("write the network files of %s: %w", cfg.Name, err)
+		}
+	}
 	task, err := ctr.NewTask(ctx, cio.LogFile(cfg.LogFile))
 	if err != nil {
-		return fmt.Errorf("create the task of %s: %w", cfg.Name, err)
+		err = fmt.Errorf("create the task of %s: %w", cfg.Name, err)
+		if cfg.Network != nil {
+			err = withHookError(err, cfg.Network.Dir)
+		}
+		return err
 	}
 	defer func() {
 		if err != nil {
@@ -359,6 +422,9 @@ func newContainer(ctx context.Context, c *client.Client, image RunImage, cfg Run
 	if cfg.CPUs > 0 {
 		specOpts = append(specOpts, oci.WithCPUCFS(int64(cfg.CPUs)*cpuPeriod, cpuPeriod))
 	}
+	if cfg.Network != nil {
+		specOpts = append(specOpts, withNetwork(cfg.Network))
+	}
 
 	id, err := newContainerID()
 	if err != nil {
@@ -403,6 +469,81 @@ func newContainerID() (string, error) {
 		return "", fmt.Errorf("make a container ID: %w", err)
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// withNetwork adds n's hooks to the spec, and binds its resolver
+// configuration over the guest's /etc/resolv.conf. urunc binds it into a
+// shared root filesystem, and copies it into a block device one.
+//
+// The guest keeps the image's own /etc/hosts, as on macOS. hull cannot
+// read the image's root filesystem to add to that file, and a file of its
+// own would drop the image's entries for no gain: it could not name the
+// instance's own address either, since on a block device root filesystem
+// urunc copies the file before the network has given the instance one.
+func withNetwork(n *Network) oci.SpecOpts {
+	return func(_ context.Context, _ oci.Client, _ *containers.Container, s *oci.Spec) error {
+		if s.Hooks == nil {
+			s.Hooks = &specs.Hooks{}
+		}
+		hook := func(event string) specs.Hook {
+			h := n.Hook
+			h.Args = append(slices.Clone(n.Hook.Args), event)
+			return h
+		}
+		s.Hooks.CreateRuntime = append(s.Hooks.CreateRuntime, hook("createRuntime"))
+		s.Hooks.Poststop = append(s.Hooks.Poststop, hook("postStop"))
+		s.Mounts = append(s.Mounts, specs.Mount{
+			Destination: "/etc/resolv.conf",
+			Type:        "bind",
+			Source:      filepath.Join(n.Dir, ResolvConfFile),
+			Options:     []string{"bind", "rprivate"},
+		})
+		return nil
+	}
+}
+
+// withHookError adds to err, a failed task create's, the error a failed
+// createRuntime hook wrote to HookErrorFile in dir, if it wrote one.
+func withHookError(err error, dir string) error {
+	reason, rerr := os.ReadFile(filepath.Join(dir, HookErrorFile))
+	if rerr != nil {
+		return err
+	}
+	return fmt.Errorf("%w: the network hook failed: %s", err, strings.TrimSpace(string(reason)))
+}
+
+// RemoveNetworkDir removes an instance's network directory, dir. When the
+// instance's postStop hook never ran, as when the hull binary it names is
+// gone, the namespace is still pinned in dir. A pin is a mount, which
+// unlink refuses with EBUSY in the mount namespace that holds it, as a
+// rootful daemon's and hull's own is, so the pin is released first.
+func RemoveNetworkDir(dir string) error {
+	err := cni.UnpinNetns(filepath.Join(dir, NetnsPinFile))
+	if err != nil {
+		return err
+	}
+	return os.RemoveAll(dir)
+}
+
+// writeNetworkFiles replaces n.Dir with one holding n's resolver
+// configuration. The file is readable by anyone, as the guest's
+// /etc/resolv.conf is, whatever the umask: urunc copies its mode into the
+// guest, where a process that is not root has to read it.
+func writeNetworkFiles(n *Network) error {
+	err := RemoveNetworkDir(n.Dir)
+	if err != nil {
+		return err
+	}
+	err = os.Mkdir(n.Dir, 0o755)
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(n.Dir, ResolvConfFile)
+	err = os.WriteFile(path, n.ResolvConf, 0o644)
+	if err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o644)
 }
 
 // unpack unpacks img into snapshotter, "" for the namespace's default, when

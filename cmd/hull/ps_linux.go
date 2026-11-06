@@ -49,9 +49,12 @@ func listInstances(ctx context.Context, cmd *cli.Command) error {
 	if err != nil {
 		return err
 	}
+	namespace := containerd.ResolveNamespace(cmd.String("namespace"))
 	records := make([]*store.InstanceState, 0, len(instances))
 	for _, inst := range instances {
-		records = append(records, instanceRecord(inst))
+		rec := instanceRecord(inst)
+		withNetworkAddress(rec, namespace)
+		records = append(records, rec)
 	}
 	return writeInstanceTable(cmd.Writer, records)
 }

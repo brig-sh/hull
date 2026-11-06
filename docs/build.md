@@ -90,8 +90,8 @@ it rather than letting the build assume it owns the box.
 ### Building on Linux
 
 A Linux port has started. It can start an instance in the background, with
-no network, run commands in it, read its log and stop it, and little else
-yet. `make linux`, or plain `make` on a Linux host, builds a `hull` whose
+no network or on a CNI bridge, run commands in it, read its log and stop
+it, and little else yet. `make linux`, or plain `make` on a Linux host, builds a `hull` whose
 only commands are `hull assets`, `hull exec`, `hull images`,
 `hull inspect`, `hull logs`, `hull ps`, `hull pull`, `hull rm`, `hull rmi`,
 `hull run`, `hull stop` and `hull version`. It builds no runners and signs
@@ -421,8 +421,105 @@ ways:
   `hull logs` reads, and nothing attaches to it. The log is under
   `$XDG_STATE_HOME/hull/<namespace>`, or `~/.local/state/hull/<namespace>`,
   and under `/var/log/hull/<namespace>` for root.
-- `--net` takes only `none`, its default: the instance has no network.
-  Neither `--net shared` nor the network gateway exists on Linux yet.
+- `--net` takes `none`, its default, and `shared`. With `none` the
+  instance has no network. `shared` attaches it to the CNI network named
+  `bridge`, the name of nerdctl's default network, which the bundle's
+  configuration keeps: its `brig0` bridge on `10.44.0.0/24` is the one
+  brig's nerdctl containers use, so hull's instances and those containers
+  share one segment and one address pool. The network gateway does not
+  exist on Linux. hull looks for the plugins in `$CNI_PATH`, a
+  colon-separated list, and for the network's configuration in
+  `$NETCONFPATH`, as nerdctl and the CNI tools do. When those are unset, it
+  uses the installed bundle's `libexec/cni` and `etc/cni/net.d`, under
+  `$XDG_DATA_HOME/brig/data`, or `~/.local/share/brig/data`, then
+  `/var/lib/brig/data`, and with no bundle, `/opt/cni/bin` and
+  `/etc/cni/net.d`. For a user other than root, the configuration comes from
+  `$XDG_CONFIG_HOME/brig/cni/net.d`, or `~/.config/brig/cni/net.d`, when
+  that exists: `brig-rootless-setup.sh` copies the bundle's configuration
+  there, and points the rootless nerdctl it sets up at the copy. A run whose
+  network or plugins are missing, or whose configuration directory it
+  cannot create nerdctl's lock file in, fails before it pulls anything.
+- The attachment works as nerdctl's does. The spec carries a `createRuntime`
+  and a `postStop` OCI hook that run `hull internal oci-hook`, so the
+  runtime attaches the instance's network namespace before urunc starts the
+  guest, and detaches it when the task is deleted: by `hull stop`,
+  `hull rm`, or the cleanup of a failed run. The hook takes the lock nerdctl
+  takes, `.cni-concurrency.lock` in the configuration directory, so the two
+  do not run the plugins of one network at once. On a rootless daemon the
+  hook runs in rootlesskit's user namespace, and makes the bridge in the
+  network namespace rootlesskit keeps for slirp4netns, which hull finds
+  under `$ROOTLESSKIT_STATE_DIR`, else `$XDG_RUNTIME_DIR/containerd-rootless`,
+  the directory containerd-rootless.sh uses. A state directory where no
+  rootlesskit answers on `api.sock`, as one a stopped rootlesskit left, is
+  taken for no rootless daemon at all. While the instance is
+  attached, the hook keeps its network namespace pinned by a bind mount in
+  `<instance>.net`, as CRI pins a pod's: the namespace would otherwise go
+  with the guest, before `postStop` runs, and the bridge plugin removes the
+  masquerade rule it added only from inside it. A hook that fails fails the
+  run with the plugin's error, and leaves no address leased.
+- urunc moves the interface's traffic to the guest and gives the guest its
+  address on the kernel command line. The guest's `/etc/resolv.conf` comes
+  from a file hull writes beside the instance's log, in `<instance>.net`.
+  The nameservers are rootlesskit's own, such as
+  slirp4netns's `10.0.2.3`, on a rootless daemon, and then the host's:
+  those in `/etc/resolv.conf`, or behind systemd-resolved's stub the
+  upstream servers it lists in `/run/systemd/resolve/resolv.conf`, less
+  loopback and IPv6 ones. With none left, the guest gets `8.8.8.8` and
+  `8.8.4.4`, as docker gives a container. On a block device root
+  filesystem, urunc copies the file into the guest's disk when the instance
+  is created, so hull writes it before then. urunc boots a plain image from
+  a block device, a devmapper snapshot, only when it cannot share the root
+  filesystem: on a monitor with no shared filesystem, or with no virtiofsd
+  where urunc's configuration says. The guest keeps the image's own
+  `/etc/hosts`, as on macOS, so it has no line for the instance's own name
+  or address.
+  `hull ps` and `hull inspect` show the address while the instance is
+  attached.
+- `--net shared` has limits. There is no `--publish`, no network of a
+  sandbox's own (`--net <name>`, `hull network`), no `--dns`, `--add-host`
+  or `--hostname`, and no network other than `bridge`. urunc gives the guest
+  one interface and only its first IPv4 address. A detach that fails does
+  not stop the task's delete: `hull stop`, or `hull rm` when it deletes the
+  task, prints the error as a warning, and leaves whatever the detach did
+  not remove in place. The OCI runtime spec has a runtime only warn about a
+  failed `postStop` hook, but the bundle's urunc fails the delete instead,
+  after removing its own state, so a failed hook would leave an instance
+  that can never be removed. The hook is the hull binary that ran the
+  instance, at the path its symlinks lead to, and urunc cannot start a hook
+  that is not there. So moving or removing that file while an instance runs,
+  as an upgrade that removes the old version's directory does, makes `hull
+  stop` and `hull rm` of the instance fail, and every later try fails too,
+  for the same reason. Killing the instance's shim, the
+  `containerd-shim-urunc-v2 -namespace <namespace> -id <container-id>`
+  process, with the `containerId` `hull inspect` prints, has containerd
+  remove the task, and `hull rm` then removes the instance. A task that
+  goes without being deleted, this way or at a host reboot, never runs its
+  `postStop` hook. `hull rm` detaches such an instance itself: when the
+  hook's record of the address in `<instance>.net` is still there once the
+  task is gone, it runs the hook as the instance's spec names it, from its
+  own binary, so the binary that ran the instance need not exist. For an
+  instance of a rootless daemon it runs it in rootlesskit's namespaces
+  through `nsenter`, which must be on its `PATH`. It does so before it
+  deletes the container, and a detach that fails fails `hull rm` and keeps
+  the instance, its record and its pin, so the next `hull rm` tries again;
+  `hull rm --force` removes it anyway, with the error as a warning. Until
+  then the instance keeps its address leased, on a rootful daemon even
+  across reboots, since the bundle's host-local plugin keeps its leases in
+  `/var/lib/cni/networks`, and a later run of the name does not free it:
+  each run's container has an ID of its own, and so does its attachment.
+  `hull stop` of an instance whose task is gone does not detach it, and
+  neither does the removal of its container by another client, such as
+  `ctr`. hull takes the daemon for a rootless one from the user it runs
+  as, not from the daemon it reaches: a user other than root with a rootless
+  setup whose `--containerd-address` names a rootful daemon gets that
+  setup's configuration directory and rootlesskit's nameserver, which the
+  guest cannot reach. Run hull as root for a rootful daemon. Under a
+  rootless daemon, `/var/lib` is rootlesskit's own tmpfs, so the plugins'
+  state there, the bundle's address store included, goes when rootlesskit
+  stops. When a plugin fails partway through an attach, the firewall
+  plugin's two `ACCEPT` rules for the address stay in the `CNI-FORWARD`
+  chain: it removes its rules using the attach's result, and libcni records
+  none for an attach that failed.
 - `--env-file` adds the variables of a file, and is Linux only: macOS
   `hull run` does not take it. It follows `docker run --env-file`. Each
   line is `KEY=VALUE`, taken as written once its leading white space is

@@ -674,7 +674,7 @@ func TestRunsSnapshotterHoldsTheInstance(t *testing.T) {
 	}
 	assertNoContainer(ctx, t, c, "nosuch")
 
-	err = RemoveInstance(ctx, c, "vm", false, 5*time.Second)
+	err = RemoveInstance(ctx, c, "vm", false, 5*time.Second, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

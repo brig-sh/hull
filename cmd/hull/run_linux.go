@@ -59,7 +59,7 @@ func runCommand() *cli.Command {
 			&cli.StringFlag{
 				Name:  "net",
 				Value: "none",
-				Usage: "network mode: only 'none' on Linux so far",
+				Usage: "network mode: 'none' (default) or 'shared', the CNI network named bridge",
 			},
 			pullFlag(),
 			memFlag(),
@@ -101,10 +101,6 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	if !cmd.Bool("detach") {
 		return errors.New("hull run on Linux needs --detach: it cannot attach to the console yet")
 	}
-	if cmd.String("net") != "none" {
-		return fmt.Errorf("--net %s is not supported on Linux yet: an instance has no network, so pass --net none",
-			cmd.String("net"))
-	}
 	pullPolicy := cmd.String("pull")
 	if !validPullPolicy(pullPolicy) {
 		return fmt.Errorf("invalid --pull %q, expected missing, always or never", pullPolicy)
@@ -137,6 +133,13 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 	platform, err := imageplatform.Parse(defaultPlatform)
+	if err != nil {
+		return err
+	}
+	// Before the daemon is dialled and the image pulled: a network that
+	// cannot be found fails the run at once.
+	namespace := containerd.ResolveNamespace(cmd.String("namespace"))
+	network, err := runNetwork(ctx, cmd.String("net"), namespace, name)
 	if err != nil {
 		return err
 	}
@@ -179,7 +182,7 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	logFile, err := instanceLogFile(containerd.ResolveNamespace(cmd.String("namespace")), name)
+	logFile, err := instanceLogFile(namespace, name)
 	if err != nil {
 		return err
 	}
@@ -198,6 +201,7 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 		Backend:     backend,
 		LogFile:     logFile,
 		Snapshotter: cmd.String("snapshotter"),
+		Network:     network,
 	})
 	if errdefs.IsAlreadyExists(err) {
 		return fmt.Errorf("%w: %s", store.ErrInstanceExists, name)

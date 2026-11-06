@@ -18,6 +18,7 @@ package containerd
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -59,6 +60,44 @@ func TestResolveAddress(t *testing.T) {
 			got := ResolveAddress(tc.explicit)
 			if got != tc.want {
 				t.Fatalf("ResolveAddress(%q) = %q, want %q", tc.explicit, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRootlessKitStateDir(t *testing.T) {
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	err := os.Mkdir("rk", 0o700)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := t.TempDir()
+	err = os.Mkdir(filepath.Join(rt, "containerd-rootless"), 0o700)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		euid int
+		env  string
+		want string
+	}{
+		{name: "root", euid: 0, env: filepath.Join(cwd, "rk"), want: ""},
+		{name: "the default", euid: 1000, want: filepath.Join(rt, "containerd-rootless")},
+		{name: "the environment", euid: 1000, env: filepath.Join(cwd, "rk"), want: filepath.Join(cwd, "rk")},
+		// The hook reads it from the runtime's working directory.
+		{name: "a relative one is made absolute", euid: 1000, env: "rk", want: filepath.Join(cwd, "rk")},
+		{name: "one that does not exist", euid: 1000, env: filepath.Join(cwd, "missing"), want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeIDs(t, tc.euid, 1000)
+			t.Setenv("XDG_RUNTIME_DIR", rt)
+			t.Setenv("ROOTLESSKIT_STATE_DIR", tc.env)
+			got := RootlessKitStateDir()
+			if got != tc.want {
+				t.Errorf("RootlessKitStateDir() = %q, want %q", got, tc.want)
 			}
 		})
 	}

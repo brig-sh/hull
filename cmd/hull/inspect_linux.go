@@ -68,5 +68,7 @@ func inspectInstance(ctx context.Context, cmd *cli.Command) error {
 		// container; instanceReadError would put the name in front again.
 		return err
 	}
-	return printJSON(cmd.Writer, instanceRecord(inst))
+	rec := instanceRecord(inst)
+	withNetworkAddress(rec, containerd.ResolveNamespace(cmd.String("namespace")))
+	return printJSON(cmd.Writer, rec)
 }

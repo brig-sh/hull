@@ -42,12 +42,16 @@ import (
 // The refusals come before hull dials containerd, so the address names no
 // daemon.
 func TestRunRefusesBeforeDialling(t *testing.T) {
+	// A network configuration directory with no network in it.
+	fakeBundles(t, filepath.Join(t.TempDir(), "none"))
+	t.Setenv("NETCONFPATH", t.TempDir())
 	for _, tc := range []struct {
 		args []string
 		want string
 	}{
 		{[]string{"busybox"}, "needs --detach"},
-		{[]string{"-d", "--net", "shared", "busybox"}, "--net shared is not supported on Linux"},
+		{[]string{"-d", "--net", "shred", "busybox"}, `invalid --net "shred"`},
+		{[]string{"-d", "--net", "shared", "busybox"}, "load CNI network bridge"},
 		{[]string{"-d", "--pull", "sometimes", "busybox"}, `invalid --pull "sometimes"`},
 		{[]string{"-d", "--hypervisor", "vz", "busybox"}, "--hypervisor vz: macOS only"},
 		{[]string{"-d", "--hypervisor", "hvi", "busybox"}, "--hypervisor hvi: macOS only"},
