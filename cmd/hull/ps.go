@@ -27,16 +27,6 @@ import (
 	"github.com/brig-sh/hull/pkg/store"
 )
 
-func psCommand() *cli.Command {
-	return &cli.Command{
-		Name:  "ps",
-		Usage: "list running instances",
-		Action: func(ctx context.Context, cmd *cli.Command) error {
-			return listInstances(ctx, cmd)
-		},
-	}
-}
-
 func listInstances(ctx context.Context, cmd *cli.Command) error {
 	s, err := globalStore(cmd)
 	if err != nil {
