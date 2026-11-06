@@ -170,18 +170,18 @@ func TestRemoveInstanceThroughDaemon(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = RemoveInstance(ctx, c, "missing", true, time.Second)
+	err = RemoveInstance(ctx, c, "missing", true, time.Second, nil)
 	if !errdefs.IsNotFound(err) {
 		t.Errorf("removing a missing instance: error = %v, want not found", err)
 	}
 
-	err = RemoveInstance(ctx, c, "idle", false, time.Second)
+	err = RemoveInstance(ctx, c, "idle", false, time.Second, nil)
 	if err != nil {
 		t.Fatalf("removing an instance with no task: %v", err)
 	}
 	assertNoContainer(ctx, t, c, "idle")
 
-	err = RemoveInstance(ctx, c, "running", false, time.Second)
+	err = RemoveInstance(ctx, c, "running", false, time.Second, nil)
 	if !errors.Is(err, ErrInstanceRunning) {
 		t.Fatalf("removing a running instance without kill: error = %v, want ErrInstanceRunning", err)
 	}
@@ -190,7 +190,7 @@ func TestRemoveInstanceThroughDaemon(t *testing.T) {
 		t.Fatalf("the refusal removed the container: %v", err)
 	}
 
-	err = RemoveInstance(ctx, c, "running", true, 5*time.Second)
+	err = RemoveInstance(ctx, c, "running", true, 5*time.Second, nil)
 	if err != nil {
 		t.Fatalf("removing a running instance with kill: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestRemoveInstanceRefusesATaskThatOutlivesTheGrace(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = RemoveInstance(ctx, c, "stubborn", true, time.Nanosecond)
+	err = RemoveInstance(ctx, c, "stubborn", true, time.Nanosecond, nil)
 	if err == nil || errors.Is(err, ErrInstanceRunning) || !strings.Contains(err.Error(), "refusing to delete") {
 		t.Fatalf("removing past the grace: error = %v, want a refusal to delete", err)
 	}
@@ -240,11 +240,46 @@ func TestRemoveInstanceWhoseTaskExited(t *testing.T) {
 	}
 	<-exitCh
 
-	err = RemoveInstance(ctx, c, "exited", false, time.Second)
+	err = RemoveInstance(ctx, c, "exited", false, time.Second, nil)
 	if err != nil {
 		t.Fatalf("removing an instance whose task exited: %v", err)
 	}
 	assertNoContainer(ctx, t, c, "exited")
+}
+
+// taskGone runs with the task deleted and the container still there, and
+// an error from it keeps the container.
+func TestRemoveInstanceRunsTaskGone(t *testing.T) {
+	c := instancesClient(t)
+	ctx := context.Background()
+	containerdtest.StartTask(ctx, t, c, "vm", "sleep", "300")
+	var ran bool
+	taskGone := func(ctx context.Context, ctr client.Container) error {
+		ran = true
+		_, err := ctr.Task(ctx, nil)
+		if !errdefs.IsNotFound(err) {
+			t.Errorf("task in taskGone: error = %v, want it deleted", err)
+		}
+		_, err = c.LoadContainer(ctx, ctr.ID())
+		if err != nil {
+			t.Errorf("container in taskGone: %v, want it still there", err)
+		}
+		return errors.New("detach failed")
+	}
+	err := RemoveInstance(ctx, c, "vm", true, 5*time.Second, taskGone)
+	if !ran || err == nil || err.Error() != "detach failed" {
+		t.Fatalf("RemoveInstance whose taskGone fails = %v, ran %v; want taskGone's error", err, ran)
+	}
+	_, err = c.LoadContainer(ctx, "vm")
+	if err != nil {
+		t.Fatalf("a failed taskGone removed the container: %v", err)
+	}
+
+	err = RemoveInstance(ctx, c, "vm", false, time.Second, func(context.Context, client.Container) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertNoContainer(ctx, t, c, "vm")
 }
 
 // StopInstance deletes the task, and keeps the container and its snapshot
@@ -537,7 +572,7 @@ func TestInstanceVerbsFindALabeledContainer(t *testing.T) {
 	if !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("the exec FIFO directory after stop: error = %v, want it removed", err)
 	}
-	err = RemoveInstance(ctx, c, "web", false, 5*time.Second)
+	err = RemoveInstance(ctx, c, "web", false, 5*time.Second, nil)
 	if err != nil {
 		t.Fatalf("RemoveInstance(web): %v", err)
 	}
@@ -558,7 +593,7 @@ func TestInstanceVerbsFindALabeledContainer(t *testing.T) {
 		t.Fatal(err)
 	}
 	execAndWait(t, c, "api", "", ExecConfig{Args: []string{"true"}})
-	err = RemoveInstance(ctx, c, "api", true, 5*time.Second)
+	err = RemoveInstance(ctx, c, "api", true, 5*time.Second, nil)
 	if err != nil {
 		t.Fatalf("RemoveInstance(api, kill): %v", err)
 	}

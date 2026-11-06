@@ -27,14 +27,16 @@ for the one build that reports `dev`.
 
 ## Commands
 
-There are nineteen top-level commands. `network-gateway` is the only hidden one:
-it does not appear in `hull --help`, but it runs and prints its own help when
-named. No flag anywhere in the tree is hidden.
+There are nineteen top-level commands. On macOS, `network-gateway` is the only
+hidden one: it does not appear in `hull --help`, but it runs and prints its own
+help when named. On Linux, `internal` is hidden in the same way: it holds the
+OCI hook that attaches an instance to its network. No flag anywhere in the tree
+is hidden.
 
 | Command | What it does |
 |---|---|
 | `pull <image>` | pull an OCI image into the store |
-| `run <image> [cmd...]` | create and run an instance. On Linux only in the background, with no network; see [Building on Linux](build.md#building-on-linux) |
+| `run <image> [cmd...]` | create and run an instance. On Linux only in the background, with no network or on a CNI bridge; see [Building on Linux](build.md#building-on-linux) |
 | `exec <id> <cmd...>` | run a command in a running instance |
 | `ps` | list instances |
 | `stop <id>` | stop a running instance |

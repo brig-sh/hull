@@ -55,7 +55,13 @@ func stopInstance(ctx context.Context, cmd *cli.Command) error {
 		return fmt.Errorf("instance not found: %s", instanceID)
 	case err != nil:
 		return fmt.Errorf("failed to stop instance: %w", err)
-	case !running:
+	}
+	// Whoever deleted the task, its postStop hook may have failed.
+	dir, err := instanceNetDir(containerd.ResolveNamespace(cmd.String("namespace")), instanceID)
+	if err == nil {
+		warnDetachFailure(cmd.ErrWriter, instanceID, dir)
+	}
+	if !running {
 		_, err = fmt.Fprintf(cmd.Writer, "Instance %s is already stopped\n", instanceID)
 		return err
 	}

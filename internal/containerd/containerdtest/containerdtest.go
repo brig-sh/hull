@@ -191,32 +191,40 @@ const TaskImage = "ghcr.io/containerd/busybox:1.36"
 // rootlesskit.
 func StartTask(ctx context.Context, t testing.TB, c *client.Client, id string, args ...string) (client.Container, client.Task) {
 	t.Helper()
+	return StartTaskWithSpec(ctx, t, c, id, nil, args...)
+}
+
+// StartTaskWithSpec is StartTask with opts applied to the container's spec
+// after StartTask's own.
+func StartTaskWithSpec(ctx context.Context, t testing.TB, c *client.Client, id string, opts []oci.SpecOpts, args ...string) (client.Container, client.Task) {
+	t.Helper()
 	img, err := c.Pull(ctx, TaskImage, client.WithPullUnpack)
 	if err != nil {
 		t.Fatal(err)
 	}
+	specOpts := []oci.SpecOpts{
+		// Not oci.WithImageConfig: it reads the image's /etc/group from
+		// the snapshot in this process, and a test that is not root
+		// cannot open the snapshot of a daemon that is, as in CI.
+		// busybox needs only a PATH to find its commands.
+		oci.WithDefaultPathEnv,
+		oci.WithProcessArgs(args...),
+		// A relative cgroup path, which runc puts next to the cgroup it
+		// runs in, as it does a task with no path. containerd's default,
+		// /<namespace>/<id>, is under the root cgroup, which a rootless
+		// daemon cannot write. With no path, runc names the cgroup after
+		// the container ID alone, so two tests in different namespaces
+		// that start a task with the same ID at once, as the tests of
+		// two packages do, share one cgroup, and runc refuses to start
+		// the second task in a cgroup that already has a process. One
+		// level, not <namespace>/<id>: deleting the task removes only
+		// the last element of the path, and would leave a <namespace>
+		// cgroup behind.
+		oci.WithCgroup(c.DefaultNamespace() + "-" + id),
+	}
 	ctr, err := c.NewContainer(ctx, id,
 		client.WithNewSnapshot(id+"-snapshot", img),
-		client.WithNewSpec(
-			// Not oci.WithImageConfig: it reads the image's /etc/group from
-			// the snapshot in this process, and a test that is not root
-			// cannot open the snapshot of a daemon that is, as in CI.
-			// busybox needs only a PATH to find its commands.
-			oci.WithDefaultPathEnv,
-			oci.WithProcessArgs(args...),
-			// A relative cgroup path, which runc puts next to the cgroup it
-			// runs in, as it does a task with no path. containerd's default,
-			// /<namespace>/<id>, is under the root cgroup, which a rootless
-			// daemon cannot write. With no path, runc names the cgroup after
-			// the container ID alone, so two tests in different namespaces
-			// that start a task with the same ID at once, as the tests of
-			// two packages do, share one cgroup, and runc refuses to start
-			// the second task in a cgroup that already has a process. One
-			// level, not <namespace>/<id>: deleting the task removes only
-			// the last element of the path, and would leave a <namespace>
-			// cgroup behind.
-			oci.WithCgroup(c.DefaultNamespace()+"-"+id),
-		))
+		client.WithNewSpec(append(specOpts, opts...)...))
 	if err != nil {
 		t.Fatal(err)
 	}

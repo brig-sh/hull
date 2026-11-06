@@ -381,7 +381,7 @@ func TestStopAndRemoveEndTheExecsLeftBehind(t *testing.T) {
 		t.Fatal(err)
 	}
 	// rm without --force refuses a running instance and leaves its execs.
-	err = RemoveInstance(ctx, c, "vm", false, 5*time.Second)
+	err = RemoveInstance(ctx, c, "vm", false, 5*time.Second, nil)
 	if !errors.Is(err, ErrInstanceRunning) {
 		t.Fatalf("rm of a running instance: error = %v, want ErrInstanceRunning", err)
 	}
@@ -411,7 +411,7 @@ func TestStopAndRemoveEndTheExecsLeftBehind(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = RemoveInstance(ctx, c, "vm2", true, 5*time.Second)
+	err = RemoveInstance(ctx, c, "vm2", true, 5*time.Second, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -451,7 +451,7 @@ func TestStopAndRemoveDeleteAnExecNeverStarted(t *testing.T) {
 		if stop {
 			_, err = StopInstance(ctx, c, "vm", time.Second, 5*time.Second)
 		} else {
-			err = RemoveInstance(ctx, c, "vm", true, 5*time.Second)
+			err = RemoveInstance(ctx, c, "vm", true, 5*time.Second, nil)
 		}
 		if err != nil {
 			t.Fatalf("stop %v: %v", stop, err)
@@ -461,7 +461,7 @@ func TestStopAndRemoveDeleteAnExecNeverStarted(t *testing.T) {
 			t.Errorf("the FIFO directory after stop %v: %v, want it gone", stop, err)
 		}
 		if stop {
-			err = RemoveInstance(ctx, c, "vm", false, 5*time.Second)
+			err = RemoveInstance(ctx, c, "vm", false, 5*time.Second, nil)
 			if err != nil {
 				t.Fatal(err)
 			}

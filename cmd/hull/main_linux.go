@@ -93,6 +93,7 @@ func newApp() *cli.Command {
 			execCommand(),
 			imagesCommand(),
 			inspectCommand(),
+			internalCommand(),
 			logsCommand(),
 			psCommand(),
 			pullCommand(),

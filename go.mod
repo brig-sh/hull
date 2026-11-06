@@ -11,12 +11,14 @@ require (
 	github.com/containerd/errdefs v1.0.0
 	github.com/containerd/log v0.2.0
 	github.com/containerd/platforms v1.0.0-rc.5
+	github.com/containernetworking/cni v1.3.1
 	github.com/containers/gvisor-tap-vsock v0.8.9
 	github.com/distribution/reference v0.6.0
 	github.com/google/go-containerregistry v0.22.0
 	github.com/hashicorp/go-version v1.9.0
 	github.com/inetaf/tcpproxy v0.0.0-20250222171855-c4b9df066048
 	github.com/miekg/dns v1.1.72
+	github.com/moby/sys/userns v0.2.1
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/opencontainers/runtime-spec v1.3.0
@@ -76,7 +78,6 @@ require (
 	github.com/moby/sys/mountinfo v0.7.2 // indirect
 	github.com/moby/sys/signal v0.7.1 // indirect
 	github.com/moby/sys/user v0.4.1 // indirect
-	github.com/moby/sys/userns v0.2.1 // indirect
 	github.com/mrunalp/fileutils v0.5.1 // indirect
 	github.com/nubificus/hedge_cli v0.0.3 // indirect
 	github.com/opencontainers/cgroups v0.1.0 // indirect

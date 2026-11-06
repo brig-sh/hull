@@ -23,12 +23,16 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/containers"
 	"github.com/containerd/containerd/v2/pkg/oci"
+	"github.com/containerd/errdefs"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 
 	"github.com/brig-sh/hull/internal/containerd"
 	"github.com/brig-sh/hull/internal/containerd/containerdtest"
@@ -119,12 +123,20 @@ func newInstanceFixture(t *testing.T) *instanceFixture {
 // what it printed.
 func (f *instanceFixture) run(ns string, args ...string) (string, error) {
 	f.t.Helper()
-	var out bytes.Buffer
+	out, _, err := f.runStderr(ns, args...)
+	return out, err
+}
+
+// runStderr is run, and also returns what hull printed to stderr.
+func (f *instanceFixture) runStderr(ns string, args ...string) (stdout, stderr string, err error) {
+	f.t.Helper()
+	var out, errOut bytes.Buffer
 	app := newApp()
 	app.Writer = &out
+	app.ErrWriter = &errOut
 	argv := append([]string{"hull", "--containerd-address", f.addr, "--namespace", ns}, args...)
-	err := app.Run(context.Background(), argv)
-	return out.String(), err
+	err = app.Run(context.Background(), argv)
+	return out.String(), errOut.String(), err
 }
 
 // psRow returns the fields of the `hull ps` row for id, split the way brig
@@ -272,9 +284,9 @@ func TestInstanceCommandsReportADuplicateName(t *testing.T) {
 	}
 }
 
-// rm removes the log at the path run gives the name, and not a file the
-// container's log-file label names: any client of the namespace can set
-// that label.
+// rm removes the log and the network directory at the paths run gives the
+// name, and not a file the container's log-file label names: any client of
+// the namespace can set that label.
 func TestRemoveDeletesOnlyTheInstanceLog(t *testing.T) {
 	privateLogDirs(t)
 	f := newInstanceFixture(t)
@@ -298,17 +310,245 @@ func TestRemoveDeletesOnlyTheInstanceLog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	_, err = f.run(f.ns, "rm", "vm")
+	netDir, err := instanceNetDir(f.ns, "vm")
 	if err != nil {
 		t.Fatal(err)
+	}
+	err = os.MkdirAll(netDir, 0o755)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = os.WriteFile(filepath.Join(netDir, "resolv.conf"), []byte("nameserver 192.0.2.1\n"), 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = os.WriteFile(filepath.Join(netDir, containerd.HookErrorFile), []byte("lease store unreadable\n"), 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, stderr, err := f.runStderr(f.ns, "rm", "vm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr, "could not detach instance vm: lease store unreadable") {
+		t.Errorf("rm's stderr = %q, want the failed detach reported", stderr)
 	}
 	_, err = os.Stat(logFile)
 	if !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("log %s: error = %v, want it removed", logFile, err)
 	}
+	_, err = os.Stat(netDir)
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("network directory %s: error = %v, want it removed", netDir, err)
+	}
 	_, err = os.Stat(decoy)
 	if err != nil {
 		t.Errorf("%s, named by the label: %v, want it kept", decoy, err)
+	}
+}
+
+// stop reports a detach that failed when the task was deleted, which the
+// hook cannot report itself.
+func TestStopReportsAFailedDetach(t *testing.T) {
+	privateLogDirs(t)
+	f := newInstanceFixture(t)
+	containerdtest.StartTask(context.Background(), t, f.c, "vm", "sleep", "300")
+	netDir, err := instanceNetDir(f.ns, "vm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = os.MkdirAll(netDir, 0o755)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = os.WriteFile(filepath.Join(netDir, containerd.HookErrorFile), []byte("lease store unreadable\n"), 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// sleep, as the task's first process, ignores the SIGTERM.
+	out, stderr, err := f.runStderr(f.ns, "stop", "--timeout", "1", "vm")
+	if err != nil || out != "Instance vm stopped\n" {
+		t.Errorf("stop = %q, %v", out, err)
+	}
+	if stderr != "warning: the network hook could not detach instance vm: lease store unreadable\n" {
+		t.Errorf("stop's stderr = %q, want the failed detach reported", stderr)
+	}
+}
+
+// newAttachedInstance creates instance name in f's namespace as a container
+// whose spec names the network hook, and its network directory, with the
+// hook's record of an attachment when attached is set. The task is gone, as
+// after a host reboot, so the runtime never runs the hook.
+func newAttachedInstance(t *testing.T, f *instanceFixture, name string, attached bool) (client.Container, string) {
+	t.Helper()
+	ctx := context.Background()
+	netDir, err := instanceNetDir(f.ns, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = os.MkdirAll(netDir, 0o755)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attached {
+		err = os.WriteFile(filepath.Join(netDir, networkResultFile), []byte(`{"ip":"10.44.0.9"}`), 0o644)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	hookArgs := []string{"/gone/hull", "internal", "oci-hook", "--dir", netDir, "postStop"}
+	spec := &oci.Spec{Version: specs.Version, Hooks: &specs.Hooks{
+		Poststop: []specs.Hook{{Path: "/gone/hull", Args: hookArgs, Env: []string{"PATH=/usr/bin:/bin", "HOOK_TEST=1"}}},
+	}}
+	ctr, err := f.c.NewContainer(ctx, "ctr-"+name, client.WithSpec(spec),
+		client.WithContainerLabels(map[string]string{containerd.LabelName: name}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ctr.Delete(ctx) })
+	return ctr, netDir
+}
+
+// fakeHook stands in for the hull binary rm runs the hook with: a script
+// that records its arguments, its environment and its stdin in a directory
+// it returns, and exits with code.
+func fakeHook(t *testing.T, code int) string {
+	t.Helper()
+	out := t.TempDir()
+	script := filepath.Join(t.TempDir(), "hull")
+	body := "#!/bin/sh\necho \"$@\" > " + out + "/args\nenv > " + out + "/env\ncat > " + out + "/state\n" +
+		"echo hook output\nexit " + strconv.Itoa(code) + "\n"
+	err := os.WriteFile(script, []byte(body), 0o755)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := hookExecutable
+	hookExecutable = func() (string, error) { return script, nil }
+	t.Cleanup(func() { hookExecutable = old })
+	return out
+}
+
+// rm runs the postStop hook of an instance whose task went without running
+// it, as detach, with the spec's other arguments, its environment and the
+// container's state, from the hull binary rm is: the spec's may be gone.
+func TestRemoveDetachesWhatTheHookNeverDid(t *testing.T) {
+	privateLogDirs(t)
+	f := newInstanceFixture(t)
+	out := fakeHook(t, 0)
+	ctr, netDir := newAttachedInstance(t, f, "web", true)
+
+	_, stderr, err := f.runStderr(f.ns, "rm", "web")
+	if err != nil || stderr != "" {
+		t.Fatalf("rm web: %v, stderr %q", err, stderr)
+	}
+	args, err := os.ReadFile(filepath.Join(out, "args"))
+	if err != nil || strings.TrimSpace(string(args)) != "internal oci-hook --dir "+netDir+" detach" {
+		t.Errorf("hook arguments = %q, %v; want the spec's, after the executable, with detach for postStop", args, err)
+	}
+	env, err := os.ReadFile(filepath.Join(out, "env"))
+	if err != nil || !strings.Contains(string(env), "HOOK_TEST=1") {
+		t.Errorf("hook environment = %q, %v; want the spec's", env, err)
+	}
+	var state specs.State
+	data, err := os.ReadFile(filepath.Join(out, "state"))
+	if err == nil {
+		err = json.Unmarshal(data, &state)
+	}
+	if err != nil || state.ID != ctr.ID() || state.Status != specs.StateStopped {
+		t.Errorf("hook state = %s, %v; want container %s, stopped", data, err, ctr.ID())
+	}
+	_, err = os.Stat(netDir)
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("network directory: error = %v, want it removed", err)
+	}
+}
+
+// rm runs no hook for an instance its hook already detached. When the
+// detach it runs fails, rm fails and keeps the instance, so the next rm
+// tries again, and rm --force removes it with a warning.
+func TestRemoveDetachesOnlyWhatIsLeft(t *testing.T) {
+	privateLogDirs(t)
+	f := newInstanceFixture(t)
+	out := fakeHook(t, 1)
+	newAttachedInstance(t, f, "detached", false)
+	_, stderr, err := f.runStderr(f.ns, "rm", "detached")
+	if err != nil || stderr != "" {
+		t.Fatalf("rm detached: %v, stderr %q", err, stderr)
+	}
+	_, err = os.Stat(filepath.Join(out, "args"))
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("hook ran for a detached instance: %v", err)
+	}
+
+	ctr, netDir := newAttachedInstance(t, f, "web", true)
+	_, err = f.run(f.ns, "rm", "web")
+	if err == nil || !strings.Contains(err.Error(), "could not detach it from its network, so it is kept") ||
+		!strings.Contains(err.Error(), "hook output") {
+		t.Errorf("rm web with a failing detach: error = %v, want the failed hook reported with its output", err)
+	}
+	_, err = f.c.LoadContainer(context.Background(), ctr.ID())
+	if err != nil {
+		t.Errorf("container after a failed detach: %v, want it kept", err)
+	}
+	_, err = os.Stat(filepath.Join(netDir, networkResultFile))
+	if err != nil {
+		t.Errorf("the hook's record after a failed detach: %v, want it kept", err)
+	}
+
+	_, stderr, err = f.runStderr(f.ns, "rm", "--force", "web")
+	if err != nil {
+		t.Fatalf("rm --force web: %v", err)
+	}
+	if !strings.Contains(stderr, "warning: could not detach instance web from its network: ") ||
+		!strings.Contains(stderr, "hook output") {
+		t.Errorf("rm --force's stderr = %q, want the failed hook reported with its output", stderr)
+	}
+	_, err = f.c.LoadContainer(context.Background(), ctr.ID())
+	if !errdefs.IsNotFound(err) {
+		t.Errorf("container after rm --force: error = %v, want it removed", err)
+	}
+	_, err = os.Stat(netDir)
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("network directory after rm --force: error = %v, want it removed", err)
+	}
+}
+
+// rm runs no hook of its own when the task it deletes runs its postStop
+// hook, which removes the hook's record of the attachment.
+func TestRemoveLeavesTheDetachToTheRuntime(t *testing.T) {
+	privateLogDirs(t)
+	f := newInstanceFixture(t)
+	out := fakeHook(t, 0)
+	netDir, err := instanceNetDir(f.ns, "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = os.MkdirAll(netDir, 0o755)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = os.WriteFile(filepath.Join(netDir, networkResultFile), []byte(`{"ip":"10.44.0.9"}`), 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// runc runs both at the task's delete: the first stands in for the
+	// network hook's detach, and the second names the hook for rm to find.
+	hooks := func(_ context.Context, _ oci.Client, _ *containers.Container, s *oci.Spec) error {
+		s.Hooks = &specs.Hooks{Poststop: []specs.Hook{
+			{Path: "/bin/sh", Args: []string{"sh", "-c", "rm -f " + filepath.Join(netDir, networkResultFile)}},
+			{Path: "/bin/true", Args: []string{"/gone/hull", "internal", "oci-hook", "--dir", netDir, "postStop"}},
+		}}
+		return nil
+	}
+	containerdtest.StartTaskWithSpec(context.Background(), t, f.c, "web", []oci.SpecOpts{hooks}, "sleep", "300")
+
+	_, stderr, err := f.runStderr(f.ns, "rm", "--force", "web")
+	if err != nil || stderr != "" {
+		t.Fatalf("rm --force web: %v, stderr %q", err, stderr)
+	}
+	_, err = os.Stat(filepath.Join(out, "args"))
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("rm ran the hook after the runtime had: %v", err)
 	}
 }

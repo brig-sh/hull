@@ -103,6 +103,33 @@ func runtimeDir() string {
 	return dir
 }
 
+// RootlessKitStateDir returns the state directory of the rootlesskit a
+// rootless containerd runs under, for a user other than root:
+// $ROOTLESSKIT_STATE_DIR, which nerdctl reads too, else the one
+// containerd-rootless.sh uses by default, $XDG_RUNTIME_DIR/containerd-rootless.
+// It returns "" for root, and when the directory does not exist: the daemon
+// is not rootless then. A relative $ROOTLESSKIT_STATE_DIR is made absolute:
+// the hook that reads the directory runs in the runtime's working
+// directory, not hull's.
+func RootlessKitStateDir() string {
+	if geteuid() == 0 {
+		return ""
+	}
+	dir := os.Getenv("ROOTLESSKIT_STATE_DIR")
+	if dir == "" {
+		dir = filepath.Join(runtimeDir(), "containerd-rootless")
+	}
+	dir, err := filepath.Abs(dir)
+	if err != nil {
+		return ""
+	}
+	_, err = os.Stat(dir)
+	if err != nil {
+		return ""
+	}
+	return dir
+}
+
 // ResolveNamespace picks the containerd namespace: the explicit namespace if
 // one was given (a command-line flag), then $HULL_NAMESPACE, then "hull".
 func ResolveNamespace(explicit string) string {

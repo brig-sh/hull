@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/containerd/containerd/v2/client"
 	"github.com/containerd/errdefs"
 	"github.com/urfave/cli/v3"
 
@@ -76,7 +77,31 @@ func removeInstance(ctx context.Context, cmd *cli.Command) error {
 		}
 	}
 
-	err = containerd.RemoveInstance(ctx, c, instanceID, cmd.Bool("force"), forceKillGrace)
+	// The detach the instance's hook never ran, if it did not, goes while
+	// the container, whose spec names the hook, is still there: a detach
+	// that fails, or a hull rm killed before it, keeps the instance, and
+	// the next hull rm runs it again.
+	var taskGone func(context.Context, client.Container) error
+	if logErr == nil && logFile != "" {
+		dir := netDirOf(logFile)
+		taskGone = func(ctx context.Context, ctr client.Container) error {
+			left, err := attachmentOf(ctx, ctr, dir)
+			if err == nil && left != nil {
+				err = detachLeft(ctx, left)
+			}
+			if err == nil {
+				return nil
+			}
+			if !cmd.Bool("force") {
+				return fmt.Errorf("could not detach it from its network, so it is kept: %w; "+
+					"hull rm tries again, and hull rm --force removes it without the detach", err)
+			}
+			_, _ = fmt.Fprintf(cmd.ErrWriter, "warning: could not detach instance %s from its network: %s\n", instanceID, err)
+			return nil
+		}
+	}
+
+	err = containerd.RemoveInstance(ctx, c, instanceID, cmd.Bool("force"), forceKillGrace, taskGone)
 	switch {
 	case errdefs.IsNotFound(err):
 		return fmt.Errorf("instance not found: %s", instanceID)
@@ -90,6 +115,15 @@ func removeInstance(ctx context.Context, cmd *cli.Command) error {
 	}
 	if logErr != nil && !errors.Is(logErr, os.ErrNotExist) {
 		return fmt.Errorf("instance %s removed, but not its log: %w", instanceID, logErr)
+	}
+	// The network files sit beside the log, under the same lock. Their path
+	// comes from the log's, the one run computes, and not from a label.
+	if logFile != "" {
+		warnDetachFailure(cmd.ErrWriter, instanceID, netDirOf(logFile))
+		err = containerd.RemoveNetworkDir(netDirOf(logFile))
+		if err != nil {
+			return fmt.Errorf("instance %s removed, but not its network files: %w", instanceID, err)
+		}
 	}
 
 	_, err = fmt.Fprintf(cmd.Writer, "Instance %s removed\n", instanceID)
