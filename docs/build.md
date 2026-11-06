@@ -253,6 +253,12 @@ these differences:
   `backend` and `logFile` come from labels `hull run` sets, so they are
   empty for a container another client created. Those containerd has no
   counterpart for, among them `cmdLine` and `bundleDir`, are always empty.
+- `hull inspect` prints `network`, Linux only: `none`, or the `--net` mode
+  that attached the instance, `shared`. It comes from a label `hull run`
+  sets, so it stays after the instance stops, when the address is gone. It
+  is missing for a container another client created, and for one an older
+  hull created, which recorded no network: read that as unknown, not as
+  `none`. macOS records no `network`; its network is in `cmdLine`.
 - `hull rm` deletes the container's task, the container and its snapshot,
   the instance's log, and the exec processes and FIFOs a killed `hull exec`
   left, described below. A task that has not stopped is refused without

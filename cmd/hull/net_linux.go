@@ -121,6 +121,7 @@ func runNetwork(ctx context.Context, mode, namespace, id string) (*containerd.Ne
 		args = append(args, "--rootlesskit-state-dir", stateDir)
 	}
 	return &containerd.Network{
+		Mode: mode,
 		Hook: specs.Hook{
 			Path: exe,
 			Args: args,

@@ -37,6 +37,7 @@ import (
 
 func testNetwork(dir string) *Network {
 	return &Network{
+		Mode:       "shared",
 		Hook:       specs.Hook{Path: "/usr/bin/hull", Args: []string{"/usr/bin/hull", "internal", "oci-hook"}},
 		Dir:        dir,
 		ResolvConf: []byte("nameserver 192.0.2.1\n"),

@@ -216,7 +216,7 @@ func TestNewContainerThroughDaemon(t *testing.T) {
 		ociclient.BootKernelAnnotation:    "/run/kernel",
 		ociclient.BootInitrdAnnotation:    "/run/initrd",
 		ociclient.UnikernelTypeAnnotation: "linux",
-	}})
+	}, Network: testNetwork(filepath.Join(t.TempDir(), "vm.net"))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,9 +229,17 @@ func TestNewContainerThroughDaemon(t *testing.T) {
 		LabelBackend:     "firecracker",
 		LabelImageDigest: img.Target().Digest.String(),
 		LabelLogFile:     logFile,
+		LabelNetwork:     "none",
 	}
 	if !reflect.DeepEqual(info.Labels, wantLabels) {
 		t.Errorf("labels = %v, want %v", info.Labels, wantLabels)
+	}
+	againInfo, err := again.Info(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if againInfo.Labels[LabelNetwork] != "shared" {
+		t.Errorf("network label of a run with a network = %q, want its mode, shared", againInfo.Labels[LabelNetwork])
 	}
 	spec, err := ctr.Spec(ctx)
 	if err != nil {
