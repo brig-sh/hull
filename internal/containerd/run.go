@@ -32,6 +32,7 @@ import (
 	"github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/containers"
 	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/defaults"
 	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/containerd/errdefs"
@@ -53,6 +54,13 @@ const (
 // LabelName is the label that holds the name of the instance a container
 // hull created is. The container's ID is one of its own; see newContainerID.
 const LabelName = "sh.brig.hull/name"
+
+// LabelNetwork holds the network a container hull created was run with:
+// none, or the --net mode of its RunConfig.Network. The attachment's own
+// record goes when the task does, and a label is still there for a stopped
+// instance, as nerdctl keeps a container's networks in its nerdctl/networks
+// label.
+const LabelNetwork = "sh.brig.hull/network"
 
 // ImageForRun returns the image ref names, for platform, pulling it as
 // policy says: "missing" pulls only an image the namespace does not have,
@@ -174,8 +182,7 @@ func LoadRunImage(ctx context.Context, img client.Image) (RunImage, error) {
 
 // RunConfig describes an instance to create.
 type RunConfig struct {
-	// Name is the instance's name, which hull's commands take. It is the
-	// guest's hostname too.
+	// Name is the instance's name, which hull's commands take.
 	Name string
 	// Args replaces the image's Cmd when it is not empty. The image's
 	// Entrypoint is kept, as docker run keeps it.
@@ -197,6 +204,8 @@ type RunConfig struct {
 	// Network, when not nil, attaches the instance to a network. Without
 	// it, the instance has none.
 	Network *Network
+	// Mounts are added to the spec's, for urunc to take into the guest.
+	Mounts []specs.Mount
 }
 
 // afterCreate runs between CreateInstance's create of the container and its
@@ -206,6 +215,10 @@ var afterCreate = func() {}
 
 // containerIDLen is the length of the IDs newContainerID makes.
 const containerIDLen = 16
+
+// hostnameLen is how much of the container ID is the spec's host name: 12
+// characters, as in nerdctl and docker.
+const hostnameLen = 12
 
 // maxNamespaceLen is the longest namespace an instance can start in. urunc
 // listens on two sockets in the runc shim's default root,
@@ -231,6 +244,9 @@ func ValidateRunNamespace(namespace string) error {
 // and before urunc's start reads the interface from it, and at postStop,
 // when the task is deleted.
 type Network struct {
+	// Mode is the --net the run attaches the instance with, such as
+	// shared, which the container's LabelNetwork keeps.
+	Mode string
 	// Hook is the command the runtime runs, with "createRuntime" or
 	// "postStop" appended to its arguments.
 	Hook specs.Hook
@@ -402,8 +418,15 @@ func newContainer(ctx context.Context, c *client.Client, image RunImage, cfg Run
 		return nil, err
 	}
 
+	id, err := newContainerID()
+	if err != nil {
+		return nil, err
+	}
 	specOpts := []oci.SpecOpts{
-		oci.WithHostname(cfg.Name),
+		// The container ID's first characters, as nerdctl and docker name
+		// a container's host, and not the instance's name, which can be
+		// longer than the 64 bytes a Linux host name can be.
+		oci.WithHostname(id[:hostnameLen]),
 		oci.WithProcessArgs(process.Args...),
 		// The default PATH first, as docker gives an image that sets none,
 		// so the image's own replaces it.
@@ -422,14 +445,15 @@ func newContainer(ctx context.Context, c *client.Client, image RunImage, cfg Run
 	if cfg.CPUs > 0 {
 		specOpts = append(specOpts, oci.WithCPUCFS(int64(cfg.CPUs)*cpuPeriod, cpuPeriod))
 	}
+	if len(cfg.Mounts) > 0 {
+		specOpts = append(specOpts, oci.WithMounts(cfg.Mounts))
+	}
+	network := "none"
 	if cfg.Network != nil {
 		specOpts = append(specOpts, withNetwork(cfg.Network))
+		network = cfg.Network.Mode
 	}
 
-	id, err := newContainerID()
-	if err != nil {
-		return nil, err
-	}
 	ctr, err := c.NewContainer(ctx, id,
 		client.WithImage(img),
 		// Before WithNewSnapshot, which prepares the snapshot in the
@@ -446,6 +470,7 @@ func newContainer(ctx context.Context, c *client.Client, image RunImage, cfg Run
 			LabelBackend:     cfg.Backend,
 			LabelImageDigest: img.Target().Digest.String(),
 			LabelLogFile:     cfg.LogFile,
+			LabelNetwork:     network,
 		}),
 	)
 	if err != nil {
@@ -544,6 +569,24 @@ func writeNetworkFiles(n *Network) error {
 		return err
 	}
 	return os.Chmod(path, 0o644)
+}
+
+// ResolveSnapshotter returns the snapshotter a run given snapshotter, "" for
+// the namespace's default, creates its container in: the namespace's
+// containerd.io/defaults/snapshotter label, else containerd's default, as
+// the client resolves it when it unpacks and creates.
+func ResolveSnapshotter(ctx context.Context, c *client.Client, snapshotter string) (string, error) {
+	if snapshotter != "" {
+		return snapshotter, nil
+	}
+	label, err := c.GetLabel(ctx, defaults.DefaultSnapshotterNSLabel)
+	if err != nil {
+		return "", fmt.Errorf("read the namespace's default snapshotter: %w", err)
+	}
+	if label != "" {
+		return label, nil
+	}
+	return defaults.DefaultSnapshotter, nil
 }
 
 // unpack unpacks img into snapshotter, "" for the namespace's default, when

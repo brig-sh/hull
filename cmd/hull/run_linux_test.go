@@ -31,6 +31,7 @@ import (
 
 	"github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/pkg/oci"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 
 	"github.com/brig-sh/hull/internal/bootassets"
 	"github.com/brig-sh/hull/internal/containerd"
@@ -54,13 +55,13 @@ func TestRunRefusesBeforeDialling(t *testing.T) {
 		{[]string{"-d", "--net", "shared", "busybox"}, "load CNI network bridge"},
 		{[]string{"-d", "--pull", "sometimes", "busybox"}, `invalid --pull "sometimes"`},
 		{[]string{"-d", "--hypervisor", "vz", "busybox"}, "--hypervisor vz: macOS only"},
-		{[]string{"-d", "--hypervisor", "hvi", "busybox"}, "--hypervisor hvi: macOS only"},
 		{[]string{"-d", "--hypervisor", "kvm", "busybox"}, "urunc has no such monitor"},
 		{[]string{"-d", "--annotation", "novalue", "busybox"}, `invalid --annotation "novalue"`},
 		{[]string{"-d", "--name", "../x", "busybox"}, "--name: invalid instance name"},
-		// A name hull takes elsewhere, but not a containerd identifier.
-		{[]string{"-d", "--name", "web-", "busybox"}, "--name: invalid instance name"},
+		// The log, <name>.log, would not fit in a file name.
+		{[]string{"-d", "--name", strings.Repeat("a", 252), "busybox"}, "--name: invalid instance name"},
 		{[]string{"-d", "--env-file", "/nonexistent/env", "busybox"}, "--env-file: open /nonexistent/env"},
+		{[]string{"-d", "--shared-dir", "/nonexistent:/mnt", "busybox"}, "shared directory not found: /nonexistent"},
 		{[]string{"-d"}, "image reference required"},
 	} {
 		app := newApp()
@@ -145,9 +146,11 @@ func TestInstanceRecordReadsHullLabels(t *testing.T) {
 		containerd.LabelBackend:     "cloud-hypervisor",
 		containerd.LabelImageDigest: "sha256:abc",
 		containerd.LabelLogFile:     "/logs/vm.log",
+		containerd.LabelNetwork:     "shared",
 	}})
-	if rec.Backend != "cloud-hypervisor" || rec.ImageDigest != "sha256:abc" || rec.LogFile != "/logs/vm.log" {
-		t.Errorf("record = %+v, want the backend, digest and log file from the labels", rec)
+	if rec.Backend != "cloud-hypervisor" || rec.ImageDigest != "sha256:abc" || rec.LogFile != "/logs/vm.log" ||
+		rec.Network != "shared" {
+		t.Errorf("record = %+v, want the backend, digest, log file and network from the labels", rec)
 	}
 }
 
@@ -426,9 +429,25 @@ func TestRunRefusalsAgainstDaemon(t *testing.T) {
 	if !errors.Is(err, containerd.ErrNotVM) || !strings.Contains(err.Error(), "with --annotation") {
 		t.Errorf("--no-boot-assets of a plain image: error = %v, want ErrNotVM and how to name a unikernel", err)
 	}
-	err = run(append([]string{"--pull", "never", "--annotation", ociclient.HypervisorAnnotation + "=hvi"}, bootFiles...)...)
-	if err == nil || !strings.Contains(err.Error(), ociclient.HypervisorAnnotation+"=hvi: macOS only") {
-		t.Errorf("hvi named by an annotation: error = %v, want it refused", err)
+	err = run(append([]string{"--pull", "never", "--annotation", ociclient.HypervisorAnnotation + "=vz"}, bootFiles...)...)
+	if err == nil || !strings.Contains(err.Error(), ociclient.HypervisorAnnotation+"=vz: macOS only") {
+		t.Errorf("vz named by an annotation: error = %v, want it refused", err)
+	}
+	// A share urunc would leave out of the guest is refused: on a monitor
+	// that cannot share a directory, and for an image that boots its own
+	// kernel from a snapshot that may be a disk.
+	share := t.TempDir()
+	err = run(append([]string{"--pull", "never", "--shared-dir", share + ":/mnt", "--hypervisor", "firecracker"}, bootFiles...)...)
+	if err == nil || !strings.Contains(err.Error(), "and the run's is firecracker") {
+		t.Errorf("a share on firecracker: error = %v, want it refused", err)
+	}
+	err = run("--pull", "never", "--no-boot-assets", "--shared-dir", share+":/mnt", "--snapshotter", "native",
+		"--annotation", ociclient.UnikernelTypeAnnotation+"=linux",
+		"--annotation", ociclient.HypervisorAnnotation+"=cloud-hypervisor",
+		"--annotation", ociclient.UnikernelBinaryAnnotation+"=/unikernel",
+		"--annotation", "com.urunc.unikernel.mountRootfs=true")
+	if err == nil || !strings.Contains(err.Error(), "needs the overlayfs snapshotter, and the run's is native") {
+		t.Errorf("a share for an image's own kernel on native: error = %v, want it refused", err)
 	}
 	err = run(append([]string{"--pull", "never", "--annotation", "io.kubernetes.cri.container-name=queue-proxy"}, bootFiles...)...)
 	if err == nil || !strings.Contains(err.Error(), "io.kubernetes.cri.container-name is refused") {
@@ -522,6 +541,29 @@ func TestRunPassesTheSnapshotter(t *testing.T) {
 	unpacked, err := img.IsUnpacked(context.Background(), "native")
 	if err != nil || !unpacked {
 		t.Errorf("unpacked into native = %v, %v; want true", unpacked, err)
+	}
+}
+
+func TestRunPassesTheShares(t *testing.T) {
+	privateLogDirs(t)
+	f := newInstanceFixture(t)
+	dir := t.TempDir()
+	cfg := runConfigOf(t, f, append([]string{"--shared-dir", dir + ":/workspace:ro"}, bootFileArgs(t)...)...)
+	want := []specs.Mount{{Type: "bind", Source: dir, Destination: "/workspace", Options: []string{"rbind", "rprivate", "ro"}}}
+	if !reflect.DeepEqual(cfg.Mounts, want) {
+		t.Errorf("mounts = %+v, want %+v", cfg.Mounts, want)
+	}
+}
+
+// hvi names a macOS backend and a urunc monitor both. On Linux it is the
+// monitor, and reaches urunc as given, where vz is refused.
+func TestRunPassesTheMonitor(t *testing.T) {
+	privateLogDirs(t)
+	f := newInstanceFixture(t)
+	cfg := runConfigOf(t, f, append([]string{"--hypervisor", "hvi"}, bootFileArgs(t)...)...)
+	got := cfg.Annotations[ociclient.HypervisorAnnotation]
+	if got != "hvi" {
+		t.Errorf("monitor = %q, want hvi", got)
 	}
 }
 

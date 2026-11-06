@@ -108,15 +108,35 @@ them, with the same output as on macOS. All three need a running containerd, whi
 start. hull looks for its socket in this order:
 
 1. `--containerd-address`
-2. `$HULL_CONTAINERD_ADDRESS`
+2. `$CONTAINERD_ADDRESS`, which nerdctl and ctr read too, with or without
+   `unix://` in front
 3. `/run/containerd/containerd.sock` when run as root, and
    `$XDG_RUNTIME_DIR/containerd/containerd.sock`, where a rootless containerd
    puts it, for any other user. With `$XDG_RUNTIME_DIR` unset or not an
    absolute path, `/run/user/<uid>` takes its place.
 
+For a user whose rootless containerd is running under rootlesskit, an
+absolute address from `--containerd-address` or `$CONTAINERD_ADDRESS` is a
+path in rootlesskit's mount namespace, as it is for nerdctl, which runs
+there. `containerd-rootless.sh` mounts `$XDG_RUNTIME_DIR/containerd` over
+`/run/containerd` in that namespace, so `unix:///run/containerd/containerd.sock`,
+the address the brig bundle's `brig-env.sh` sets for such a user, is the
+rootless daemon's socket and not the system daemon's. hull stays on the host
+and opens the path through `/proc/<pid>/root` of rootlesskit's child, a path
+its errors name, resolving any symbolic link on it inside that root, as a
+process in the namespace would: `/var/run`, a link to `/run`, leads to the
+rootless daemon too. A path rootlesskit's namespace does not replace, such
+as one under `$XDG_RUNTIME_DIR`, is the same file either way. When the
+state directory is a stopped rootlesskit's, whose child is gone, hull fails
+with "rootless containerd not running?", as nerdctl does, rather than reach
+the system daemon at the same path on the host. Remove the state directory,
+or point `$ROOTLESSKIT_STATE_DIR` at a directory that does not exist, to use
+the host's path. Root leaves the address as given.
+
 There is no store directory on Linux, and no `--store-dir`. Isolation comes
 from the containerd namespace instead: `--namespace`, then
-`$HULL_NAMESPACE`, then `hull`. Two namespaces see none of each other's
+`$CONTAINERD_NAMESPACE`, which nerdctl and ctr read too, then `hull`.
+Two namespaces see none of each other's
 images, and `ctr -n hull images ls` shows what hull sees.
 
 containerd keeps one record per image name, and it may hold several
@@ -219,9 +239,15 @@ killed between its create and its removal of its own container leaves both.
 Every command that acts on the name then fails, naming the two container IDs
 and the `ctr` commands that remove one, but `hull ps` does not: it lists
 both containers under the name, so brig, which reads `hull ps`, still finds
-the instance. A name on Linux must also be a containerd identifier, as
-every name was while it was the container's ID: at most 76 characters, with
-no two of `.`, `_` and `-` in a row, and ending in a letter or digit.
+the instance. A name on Linux follows the macOS rule, with a shorter
+limit: at most 251 characters, so that the instance's log, `<name>.log`,
+fits in a file name. Like a nerdctl container's name, and unlike a
+containerd identifier, it may hold two of `.`, `_` and `-` in a row and
+end in one. The instance's host name in its spec is the first 12
+characters of its container ID, as nerdctl and docker give a container,
+not its name. The bundle's urunc does not read the spec's host name. It
+names a guest with a network `urunc`, through the kernel's `ip=`
+argument, and a guest run with `--net none` has no host name, `(none)`.
 `hull inspect <name>` prints an instance's container ID as `containerId`.
 When inspect fails, as it does for an instance whose task containerd cannot
 read, this shows it:
@@ -253,6 +279,12 @@ these differences:
   `backend` and `logFile` come from labels `hull run` sets, so they are
   empty for a container another client created. Those containerd has no
   counterpart for, among them `cmdLine` and `bundleDir`, are always empty.
+- `hull inspect` prints `network`, Linux only: `none`, or the `--net` mode
+  that attached the instance, `shared`. It comes from a label `hull run`
+  sets, so it stays after the instance stops, when the address is gone. It
+  is missing for a container another client created, and for one an older
+  hull created, which recorded no network: read that as unknown, not as
+  `none`. macOS records no `network`; its network is in `cmdLine`.
 - `hull rm` deletes the container's task, the container and its snapshot,
   the instance's log, and the exec processes and FIFOs a killed `hull exec`
   left, described below. A task that has not stopped is refused without
@@ -520,6 +552,51 @@ ways:
   plugin's two `ACCEPT` rules for the address stay in the `CNI-FORWARD`
   chain: it removes its rules using the attach's result, and libcni records
   none for an attach that failed.
+- `--shared-dir` takes the macOS form, `/host/path:/guest/path[:ro|rw]`,
+  with the same refusals but one: the host path starts with `/`, `.` or `~`
+  and names a directory that exists, and the guest path is absolute, not
+  `/`, and no other share's. A space or a quote in the guest path, which
+  macOS refuses because its init script names the path unquoted, is taken:
+  urunc passes the path through no shell. With `--net shared` the guest
+  path cannot be `/etc/resolv.conf`, where hull puts the network's
+  resolver configuration. hull makes the host path absolute and puts it in the spec as a bind mount,
+  `rbind` and `rprivate` as `nerdctl run -v` makes one, with `ro` or `rw`,
+  and urunc takes it into the guest. As urunc 3c00b69 does it, that works on
+  two roots:
+  - On a root urunc shares from the host, over virtio-fs or 9p, the
+    directory is bind-mounted into the tree the guest shares. `ro` holds in
+    the guest, and a write reaches the host. A container boot gets this root
+    on cloud-hypervisor, hvi and qemu, on any snapshotter, devmapper too.
+  - On the overlay-block root (`com.urunc.unikernel.rootfsMode` set to
+    `overlay-block`), it is a virtio-fs export of its own, and `ro` holds
+    the same way.
+
+  On any other root urunc drops the directory with no error, because it
+  copies only files into a root it boots from as an initrd or a disk, and
+  gives a guest with no root from the host none. So hull refuses the share
+  before the instance exists:
+  - on a monitor that cannot share a directory, such as firecracker, where
+    urunc boots a container boot from the snapshot as a disk;
+  - for an image that boots its own kernel, unless
+    `com.urunc.unikernel.mountRootfs` is true, neither a
+    `com.urunc.unikernel.initrd` nor a block device mounted at `/` is
+    named, and the snapshotter is overlayfs. urunc boots such a guest from
+    the snapshot whenever that is a block device, as devmapper's is, and
+    hull can tell ahead of the run that it is not only for overlayfs.
+
+  urunc fails a container boot itself when it is given an initrd, a block
+  image or `com.urunc.unikernel.mountRootfs` false. All of this takes the
+  virtiofsd urunc is configured with to be there, as the bundle ships it:
+  without it, urunc boots a container boot on cloud-hypervisor or hvi from
+  a snapshot that is a block device, and drops the share.
+
+  `ro` is not recursive, as nerdctl's `:ro` is not either; hull has no
+  form of nerdctl's `:rro`, which is. urunc remounts only the top of the
+  bind read-only, so a file system mounted below a read-only share on the
+  host stays writable from the guest on a shared root, and is not shared
+  on the overlay-block root. hull checks the host path, and urunc opens it when the task is
+  created, so a directory put in its place in between is the one the
+  guest gets, as with nerdctl. `--shared-dir-fd` is macOS only.
 - `--env-file` adds the variables of a file, and is Linux only: macOS
   `hull run` does not take it. It follows `docker run --env-file`. Each
   line is `KEY=VALUE`, taken as written once its leading white space is
@@ -541,13 +618,19 @@ ways:
   config for the host's platform. One pulled only for another platform is
   pulled again with `--pull missing`, and refused with `--pull never`.
 - `--hypervisor` names one of the monitors urunc knows: `cloud-hypervisor`,
-  `firecracker`, `qemu`, `hvt`, `spt` or `hyperlight-unikraft`. Any other
-  name is refused, `vz` and `hvi` among them, whether `--hypervisor` or the
+  `firecracker`, `qemu`, `hvi`, `hvt`, `spt` or `hyperlight-unikraft`. Any
+  other name is refused, `vz` among them, whether `--hypervisor` or the
   `com.urunc.unikernel.hypervisor` annotation gives it. Without the flag,
   the monitor comes from that annotation, and a plain image boots on
   `cloud-hypervisor`, since the bundle ships no qemu, urunc's own default.
   The monitor must also be installed where urunc's configuration says; the
-  bundle ships `cloud-hypervisor` and `firecracker`.
+  bundle ships `cloud-hypervisor` and `firecracker`, and `hvi` from
+  v0.1.0-rc21.
+- `hvi` here is urunc's monitor of that name, which boots the guest on KVM,
+  not the macOS backend. Only the urunc of the bundle from v0.1.0-rc21 runs
+  it. An older urunc refuses it as an unsupported monitor when the task is
+  created, after the container exists, and hull cannot tell which urunc the
+  shim runs, so it cannot refuse the run sooner.
 - `--snapshotter` names the containerd snapshotter that holds the
   instance's root filesystem, such as `devmapper`. Without it, the instance
   gets the namespace's default snapshotter, the one `hull pull` unpacks
@@ -595,8 +678,8 @@ ways:
   container's spec, empty for one that is not set. urunc's shim copies any of
   them the spec lacks from the image's manifest, and an image could
   otherwise name a host file as the kernel or initrd to boot. The image's
-  annotations are still honored, except `bootKernel`, `bootInitrd`, `vAccel`
-  and `RPCAddress`, which only `--annotation` sets.
+  annotations are still honored, except `bootKernel`, `bootInitrd`,
+  `rootfsMode`, `vAccel` and `RPCAddress`, which only `--annotation` sets.
 - `hull run` refuses a run urunc would not boot as a VM. urunc needs a
   unikernel type and a monitor in the annotations, and a binary unless a
   boot kernel and initrd are given. When one is missing it looks for a

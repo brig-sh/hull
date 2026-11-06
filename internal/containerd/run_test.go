@@ -19,11 +19,13 @@ package containerd
 import (
 	"context"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +39,8 @@ import (
 	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	runtimespec "github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/urunc-dev/urunc/pkg/unikontainers"
 
 	"github.com/brig-sh/hull/internal/containerd/containerdtest"
 	"github.com/brig-sh/hull/internal/imageplatform"
@@ -47,10 +51,12 @@ import (
 func TestUruncAnnotations(t *testing.T) {
 	image := imageUrunc(
 		map[string]string{
-			ociclient.UnikernelBinaryAnnotation: "/unikernel/app",
-			ociclient.BootKernelAnnotation:      "/etc/shadow",
-			"com.urunc.unikernel.vAccel":        "exec",
-			"org.opencontainers.image.title":    "app",
+			ociclient.UnikernelBinaryAnnotation:   "/unikernel/app",
+			ociclient.BootKernelAnnotation:        "/etc/shadow",
+			"com.urunc.unikernel.vAccel":          "exec",
+			"com.urunc.unikernel.rootfsMode":      "overlay-block",
+			"com.urunc.unikernel.hyperlightPorts": "8080",
+			"org.opencontainers.image.title":      "app",
 		},
 		map[string]string{
 			ociclient.UnikernelBinaryAnnotation: "/from/labels",
@@ -58,7 +64,13 @@ func TestUruncAnnotations(t *testing.T) {
 			ociclient.BootInitrdAnnotation:      "/etc/passwd",
 		},
 	)
-	want := map[string]string{ociclient.UnikernelBinaryAnnotation: "/unikernel/app", ociclient.HypervisorAnnotation: "firecracker"}
+	// The ports a hyperlight guest serves on are the image's to declare,
+	// as urunc reads them from its urunc.json. The root mode is the host's.
+	want := map[string]string{
+		ociclient.UnikernelBinaryAnnotation:   "/unikernel/app",
+		ociclient.HypervisorAnnotation:        "firecracker",
+		"com.urunc.unikernel.hyperlightPorts": "8080",
+	}
 	if !reflect.DeepEqual(image, want) {
 		t.Errorf("imageUrunc = %v, want %v: the manifest over the labels, and no host keys", image, want)
 	}
@@ -79,10 +91,12 @@ func TestUruncAnnotations(t *testing.T) {
 		ociclient.HypervisorAnnotation:      "cloud-hypervisor",
 		ociclient.BootKernelAnnotation:      "/host/kernel",
 		ociclient.BootInitrdAnnotation:      "",
+		"com.urunc.unikernel.rootfsMode":    "",
 		"example.com/other":                 "kept",
 	} {
-		if got[k] != v {
-			t.Errorf("%s = %q, want %q", k, got[k], v)
+		value, ok := got[k]
+		if !ok || value != v {
+			t.Errorf("%s = %q (set: %t), want %q", k, value, ok, v)
 		}
 	}
 }
@@ -194,6 +208,7 @@ func TestNewContainerThroughDaemon(t *testing.T) {
 		},
 		Backend: "firecracker",
 		LogFile: logFile,
+		Mounts:  []runtimespec.Mount{{Type: "bind", Source: "/srv/work", Destination: "/workspace", Options: []string{"rbind", "ro"}}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -216,7 +231,7 @@ func TestNewContainerThroughDaemon(t *testing.T) {
 		ociclient.BootKernelAnnotation:    "/run/kernel",
 		ociclient.BootInitrdAnnotation:    "/run/initrd",
 		ociclient.UnikernelTypeAnnotation: "linux",
-	}})
+	}, Network: testNetwork(filepath.Join(t.TempDir(), "vm.net"))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,13 +244,26 @@ func TestNewContainerThroughDaemon(t *testing.T) {
 		LabelBackend:     "firecracker",
 		LabelImageDigest: img.Target().Digest.String(),
 		LabelLogFile:     logFile,
+		LabelNetwork:     "none",
 	}
 	if !reflect.DeepEqual(info.Labels, wantLabels) {
 		t.Errorf("labels = %v, want %v", info.Labels, wantLabels)
 	}
+	againInfo, err := again.Info(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if againInfo.Labels[LabelNetwork] != "shared" {
+		t.Errorf("network label of a run with a network = %q, want its mode, shared", againInfo.Labels[LabelNetwork])
+	}
 	spec, err := ctr.Spec(ctx)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(spec.Mounts, func(m runtimespec.Mount) bool {
+		return m.Destination == "/workspace" && m.Source == "/srv/work" && slices.Equal(m.Options, []string{"rbind", "ro"})
+	}) {
+		t.Errorf("spec mounts = %+v, want the run's bind mount of /srv/work at /workspace", spec.Mounts)
 	}
 	for _, k := range uruncKeys {
 		_, ok := spec.Annotations[k]
@@ -250,8 +278,9 @@ func TestNewContainerThroughDaemon(t *testing.T) {
 	if spec.Annotations[ociclient.HypervisorAnnotation] != "firecracker" {
 		t.Errorf("hypervisor = %q, want the image's", spec.Annotations[ociclient.HypervisorAnnotation])
 	}
-	if !reflect.DeepEqual(spec.Process.Args, []string{"sleep", "1"}) || spec.Process.Cwd != "/" || spec.Hostname != "vm" {
-		t.Errorf("process %v in %q on host %q, want sleep 1 in / on vm", spec.Process.Args, spec.Process.Cwd, spec.Hostname)
+	if !reflect.DeepEqual(spec.Process.Args, []string{"sleep", "1"}) || spec.Process.Cwd != "/" || spec.Hostname != ctr.ID()[:12] {
+		t.Errorf("process %v in %q on host %q, want sleep 1 in / on %s, the start of the container ID",
+			spec.Process.Args, spec.Process.Cwd, spec.Hostname, ctr.ID()[:12])
 	}
 	var paths []string
 	foo := false
@@ -509,10 +538,10 @@ func TestCreateInstanceRefusesANameInUse(t *testing.T) {
 			t.Errorf("CreateInstance(%s): error = %v, want AlreadyExists", name, err)
 		}
 	}
-	// A name that is no containerd identifier is refused too.
-	err = CreateInstance(ctx, c, image, RunConfig{Name: "web-", Args: []string{"true"}, LogFile: filepath.Join(t.TempDir(), "web-.log")})
+	// A name hull's commands do not take is refused too.
+	err = CreateInstance(ctx, c, image, RunConfig{Name: "-web", Args: []string{"true"}, LogFile: filepath.Join(t.TempDir(), "web.log")})
 	if !errors.Is(err, store.ErrInvalidInstanceID) {
-		t.Errorf("CreateInstance(web-): error = %v, want ErrInvalidInstanceID", err)
+		t.Errorf("CreateInstance(-web): error = %v, want ErrInvalidInstanceID", err)
 	}
 	containers, err := c.Containers(ctx)
 	if err != nil {
@@ -742,4 +771,129 @@ func newSnapshotterContainer(ctx context.Context, t *testing.T, c *client.Client
 		t.Cleanup(func() { _ = ctr.Delete(context.Background(), client.WithSnapshotCleanup) })
 	}
 	return ctr, err
+}
+
+func TestCheckShares(t *testing.T) {
+	boot := map[string]string{
+		ociclient.HypervisorAnnotation: "cloud-hypervisor",
+		ociclient.BootKernelAnnotation: "/boot/kernel",
+		ociclient.BootInitrdAnnotation: "/boot/initrd",
+	}
+	own := map[string]string{
+		ociclient.HypervisorAnnotation:      "qemu",
+		ociclient.UnikernelBinaryAnnotation: "/unikernel",
+		"com.urunc.unikernel.mountRootfs":   "true",
+	}
+	with := func(spec, extra map[string]string) map[string]string {
+		spec = maps.Clone(spec)
+		maps.Copy(spec, extra)
+		return spec
+	}
+	for _, tc := range []struct {
+		name        string
+		spec        map[string]string
+		snapshotter string
+		want        string
+	}{
+		{"a container boot on overlayfs", boot, "overlayfs", ""},
+		{"a container boot on devmapper", boot, "devmapper", ""},
+		{"a container boot with only a kernel", with(boot, map[string]string{ociclient.BootInitrdAnnotation: ""}),
+			"devmapper", ""},
+		{"a container boot with only an initrd", with(boot, map[string]string{ociclient.BootKernelAnnotation: ""}),
+			"devmapper", ""},
+		{"a container boot on hvi", with(boot, map[string]string{ociclient.HypervisorAnnotation: "hvi"}), "devmapper", ""},
+		{"no monitor", map[string]string{}, "overlayfs", ""},
+		{"a container boot on firecracker", with(boot, map[string]string{ociclient.HypervisorAnnotation: "firecracker"}),
+			"overlayfs", "the run's is firecracker"},
+		{"an image's own kernel on hvt", with(own, map[string]string{ociclient.HypervisorAnnotation: "hvt"}), "overlayfs",
+			"the run's is hvt"},
+		{"an image's own kernel on overlayfs", own, "overlayfs", ""},
+		{"an image's own kernel on devmapper", own, "devmapper",
+			"needs the overlayfs snapshotter, and the run's is devmapper"},
+		{"an image's own kernel without mountRootfs", with(own, map[string]string{"com.urunc.unikernel.mountRootfs": ""}),
+			"overlayfs", `mountRootfs is ""`},
+		{"an image's own kernel with mountRootfs false", with(own, map[string]string{"com.urunc.unikernel.mountRootfs": "false"}),
+			"overlayfs", `mountRootfs is "false"`},
+		{"an image's own kernel with mountRootfs unparsable", with(own, map[string]string{"com.urunc.unikernel.mountRootfs": "yes"}),
+			"overlayfs", `mountRootfs is "yes"`},
+		{"an initrd root", with(own, map[string]string{ociclient.InitrdAnnotation: "/initrd"}), "overlayfs", "initrd"},
+		{"a block root", with(own, map[string]string{"com.urunc.unikernel.block": "/dev/vdb", "com.urunc.unikernel.blkMntPoint": "/"}),
+			"overlayfs", "block device mounted at /"},
+		{"a block elsewhere", with(own, map[string]string{"com.urunc.unikernel.block": "/dev/vdb", "com.urunc.unikernel.blkMntPoint": "/data"}),
+			"overlayfs", ""},
+	} {
+		err := CheckShares(tc.spec, tc.snapshotter)
+		if tc.want == "" {
+			if err != nil {
+				t.Errorf("%s: %v, want the shares taken", tc.name, err)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: error = %v, want %q", tc.name, err, tc.want)
+		}
+	}
+}
+
+func TestResolveSnapshotterThroughDaemon(t *testing.T) {
+	c := instancesClient(t)
+	ctx := context.Background()
+	got, err := ResolveSnapshotter(ctx, c, "devmapper")
+	if err != nil || got != "devmapper" {
+		t.Errorf("a named snapshotter: %q, %v; want devmapper", got, err)
+	}
+	got, err = ResolveSnapshotter(ctx, c, "")
+	if err != nil || got != defaults.DefaultSnapshotter {
+		t.Errorf("no label: %q, %v; want %s", got, err, defaults.DefaultSnapshotter)
+	}
+	err = c.NamespaceService().SetLabel(ctx, c.DefaultNamespace(), defaults.DefaultSnapshotterNSLabel, "native")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err = ResolveSnapshotter(ctx, c, "")
+	if err != nil || got != "native" {
+		t.Errorf("the namespace's label: %q, %v; want native", got, err)
+	}
+}
+
+// uruncKeys and hostKeys must follow the urunc go.mod requires, which is the
+// bundle's: a key urunc reads and hull does not write is one the shim fills
+// from the image. urunc's UnikernelConfig has a field per key. Those it
+// reads from an image's urunc.json carry the key as their json tag. Those it
+// reads from the spec alone are tagged "-", which names no key, so they are
+// listed here, and are exactly the host keys.
+func TestUruncKeysFollowUrunc(t *testing.T) {
+	specOnly := map[string]string{
+		"VAccel":     "com.urunc.unikernel.vAccel",
+		"RPCAddress": "com.urunc.unikernel.RPCAddress",
+		"BootKernel": ociclient.BootKernelAnnotation,
+		"BootInitrd": ociclient.BootInitrdAnnotation,
+		"RootfsMode": rootfsModeAnnotation,
+	}
+	var keys []string
+	host := map[string]bool{}
+	config := reflect.TypeFor[unikontainers.UnikernelConfig]()
+	for i := range config.NumField() {
+		field := config.Field(i)
+		tag, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		if tag != "-" {
+			keys = append(keys, tag)
+			continue
+		}
+		key, ok := specOnly[field.Name]
+		if !ok {
+			t.Errorf("urunc reads %s from the spec only, and this test does not know its key", field.Name)
+			continue
+		}
+		keys = append(keys, key)
+		host[key] = true
+	}
+	slices.Sort(keys)
+	want := slices.Sorted(slices.Values(uruncKeys))
+	if !slices.Equal(keys, want) {
+		t.Errorf("urunc reads %q, and uruncKeys is %q", keys, want)
+	}
+	if !maps.Equal(host, hostKeys) {
+		t.Errorf("urunc reads %v from the spec only, and hostKeys is %v", host, hostKeys)
+	}
 }

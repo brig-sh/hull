@@ -38,8 +38,9 @@ import (
 )
 
 // defaultHypervisor is the monitor a plain image boots on. The
-// brig-standalone-linux bundle ships cloud-hypervisor and firecracker, and
-// no qemu, which is the monitor urunc picks when none is named.
+// brig-standalone-linux bundle ships no qemu, which is the monitor urunc
+// picks when none is named. It ships cloud-hypervisor in every release, and
+// hvi only from v0.1.0-rc21, so hvi is not the default.
 const defaultHypervisor = "cloud-hypervisor"
 
 func runCommand() *cli.Command {
@@ -65,6 +66,7 @@ func runCommand() *cli.Command {
 			memFlag(),
 			cpusFlag(),
 			nameFlag(),
+			sharedDirFlag(),
 			&cli.StringFlag{
 				Name:  "hypervisor",
 				Usage: "urunc monitor to boot with, such as 'cloud-hypervisor' (default: from the image, else cloud-hypervisor for a plain image)",
@@ -120,6 +122,10 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	if err != nil {
 		return err
 	}
+	mounts, err := sharedDirMounts(cmd.StringSlice("shared-dir"))
+	if err != nil {
+		return err
+	}
 	name := cmd.String("name")
 	if name == "" {
 		name = generateID(8)
@@ -142,6 +148,12 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	network, err := runNetwork(ctx, cmd.String("net"), namespace, name)
 	if err != nil {
 		return err
+	}
+	if network != nil {
+		err = checkNetworkShares(mounts)
+		if err != nil {
+			return err
+		}
 	}
 
 	c, err := connectContainerd(ctx, cmd)
@@ -173,6 +185,16 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 			return fmt.Errorf("%s=%s: %w", ociclient.HypervisorAnnotation, backend, err)
 		}
 	}
+	if len(mounts) > 0 {
+		snapshotter, err := containerd.ResolveSnapshotter(ctx, c, cmd.String("snapshotter"))
+		if err != nil {
+			return err
+		}
+		err = containerd.CheckShares(containerd.UruncAnnotations(annotations, image.Urunc), snapshotter)
+		if err != nil {
+			return err
+		}
+	}
 	err = absBootFiles(annotations)
 	if err != nil {
 		return err
@@ -202,6 +224,7 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 		LogFile:     logFile,
 		Snapshotter: cmd.String("snapshotter"),
 		Network:     network,
+		Mounts:      mounts,
 	})
 	if errdefs.IsAlreadyExists(err) {
 		return fmt.Errorf("%w: %s", store.ErrInstanceExists, name)
@@ -259,7 +282,7 @@ func planBoot(annotations, image map[string]string, noBootAssets bool,
 // checkMonitor refuses a monitor urunc would refuse only when the task is
 // created, after the container and its snapshot exist.
 func checkMonitor(name string) error {
-	if name == "vz" || name == "hvi" {
+	if name == "vz" {
 		return errors.New("macOS only. On Linux urunc boots the instance, with a monitor such as cloud-hypervisor")
 	}
 	if !slices.Contains(containerd.Monitors, name) {

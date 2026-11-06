@@ -494,7 +494,7 @@ func TestLoadNamed(t *testing.T) {
 	for id, label := range map[string]string{
 		"forged": "x\tstopped\t-\t-\t-\t-\nvictim",
 		"empty":  "",
-		"dash":   "web-",
+		"dash":   "-web",
 	} {
 		ctr, err := c.NewContainer(ctx, id, client.WithSpec(&oci.Spec{}),
 			client.WithContainerLabels(map[string]string{LabelName: label}))
@@ -507,9 +507,9 @@ func TestLoadNamed(t *testing.T) {
 			t.Errorf("LoadNamed(%s), labeled %q = %v, %v; want the container %s", id, label, got, err, id)
 		}
 	}
-	_, err = LoadNamed(ctx, c, "web-")
+	_, err = LoadNamed(ctx, c, "-web")
 	if !errdefs.IsNotFound(err) {
-		t.Errorf("LoadNamed(web-), a label that is no valid name: error = %v, want not found", err)
+		t.Errorf("LoadNamed(-web), a label that is no valid name: error = %v, want not found", err)
 	}
 
 	instances, err := Instances(ctx, c)
@@ -604,13 +604,15 @@ func TestInstanceVerbsFindALabeledContainer(t *testing.T) {
 }
 
 func TestValidateName(t *testing.T) {
-	for _, name := range []string{"web", "a.b_c-d", "0", strings.Repeat("a", 76)} {
+	// Names brig's session slugs make, which a containerd identifier is
+	// not: two separators in a row, one at the end, and any length.
+	for _, name := range []string{"web", "a.b_c-d", "0", "web-", "a..b", "a_-b", "brig-my__proj", strings.Repeat("a", 251)} {
 		err := ValidateName(name)
 		if err != nil {
 			t.Errorf("ValidateName(%q) = %v, want nil", name, err)
 		}
 	}
-	for _, name := range []string{"", "../x", "my app", "a\tb", "web-", "a..b", "a_-b", strings.Repeat("a", 77)} {
+	for _, name := range []string{"", "../x", "my app", "a\tb", "-web", strings.Repeat("a", 252)} {
 		err := ValidateName(name)
 		if !errors.Is(err, store.ErrInvalidInstanceID) {
 			t.Errorf("ValidateName(%q) = %v, want ErrInvalidInstanceID", name, err)

@@ -177,6 +177,13 @@ func TestInstanceCommandsAgainstDaemon(t *testing.T) {
 	if len(row) < 2 || row[1] != "stopped" {
 		t.Errorf("ps row for idle = %q, want status stopped", row)
 	}
+	// brig's List asks for ps -a first.
+	for _, flag := range []string{"-a", "--all"} {
+		all, err := f.run(f.ns, "ps", flag)
+		if err != nil || all != table {
+			t.Errorf("ps %s = %q, %v; want the table ps prints:\n%s", flag, all, err, table)
+		}
+	}
 
 	other, err := f.run(f.ns+"-other", "ps")
 	if err != nil || strings.TrimSpace(other) != "No instances found" {
