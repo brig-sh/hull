@@ -142,7 +142,7 @@ filters the terminal; see [Building on Linux](build.md#building-on-linux).
 | Command | Flags |
 |---|---|
 | `pull <image>` | `--platform` |
-| `ps` | none. Columns: ID, STATUS, EXIT, PID, IP, CREATED. No JSON mode. On Linux the status comes from containerd; see [Building on Linux](build.md#building-on-linux) |
+| `ps` | `--all`, `-a` (accepted for compatibility with `docker ps -a`; `ps` always lists stopped instances too). Columns: ID, STATUS, EXIT, PID, IP, CREATED. No JSON mode. On Linux the status comes from containerd; see [Building on Linux](build.md#building-on-linux) |
 | `stop <id>` | `--timeout`, `-t <secs>` force-kill timeout |
 | `rm <id>` | `--force`, `-f` remove a running instance. On Linux it removes a containerd container; see [Building on Linux](build.md#building-on-linux) |
 | `logs <id>` | `--follow`, `-f`; `--tail`, `-n <lines>` |

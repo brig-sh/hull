@@ -23,7 +23,19 @@ import (
 func psCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "ps",
-		Usage: "list running instances",
+		Usage: "list instances, stopped ones included",
+		Flags: []cli.Flag{
+			// docker and nerdctl list a stopped container only with -a,
+			// and callers written for them, brig among them, pass it.
+			// hull ps lists every instance whatever it is given, since a
+			// stopped instance still holds its name, so the flag changes
+			// nothing.
+			&cli.BoolFlag{
+				Name:    "all",
+				Aliases: []string{"a"},
+				Usage:   "accepted for compatibility: hull ps always lists stopped instances too",
+			},
+		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			return listInstances(ctx, cmd)
 		},
