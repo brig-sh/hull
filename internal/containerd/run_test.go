@@ -40,6 +40,7 @@ import (
 	"github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	runtimespec "github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/urunc-dev/urunc/pkg/unikontainers"
 
 	"github.com/brig-sh/hull/internal/containerd/containerdtest"
 	"github.com/brig-sh/hull/internal/imageplatform"
@@ -50,10 +51,12 @@ import (
 func TestUruncAnnotations(t *testing.T) {
 	image := imageUrunc(
 		map[string]string{
-			ociclient.UnikernelBinaryAnnotation: "/unikernel/app",
-			ociclient.BootKernelAnnotation:      "/etc/shadow",
-			"com.urunc.unikernel.vAccel":        "exec",
-			"org.opencontainers.image.title":    "app",
+			ociclient.UnikernelBinaryAnnotation:   "/unikernel/app",
+			ociclient.BootKernelAnnotation:        "/etc/shadow",
+			"com.urunc.unikernel.vAccel":          "exec",
+			"com.urunc.unikernel.rootfsMode":      "overlay-block",
+			"com.urunc.unikernel.hyperlightPorts": "8080",
+			"org.opencontainers.image.title":      "app",
 		},
 		map[string]string{
 			ociclient.UnikernelBinaryAnnotation: "/from/labels",
@@ -61,7 +64,13 @@ func TestUruncAnnotations(t *testing.T) {
 			ociclient.BootInitrdAnnotation:      "/etc/passwd",
 		},
 	)
-	want := map[string]string{ociclient.UnikernelBinaryAnnotation: "/unikernel/app", ociclient.HypervisorAnnotation: "firecracker"}
+	// The ports a hyperlight guest serves on are the image's to declare,
+	// as urunc reads them from its urunc.json. The root mode is the host's.
+	want := map[string]string{
+		ociclient.UnikernelBinaryAnnotation:   "/unikernel/app",
+		ociclient.HypervisorAnnotation:        "firecracker",
+		"com.urunc.unikernel.hyperlightPorts": "8080",
+	}
 	if !reflect.DeepEqual(image, want) {
 		t.Errorf("imageUrunc = %v, want %v: the manifest over the labels, and no host keys", image, want)
 	}
@@ -82,10 +91,12 @@ func TestUruncAnnotations(t *testing.T) {
 		ociclient.HypervisorAnnotation:      "cloud-hypervisor",
 		ociclient.BootKernelAnnotation:      "/host/kernel",
 		ociclient.BootInitrdAnnotation:      "",
+		"com.urunc.unikernel.rootfsMode":    "",
 		"example.com/other":                 "kept",
 	} {
-		if got[k] != v {
-			t.Errorf("%s = %q, want %q", k, got[k], v)
+		value, ok := got[k]
+		if !ok || value != v {
+			t.Errorf("%s = %q (set: %t), want %q", k, value, ok, v)
 		}
 	}
 }
@@ -841,5 +852,47 @@ func TestResolveSnapshotterThroughDaemon(t *testing.T) {
 	got, err = ResolveSnapshotter(ctx, c, "")
 	if err != nil || got != "native" {
 		t.Errorf("the namespace's label: %q, %v; want native", got, err)
+	}
+}
+
+// uruncKeys and hostKeys must follow the urunc go.mod requires, which is the
+// bundle's: a key urunc reads and hull does not write is one the shim fills
+// from the image. urunc's UnikernelConfig has a field per key. Those it
+// reads from an image's urunc.json carry the key as their json tag. Those it
+// reads from the spec alone are tagged "-", which names no key, so they are
+// listed here, and are exactly the host keys.
+func TestUruncKeysFollowUrunc(t *testing.T) {
+	specOnly := map[string]string{
+		"VAccel":     "com.urunc.unikernel.vAccel",
+		"RPCAddress": "com.urunc.unikernel.RPCAddress",
+		"BootKernel": ociclient.BootKernelAnnotation,
+		"BootInitrd": ociclient.BootInitrdAnnotation,
+		"RootfsMode": rootfsModeAnnotation,
+	}
+	var keys []string
+	host := map[string]bool{}
+	config := reflect.TypeFor[unikontainers.UnikernelConfig]()
+	for i := range config.NumField() {
+		field := config.Field(i)
+		tag, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		if tag != "-" {
+			keys = append(keys, tag)
+			continue
+		}
+		key, ok := specOnly[field.Name]
+		if !ok {
+			t.Errorf("urunc reads %s from the spec only, and this test does not know its key", field.Name)
+			continue
+		}
+		keys = append(keys, key)
+		host[key] = true
+	}
+	slices.Sort(keys)
+	want := slices.Sorted(slices.Values(uruncKeys))
+	if !slices.Equal(keys, want) {
+		t.Errorf("urunc reads %q, and uruncKeys is %q", keys, want)
+	}
+	if !maps.Equal(host, hostKeys) {
+		t.Errorf("urunc reads %v from the spec only, and hostKeys is %v", host, hostKeys)
 	}
 }
