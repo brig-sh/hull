@@ -26,7 +26,6 @@ import (
 	"time"
 
 	"github.com/containerd/containerd/v2/client"
-	"github.com/containerd/containerd/v2/pkg/identifiers"
 	"github.com/containerd/errdefs"
 
 	"github.com/brig-sh/hull/pkg/store"
@@ -185,20 +184,25 @@ func nameHolders(ctx context.Context, c *client.Client, name string) ([]string, 
 	return ids, nil
 }
 
-// ValidateName checks that name can be an instance's name on Linux. It must
-// be one hull's commands take, as store.ValidateInstanceID checks, and a
-// containerd identifier: at most 76 characters, with no two of '.', '_' and
-// '-' in a row, and ending in a letter or digit. Every name was one while
-// it was its container's ID, so this keeps the names hull takes on Linux
-// the same.
+// maxNameLen is the longest name an instance on Linux can have. The name
+// is only a label on the container, whose ID is one of its own, but it
+// names the instance's log, <name>.log, and a file name is at most 255
+// bytes.
+const maxNameLen = 255 - len(".log")
+
+// ValidateName checks that name can be an instance's name on Linux: one
+// hull's commands take, as store.ValidateInstanceID checks, and at most
+// maxNameLen characters, where macOS takes 255. As on macOS and as in
+// nerdctl, a name may hold two of '.', '_' and '-' in a row and end in
+// one, which a containerd identifier may not.
 func ValidateName(name string) error {
 	err := store.ValidateInstanceID(name)
 	if err != nil {
 		return err
 	}
-	err = identifiers.Validate(name)
-	if err != nil {
-		return fmt.Errorf("%w %q: %w", store.ErrInvalidInstanceID, name, err)
+	if len(name) > maxNameLen {
+		return fmt.Errorf("%w %q: a name is at most %d characters on Linux, so that its log, <name>.log, "+
+			"fits in a file name", store.ErrInvalidInstanceID, name, maxNameLen)
 	}
 	return nil
 }
