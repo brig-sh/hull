@@ -58,8 +58,8 @@ func TestRunRefusesBeforeDialling(t *testing.T) {
 		{[]string{"-d", "--hypervisor", "kvm", "busybox"}, "urunc has no such monitor"},
 		{[]string{"-d", "--annotation", "novalue", "busybox"}, `invalid --annotation "novalue"`},
 		{[]string{"-d", "--name", "../x", "busybox"}, "--name: invalid instance name"},
-		// A name hull takes elsewhere, but not a containerd identifier.
-		{[]string{"-d", "--name", "web-", "busybox"}, "--name: invalid instance name"},
+		// The log, <name>.log, would not fit in a file name.
+		{[]string{"-d", "--name", strings.Repeat("a", 252), "busybox"}, "--name: invalid instance name"},
 		{[]string{"-d", "--env-file", "/nonexistent/env", "busybox"}, "--env-file: open /nonexistent/env"},
 		{[]string{"-d", "--shared-dir", "/nonexistent:/mnt", "busybox"}, "shared directory not found: /nonexistent"},
 		{[]string{"-d"}, "image reference required"},

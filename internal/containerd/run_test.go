@@ -278,8 +278,9 @@ func TestNewContainerThroughDaemon(t *testing.T) {
 	if spec.Annotations[ociclient.HypervisorAnnotation] != "firecracker" {
 		t.Errorf("hypervisor = %q, want the image's", spec.Annotations[ociclient.HypervisorAnnotation])
 	}
-	if !reflect.DeepEqual(spec.Process.Args, []string{"sleep", "1"}) || spec.Process.Cwd != "/" || spec.Hostname != "vm" {
-		t.Errorf("process %v in %q on host %q, want sleep 1 in / on vm", spec.Process.Args, spec.Process.Cwd, spec.Hostname)
+	if !reflect.DeepEqual(spec.Process.Args, []string{"sleep", "1"}) || spec.Process.Cwd != "/" || spec.Hostname != ctr.ID()[:12] {
+		t.Errorf("process %v in %q on host %q, want sleep 1 in / on %s, the start of the container ID",
+			spec.Process.Args, spec.Process.Cwd, spec.Hostname, ctr.ID()[:12])
 	}
 	var paths []string
 	foo := false
@@ -537,10 +538,10 @@ func TestCreateInstanceRefusesANameInUse(t *testing.T) {
 			t.Errorf("CreateInstance(%s): error = %v, want AlreadyExists", name, err)
 		}
 	}
-	// A name that is no containerd identifier is refused too.
-	err = CreateInstance(ctx, c, image, RunConfig{Name: "web-", Args: []string{"true"}, LogFile: filepath.Join(t.TempDir(), "web-.log")})
+	// A name hull's commands do not take is refused too.
+	err = CreateInstance(ctx, c, image, RunConfig{Name: "-web", Args: []string{"true"}, LogFile: filepath.Join(t.TempDir(), "web.log")})
 	if !errors.Is(err, store.ErrInvalidInstanceID) {
-		t.Errorf("CreateInstance(web-): error = %v, want ErrInvalidInstanceID", err)
+		t.Errorf("CreateInstance(-web): error = %v, want ErrInvalidInstanceID", err)
 	}
 	containers, err := c.Containers(ctx)
 	if err != nil {

@@ -219,9 +219,15 @@ killed between its create and its removal of its own container leaves both.
 Every command that acts on the name then fails, naming the two container IDs
 and the `ctr` commands that remove one, but `hull ps` does not: it lists
 both containers under the name, so brig, which reads `hull ps`, still finds
-the instance. A name on Linux must also be a containerd identifier, as
-every name was while it was the container's ID: at most 76 characters, with
-no two of `.`, `_` and `-` in a row, and ending in a letter or digit.
+the instance. A name on Linux follows the macOS rule, with a shorter
+limit: at most 251 characters, so that the instance's log, `<name>.log`,
+fits in a file name. Like a nerdctl container's name, and unlike a
+containerd identifier, it may hold two of `.`, `_` and `-` in a row and
+end in one. The instance's host name in its spec is the first 12
+characters of its container ID, as nerdctl and docker give a container,
+not its name. The bundle's urunc does not read the spec's host name. It
+names a guest with a network `urunc`, through the kernel's `ip=`
+argument, and a guest run with `--net none` has no host name, `(none)`.
 `hull inspect <name>` prints an instance's container ID as `containerId`.
 When inspect fails, as it does for an instance whose task containerd cannot
 read, this shows it:

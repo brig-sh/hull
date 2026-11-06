@@ -182,8 +182,7 @@ func LoadRunImage(ctx context.Context, img client.Image) (RunImage, error) {
 
 // RunConfig describes an instance to create.
 type RunConfig struct {
-	// Name is the instance's name, which hull's commands take. It is the
-	// guest's hostname too.
+	// Name is the instance's name, which hull's commands take.
 	Name string
 	// Args replaces the image's Cmd when it is not empty. The image's
 	// Entrypoint is kept, as docker run keeps it.
@@ -216,6 +215,10 @@ var afterCreate = func() {}
 
 // containerIDLen is the length of the IDs newContainerID makes.
 const containerIDLen = 16
+
+// hostnameLen is how much of the container ID is the spec's host name: 12
+// characters, as in nerdctl and docker.
+const hostnameLen = 12
 
 // maxNamespaceLen is the longest namespace an instance can start in. urunc
 // listens on two sockets in the runc shim's default root,
@@ -415,8 +418,15 @@ func newContainer(ctx context.Context, c *client.Client, image RunImage, cfg Run
 		return nil, err
 	}
 
+	id, err := newContainerID()
+	if err != nil {
+		return nil, err
+	}
 	specOpts := []oci.SpecOpts{
-		oci.WithHostname(cfg.Name),
+		// The container ID's first characters, as nerdctl and docker name
+		// a container's host, and not the instance's name, which can be
+		// longer than the 64 bytes a Linux host name can be.
+		oci.WithHostname(id[:hostnameLen]),
 		oci.WithProcessArgs(process.Args...),
 		// The default PATH first, as docker gives an image that sets none,
 		// so the image's own replaces it.
@@ -444,10 +454,6 @@ func newContainer(ctx context.Context, c *client.Client, image RunImage, cfg Run
 		network = cfg.Network.Mode
 	}
 
-	id, err := newContainerID()
-	if err != nil {
-		return nil, err
-	}
 	ctr, err := c.NewContainer(ctx, id,
 		client.WithImage(img),
 		// Before WithNewSnapshot, which prepares the snapshot in the
