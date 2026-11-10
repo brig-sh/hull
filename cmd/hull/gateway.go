@@ -409,6 +409,15 @@ func handleGatewayMember(ctx context.Context, vn *netgw.Network, conn *net.UnixC
 		}
 		cancel()
 	}()
+	// Cancelling memberCtx does not interrupt the switch: it checks the
+	// context only between frames, and waits for the next one in a read on
+	// fileConn. A datagram socket has no end of stream, so that read need not
+	// fail when vz-runner exits. Closing fileConn makes it fail, and
+	// AcceptVfkit returns, which is when the gateway forgets the member's MAC.
+	// A member kept past its VMM leaves the gateway sending a restarted
+	// guest's frames to that MAC.
+	stop := context.AfterFunc(memberCtx, func() { _ = fileConn.Close() })
+	defer stop()
 
 	if err := vn.AcceptVfkit(memberCtx, fileConn); err != nil && memberCtx.Err() == nil {
 		log.WithError(err).Debug("gateway: member connection ended")
