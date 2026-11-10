@@ -201,6 +201,35 @@ jobs:
           version: v2.12.2
           working-directory: pkg/telemetry
 
+  urunc-keys:
+    name: urunc keys module (linux)
+    # internal/urunckeys is a module of its own, which `go test ./...` and the
+    # lint, run from the root module, never reach. It requires the urunc the
+    # brig-standalone-linux bundle ships, rather than the one the root go.mod
+    # requires for the macOS backends, and checks the annotation keys hull
+    # writes on Linux against it.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: internal/urunckeys
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: internal/urunckeys/go.mod
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Unit tests
+        run: go test -count=1 -race ./...
+
+      - uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9 # v8
+        with:
+          version: v2.12.2
+          working-directory: internal/urunckeys
+
   unit-linux:
     name: unit tests (linux, ${{ matrix.arch }})
     # `unit` runs the Go suite on a Mac, where the linux-tagged files in

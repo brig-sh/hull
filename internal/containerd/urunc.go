@@ -44,6 +44,9 @@ const uruncPrefix = "com.urunc.unikernel."
 // would become the guest's kernel or initrd. UruncAnnotations writes every
 // key, an empty value standing for an unset one, as urunc reads it, so
 // nothing is left for the shim to fill in.
+//
+// internal/urunckeys, a module that requires the bundle's urunc, checks
+// this list and hostKeys against it, through its keys.json.
 var uruncKeys = []string{
 	ociclient.UnikernelTypeAnnotation,
 	"com.urunc.unikernel.unikernelVersion",

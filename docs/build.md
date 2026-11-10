@@ -855,6 +855,36 @@ use (
 )
 ```
 
+### The bundle's urunc on Linux
+
+The urunc the root `go.mod` requires serves the macOS backends alone. On
+Linux hull reaches urunc only through containerd, and runs whatever urunc
+the brig-standalone-linux bundle installs. hull writes every `com.urunc.unikernel.*` annotation that urunc
+reads into the spec, since urunc's shim copies any the spec lacks from the
+image, and keeps images from setting the ones urunc reads from the spec
+alone (`uruncKeys` and `hostKeys` in `internal/containerd/urunc.go`).
+`internal/urunckeys` checks those lists against the bundle's urunc. It is a
+module of its own, whose `go.mod` requires the commit the bundle's
+`pins.env` names as `URUNC_REF`, and it reads the lists from its
+`keys.json`, which a test in `internal/containerd` keeps equal to them.
+When the bundle moves to another urunc, move that module's pin:
+
+```bash
+cd internal/urunckeys
+export GOWORK=off
+go get github.com/urunc-dev/urunc@<URUNC_REF of the bundle>
+go mod tidy
+go test -count=1 ./...
+```
+
+A key the new urunc reads and hull does not write fails the test, as does
+a key hull writes that urunc no longer reads. A key hull writes for a urunc
+newer than the bundle's goes in the test's `ahead` list until the bundle
+catches up. `make test` runs the module's test, and so does CI's
+`urunc-keys` job. Run it with `GOWORK=off`, as `make test` does: a `go.work`
+picks one urunc for every module it uses, which would check the lists
+against the root module's urunc instead.
+
 ## The telemetry module
 
 `pkg/telemetry` is a Go module of its own,
