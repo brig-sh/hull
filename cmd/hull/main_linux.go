@@ -95,6 +95,7 @@ func newApp() *cli.Command {
 			inspectCommand(),
 			internalCommand(),
 			logsCommand(),
+			networkGatewayCommand(),
 			psCommand(),
 			pullCommand(),
 			rmCommand(),

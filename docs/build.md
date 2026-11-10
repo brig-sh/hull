@@ -16,9 +16,9 @@ start a VM.
 ## Prerequisites
 
 - An Apple Silicon Mac. On Linux the CLI has only `hull assets`,
-  `hull exec`, `hull images`, `hull inspect`, `hull logs`, `hull ps`,
-  `hull pull`, `hull rm`, `hull rmi`, `hull run`, `hull stop` and
-  `hull version` so far;
+  `hull exec`, `hull images`, `hull inspect`, `hull logs`,
+  `hull network-gateway`, `hull ps`, `hull pull`, `hull rm`, `hull rmi`,
+  `hull run`, `hull stop` and `hull version` so far;
   see
   [Building on Linux](#building-on-linux).
 - **Go** 1.26 or later. `go.mod` declares 1.26.4.
@@ -93,8 +93,9 @@ A Linux port has started. It can start an instance in the background, with
 no network or on a CNI bridge, run commands in it, read its log and stop
 it, and little else yet. `make linux`, or plain `make` on a Linux host, builds a `hull` whose
 only commands are `hull assets`, `hull exec`, `hull images`,
-`hull inspect`, `hull logs`, `hull ps`, `hull pull`, `hull rm`, `hull rmi`,
-`hull run`, `hull stop` and `hull version`. It builds no runners and signs
+`hull inspect`, `hull logs`, `hull network-gateway`, `hull ps`,
+`hull pull`, `hull rm`, `hull rmi`, `hull run`, `hull stop` and
+`hull version`. It builds no runners and signs
 nothing.
 
 ```bash
