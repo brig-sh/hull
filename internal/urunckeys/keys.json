@@ -1,0 +1,28 @@
+{
+  "uruncKeys": [
+    "com.urunc.unikernel.RPCAddress",
+    "com.urunc.unikernel.binary",
+    "com.urunc.unikernel.blkMntPoint",
+    "com.urunc.unikernel.block",
+    "com.urunc.unikernel.bootInitrd",
+    "com.urunc.unikernel.bootKernel",
+    "com.urunc.unikernel.hyperlightPorts",
+    "com.urunc.unikernel.hypervisor",
+    "com.urunc.unikernel.initrd",
+    "com.urunc.unikernel.mountRootfs",
+    "com.urunc.unikernel.rootfsMode",
+    "com.urunc.unikernel.snapshot",
+    "com.urunc.unikernel.solo5BlkDev",
+    "com.urunc.unikernel.solo5NetDev",
+    "com.urunc.unikernel.unikernelType",
+    "com.urunc.unikernel.unikernelVersion",
+    "com.urunc.unikernel.vAccel"
+  ],
+  "hostKeys": [
+    "com.urunc.unikernel.RPCAddress",
+    "com.urunc.unikernel.bootInitrd",
+    "com.urunc.unikernel.bootKernel",
+    "com.urunc.unikernel.rootfsMode",
+    "com.urunc.unikernel.vAccel"
+  ]
+}
