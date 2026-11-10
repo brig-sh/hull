@@ -22,6 +22,7 @@ import (
 
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
+	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 )
 
 const (
@@ -221,4 +222,83 @@ func TestGatewayAnswersARP(t *testing.T) {
 	if got := tcpip.LinkAddress(a.HardwareAddressSender()); got != mustMAC(t, testGatewayMA) {
 		t.Fatalf("ARP reply carries MAC %s, want %s", got, testGatewayMA)
 	}
+}
+
+// isSYNTo reports whether frame opens a TCP connection to the guest address
+// at the given MAC.
+func isSYNTo(mac tcpip.LinkAddress) func([]byte) bool {
+	return func(frame []byte) bool {
+		if len(frame) < header.EthernetMinimumSize+header.IPv4MinimumSize+header.TCPMinimumSize {
+			return false
+		}
+		eth := header.Ethernet(frame)
+		if eth.DestinationAddress() != mac || eth.Type() != header.IPv4ProtocolNumber {
+			return false
+		}
+		ip := header.IPv4(frame[header.EthernetMinimumSize:])
+		if ip.TransportProtocol() != header.TCPProtocolNumber || ip.DestinationAddress().String() != testGuestIP {
+			return false
+		}
+		return header.TCP(ip.Payload()).Flags().Contains(header.TCPFlagSyn)
+	}
+}
+
+// dialGuest starts a connection from the gateway to the guest, the way a
+// published port does, and leaves it trying until the test ends. The guest
+// side never accepts: the SYN reaching the right MAC is what is checked.
+func dialGuest(t *testing.T, n *Network) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := n.DialContextTCP(ctx, net.JoinHostPort(testGuestIP, "80"))
+		if err == nil {
+			_ = conn.Close()
+		}
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+}
+
+// A guest that restarts comes back on the same address with a new MAC. The
+// gateway must resolve the address again rather than keep sending to the MAC
+// that left: the switch drops frames for a MAC no member holds, so a
+// published port would time out until the stale entry aged out.
+//
+// The old guest's entry is made reachable, by resolving it through a dial,
+// because a reachable entry is the one the netstack keeps using longest.
+func TestGatewayForgetsTheMACOfAGuestThatLeft(t *testing.T) {
+	n := testNetwork(t)
+	gone := joinAs(t, n, testGuestMA, testGuestIP)
+	dialGuest(t, n)
+	gone.await(t, "a SYN to the first guest", isSYNTo(gone.mac))
+	_ = gone.conn.Close()
+
+	deadline := time.Now().Add(replyWait)
+	for {
+		entries, tcpErr := n.stack.Neighbors(nicID, ipv4.ProtocolNumber)
+		if tcpErr != nil {
+			t.Fatalf("Neighbors: %s", tcpErr)
+		}
+		stale := false
+		for _, e := range entries {
+			if e.LinkAddr == gone.mac {
+				stale = true
+			}
+		}
+		if !stale {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the gateway still resolves %s to %s after that guest left", testGuestIP, gone.mac)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	back := joinAs(t, n, "5a:94:ef:e4:0c:ff", testGuestIP)
+	dialGuest(t, n)
+	back.await(t, "a SYN to the guest's new MAC", isSYNTo(back.mac))
 }

@@ -176,13 +176,60 @@ func (n *Network) Diverts() []DivertStatus {
 // AcceptVfkit serves a member that speaks the vfkit protocol: one Ethernet
 // frame per datagram.
 func (n *Network) AcceptVfkit(ctx context.Context, conn net.Conn) error {
-	return n.networkSwitch.Accept(ctx, conn, gvntypes.VfkitProtocol)
+	return n.accept(ctx, conn, gvntypes.VfkitProtocol)
 }
 
 // AcceptQemu serves a member that speaks the QEMU stream protocol:
 // length-prefixed Ethernet frames.
 func (n *Network) AcceptQemu(ctx context.Context, conn net.Conn) error {
-	return n.networkSwitch.Accept(ctx, conn, gvntypes.QemuProtocol)
+	return n.accept(ctx, conn, gvntypes.QemuProtocol)
+}
+
+// accept serves a member until it disconnects, then forgets the addresses
+// that resolved to it.
+func (n *Network) accept(ctx context.Context, conn net.Conn, protocol gvntypes.Protocol) error {
+	defer n.forgetDeparted()
+	return n.networkSwitch.Accept(ctx, conn, protocol)
+}
+
+// forgetDeparted drops the ARP entries that point at a MAC no member holds.
+//
+// The switch forgets a member's MACs when it disconnects, but the netstack's
+// ARP cache keeps the address it resolved to them. A guest that restarts
+// keeps its address but not its MAC, which each run picks anew. The
+// netstack then sends the guest's frames to the old MAC, and the switch
+// drops them without an error. The entry recovers only when the guest sends
+// an ARP request, or when it ages out under gvisor's default timers: 15 to
+// 45 seconds, then about 8 seconds of probes to the old MAC, which the switch
+// drops as well. A quiet guest behind a published port sends nothing, so a
+// connection to it can time out for most of a minute.
+//
+// The switch learns a member's MACs from its frames and does not say which
+// ones a departed member held, so the entries are found by the MACs the
+// switch still has instead. The neighbours are read before the switch's
+// table: the switch records a frame's source MAC before the netstack sees the
+// frame, so an entry a joining member's ARP just created is never dropped for
+// a MAC the table did not have yet. An entry still resolving has no MAC and
+// is left alone.
+func (n *Network) forgetDeparted() {
+	entries, tcpErr := n.stack.Neighbors(nicID, ipv4.ProtocolNumber)
+	if tcpErr != nil {
+		log.Errorf("cannot list the gateway's ARP entries: %s", tcpErr)
+		return
+	}
+	held := n.networkSwitch.CAM()
+	for _, e := range entries {
+		if e.LinkAddr == "" {
+			continue
+		}
+		_, ok := held[e.LinkAddr.String()]
+		if ok {
+			continue
+		}
+		// Another member's departure may have removed the entry already,
+		// and a missing entry is the outcome wanted here.
+		_ = n.stack.RemoveNeighbor(nicID, ipv4.ProtocolNumber, e.Addr)
+	}
 }
 
 // DialContextTCP opens a TCP connection from inside the virtual network. The
