@@ -205,7 +205,9 @@ See [compose.md](compose.md).
 ## `hull network-gateway`
 
 Hidden from `hull --help`. `hull compose` starts one per project; a standalone
-`hull run` joins one with `--gateway-sock`.
+`hull run` joins one with `--gateway-sock`. It runs on Linux too, where hull
+run joins it on hvi, and refuses `--project` there, since compose is macOS
+only; see [Building on Linux](build.md#building-on-linux).
 
 | Flag | Default | What it does |
 |---|---|---|

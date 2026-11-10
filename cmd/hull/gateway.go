@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build darwin
+//go:build darwin || linux
 
 package main
 
@@ -58,7 +58,7 @@ import (
 func networkGatewayCommand() *cli.Command {
 	return &cli.Command{
 		Name:   "network-gateway",
-		Usage:  "run the user-mode network gateway (used by compose)",
+		Usage:  "run the user-mode network gateway that compose and hull run --gateway-sock use",
 		Hidden: true,
 		Description: strings.TrimSpace(`
 Egress filtering is off unless --egress-default is given. With it, every
@@ -601,8 +601,19 @@ func clearStaleUnixSocket(what, path, remedy string) error {
 		return fmt.Errorf("socket %s is in use by a running gateway", path)
 	case errors.Is(err, syscall.ECONNREFUSED):
 		// Nobody is listening: the file the last gateway left behind is
-		// ours to clear.
-		if rmErr := os.Remove(path); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
+		// ours to clear. Linux refuses a connection to a path that holds
+		// a file other than a socket with ECONNREFUSED too, so only a
+		// socket is removed: the path may be a file of the user's.
+		info, statErr := os.Lstat(path)
+		if statErr != nil && !errors.Is(statErr, fs.ErrNotExist) {
+			return fmt.Errorf("cannot tell whether %s is a stale socket: %w", path, statErr)
+		}
+		if statErr == nil && info.Mode().Type() != fs.ModeSocket {
+			return fmt.Errorf("%s is not a socket, so it is not a gateway's to remove; "+
+				"pick another path for the %s socket", path, what)
+		}
+		rmErr := os.Remove(path)
+		if rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
 			return fmt.Errorf("failed to remove stale socket %s: %w", path, rmErr)
 		}
 	case errors.Is(err, fs.ErrNotExist):
