@@ -50,10 +50,12 @@ import (
 func TestUruncAnnotations(t *testing.T) {
 	image := imageUrunc(
 		map[string]string{
-			ociclient.UnikernelBinaryAnnotation: "/unikernel/app",
-			ociclient.BootKernelAnnotation:      "/etc/shadow",
-			"com.urunc.unikernel.vAccel":        "exec",
-			"org.opencontainers.image.title":    "app",
+			ociclient.UnikernelBinaryAnnotation:   "/unikernel/app",
+			ociclient.BootKernelAnnotation:        "/etc/shadow",
+			"com.urunc.unikernel.vAccel":          "exec",
+			"com.urunc.unikernel.rootfsMode":      "overlay-block",
+			"com.urunc.unikernel.hyperlightPorts": "8080",
+			"org.opencontainers.image.title":      "app",
 		},
 		map[string]string{
 			ociclient.UnikernelBinaryAnnotation: "/from/labels",
@@ -61,7 +63,13 @@ func TestUruncAnnotations(t *testing.T) {
 			ociclient.BootInitrdAnnotation:      "/etc/passwd",
 		},
 	)
-	want := map[string]string{ociclient.UnikernelBinaryAnnotation: "/unikernel/app", ociclient.HypervisorAnnotation: "firecracker"}
+	// The ports a hyperlight guest serves on are the image's to declare,
+	// as urunc reads them from its urunc.json. The root mode is the host's.
+	want := map[string]string{
+		ociclient.UnikernelBinaryAnnotation:   "/unikernel/app",
+		ociclient.HypervisorAnnotation:        "firecracker",
+		"com.urunc.unikernel.hyperlightPorts": "8080",
+	}
 	if !reflect.DeepEqual(image, want) {
 		t.Errorf("imageUrunc = %v, want %v: the manifest over the labels, and no host keys", image, want)
 	}
@@ -82,10 +90,12 @@ func TestUruncAnnotations(t *testing.T) {
 		ociclient.HypervisorAnnotation:      "cloud-hypervisor",
 		ociclient.BootKernelAnnotation:      "/host/kernel",
 		ociclient.BootInitrdAnnotation:      "",
+		"com.urunc.unikernel.rootfsMode":    "",
 		"example.com/other":                 "kept",
 	} {
-		if got[k] != v {
-			t.Errorf("%s = %q, want %q", k, got[k], v)
+		value, ok := got[k]
+		if !ok || value != v {
+			t.Errorf("%s = %q (set: %t), want %q", k, value, ok, v)
 		}
 	}
 }

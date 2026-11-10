@@ -622,13 +622,19 @@ ways:
   config for the host's platform. One pulled only for another platform is
   pulled again with `--pull missing`, and refused with `--pull never`.
 - `--hypervisor` names one of the monitors urunc knows: `cloud-hypervisor`,
-  `firecracker`, `qemu`, `hvt`, `spt` or `hyperlight-unikraft`. Any other
-  name is refused, `vz` and `hvi` among them, whether `--hypervisor` or the
+  `firecracker`, `qemu`, `hvi`, `hvt`, `spt` or `hyperlight-unikraft`. Any
+  other name is refused, `vz` among them, whether `--hypervisor` or the
   `com.urunc.unikernel.hypervisor` annotation gives it. Without the flag,
   the monitor comes from that annotation, and a plain image boots on
   `cloud-hypervisor`, since the bundle ships no qemu, urunc's own default.
   The monitor must also be installed where urunc's configuration says; the
-  bundle ships `cloud-hypervisor` and `firecracker`.
+  bundle ships `cloud-hypervisor` and `firecracker`, and `hvi` from
+  v0.1.0-rc21.
+- `hvi` here is urunc's monitor of that name, which boots the guest on KVM,
+  not the macOS backend. Only the urunc of the bundle from v0.1.0-rc21 runs
+  it. An older urunc refuses it as an unsupported monitor when the task is
+  created, after the container exists, and hull cannot tell which urunc the
+  shim runs, so it cannot refuse the run sooner.
 - `--snapshotter` names the containerd snapshotter that holds the
   instance's root filesystem, such as `devmapper`. Without it, the instance
   gets the namespace's default snapshotter, the one `hull pull` unpacks
@@ -676,8 +682,8 @@ ways:
   container's spec, empty for one that is not set. urunc's shim copies any of
   them the spec lacks from the image's manifest, and an image could
   otherwise name a host file as the kernel or initrd to boot. The image's
-  annotations are still honored, except `bootKernel`, `bootInitrd`, `vAccel`
-  and `RPCAddress`, which only `--annotation` sets.
+  annotations are still honored, except `bootKernel`, `bootInitrd`,
+  `rootfsMode`, `vAccel` and `RPCAddress`, which only `--annotation` sets.
 - `hull run` refuses a run urunc would not boot as a VM. urunc needs a
   unikernel type and a monitor in the annotations, and a binary unless a
   boot kernel and initrd are given. When one is missing it looks for a
