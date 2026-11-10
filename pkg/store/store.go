@@ -93,10 +93,11 @@ type InstanceState struct {
 	// later `exec` attach or `stop` emits. Empty on instances created
 	// before this field existed.
 	Backend string `json:"backend,omitempty"`
-	// Network is the network an instance on Linux was run with: none, or
-	// the --net mode that attached it, such as shared. It is empty on macOS,
-	// whose network is in CmdLine, and for a container hull did not create
-	// or created before it recorded one.
+	// Network is the network an instance on Linux was run with: none, the
+	// --net mode that attached it, such as shared, or gateway, for one on a
+	// hull network-gateway. It is empty on macOS, whose network is in
+	// CmdLine, and for a container hull did not create or created before it
+	// recorded one.
 	Network string `json:"network,omitempty"`
 	// TelemetryEndSent guards the telemetry `end` event to exactly once
 	// across the foreground exit path and `stop`.

@@ -55,16 +55,20 @@ func TestUruncAnnotations(t *testing.T) {
 			"com.urunc.unikernel.vAccel":          "exec",
 			"com.urunc.unikernel.rootfsMode":      "overlay-block",
 			"com.urunc.unikernel.hyperlightPorts": "8080",
+			NetSocketAnnotation:                   "/run/containerd/containerd.sock",
 			"org.opencontainers.image.title":      "app",
 		},
 		map[string]string{
 			ociclient.UnikernelBinaryAnnotation: "/from/labels",
 			ociclient.HypervisorAnnotation:      "firecracker",
 			ociclient.BootInitrdAnnotation:      "/etc/passwd",
+			NetAddressAnnotation:                "10.87.0.10/24",
+			NetGatewayAnnotation:                "10.87.0.1",
 		},
 	)
 	// The ports a hyperlight guest serves on are the image's to declare,
-	// as urunc reads them from its urunc.json. The root mode is the host's.
+	// as urunc reads them from its urunc.json. The root mode and the
+	// gateway are the host's.
 	want := map[string]string{
 		ociclient.UnikernelBinaryAnnotation:   "/unikernel/app",
 		ociclient.HypervisorAnnotation:        "firecracker",
@@ -91,6 +95,9 @@ func TestUruncAnnotations(t *testing.T) {
 		ociclient.BootKernelAnnotation:      "/host/kernel",
 		ociclient.BootInitrdAnnotation:      "",
 		"com.urunc.unikernel.rootfsMode":    "",
+		NetSocketAnnotation:                 "",
+		NetAddressAnnotation:                "",
+		NetGatewayAnnotation:                "",
 		"example.com/other":                 "kept",
 	} {
 		value, ok := got[k]

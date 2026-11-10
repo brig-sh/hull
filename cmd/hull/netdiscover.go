@@ -218,24 +218,6 @@ func injectHosts(rootfsDir string, entries []string) error {
 	return nil
 }
 
-// gatewayNetConfig derives the guest address, gateway address (.1 on the
-// subnet) and dotted netmask from a CIDR like 10.87.0.10/24 — the pieces of
-// the kernel ip= parameter, in the same format urunc uses on Linux.
-func gatewayNetConfig(cidr string) (addr, gw, mask string, err error) {
-	ip, ipnet, err := net.ParseCIDR(cidr)
-	if err != nil {
-		return "", "", "", fmt.Errorf("invalid gateway CIDR %q: %w", cidr, err)
-	}
-	ip4 := ip.To4()
-	if ip4 == nil {
-		return "", "", "", fmt.Errorf("gateway CIDR %q is not IPv4", cidr)
-	}
-	gwIP := ipnet.IP.To4()
-	gwIP = net.IPv4(gwIP[0], gwIP[1], gwIP[2], gwIP[3]+1)
-	m := ipnet.Mask
-	return ip4.String(), gwIP.String(), net.IPv4(m[0], m[1], m[2], m[3]).String(), nil
-}
-
 // hostsWithEntries composes what /etc/hosts should be: whatever the image
 // ships, plus the --add-host entries appended.
 //

@@ -20,14 +20,23 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io/fs"
+	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
+
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	"github.com/brig-sh/hull/internal/containerd"
+	"github.com/brig-sh/hull/pkg/ociclient"
 	"github.com/brig-sh/hull/pkg/store"
 )
 
@@ -567,5 +576,365 @@ func TestDetachCommand(t *testing.T) {
 	_, _, err = detachCommand("/hull", []string{"internal", "oci-hook", "--rootlesskit-state-dir", t.TempDir(), "postStop"})
 	if err == nil {
 		t.Error("detachCommand found the namespaces of a rootlesskit with no child_pid")
+	}
+}
+
+// listenGateway stands in for a gateway hvi joins: a socket listening at
+// qemuGatewaySock of the control socket it returns.
+func listenGateway(t *testing.T) string {
+	t.Helper()
+	control := filepath.Join(t.TempDir(), "gw.sock")
+	l, err := net.Listen("unix", qemuGatewaySock(control))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	return control
+}
+
+func TestGatewayNetwork(t *testing.T) {
+	privateLogDirs(t)
+	control := listenGateway(t)
+
+	annotations := map[string]string{}
+	n, err := gatewayNetwork("shared", control, "10.87.0.10/24", "hull", "vm", annotations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDir, err := instanceNetDir("hull", "vm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No hook: urunc has hvi join the gateway itself, and the guest asks
+	// the gateway's resolver.
+	want := &containerd.Network{Mode: "gateway", Dir: wantDir, ResolvConf: []byte("nameserver 10.87.0.1\n")}
+	if !reflect.DeepEqual(n, want) {
+		t.Errorf("network = %+v, want %+v", n, want)
+	}
+	wantAnnotations := map[string]string{
+		containerd.NetSocketAnnotation:  control + ".qemu",
+		containerd.NetAddressAnnotation: "10.87.0.10/24",
+		containerd.NetGatewayAnnotation: "10.87.0.1",
+	}
+	if !reflect.DeepEqual(annotations, wantAnnotations) {
+		t.Errorf("annotations = %v, want %v", annotations, wantAnnotations)
+	}
+
+	// urunc takes only an absolute socket.
+	t.Chdir(filepath.Dir(control))
+	annotations = map[string]string{}
+	_, err = gatewayNetwork("shared", "gw.sock", "10.87.0.10/24", "hull", "vm", annotations)
+	if err != nil || annotations[containerd.NetSocketAnnotation] != control+".qemu" {
+		t.Errorf("a relative socket: %q, %v; want %s", annotations[containerd.NetSocketAnnotation], err, control+".qemu")
+	}
+
+	dir := t.TempDir()
+	file := filepath.Join(dir, "file")
+	err = os.WriteFile(file+".qemu", nil, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A killed gateway leaves its socket behind, with nothing listening.
+	stale := filepath.Join(dir, "stale")
+	l, err := net.ListenUnix("unix", &net.UnixAddr{Name: stale + ".qemu", Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.SetUnlinkOnClose(false)
+	err = l.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	err = os.Symlink(control+".qemu", link+".qemu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	odd := filepath.Join(dir, "a b")
+	for _, tc := range []struct{ net, sock, cidr, want string }{
+		{"shared", control, "", "--gateway-sock and --gateway-cidr must be used together"},
+		{"shared", "", "10.87.0.10/24", "--gateway-sock and --gateway-cidr must be used together"},
+		{"none", control, "10.87.0.10/24", "--net none cannot be combined with --gateway-sock"},
+		{"shred", control, "10.87.0.10/24", `invalid --net "shred"`},
+		{"shared", control, "10.87.0.10", `invalid --gateway-cidr "10.87.0.10"`},
+		{"shared", control, "10.87.0.1/24", "is the gateway's own address"},
+		{"shared", filepath.Join(dir, "gone.sock"), "10.87.0.10/24", "no gateway listens for hvi at"},
+		{"shared", file, "10.87.0.10/24", "it is not a socket"},
+		{"shared", stale, "10.87.0.10/24", "no gateway listens for hvi at"},
+		{"shared", link, "10.87.0.10/24", "a symlink to one included"},
+		{"shared", odd, "10.87.0.10/24", "urunc takes only letters"},
+	} {
+		annotations := map[string]string{}
+		_, err := gatewayNetwork(tc.net, tc.sock, tc.cidr, "hull", "vm", annotations)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("--net %s --gateway-sock %q --gateway-cidr %q: error = %v, want %q", tc.net, tc.sock, tc.cidr, err, tc.want)
+		}
+		if len(annotations) != 0 {
+			t.Errorf("--gateway-cidr %q: annotations = %v, want none on a refusal", tc.cidr, annotations)
+		}
+	}
+}
+
+// gatewayAddress refuses what urunc's validateNetGateway refuses, before
+// the image is pulled.
+func TestGatewayAddress(t *testing.T) {
+	for _, tc := range []struct{ cidr, gateway, want string }{
+		{"10.87.0.10/24", "10.87.0.1", ""},
+		{"10.87.0.254/24", "10.87.0.1", ""},
+		{"10.0.3.7/16", "10.0.0.1", ""},
+		{"192.168.1.2/30", "192.168.1.1", ""},
+		{"192.168.1.10/31", "192.168.1.11", ""},
+		{"10.87.0.10", "", "expected a unicast IPv4 address"},
+		{"fd00::10/64", "", "expected a unicast IPv4 address"},
+		{"127.0.0.10/8", "", "expected a unicast IPv4 address"},
+		{"169.254.0.10/16", "", "expected a unicast IPv4 address"},
+		{"224.0.0.10/24", "", "expected a unicast IPv4 address"},
+		{"10.87.0.10/0", "", "expected a unicast IPv4 address"},
+		{"10.87.0.255/32", "", "a /32 has no room for the gateway"},
+		{"10.87.0.1/24", "", "is the gateway's own address"},
+		{"192.168.1.11/31", "", "is the gateway's own address"},
+		{"10.87.0.0/24", "", "is the network or broadcast address of 10.87.0.0/24"},
+		{"10.87.0.255/24", "", "is the network or broadcast address of 10.87.0.0/24"},
+		{"10.87.255.255/16", "", "is the network or broadcast address of 10.87.0.0/16"},
+	} {
+		gateway, err := gatewayAddress(tc.cidr)
+		if tc.want == "" {
+			if err != nil || gateway != tc.gateway {
+				t.Errorf("gatewayAddress(%q) = %q, %v; want %s", tc.cidr, gateway, err, tc.gateway)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("gatewayAddress(%q): error = %v, want %q", tc.cidr, err, tc.want)
+		}
+	}
+}
+
+func TestCheckGatewayAnnotations(t *testing.T) {
+	err := checkGatewayAnnotations(map[string]string{ociclient.HypervisorAnnotation: "hvi"})
+	if err != nil {
+		t.Errorf("no gateway annotation: %v", err)
+	}
+	for _, k := range gatewayAnnotations {
+		// An empty value is refused too: urunc reads it as unset, and hull
+		// writes the keys itself.
+		err := checkGatewayAnnotations(map[string]string{k: ""})
+		if err == nil || !strings.Contains(err.Error(), "--annotation "+k+" is refused") {
+			t.Errorf("--annotation %s: error = %v, want it refused", k, err)
+		}
+	}
+}
+
+// A gateway run boots on hvi unless the run or the image names a monitor,
+// and a monitor other than hvi is refused.
+func TestGatewayMonitor(t *testing.T) {
+	annotations := map[string]string{}
+	defaultGatewayMonitor(annotations, nil)
+	if annotations[ociclient.HypervisorAnnotation] != "hvi" {
+		t.Errorf("no monitor named: %v, want hvi", annotations)
+	}
+	annotations = map[string]string{ociclient.HypervisorAnnotation: "cloud-hypervisor"}
+	defaultGatewayMonitor(annotations, nil)
+	if annotations[ociclient.HypervisorAnnotation] != "cloud-hypervisor" {
+		t.Errorf("the run's monitor: %v, want it kept", annotations)
+	}
+	annotations = map[string]string{}
+	defaultGatewayMonitor(annotations, map[string]string{ociclient.HypervisorAnnotation: "qemu"})
+	if annotations[ociclient.HypervisorAnnotation] != "" {
+		t.Errorf("the image's monitor: %v, want the image's left to it", annotations)
+	}
+	err := checkGatewayMonitor("hvi")
+	if err != nil {
+		t.Errorf("hvi: %v", err)
+	}
+	err = checkGatewayMonitor("cloud-hypervisor")
+	if err == nil || !strings.Contains(err.Error(), `--gateway-sock needs the hvi monitor on Linux, and the run's is "cloud-hypervisor"`) {
+		t.Errorf("cloud-hypervisor: error = %v, want it refused", err)
+	}
+}
+
+func TestMayWrite(t *testing.T) {
+	st := func(uid, gid, mode uint32) *syscall.Stat_t {
+		return &syscall.Stat_t{Uid: uid, Gid: gid, Mode: syscall.S_IFSOCK | mode}
+	}
+	for _, tc := range []struct {
+		name     string
+		st       *syscall.Stat_t
+		uid, gid uint32
+		want     bool
+	}{
+		{"root", st(1000, 1000, 0o700), 0, 0, true},
+		{"the owner", st(1000, 1000, 0o755), 1000, 1000, true},
+		{"the owner without its write bit", st(1000, 1000, 0o577), 1000, 1000, false},
+		{"the group", st(1000, 100, 0o775), 2000, 100, true},
+		{"the group without its write bit", st(1000, 100, 0o757), 2000, 100, false},
+		{"another user", st(1000, 1000, 0o775), 2000, 2000, false},
+		{"another user, others may write", st(1000, 1000, 0o777), 2000, 2000, true},
+		{"a subordinate ID", st(1000, 1000, 0o775), noID, noID, false},
+	} {
+		got := mayWrite(tc.st, tc.uid, tc.gid)
+		if got != tc.want {
+			t.Errorf("%s: mayWrite = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestGatewayHostIDs(t *testing.T) {
+	uid, gid := gatewayHostIDs(1000, 100, false)
+	if uid != 1000 || gid != 100 {
+		t.Errorf("rootful: %d:%d, want the instance's own 1000:100", uid, gid)
+	}
+	euid, egid := uint32(os.Geteuid()), uint32(os.Getegid())
+	uid, gid = gatewayHostIDs(0, 0, true)
+	if uid != euid || gid != egid {
+		t.Errorf("rootless root: %d:%d, want hull's own %d:%d", uid, gid, euid, egid)
+	}
+	uid, gid = gatewayHostIDs(1000, 0, true)
+	if uid != noID || gid != egid {
+		t.Errorf("rootless 1000:0: %d:%d, want a subordinate uid and hull's gid %d", uid, gid, egid)
+	}
+}
+
+// A run whose image's user may not write to the socket warns that hvi,
+// which joins the gateway as that user, may not reach it.
+func TestWarnGatewayUser(t *testing.T) {
+	control := listenGateway(t)
+	sock := control + ".qemu"
+	warn := func(user string, rootless bool) string {
+		var out bytes.Buffer
+		warnGatewayUser(&out, ocispec.ImageConfig{User: user}, sock, rootless)
+		return out.String()
+	}
+	err := os.Chmod(sock, 0o755)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, user := range []string{"", "0", "root", "0:0"} {
+		got := warn(user, false)
+		if got != "" {
+			t.Errorf("rootful, user %q: warned %q, want nothing for root", user, got)
+		}
+		// rootlesskit maps root to hull's own user, the socket's owner.
+		got = warn(user, true)
+		if got != "" {
+			t.Errorf("rootless, user %q: warned %q, want nothing for the socket's owner", user, got)
+		}
+	}
+	for _, rootless := range []bool{false, true} {
+		got := warn("65532", rootless)
+		if !strings.Contains(got, "warning: the image runs as uid 65532") || !strings.Contains(got, sock) {
+			t.Errorf("rootless %v, user 65532 and a socket others cannot write to: warned %q", rootless, got)
+		}
+	}
+	// Under a rootful daemon the image's uid is the host's, and owns the
+	// socket.
+	owner := strconv.Itoa(os.Geteuid())
+	got := warn(owner+":65532", false)
+	if os.Geteuid() != 0 && got != "" {
+		t.Errorf("rootful, the socket's owner: warned %q, want nothing", got)
+	}
+	got = warn(owner, true)
+	if os.Geteuid() != 0 && got == "" {
+		t.Errorf("rootless, uid %s, a subordinate ID: no warning", owner)
+	}
+	err = os.Chmod(sock, 0o777)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = warn("65532", true)
+	if got != "" {
+		t.Errorf("a socket anyone may write to: warned %q, want nothing", got)
+	}
+}
+
+// A gateway run fails when urunc started hvi without --net-gateway, as a
+// urunc that ignores the gateway's annotations does, and waits for urunc to
+// exec hvi first.
+func TestCheckJoinedGateway(t *testing.T) {
+	old, oldTimeout := procCmdline, gatewayJoinTimeout
+	t.Cleanup(func() { procCmdline, gatewayJoinTimeout = old, oldTimeout })
+	gatewayJoinTimeout = 200 * time.Millisecond
+	urunc := []string{"urunc", "--root", "/run/urunc", "reexec"}
+	joined := []string{"/opt/brig/bin/hvi", "boot", "--net-gateway", "/urunc-net/gateway.sock", "--net-mac", "16:1f:43:50:64:d3"}
+	tap := []string{"/opt/brig/bin/hvi", "boot", "--net-tap", "tap0_urunc"}
+	for _, tc := range []struct {
+		name    string
+		seen    [][]string
+		err     error
+		want    string
+		warning string
+	}{
+		{name: "hvi joined", seen: [][]string{urunc, urunc, joined}},
+		{name: "hvi on a tap", seen: [][]string{urunc, tap}, want: "urunc started hvi without --net-gateway"},
+		// A zombie's cmdline is empty.
+		{name: "the task ended", seen: [][]string{urunc, {""}}, err: fs.ErrNotExist},
+		{name: "no hvi in time", seen: [][]string{urunc}, warning: "urunc did not start hvi within"},
+		{name: "no /proc access", seen: [][]string{urunc}, err: fs.ErrPermission, warning: "cannot tell whether hvi joined"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			procCmdline = func(pid uint32) ([]string, error) {
+				if pid != 4242 {
+					t.Errorf("read the arguments of %d, want the task's, 4242", pid)
+				}
+				calls++
+				if calls > len(tc.seen) {
+					if tc.err != nil {
+						return nil, tc.err
+					}
+					return tc.seen[len(tc.seen)-1], nil
+				}
+				return tc.seen[calls-1], nil
+			}
+			var out bytes.Buffer
+			err := checkJoinedGateway(context.Background(), &out, 4242)
+			if tc.want == "" && err != nil {
+				t.Errorf("error = %v, want none", err)
+			}
+			if tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+				t.Errorf("error = %v, want %q", err, tc.want)
+			}
+			if !strings.Contains(out.String(), tc.warning) || (tc.warning == "" && out.Len() != 0) {
+				t.Errorf("warned %q, want %q", out.String(), tc.warning)
+			}
+		})
+	}
+}
+
+// procCmdline reads a process's arguments as it was given them, the first
+// included, which names hvi for urunc's monitor.
+func TestProcCmdline(t *testing.T) {
+	sleep, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skip(err)
+	}
+	cmd := exec.Command(sleep, "30")
+	cmd.Args = []string{"/opt/brig/bin/hvi", "30"}
+	err = cmd.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	// Start returns once the child has begun to exec, which can be before
+	// the kernel has set up the new program's arguments: the command line
+	// reads empty until then. checkJoinedGateway polls past it the same way.
+	var got []string
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got, err = procCmdline(uint32(cmd.Process.Pid))
+		if err == nil && slices.Equal(got, cmd.Args) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("procCmdline = %q, %v; want %q", got, err, cmd.Args)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	_, err = procCmdline(1 << 30)
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a process that does not exist: error = %v, want ErrNotExist", err)
 	}
 }

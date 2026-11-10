@@ -60,7 +60,7 @@ func runCommand() *cli.Command {
 			&cli.StringFlag{
 				Name:  "net",
 				Value: "none",
-				Usage: "network mode: 'none' (default) or 'shared', the CNI network named bridge",
+				Usage: "network mode: 'none' (default) or 'shared': the CNI network named bridge, or with --gateway-sock the gateway",
 			},
 			pullFlag(),
 			memFlag(),
@@ -80,6 +80,14 @@ func runCommand() *cli.Command {
 			&cli.StringSliceFlag{
 				Name:  "env-file",
 				Usage: "read environment variables from a file of KEY=VALUE lines, or bare KEYs to inherit; --env wins over it (repeatable)",
+			},
+			&cli.StringFlag{
+				Name:  "gateway-sock",
+				Usage: "join the user-mode network gateway at this control socket, as on macOS (hvi only)",
+			},
+			&cli.StringFlag{
+				Name:  "gateway-cidr",
+				Usage: "static guest CIDR on the gateway subnet, e.g. 10.87.0.10/24 (requires --gateway-sock)",
 			},
 			&cli.StringFlag{
 				Name:  "snapshotter",
@@ -111,11 +119,28 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	if err != nil {
 		return err
 	}
+	err = checkGatewayAnnotations(annotations)
+	if err != nil {
+		return err
+	}
 	hypervisor := cmd.String("hypervisor")
 	if hypervisor != "" {
 		err = checkMonitor(hypervisor)
 		if err != nil {
 			return fmt.Errorf("--hypervisor %s: %w", hypervisor, err)
+		}
+	}
+	onGateway := cmd.String("gateway-sock") != "" || cmd.String("gateway-cidr") != ""
+	// The run names its monitor before the pull only with --hypervisor or
+	// --annotation. One the image names is checked after the pull.
+	named := hypervisor
+	if named == "" {
+		named = annotations[ociclient.HypervisorAnnotation]
+	}
+	if onGateway && named != "" {
+		err = checkGatewayMonitor(named)
+		if err != nil {
+			return err
 		}
 	}
 	env, err := runEnv(cmd.StringSlice("env-file"), cmd.StringSlice("env"), os.LookupEnv)
@@ -145,7 +170,13 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	// Before the daemon is dialled and the image pulled: a network that
 	// cannot be found fails the run at once.
 	namespace := containerd.ResolveNamespace(cmd.String("namespace"))
-	network, err := runNetwork(ctx, cmd.String("net"), namespace, name)
+	var network *containerd.Network
+	if onGateway {
+		network, err = gatewayNetwork(cmd.String("net"), cmd.String("gateway-sock"), cmd.String("gateway-cidr"),
+			namespace, name, annotations)
+	} else {
+		network, err = runNetwork(ctx, cmd.String("net"), namespace, name)
+	}
 	if err != nil {
 		return err
 	}
@@ -174,6 +205,9 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	if hypervisor != "" {
 		annotations[ociclient.HypervisorAnnotation] = hypervisor
 	}
+	if onGateway {
+		defaultGatewayMonitor(annotations, image.Urunc)
+	}
 	backend, err := planBoot(annotations, image.Urunc, cmd.Bool("no-boot-assets"), genericBootAssets)
 	if err != nil {
 		return err
@@ -195,6 +229,18 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 			return err
 		}
 	}
+	var checkStarted func(ctx context.Context, pid uint32) error
+	if onGateway {
+		err = checkGatewayMonitor(backend)
+		if err != nil {
+			return err
+		}
+		warnGatewayUser(cmd.ErrWriter, image.Config, annotations[containerd.NetSocketAnnotation],
+			containerd.RootlessKitStateDir() != "")
+		checkStarted = func(ctx context.Context, pid uint32) error {
+			return checkJoinedGateway(ctx, cmd.ErrWriter, pid)
+		}
+	}
 	err = absBootFiles(annotations)
 	if err != nil {
 		return err
@@ -214,17 +260,18 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	}
 	defer unlock()
 	err = createInstance(ctx, c, image, containerd.RunConfig{
-		Name:        name,
-		Args:        args.Tail(),
-		Env:         env,
-		MemoryMB:    int(cmd.Int("mem")),
-		CPUs:        int(cmd.Int("cpus")),
-		Annotations: annotations,
-		Backend:     backend,
-		LogFile:     logFile,
-		Snapshotter: cmd.String("snapshotter"),
-		Network:     network,
-		Mounts:      mounts,
+		Name:         name,
+		Args:         args.Tail(),
+		Env:          env,
+		MemoryMB:     int(cmd.Int("mem")),
+		CPUs:         int(cmd.Int("cpus")),
+		Annotations:  annotations,
+		Backend:      backend,
+		LogFile:      logFile,
+		Snapshotter:  cmd.String("snapshotter"),
+		Network:      network,
+		Mounts:       mounts,
+		CheckStarted: checkStarted,
 	})
 	if errdefs.IsAlreadyExists(err) {
 		return fmt.Errorf("%w: %s", store.ErrInstanceExists, name)

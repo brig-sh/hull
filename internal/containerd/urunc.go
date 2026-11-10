@@ -65,15 +65,30 @@ var uruncKeys = []string{
 	"com.urunc.unikernel.hyperlightPorts",
 	"com.urunc.unikernel.vAccel",
 	"com.urunc.unikernel.RPCAddress",
+	NetSocketAnnotation,
+	NetAddressAnnotation,
+	NetGatewayAnnotation,
 }
 
 // rootfsModeAnnotation chooses how urunc builds the guest's root, such as
 // overlay-block, which takes two disks the host builds.
 const rootfsModeAnnotation = "com.urunc.unikernel.rootfsMode"
 
+// NetSocketAnnotation, NetAddressAnnotation and NetGatewayAnnotation put the
+// guest on a user-mode network gateway, `hull network-gateway`, instead of
+// the network of the container's namespace: urunc has hvi join the gateway
+// through the socket, and boots the guest with the address, its prefix
+// included, and the gateway as its route.
+const (
+	NetSocketAnnotation  = "com.urunc.unikernel.netSocket"
+	NetAddressAnnotation = "com.urunc.unikernel.netAddress"
+	NetGatewayAnnotation = "com.urunc.unikernel.netGateway"
+)
+
 // hostKeys name things on the host rather than in the image: the boot
 // kernel and initrd are host paths, vAccel and RPCAddress configure a host
-// service, and the root mode is how the host builds the guest's root. Only
+// service, the root mode is how the host builds the guest's root, and the
+// gateway keys name a host socket and an address the host hands out. Only
 // the invocation sets them, never the image. urunc itself keeps them out of
 // an image's urunc.json for the same reason.
 var hostKeys = map[string]bool{
@@ -82,6 +97,9 @@ var hostKeys = map[string]bool{
 	rootfsModeAnnotation:             true,
 	"com.urunc.unikernel.vAccel":     true,
 	"com.urunc.unikernel.RPCAddress": true,
+	NetSocketAnnotation:              true,
+	NetAddressAnnotation:             true,
+	NetGatewayAnnotation:             true,
 }
 
 // imageUrunc returns the urunc annotations an image declares, in its

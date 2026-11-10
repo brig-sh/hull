@@ -23,19 +23,28 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"math"
+	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/containerd/containerd/v2/client"
 	"github.com/moby/sys/userns"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
 	"github.com/brig-sh/hull/internal/bootassets"
 	"github.com/brig-sh/hull/internal/cni"
 	"github.com/brig-sh/hull/internal/containerd"
+	"github.com/brig-sh/hull/pkg/ociclient"
 	"github.com/brig-sh/hull/pkg/store"
 )
 
@@ -133,6 +142,328 @@ func runNetwork(ctx context.Context, mode, namespace, id string) (*containerd.Ne
 		Dir:        dir,
 		ResolvConf: resolv,
 	}, nil
+}
+
+// gatewayNetwork returns how a run joins the user-mode network gateway whose
+// control socket is controlSock, at the address cidr names, and records it
+// in annotations, the run's own urunc annotations. The flags are macOS's,
+// and so is the rest: hvi joins the gateway through the QEMU stream socket
+// beside the control socket, which qemuGatewaySock names, and the guest
+// routes through the subnet's first address, gatewayNetConfig's, which is
+// also its nameserver, the gateway's resolver.
+//
+// urunc has hvi join the gateway itself, so no hook runs and no CNI network
+// takes part, and the guest's traffic never passes through the container's
+// network namespace, rootlesskit's included. The network's directory holds
+// only the guest's resolv.conf.
+//
+// urunc refuses the socket and the address it refuses here too (see
+// validateNetGateway and gatewayNet in urunc's pkg/unikontainers), but only
+// when the task is created, after the image is pulled and the container
+// exists.
+func gatewayNetwork(netMode, controlSock, cidr, namespace, id string, annotations map[string]string) (*containerd.Network, error) {
+	if controlSock == "" || cidr == "" {
+		return nil, errors.New("--gateway-sock and --gateway-cidr must be used together")
+	}
+	switch netMode {
+	case "shared":
+	case "none":
+		return nil, errors.New("--net none cannot be combined with --gateway-sock: one asks for no " +
+			"network device at all and the other attaches the guest to the gateway")
+	default:
+		return nil, fmt.Errorf("invalid --net %q, expected none or shared", netMode)
+	}
+	gateway, err := gatewayAddress(cidr)
+	if err != nil {
+		return nil, err
+	}
+	// urunc takes only an absolute path. The flag takes a relative one, as
+	// on macOS, relative to hull's working directory.
+	sock, err := filepath.Abs(qemuGatewaySock(controlSock))
+	if err != nil {
+		return nil, err
+	}
+	err = checkGatewaySock(sock)
+	if err != nil {
+		return nil, err
+	}
+	dir, err := instanceNetDir(namespace, id)
+	if err != nil {
+		return nil, err
+	}
+	annotations[containerd.NetSocketAnnotation] = sock
+	annotations[containerd.NetAddressAnnotation] = cidr
+	annotations[containerd.NetGatewayAnnotation] = gateway
+	return &containerd.Network{
+		Mode:       gatewayMode,
+		Dir:        dir,
+		ResolvConf: []byte("nameserver " + gateway + "\n"),
+	}, nil
+}
+
+// gatewayMode is the network a gateway run records in its container's
+// LabelNetwork, which hull ps and hull inspect print. The --net mode,
+// shared, would name the CNI network the run does not join.
+const gatewayMode = "gateway"
+
+// gatewayAddress returns the gateway's address for a guest at cidr, the
+// subnet's first, as gatewayNetConfig derives it, and refuses an address
+// urunc refuses: one that is not unicast IPv4, a /32, whose subnet has no
+// room for the gateway, the gateway's own address, and the subnet's network
+// or broadcast address.
+func gatewayAddress(cidr string) (string, error) {
+	prefix, err := netip.ParsePrefix(cidr)
+	if err != nil || !prefix.Addr().Is4() || !prefix.Addr().IsGlobalUnicast() || prefix.Bits() == 0 {
+		return "", fmt.Errorf("invalid --gateway-cidr %q: expected a unicast IPv4 address with its prefix, "+
+			"such as 10.87.0.10/24", cidr)
+	}
+	// gatewayNetConfig would add one to the last byte of the address
+	// itself, and wrap at 255.
+	if prefix.Bits() == 32 {
+		return "", fmt.Errorf("invalid --gateway-cidr %q: a /32 has no room for the gateway", cidr)
+	}
+	_, gateway, _, err := gatewayNetConfig(cidr)
+	if err != nil {
+		return "", err
+	}
+	gw, err := netip.ParseAddr(gateway)
+	if err != nil {
+		return "", err
+	}
+	if !gw.IsGlobalUnicast() {
+		return "", fmt.Errorf("invalid --gateway-cidr %q: the gateway's address, %s, is not unicast", cidr, gw)
+	}
+	if gw == prefix.Addr() {
+		return "", fmt.Errorf("invalid --gateway-cidr %q: %s is the gateway's own address, the subnet's first",
+			cidr, gw)
+	}
+	if isNetworkOrBroadcast(prefix, prefix.Addr()) {
+		return "", fmt.Errorf("invalid --gateway-cidr %q: %s is the network or broadcast address of %s",
+			cidr, prefix.Addr(), prefix.Masked())
+	}
+	return gateway, nil
+}
+
+// isNetworkOrBroadcast reports whether addr is the first or the last address
+// of prefix, which name the network and its broadcast on any prefix shorter
+// than /31. A /31 has no broadcast: its two addresses are its two hosts.
+func isNetworkOrBroadcast(prefix netip.Prefix, addr netip.Addr) bool {
+	if prefix.Bits() >= 31 {
+		return false
+	}
+	network := prefix.Masked().Addr().As4()
+	broadcast := network
+	hostBits := 32 - prefix.Bits()
+	for i := 3; i >= 0 && hostBits > 0; i-- {
+		n := min(hostBits, 8)
+		broadcast[i] |= byte(1<<n - 1)
+		hostBits -= n
+	}
+	a := addr.As4()
+	return a == network || a == broadcast
+}
+
+// hostPathRe is the set of characters urunc takes in a host path
+// annotation (validateAnnotationHostPath).
+var hostPathRe = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
+
+// checkGatewaySock refuses a stream socket, an absolute path, that urunc
+// would refuse or hvi could not join. hvi does not fail on a gateway it
+// cannot reach: it boots the guest on a stub network with no way out.
+// So the gateway must answer, as macOS's run checks too. A gateway that
+// was killed leaves its socket behind, and only a connection tells the
+// two apart. urunc refuses a symlink in the socket's place, to keep a
+// path its user controls from leading root's bind mount elsewhere.
+func checkGatewaySock(sock string) error {
+	if !hostPathRe.MatchString(sock) {
+		return fmt.Errorf("--gateway-sock: urunc takes only letters, digits, '.', '_', '-' and '/' in the "+
+			"socket's path, %s", sock)
+	}
+	info, err := os.Lstat(sock)
+	if err != nil {
+		return fmt.Errorf("no gateway listens for hvi at %s: %w", sock, err)
+	}
+	if info.Mode().Type() != os.ModeSocket {
+		return fmt.Errorf("no gateway listens for hvi at %s: it is not a socket, and urunc takes nothing "+
+			"else in its place, a symlink to one included", sock)
+	}
+	conn, err := net.DialTimeout("unix", sock, 2*time.Second)
+	if err != nil {
+		return fmt.Errorf("no gateway listens for hvi at %s: %w", sock, err)
+	}
+	_ = conn.Close()
+	return nil
+}
+
+// gatewayAnnotations are the urunc annotations a gateway run sets from
+// --gateway-sock and --gateway-cidr.
+var gatewayAnnotations = []string{
+	containerd.NetSocketAnnotation,
+	containerd.NetAddressAnnotation,
+	containerd.NetGatewayAnnotation,
+}
+
+// checkGatewayAnnotations refuses the gateway's annotations in --annotation.
+// Set there, they would skip every check gatewayNetwork makes, and the
+// guest's resolv.conf, and with --net shared the CNI network would attach
+// an address the guest never uses.
+func checkGatewayAnnotations(annotations map[string]string) error {
+	for _, k := range gatewayAnnotations {
+		_, ok := annotations[k]
+		if ok {
+			return fmt.Errorf("--annotation %s is refused: --gateway-sock and --gateway-cidr set it", k)
+		}
+	}
+	return nil
+}
+
+// gatewayMonitor is the one monitor urunc joins to a gateway. It gives
+// every other monitor a tap in the container's network namespace.
+const gatewayMonitor = "hvi"
+
+// defaultGatewayMonitor has a gateway run boot on hvi when neither the run
+// nor the image, whose urunc annotations are image, names a monitor.
+// planBoot would otherwise give a plain image cloud-hypervisor, which
+// cannot join a gateway.
+func defaultGatewayMonitor(annotations, image map[string]string) {
+	if containerd.UruncAnnotations(annotations, image)[ociclient.HypervisorAnnotation] == "" {
+		annotations[ociclient.HypervisorAnnotation] = gatewayMonitor
+	}
+}
+
+// checkGatewayMonitor refuses a gateway run on a monitor other than hvi,
+// which urunc refuses only when the task is created.
+func checkGatewayMonitor(backend string) error {
+	if backend == gatewayMonitor {
+		return nil
+	}
+	return fmt.Errorf("--gateway-sock needs the hvi monitor on Linux, and the run's is %q: urunc joins "+
+		"only hvi to a gateway, and the others to the network of the container's namespace", backend)
+}
+
+// gatewayJoinTimeout bounds how long checkJoinedGateway waits for urunc to
+// start hvi.
+var gatewayJoinTimeout = 10 * time.Second
+
+// procCmdline returns the arguments of the process pid.
+var procCmdline = func(pid uint32) ([]string, error) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil {
+		return nil, err
+	}
+	return strings.Split(strings.TrimRight(string(data), "\x00"), "\x00"), nil
+}
+
+// checkJoinedGateway fails a gateway run whose hvi did not join the
+// gateway. A urunc that does not read the gateway's annotations, such as
+// the brig-standalone-linux bundle's 3c00b69, ignores them and gives hvi a
+// tap in the container's network namespace instead, where no network is
+// attached, so the guest boots with none and nothing reports it. hull
+// cannot tell beforehand which urunc the shim runs, so it reads what urunc
+// started: the task's process, pid, execs hvi once urunc has set the
+// instance up, and hvi joins a gateway only with --net-gateway.
+//
+// The process starts as urunc, so the check waits for hvi, for
+// gatewayJoinTimeout at most. A task that ends before then is not the
+// gateway's to report. When the check cannot see hvi at all, it warns on
+// w, and leaves the instance running.
+func checkJoinedGateway(ctx context.Context, w io.Writer, pid uint32) error {
+	deadline := time.Now().Add(gatewayJoinTimeout)
+	for {
+		args, err := procCmdline(pid)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			_, _ = fmt.Fprintf(w, "warning: cannot tell whether hvi joined the network gateway: %v\n", err)
+			return nil
+		}
+		if filepath.Base(args[0]) == gatewayMonitor {
+			if slices.Contains(args[1:], "--net-gateway") {
+				return nil
+			}
+			return errors.New("urunc started hvi without --net-gateway, so the guest has no network: " +
+				"the shim's urunc does not read the gateway's annotations, which takes " +
+				"urunc-dev/urunc@034929e. The instance is removed")
+		}
+		if time.Now().After(deadline) {
+			_, _ = fmt.Fprintf(w, "warning: urunc did not start hvi within %s, so hull cannot tell whether "+
+				"it joined the network gateway\n", gatewayJoinTimeout)
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+// noID stands for an ID that owns no file: (uid_t)-1, which the kernel
+// gives no file.
+const noID = math.MaxUint32
+
+// gatewayHostIDs returns the host uid and gid hvi runs as for an instance
+// whose image runs as uid and gid. Under a rootful daemon they are the
+// same IDs. Under a rootless one, rootlesskit maps root to the user it runs
+// as, which is hull's own, since hull finds its state directory under its
+// own runtime directory, and every other ID to a subordinate ID, which owns
+// no file a gateway creates; noID stands for that.
+func gatewayHostIDs(uid, gid uint32, rootless bool) (hostUID, hostGID uint32) {
+	if !rootless {
+		return uid, gid
+	}
+	hostUID, hostGID = noID, noID
+	if uid == 0 {
+		hostUID = uint32(os.Geteuid())
+	}
+	if gid == 0 {
+		hostGID = uint32(os.Getegid())
+	}
+	return hostUID, hostGID
+}
+
+// mayWrite reports whether a process with the host uid and gid may write to
+// a file with st's owner and mode, by the kernel's rule: root may, the
+// owner's bits apply to the owner alone, the group's to the rest of its
+// group, and the others' bits to everyone else.
+func mayWrite(st *syscall.Stat_t, uid, gid uint32) bool {
+	switch {
+	case uid == 0:
+		return true
+	case st.Uid == uid:
+		return st.Mode&0o200 != 0
+	case st.Gid == gid:
+		return st.Mode&0o020 != 0
+	default:
+		return st.Mode&0o002 != 0
+	}
+}
+
+// warnGatewayUser warns when an instance of an image with config is
+// unlikely to reach the gateway at socket. hvi connects to the socket as the
+// instance's user, which takes write permission on it, and boots the guest
+// on a stub network with no way out when it has none. rootless says whether
+// the daemon is rootless, which maps the instance's IDs to other host IDs
+// (gatewayHostIDs). The check leaves out supplementary groups.
+func warnGatewayUser(w io.Writer, config ocispec.ImageConfig, socket string, rootless bool) {
+	uid, gid, err := containerd.ImageUser(config)
+	// A user hull cannot resolve fails the run anyway, with the reason.
+	if err != nil {
+		return
+	}
+	var st syscall.Stat_t
+	err = syscall.Stat(socket, &st)
+	// checkGatewaySock found the socket. One gone since fails the create.
+	if err != nil {
+		return
+	}
+	hostUID, hostGID := gatewayHostIDs(uid, gid, rootless)
+	if mayWrite(&st, hostUID, hostGID) {
+		return
+	}
+	_, _ = fmt.Fprintf(w, "warning: the image runs as uid %d, and hvi joins the network gateway as that user. "+
+		"It may not write to %s, so the guest is likely to boot with no network\n", uid, socket)
 }
 
 // hookPath is the PATH the network hook runs with: path, or a default when
