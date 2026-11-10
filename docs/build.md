@@ -90,8 +90,8 @@ it rather than letting the build assume it owns the box.
 ### Building on Linux
 
 A Linux port has started. It can start an instance in the background, with
-no network or on a CNI bridge, run commands in it, read its log and stop
-it, and little else yet. `make linux`, or plain `make` on a Linux host, builds a `hull` whose
+no network, on a CNI bridge or on a `hull network-gateway`, run commands in
+it, read its log and stop it, and little else yet. `make linux`, or plain `make` on a Linux host, builds a `hull` whose
 only commands are `hull assets`, `hull exec`, `hull images`,
 `hull inspect`, `hull logs`, `hull network-gateway`, `hull ps`,
 `hull pull`, `hull rm`, `hull rmi`, `hull run`, `hull stop` and
@@ -284,8 +284,9 @@ these differences:
   `backend` and `logFile` come from labels `hull run` sets, so they are
   empty for a container another client created. Those containerd has no
   counterpart for, among them `cmdLine` and `bundleDir`, are always empty.
-- `hull inspect` prints `network`, Linux only: `none`, or the `--net` mode
-  that attached the instance, `shared`. It comes from a label `hull run`
+- `hull inspect` prints `network`, Linux only: `none`, the `--net` mode
+  that attached the instance, `shared`, or `gateway` for one on a
+  `hull network-gateway`. It comes from a label `hull run`
   sets, so it stays after the instance stops, when the address is gone. It
   is missing for a container another client created, and for one an older
   hull created, which recorded no network: read that as unknown, not as
@@ -463,8 +464,8 @@ ways:
   `bridge`, the name of nerdctl's default network, which the bundle's
   configuration keeps: its `brig0` bridge on `10.44.0.0/24` is the one
   brig's nerdctl containers use, so hull's instances and those containers
-  share one segment and one address pool. The network gateway does not
-  exist on Linux. hull looks for the plugins in `$CNI_PATH`, a
+  share one segment and one address pool. `--gateway-sock` attaches it to
+  a network gateway instead; see below. hull looks for the plugins in `$CNI_PATH`, a
   colon-separated list, and for the network's configuration in
   `$NETCONFPATH`, as nerdctl and the CNI tools do. When those are unset, it
   uses the installed bundle's `libexec/cni` and `etc/cni/net.d`, under
@@ -512,6 +513,75 @@ ways:
   or address.
   `hull ps` and `hull inspect` show the address while the instance is
   attached.
+- `--gateway-sock <control socket>` and `--gateway-cidr <address/prefix>`
+  attach the instance to a `hull network-gateway`, as they do on macOS,
+  instead of the CNI network. They take `--net shared`, and the macOS
+  refusals: one without the other, and either with `--net none`. hvi joins
+  the gateway itself, through the stream socket beside the control socket,
+  `<control socket>.qemu`, and the guest boots with the address
+  `--gateway-cidr` names, the subnet's first address as its route, and that
+  address as its nameserver, the gateway's resolver. No hook runs, and no
+  CNI plugin, iptables rule, slirp4netns or rootlesskit port driver takes
+  part: the gateway runs on the host, as the user who started it, opens the
+  guest's connections there, and forwards a port from a listener on the
+  host. Limits:
+  - Only hvi joins a gateway, so a gateway run boots on hvi when neither
+    the run nor the image names a monitor, and hull refuses one on any
+    other monitor. The other monitors get their network from a tap in the
+    container's network namespace. A monitor the run names, with
+    `--hypervisor` or `--annotation`, is refused before the pull, and one
+    only the image names after it.
+  - hull refuses the run before it pulls when the stream socket is missing,
+    is not a socket, a symlink to one included, or has nothing listening:
+    hvi would boot a guest whose gateway it cannot reach on a stub network
+    with no way out. urunc checks only that a socket is at the path, so a
+    gateway that stops between the check and the boot leaves the guest on
+    that stub network.
+  - hull refuses before it pulls an address urunc refuses: one that is not
+    unicast IPv4, a `/32`, the gateway's own address, and the subnet's
+    network and broadcast addresses. urunc also takes only letters, digits,
+    `.`, `_`, `-` and `/` in the socket's path.
+  - Under a rootless daemon, urunc looks the socket up in rootlesskit's
+    mount namespace, where hull does not. There `/etc`, `/run` and
+    `/var/lib` are tmpfs copies made when rootlesskit started, holding a
+    link to each entry the host's directory had then, and `/run/containerd`
+    is the daemon's own. A socket in an entry created directly under one of
+    those directories after rootlesskit started, or under `/run/containerd`,
+    is missing there, and urunc fails the create. A socket under
+    `$XDG_RUNTIME_DIR`, the home directory or `/tmp` is the same file in
+    both.
+  - It needs a urunc that reads the `com.urunc.unikernel.netSocket`,
+    `netAddress` and `netGateway` annotations, which hull sets: one with
+    urunc-dev/urunc@034929e. The bundle's urunc, 3c00b69, ignores them and
+    gives hvi a tap instead, so the guest would boot with no network. hull
+    cannot tell which urunc the shim runs before the run, so it checks what
+    urunc started: once the task has started, it reads the command line of
+    the task's process, which urunc turns into hvi once it has set the
+    instance up. When hvi has no
+    `--net-gateway`, the run fails and removes the instance. When hull
+    cannot see hvi start within 10 seconds, or cannot read the process's
+    command line, it warns and leaves the instance running.
+  - `hull run` takes the gateway's address to be the first of the subnet
+    `--gateway-cidr` names, as on macOS, and does not ask the gateway. A
+    gateway started with another `--gateway-ip`, or with a `--subnet` that
+    does not hold that address, leaves the guest with no route and no DNS,
+    and nothing reports it.
+  - hvi connects to the gateway's socket as the instance's user, which
+    takes write permission on the socket. A gateway's socket is its owner's,
+    with the owner's umask, so an image that runs as a user other than root
+    is, as a rule, refused it, and its guest boots with no network: under a
+    rootless daemon such a user maps to a subordinate ID, and under a
+    rootful one it is a host user other than the gateway's. hull warns when
+    the socket's owner, group and mode leave hvi's user no write
+    permission, as that user maps to the host under the daemon hull finds,
+    leaving out supplementary groups. urunc logs a warning when hvi's user
+    cannot write to it.
+  - Those annotations are host keys, as `bootKernel` is: an image cannot
+    set them. Nor can `--annotation`: `--gateway-sock` and
+    `--gateway-cidr` set them, after the checks above.
+  - `hull ps` and `hull inspect` show the network as `gateway`, and no
+    address. hull does not check that two instances take different
+    addresses: the caller hands them out, as brig does on macOS.
 - `--net shared` has limits. There is no `--publish`, no network of a
   sandbox's own (`--net <name>`, `hull network`), no `--dns`, `--add-host`
   or `--hostname`, and no network other than `bridge`. urunc gives the guest
@@ -683,8 +753,10 @@ ways:
   container's spec, empty for one that is not set. urunc's shim copies any of
   them the spec lacks from the image's manifest, and an image could
   otherwise name a host file as the kernel or initrd to boot. The image's
-  annotations are still honored, except `bootKernel`, `bootInitrd`,
-  `rootfsMode`, `vAccel` and `RPCAddress`, which only `--annotation` sets.
+  annotations are still honored, except the host keys: `bootKernel`,
+  `bootInitrd`, `rootfsMode`, `vAccel` and `RPCAddress`, which only
+  `--annotation` sets, and `netSocket`, `netAddress` and `netGateway`,
+  which only `--gateway-sock` and `--gateway-cidr` set.
 - `hull run` refuses a run urunc would not boot as a VM. urunc needs a
   unikernel type and a monitor in the annotations, and a binary unless a
   boot kernel and initrd are given. When one is missing it looks for a

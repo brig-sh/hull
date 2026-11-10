@@ -46,6 +46,8 @@ func TestRunRefusesBeforeDialling(t *testing.T) {
 	// A network configuration directory with no network in it.
 	fakeBundles(t, filepath.Join(t.TempDir(), "none"))
 	t.Setenv("NETCONFPATH", t.TempDir())
+	control := listenGateway(t)
+	gateway := []string{"--net", "shared", "--gateway-sock", control, "--gateway-cidr", "10.87.0.10/24", "busybox"}
 	for _, tc := range []struct {
 		args []string
 		want string
@@ -62,6 +64,18 @@ func TestRunRefusesBeforeDialling(t *testing.T) {
 		{[]string{"-d", "--name", strings.Repeat("a", 252), "busybox"}, "--name: invalid instance name"},
 		{[]string{"-d", "--env-file", "/nonexistent/env", "busybox"}, "--env-file: open /nonexistent/env"},
 		{[]string{"-d", "--shared-dir", "/nonexistent:/mnt", "busybox"}, "shared directory not found: /nonexistent"},
+		{[]string{"-d", "--annotation", containerd.NetSocketAnnotation + "=/run/gw.sock.qemu", "busybox"},
+			"--annotation " + containerd.NetSocketAnnotation + " is refused"},
+		// urunc joins only hvi to a gateway, and a run that names its
+		// monitor is refused before the pull.
+		{append([]string{"-d", "--hypervisor", "cloud-hypervisor"}, gateway...),
+			`--gateway-sock needs the hvi monitor on Linux, and the run's is "cloud-hypervisor"`},
+		{append([]string{"-d", "--annotation", ociclient.HypervisorAnnotation + "=qemu"}, gateway...),
+			`--gateway-sock needs the hvi monitor on Linux, and the run's is "qemu"`},
+		{append([]string{"-d", "--net", "shared", "--gateway-sock", control, "--gateway-cidr", "10.87.0.0/24"}, "busybox"),
+			"is the network or broadcast address"},
+		{[]string{"-d", "--net", "shared", "--gateway-sock", "/nonexistent/gw.sock", "--gateway-cidr", "10.87.0.10/24", "busybox"},
+			"no gateway listens for hvi at /nonexistent/gw.sock.qemu"},
 		{[]string{"-d"}, "image reference required"},
 	} {
 		app := newApp()
@@ -552,6 +566,37 @@ func TestRunPassesTheShares(t *testing.T) {
 	want := []specs.Mount{{Type: "bind", Source: dir, Destination: "/workspace", Options: []string{"rbind", "rprivate", "ro"}}}
 	if !reflect.DeepEqual(cfg.Mounts, want) {
 		t.Errorf("mounts = %+v, want %+v", cfg.Mounts, want)
+	}
+	if cfg.CheckStarted != nil {
+		t.Error("a run on no gateway has a CheckStarted")
+	}
+}
+
+// A run on a gateway reaches CreateInstance with the gateway's annotations
+// and a network of no hook, and boots a plain image on hvi, which joins a
+// gateway, rather than on cloud-hypervisor, the default otherwise.
+func TestRunPassesTheGateway(t *testing.T) {
+	privateLogDirs(t)
+	f := newInstanceFixture(t)
+	control := listenGateway(t)
+	cfg := runConfigOf(t, f, append([]string{"--net", "shared", "--gateway-sock", control,
+		"--gateway-cidr", "10.87.0.10/24"}, bootFileArgs(t)...)...)
+	for k, want := range map[string]string{
+		ociclient.HypervisorAnnotation:  "hvi",
+		containerd.NetSocketAnnotation:  control + ".qemu",
+		containerd.NetAddressAnnotation: "10.87.0.10/24",
+		containerd.NetGatewayAnnotation: "10.87.0.1",
+	} {
+		if cfg.Annotations[k] != want {
+			t.Errorf("%s = %q, want %q", k, cfg.Annotations[k], want)
+		}
+	}
+	if cfg.Network == nil || cfg.Network.Mode != "gateway" || cfg.Network.Hook.Path != "" ||
+		string(cfg.Network.ResolvConf) != "nameserver 10.87.0.1\n" {
+		t.Errorf("network = %+v, want mode gateway, the gateway's resolver and no hook", cfg.Network)
+	}
+	if cfg.CheckStarted == nil {
+		t.Error("no CheckStarted, so a urunc that ignores the gateway would go unnoticed")
 	}
 }
 

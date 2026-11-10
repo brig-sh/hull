@@ -70,6 +70,26 @@ func TestWithNetwork(t *testing.T) {
 	}
 }
 
+// A network urunc joins itself, such as a user-mode gateway's, has no hook
+// command, and gets the resolver configuration alone.
+func TestWithNetworkWithoutAHook(t *testing.T) {
+	n := &Network{Dir: "/state/vm.net", ResolvConf: []byte("nameserver 10.87.0.1\n")}
+	var s oci.Spec
+	err := withNetwork(n)(context.Background(), nil, nil, &s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Hooks != nil {
+		t.Errorf("hooks = %+v, want none", s.Hooks)
+	}
+	wantMounts := []specs.Mount{
+		{Destination: "/etc/resolv.conf", Type: "bind", Source: "/state/vm.net/resolv.conf", Options: []string{"bind", "rprivate"}},
+	}
+	if !reflect.DeepEqual(s.Mounts, wantMounts) {
+		t.Errorf("mounts = %+v, want %+v", s.Mounts, wantMounts)
+	}
+}
+
 func TestWriteNetworkFiles(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "vm.net")
 	err := os.Mkdir(dir, 0o700)

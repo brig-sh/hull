@@ -56,7 +56,7 @@ const (
 const LabelName = "sh.brig.hull/name"
 
 // LabelNetwork holds the network a container hull created was run with:
-// none, or the --net mode of its RunConfig.Network. The attachment's own
+// none, or the Mode of its RunConfig.Network: the --net mode, or gateway. The attachment's own
 // record goes when the task does, and a label is still there for a stopped
 // instance, as nerdctl keeps a container's networks in its nerdctl/networks
 // label.
@@ -206,6 +206,10 @@ type RunConfig struct {
 	Network *Network
 	// Mounts are added to the spec's, for urunc to take into the guest.
 	Mounts []specs.Mount
+	// CheckStarted, when not nil, is called once the task has started, with
+	// the process ID of its process. An error fails the run, which then
+	// removes the instance, as a start that fails does.
+	CheckStarted func(ctx context.Context, pid uint32) error
 }
 
 // afterCreate runs between CreateInstance's create of the container and its
@@ -239,16 +243,19 @@ func ValidateRunNamespace(namespace string) error {
 	return nil
 }
 
-// Network attaches an instance to a network through OCI hooks: the runtime
-// runs Hook at createRuntime, once the instance's network namespace exists
-// and before urunc's start reads the interface from it, and at postStop,
-// when the task is deleted.
+// Network attaches an instance to a network. A CNI network attaches it
+// through OCI hooks: the runtime runs Hook at createRuntime, once the
+// instance's network namespace exists and before urunc's start reads the
+// interface from it, and at postStop, when the task is deleted. A network
+// urunc joins the guest to itself, a user-mode gateway's, has no Hook, and
+// leaves the namespace alone.
 type Network struct {
-	// Mode is the --net the run attaches the instance with, such as
-	// shared, which the container's LabelNetwork keeps.
+	// Mode is the network the run attaches the instance to, which the
+	// container's LabelNetwork keeps: the --net mode, such as shared, or
+	// gateway.
 	Mode string
 	// Hook is the command the runtime runs, with "createRuntime" or
-	// "postStop" appended to its arguments.
+	// "postStop" appended to its arguments. With no Path, no hook runs.
 	Hook specs.Hook
 	// Dir holds the instance's network files: ResolvConf, which
 	// CreateInstance writes there as ResolvConfFile, and whatever the hook
@@ -394,6 +401,12 @@ func CreateInstance(ctx context.Context, c *client.Client, image RunImage, cfg R
 	if err != nil {
 		return fmt.Errorf("start %s: %w", cfg.Name, err)
 	}
+	if cfg.CheckStarted != nil {
+		err = cfg.CheckStarted(ctx, task.Pid())
+		if err != nil {
+			return fmt.Errorf("start %s: %w", cfg.Name, err)
+		}
+	}
 	return nil
 }
 
@@ -498,7 +511,9 @@ func newContainerID() (string, error) {
 
 // withNetwork adds n's hooks to the spec, and binds its resolver
 // configuration over the guest's /etc/resolv.conf. urunc binds it into a
-// shared root filesystem, and copies it into a block device one.
+// shared root filesystem, and copies it into a block device one. A network
+// with no hook command, such as a user-mode gateway's, which urunc joins
+// itself, gets the resolver configuration alone.
 //
 // The guest keeps the image's own /etc/hosts, as on macOS. hull cannot
 // read the image's root filesystem to add to that file, and a file of its
@@ -507,16 +522,18 @@ func newContainerID() (string, error) {
 // urunc copies the file before the network has given the instance one.
 func withNetwork(n *Network) oci.SpecOpts {
 	return func(_ context.Context, _ oci.Client, _ *containers.Container, s *oci.Spec) error {
-		if s.Hooks == nil {
-			s.Hooks = &specs.Hooks{}
+		if n.Hook.Path != "" {
+			if s.Hooks == nil {
+				s.Hooks = &specs.Hooks{}
+			}
+			hook := func(event string) specs.Hook {
+				h := n.Hook
+				h.Args = append(slices.Clone(n.Hook.Args), event)
+				return h
+			}
+			s.Hooks.CreateRuntime = append(s.Hooks.CreateRuntime, hook("createRuntime"))
+			s.Hooks.Poststop = append(s.Hooks.Poststop, hook("postStop"))
 		}
-		hook := func(event string) specs.Hook {
-			h := n.Hook
-			h.Args = append(slices.Clone(n.Hook.Args), event)
-			return h
-		}
-		s.Hooks.CreateRuntime = append(s.Hooks.CreateRuntime, hook("createRuntime"))
-		s.Hooks.Poststop = append(s.Hooks.Poststop, hook("postStop"))
 		s.Mounts = append(s.Mounts, specs.Mount{
 			Destination: "/etc/resolv.conf",
 			Type:        "bind",
@@ -644,6 +661,12 @@ func processFromImage(config ocispec.ImageConfig, args []string) (process, error
 	}
 	p.User.UID, p.User.GID = uid, gid
 	return p, nil
+}
+
+// ImageUser returns the uid and gid an instance of an image with config
+// runs as, by the rules CreateInstance applies.
+func ImageUser(config ocispec.ImageConfig) (uid, gid uint32, err error) {
+	return numericUser(config.User)
 }
 
 // numericUser parses a user, an image's USER or the one hull exec is asked

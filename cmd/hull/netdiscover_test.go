@@ -62,16 +62,6 @@ func TestParseLeases(t *testing.T) {
 	}
 }
 
-func TestGatewayNetConfig(t *testing.T) {
-	addr, gw, mask, err := gatewayNetConfig("10.87.0.10/24")
-	if err != nil || addr != "10.87.0.10" || gw != "10.87.0.1" || mask != "255.255.255.0" {
-		t.Errorf("gatewayNetConfig = %s,%s,%s,%v", addr, gw, mask, err)
-	}
-	if _, _, _, err := gatewayNetConfig("not-a-cidr"); err == nil {
-		t.Error("expected error for invalid CIDR")
-	}
-}
-
 func TestInjectHostsParsing(t *testing.T) {
 	dir := t.TempDir()
 	if err := injectHosts(dir, []string{"web:10.87.0.10", "db=2001:db8::1"}); err != nil {

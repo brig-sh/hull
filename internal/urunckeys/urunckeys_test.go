@@ -28,19 +28,29 @@ import (
 
 // specOnly names the key of each field of urunc's UnikernelConfig that urunc
 // reads from the spec alone. Such a field is tagged json:"-", which names no
-// key, since urunc keeps it out of an image's urunc.json.
+// key, since urunc keeps it out of an image's urunc.json. It may name fields
+// of a urunc newer than the bundle's, such as those of the keys in ahead.
 var specOnly = map[string]string{
 	"VAccel":     "com.urunc.unikernel.vAccel",
 	"RPCAddress": "com.urunc.unikernel.RPCAddress",
 	"BootKernel": "com.urunc.unikernel.bootKernel",
 	"BootInitrd": "com.urunc.unikernel.bootInitrd",
 	"RootfsMode": "com.urunc.unikernel.rootfsMode",
+	"NetSocket":  "com.urunc.unikernel.netSocket",
+	"NetAddress": "com.urunc.unikernel.netAddress",
+	"NetGateway": "com.urunc.unikernel.netGateway",
 }
 
 // ahead lists the keys hull writes that this urunc does not read yet, for a
 // urunc newer than the bundle's. Each must be a host key: a urunc that
 // reads it takes it from the spec alone.
-var ahead = map[string]bool{}
+var ahead = map[string]bool{
+	// The user-mode network gateway hvi joins, which
+	// urunc-dev/urunc@034929e reads and the bundle's urunc does not.
+	"com.urunc.unikernel.netSocket":  true,
+	"com.urunc.unikernel.netAddress": true,
+	"com.urunc.unikernel.netGateway": true,
+}
 
 // hullKeys is keys.json: uruncKeys and hostKeys of
 // internal/containerd/urunc.go.
