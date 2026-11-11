@@ -89,6 +89,15 @@ func removeInstance(ctx context.Context, cmd *cli.Command) error {
 			if err == nil && left != nil {
 				err = detachLeft(ctx, left)
 			}
+			if left != nil {
+				// hull rm reports this try's own outcome, which replaces
+				// the error a failed postStop left for it. Left in place,
+				// it would be printed as a second warning about the same
+				// detach, or as a warning after a retry that worked. When
+				// attachmentOf fails, no detach was tried, and postStop's
+				// error is still the only word on why the last one failed.
+				_ = os.Remove(filepath.Join(dir, containerd.HookErrorFile))
+			}
 			if err == nil {
 				return nil
 			}
@@ -119,7 +128,7 @@ func removeInstance(ctx context.Context, cmd *cli.Command) error {
 	// The network files sit beside the log, under the same lock. Their path
 	// comes from the log's, the one run computes, and not from a label.
 	if logFile != "" {
-		warnDetachFailure(cmd.ErrWriter, instanceID, netDirOf(logFile))
+		warnDetachFailure(cmd.ErrWriter, instanceID, netDirOf(logFile), "")
 		err = containerd.RemoveNetworkDir(netDirOf(logFile))
 		if err != nil {
 			return fmt.Errorf("instance %s removed, but not its network files: %w", instanceID, err)

@@ -20,6 +20,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/containerd/errdefs"
@@ -59,7 +61,17 @@ func stopInstance(ctx context.Context, cmd *cli.Command) error {
 	// Whoever deleted the task, its postStop hook may have failed.
 	dir, err := instanceNetDir(containerd.ResolveNamespace(cmd.String("namespace")), instanceID)
 	if err == nil {
-		warnDetachFailure(cmd.ErrWriter, instanceID, dir)
+		// Nothing shows the detach still to do until hull rm runs it, so
+		// say so here, where the failure is reported. The hook also fails
+		// when the detach worked and only the cleanup after it did not, and
+		// then it leaves no detachPendingFile and hull rm has nothing to
+		// retry.
+		next := ""
+		_, err = os.Stat(filepath.Join(dir, detachPendingFile))
+		if err == nil {
+			next = "hull rm tries the detach again"
+		}
+		warnDetachFailure(cmd.ErrWriter, instanceID, dir, next)
 	}
 	if !running {
 		_, err = fmt.Fprintf(cmd.Writer, "Instance %s is already stopped\n", instanceID)

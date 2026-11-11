@@ -372,26 +372,55 @@ func TestOCIHook(t *testing.T) {
 		}
 	}
 
-	// A failed detach still releases the pin and the address, and is left
-	// for hull to report: a postStop that fails makes urunc's delete fail
-	// for good.
+	// A failed detach is left for hull to report, since a postStop that
+	// fails makes urunc's delete fail for good, and for hull rm to retry:
+	// the pin stays, and the address record gives way to detachPendingFile,
+	// so hull ps no longer shows the address.
 	err = runHook(t, bundle, dir, "createRuntime", state)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("FAKE_CNI_FAIL_DEL", "1")
 	err = runHook(t, bundle, dir, "postStop", `{"ociVersion":"1.2.0","id":"vm","status":"stopped","bundle":"/b"}`)
-	reason := hookError(t, dir)
-	if err != nil || !strings.Contains(reason, "lease store unreadable") {
-		t.Errorf("postStop with a failing plugin = %v, %s %q; want success, with the plugin's error in the file", err, containerd.HookErrorFile, reason)
+	failure, rerr := os.ReadFile(filepath.Join(dir, containerd.HookErrorFile))
+	if err != nil || rerr != nil || !strings.Contains(string(failure), "lease store unreadable") {
+		t.Errorf("postStop with a failing plugin = %v, %s %q, %v; want success, with the plugin's error in the file", err, containerd.HookErrorFile, failure, rerr)
 	}
-	for _, name := range []string{networkResultFile, containerd.NetnsPinFile} {
+	for _, name := range []string{detachPendingFile, containerd.NetnsPinFile} {
 		_, err = os.Stat(filepath.Join(dir, name))
-		if !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("%s after a failed detach: error = %v, want it removed", name, err)
+		if err != nil {
+			t.Errorf("%s after a failed postStop detach: %v, want it there", name, err)
 		}
 	}
+	_, err = os.Stat(filepath.Join(dir, networkResultFile))
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("%s after a failed postStop detach: error = %v, want it removed", networkResultFile, err)
+	}
 	t.Setenv("FAKE_CNI_FAIL_DEL", "")
+
+	// hull rm's retry detaches from the pin, and clears what postStop left.
+	err = os.WriteFile(log, nil, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = runHook(t, bundle, dir, "detach", `{"ociVersion":"1.2.0","id":"vm","status":"stopped","bundle":"/b"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls, err = os.ReadFile(log)
+	if err != nil || string(calls) != "DEL hull--vm "+pin+"\n" {
+		t.Errorf("plugin calls at the retry = %q, %v; want a DEL of the pinned namespace", calls, err)
+	}
+	for _, name := range []string{detachPendingFile, containerd.NetnsPinFile} {
+		_, err = os.Stat(filepath.Join(dir, name))
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s after the retry: error = %v, want it removed", name, err)
+		}
+	}
+	err = os.Remove(filepath.Join(dir, containerd.HookErrorFile))
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// detach, which hull rm runs for a postStop the runtime never ran, fails
 	// when the detach does, and keeps the pin and the address for the next
@@ -405,9 +434,8 @@ func TestOCIHook(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "lease store unreadable") {
 		t.Errorf("detach with a failing plugin = %v, want the plugin's error", err)
 	}
-	reason = hookError(t, dir)
-	if reason != "" {
-		t.Errorf("%s after a failed detach = %q, want none: hull rm reads the hook's own error", containerd.HookErrorFile, reason)
+	if hookError(t, dir) != "" {
+		t.Errorf("%s after a failed detach: want none, hull rm reads the hook's own error", containerd.HookErrorFile)
 	}
 	for _, name := range []string{networkResultFile, containerd.NetnsPinFile} {
 		_, err = os.Stat(filepath.Join(dir, name))
@@ -467,7 +495,7 @@ func TestOCIHook(t *testing.T) {
 	if err == nil {
 		t.Fatal("createRuntime with no state succeeded")
 	}
-	reason = hookError(t, dir)
+	reason := hookError(t, dir)
 	if !strings.Contains(reason, "read the container state") {
 		t.Errorf("%s = %q; want the state's error for hull run to report", containerd.HookErrorFile, reason)
 	}
@@ -512,7 +540,7 @@ func TestCNIID(t *testing.T) {
 func TestWarnDetachFailure(t *testing.T) {
 	dir := t.TempDir()
 	var out bytes.Buffer
-	warnDetachFailure(&out, "vm", dir)
+	warnDetachFailure(&out, "vm", dir, "")
 	if out.Len() != 0 {
 		t.Errorf("with no hook error: printed %q, want nothing", out.String())
 	}
@@ -521,8 +549,9 @@ func TestWarnDetachFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	warnDetachFailure(&out, "vm", dir)
-	want := "warning: the network hook could not detach instance vm: detach from CNI network bridge: lease store unreadable\n"
+	warnDetachFailure(&out, "vm", dir, "hull rm tries the detach again")
+	want := "warning: the network hook could not detach instance vm: detach from CNI network bridge: lease store unreadable; " +
+		"hull rm tries the detach again\n"
 	if out.String() != want {
 		t.Errorf("printed %q, want %q", out.String(), want)
 	}

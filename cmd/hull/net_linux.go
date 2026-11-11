@@ -53,6 +53,11 @@ import (
 // JSON.
 const networkResultFile = "network.json"
 
+// detachPendingFile is the file the hook leaves in an instance's network
+// directory when its detach at postStop fails, so that hull rm runs the
+// detach again.
+const detachPendingFile = "detach-pending"
+
 // The places CNI looks for plugins and network configuration when neither
 // the environment nor an installed bundle names others. Variables, so tests
 // can point them at directories of their own.
@@ -599,14 +604,19 @@ func netDirOf(logFile string) string {
 // instance id's network directory, when it could not detach the instance at
 // postStop, and removes it, so it is reported once. The hook does not fail
 // then, and urunc drops the output of a hook that succeeds, so the file is
-// the only place the error is kept.
-func warnDetachFailure(w io.Writer, id, dir string) {
+// the only place the error is kept. next, when not empty, follows the error
+// and says what happens to the detach now.
+func warnDetachFailure(w io.Writer, id, dir, next string) {
 	path := filepath.Join(dir, containerd.HookErrorFile)
 	reason, err := os.ReadFile(path)
 	if err != nil {
 		return
 	}
-	_, _ = fmt.Fprintf(w, "warning: the network hook could not detach instance %s: %s\n", id, strings.TrimSpace(string(reason)))
+	msg := fmt.Sprintf("warning: the network hook could not detach instance %s: %s", id, strings.TrimSpace(string(reason)))
+	if next != "" {
+		msg += "; " + next
+	}
+	_, _ = fmt.Fprintln(w, msg)
 	_ = os.Remove(path)
 }
 
@@ -642,15 +652,22 @@ type leftAttachment struct {
 // attachmentOf returns what detachLeft needs to detach ctr, whose network
 // directory is dir, when its hook still records an attachment there, and
 // nil when it records none or the spec names no network hook. Once ctr's
-// task is gone, a record left means the hook never ran at postStop, which
-// removes it whether or not its detach works.
+// task is gone, the address record left means the hook never ran at
+// postStop, and detachPendingFile means it ran and its detach failed.
 func attachmentOf(ctx context.Context, ctr client.Container, dir string) (*leftAttachment, error) {
-	_, err := os.Stat(filepath.Join(dir, networkResultFile))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
+	left := false
+	for _, name := range []string{networkResultFile, detachPendingFile} {
+		_, err := os.Stat(filepath.Join(dir, name))
+		if err == nil {
+			left = true
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
 	}
-	if err != nil {
-		return nil, err
+	if !left {
+		return nil, nil
 	}
 	spec, err := ctr.Spec(ctx)
 	if err != nil {
@@ -678,14 +695,15 @@ var hookExecutable = os.Executable
 // under a rootless daemon. A variable, so tests can take either side.
 var inUserNS = userns.RunningInUserNS
 
-// detachLeft runs the postStop hook of a, which the runtime never ran, as
-// detach: as postStop, except that a detach that fails keeps the hook's
-// record and the pin and fails the hook, so hull rm can keep the instance
-// and run it again. A task that is gone without being deleted, as after a
-// host reboot, or after its shim was killed because urunc could not delete
-// it, never ran its hook. A rootful daemon's host-local plugin keeps its
-// leases on disk, so the address would stay leased for good, and a
-// container ID is never used again for a later attach to free it.
+// detachLeft runs the postStop hook of a, which the runtime never ran or
+// ran without detaching the instance, as detach: as postStop, except that a
+// detach that fails keeps the hook's record and the pin and fails the hook,
+// so hull rm can keep the instance and run it again. The runtime never runs
+// the hook of a task that is gone without being deleted, as after a host
+// reboot, or after its shim was killed because urunc could not delete it.
+// A rootful daemon's host-local plugin keeps its leases on disk, so the
+// address would stay leased for good, and a container ID is never used
+// again for a later attach to free it.
 //
 // The hook runs from this hull binary, with the arguments the spec gives
 // it: the binary that ran the instance may be the one that is gone. Under a
