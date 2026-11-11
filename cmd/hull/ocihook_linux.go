@@ -58,7 +58,8 @@ func internalCommand() *cli.Command {
 // spec. The runtime runs it with the container's state on stdin: at
 // createRuntime, to attach the instance's network namespace to the
 // network, and at postStop, to detach it. hull rm runs it as detach, for a
-// postStop the runtime never ran; see detachLeft.
+// postStop the runtime never ran or one whose detach failed; see
+// detachLeft.
 func ociHookCommand() *cli.Command {
 	return &cli.Command{
 		Name:      "oci-hook",
@@ -90,7 +91,8 @@ func ociHookCommand() *cli.Command {
 				// failed postStop hook. urunc 0b1ef07 fails its delete
 				// instead, after removing its state, so every later delete
 				// fails too and the instance can never be removed. So a
-				// failed detach succeeds, and is left for hull to report.
+				// failed detach succeeds, and is left for hull to report
+				// and for hull rm to retry.
 				return nil
 			}
 			return err
@@ -149,27 +151,47 @@ func runOCIHook(ctx context.Context, cmd *cli.Command) error {
 		if netnsPinned(pin) {
 			netns = pin
 		}
+		pending := filepath.Join(cmd.String("dir"), detachPendingFile)
 		err := cfg.Detach(ctx, id, netns)
-		if err != nil && event == "detach" {
-			// hull rm fails and keeps the instance, so the next hull rm
-			// runs the detach again, from the pin while it holds the
-			// namespace.
+		if err != nil {
+			// The pin stays, so the next try detaches from the namespace,
+			// and hull rm runs it before it removes the instance: it fails
+			// and keeps the instance, unless forced, until a detach works.
+			// Without that, a failed detach would leak the address and the
+			// plugins' firewall rules for good.
+			if event == "postStop" {
+				err = errors.Join(err, markDetachPending(pending, result))
+			}
 			return err
 		}
-		// At postStop the pin and the address go whether or not the detach
-		// worked: nothing runs the detach again, a pin would keep the
-		// namespace forever, and hull ps would show the address on an
-		// instance that no longer runs, which may not even hold it any
-		// more.
-		err = errors.Join(err, cni.UnpinNetns(pin))
-		rerr := os.Remove(result)
-		if rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
-			err = errors.Join(err, rerr)
+		err = cni.UnpinNetns(pin)
+		for _, path := range []string{result, pending} {
+			rerr := os.Remove(path)
+			if rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+				err = errors.Join(err, rerr)
+			}
 		}
 		return err
 	default:
 		return fmt.Errorf("unknown hook %q, expected createRuntime, postStop or detach", event)
 	}
+}
+
+// markDetachPending leaves pending for hull rm, after a failed detach at
+// postStop, in place of the address record result. hull rm reads either one
+// as a detach still to run. The record goes, since hull ps would show the
+// address on an instance that no longer runs, and may not even hold it any
+// more. pending is written first, so the instance never has neither.
+func markDetachPending(pending, result string) error {
+	err := os.WriteFile(pending, nil, 0o644)
+	if err != nil {
+		return fmt.Errorf("record the detach for hull rm to retry: %w", err)
+	}
+	err = os.Remove(result)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 // cniID returns the container ID the hook attaches the container id of the

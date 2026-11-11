@@ -355,31 +355,55 @@ func TestRemoveDeletesOnlyTheInstanceLog(t *testing.T) {
 	}
 }
 
-// stop reports a detach that failed when the task was deleted, which the
-// hook cannot report itself.
+// stop reports a hook that failed when the task was deleted, which the hook
+// cannot report itself, and promises a retry only for a detach that failed.
 func TestStopReportsAFailedDetach(t *testing.T) {
 	privateLogDirs(t)
 	f := newInstanceFixture(t)
-	containerdtest.StartTask(context.Background(), t, f.c, "vm", "sleep", "300")
-	netDir, err := instanceNetDir(f.ns, "vm")
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = os.MkdirAll(netDir, 0o755)
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = os.WriteFile(filepath.Join(netDir, containerd.HookErrorFile), []byte("lease store unreadable\n"), 0o644)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// sleep, as the task's first process, ignores the SIGTERM.
-	out, stderr, err := f.runStderr(f.ns, "stop", "--timeout", "1", "vm")
-	if err != nil || out != "Instance vm stopped\n" {
-		t.Errorf("stop = %q, %v", out, err)
-	}
-	if stderr != "warning: the network hook could not detach instance vm: lease store unreadable\n" {
-		t.Errorf("stop's stderr = %q, want the failed detach reported", stderr)
+	for _, tc := range []struct {
+		name    string
+		pending bool
+		want    string
+	}{
+		{
+			name:    "vm",
+			pending: true,
+			want:    "warning: the network hook could not detach instance vm: lease store unreadable; hull rm tries the detach again\n",
+		},
+		{
+			// The detach worked and the unpin after it failed: hull rm
+			// runs no hook.
+			name: "unpinned",
+			want: "warning: the network hook could not detach instance unpinned: lease store unreadable\n",
+		},
+	} {
+		containerdtest.StartTask(context.Background(), t, f.c, tc.name, "sleep", "300")
+		netDir, err := instanceNetDir(f.ns, tc.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = os.MkdirAll(netDir, 0o755)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = os.WriteFile(filepath.Join(netDir, containerd.HookErrorFile), []byte("lease store unreadable\n"), 0o644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tc.pending {
+			err = os.WriteFile(filepath.Join(netDir, detachPendingFile), []byte("{}"), 0o644)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		// sleep, as the task's first process, ignores the SIGTERM.
+		out, stderr, err := f.runStderr(f.ns, "stop", "--timeout", "1", tc.name)
+		if err != nil || out != "Instance "+tc.name+" stopped\n" {
+			t.Errorf("stop %s = %q, %v", tc.name, out, err)
+		}
+		if stderr != tc.want {
+			t.Errorf("stop %s's stderr = %q, want %q", tc.name, stderr, tc.want)
+		}
 	}
 }
 
@@ -518,6 +542,49 @@ func TestRemoveDetachesOnlyWhatIsLeft(t *testing.T) {
 	_, err = os.Stat(netDir)
 	if !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("network directory after rm --force: error = %v, want it removed", err)
+	}
+}
+
+// rm runs the detach again for an instance whose hook's detach failed at
+// postStop, which leaves detachPendingFile in place of the address record,
+// and the error for hull to report. rm reports the retry's outcome instead:
+// nothing when it works, and one warning when rm --force removes the
+// instance after it fails.
+func TestRemoveRetriesAFailedDetach(t *testing.T) {
+	privateLogDirs(t)
+	f := newInstanceFixture(t)
+	failedAt := func(name string) string {
+		t.Helper()
+		_, netDir := newAttachedInstance(t, f, name, false)
+		for file, data := range map[string]string{detachPendingFile: "", containerd.HookErrorFile: "postStop's error\n"} {
+			err := os.WriteFile(filepath.Join(netDir, file), []byte(data), 0o644)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		return netDir
+	}
+
+	out := fakeHook(t, 0)
+	netDir := failedAt("web")
+	_, stderr, err := f.runStderr(f.ns, "rm", "web")
+	if err != nil || stderr != "" {
+		t.Fatalf("rm web: %v, stderr %q; want the retry to work, with nothing to warn about", err, stderr)
+	}
+	args, err := os.ReadFile(filepath.Join(out, "args"))
+	if err != nil || strings.TrimSpace(string(args)) != "internal oci-hook --dir "+netDir+" detach" {
+		t.Errorf("hook arguments = %q, %v; want the retry, as detach", args, err)
+	}
+
+	fakeHook(t, 1)
+	failedAt("db")
+	_, stderr, err = f.runStderr(f.ns, "rm", "--force", "db")
+	if err != nil {
+		t.Fatalf("rm --force db: %v", err)
+	}
+	if strings.Count(stderr, "warning:") != 1 || !strings.Contains(stderr, "hook output") ||
+		strings.Contains(stderr, "postStop's error") {
+		t.Errorf("rm --force's stderr = %q, want one warning, the retry's", stderr)
 	}
 }
 

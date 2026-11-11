@@ -593,9 +593,10 @@ ways:
   sandbox's own (`--net <name>`, `hull network`), no `--dns`, `--add-host`
   or `--hostname`, and no network other than `bridge`. urunc gives the guest
   one interface and only its first IPv4 address. A detach that fails does
-  not stop the task's delete: `hull stop`, or `hull rm` when it deletes the
-  task, prints the error as a warning, and leaves whatever the detach did
-  not remove in place. The OCI runtime spec has a runtime only warn about a
+  not stop the task's delete: `hull stop` prints the error as a warning,
+  and the instance keeps its namespace pin and a note in `<instance>.net`
+  that the detach is still to do, which `hull rm` acts on as described
+  below. The OCI runtime spec has a runtime only warn about a
   failed `postStop` hook, but the bundle's urunc fails the delete instead,
   after removing its own state, so a failed hook would leave an instance
   that can never be removed. The hook is the hull binary that ran the
@@ -608,9 +609,10 @@ ways:
   process, with the `containerId` `hull inspect` prints, has containerd
   remove the task, and `hull rm` then removes the instance. A task that
   goes without being deleted, this way or at a host reboot, never runs its
-  `postStop` hook. `hull rm` detaches such an instance itself: when the
-  hook's record of the address in `<instance>.net` is still there once the
-  task is gone, it runs the hook as the instance's spec names it, from its
+  `postStop` hook. `hull rm` detaches such an instance itself, and one
+  whose detach failed: when the hook's record of the address, or its note
+  of a failed detach, is still in `<instance>.net` once the task is gone,
+  it runs the hook as the instance's spec names it, from its
   own binary, so the binary that ran the instance need not exist. For an
   instance of a rootless daemon it runs it in rootlesskit's namespaces
   through `nsenter`, which must be on its `PATH`. It does so before it
@@ -623,7 +625,10 @@ ways:
   each run's container has an ID of its own, and so does its attachment.
   `hull stop` of an instance whose task is gone does not detach it, and
   neither does the removal of its container by another client, such as
-  `ctr`. hull takes the daemon for a rootless one from the user it runs
+  `ctr`. After a detach that failed, such a removal also leaves the
+  instance's network namespace pinned in `<instance>.net`, its interface
+  still on the bridge, until a later `hull run` of the name replaces the
+  directory. hull takes the daemon for a rootless one from the user it runs
   as, not from the daemon it reaches: a user other than root with a rootless
   setup whose `--containerd-address` names a rootful daemon gets that
   setup's configuration directory and rootlesskit's nameserver, which the
