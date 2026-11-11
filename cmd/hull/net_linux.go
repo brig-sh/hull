@@ -364,20 +364,34 @@ var procCmdline = func(pid uint32) ([]string, error) {
 // instance up, and hvi joins a gateway only with --net-gateway.
 //
 // The process starts as urunc, so the check waits for hvi, for
-// gatewayJoinTimeout at most. A task that ends before then is not the
+// gatewayJoinTimeout at most. A task seen to end before then is not the
 // gateway's to report. When the check cannot see hvi at all, it warns on
 // w, and leaves the instance running.
+//
+// A process missing at the first read is not taken as a task that ended.
+// It may have, but /proc can also hide it from hull: mounted with
+// hidepid=invisible, it hides another user's processes, and a containerd in
+// another PID namespace, as rootlesskit's --pidns puts it, reports a pid
+// that hull's /proc does not have. hull cannot tell an ended task from a
+// hidden one, and taking a hidden one for ended would let a guest with no
+// network pass unreported, so the check warns.
 func checkJoinedGateway(ctx context.Context, w io.Writer, pid uint32) error {
 	deadline := time.Now().Add(gatewayJoinTimeout)
+	seen := false
 	for {
 		args, err := procCmdline(pid)
 		if errors.Is(err, fs.ErrNotExist) {
+			if !seen {
+				_, _ = fmt.Fprintf(w, "warning: hull cannot see the task's process %d, so it cannot tell whether hvi "+
+					"joined the network gateway: the task ended at once, or /proc hides the process from hull\n", pid)
+			}
 			return nil
 		}
 		if err != nil {
 			_, _ = fmt.Fprintf(w, "warning: cannot tell whether hvi joined the network gateway: %v\n", err)
 			return nil
 		}
+		seen = true
 		if filepath.Base(args[0]) == gatewayMonitor {
 			if slices.Contains(args[1:], "--net-gateway") {
 				return nil

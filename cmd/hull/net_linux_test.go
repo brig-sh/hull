@@ -868,6 +868,8 @@ func TestCheckJoinedGateway(t *testing.T) {
 		{name: "hvi on a tap", seen: [][]string{urunc, tap}, want: "urunc started hvi without --net-gateway"},
 		// A zombie's cmdline is empty.
 		{name: "the task ended", seen: [][]string{urunc, {""}}, err: fs.ErrNotExist},
+		// hidepid=invisible, or a containerd in another PID namespace.
+		{name: "the task never seen", err: fs.ErrNotExist, warning: "hull cannot see the task's process 4242"},
 		{name: "no hvi in time", seen: [][]string{urunc}, warning: "urunc did not start hvi within"},
 		{name: "no /proc access", seen: [][]string{urunc}, err: fs.ErrPermission, warning: "cannot tell whether hvi joined"},
 	} {

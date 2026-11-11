@@ -560,7 +560,14 @@ ways:
     instance up. When hvi has no
     `--net-gateway`, the run fails and removes the instance. When hull
     cannot see hvi start within 10 seconds, or cannot read the process's
-    command line, it warns and leaves the instance running.
+    command line, it warns and leaves the instance running. It also warns
+    when the process is gone at its first look: the task may have ended at
+    once, but `/proc` also hides it from hull when mounted with
+    `hidepid=invisible` and the task runs as another user, or when
+    containerd runs in another PID namespace (rootlesskit's `--pidns`).
+    In another PID namespace, the pid containerd reports can also name an
+    unrelated process of hull's, and hull then warns that hvi did not
+    start.
   - `hull run` takes the gateway's address to be the first of the subnet
     `--gateway-cidr` names, as on macOS, and does not ask the gateway. A
     gateway started with another `--gateway-ip`, or with a `--subnet` that
