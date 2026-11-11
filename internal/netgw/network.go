@@ -208,9 +208,13 @@ func (n *Network) accept(ctx context.Context, conn net.Conn, protocol gvntypes.P
 // ones a departed member held, so the entries are found by the MACs the
 // switch still has instead. The neighbours are read before the switch's
 // table: the switch records a frame's source MAC before the netstack sees the
-// frame, so an entry a joining member's ARP just created is never dropped for
-// a MAC the table did not have yet. An entry still resolving has no MAC and
-// is left alone.
+// frame, so an entry that already points at a joining member is kept. An
+// entry still resolving has no MAC and is left alone.
+//
+// RemoveNeighbor removes by address, and gvisor has no compare-and-remove. A
+// guest that rejoins on the address while this runs can have its entry, just
+// pointed at its new MAC, removed with the old one. That costs only another
+// ARP exchange: the netstack resolves the address again on its next packet.
 func (n *Network) forgetDeparted() {
 	entries, tcpErr := n.stack.Neighbors(nicID, ipv4.ProtocolNumber)
 	if tcpErr != nil {
