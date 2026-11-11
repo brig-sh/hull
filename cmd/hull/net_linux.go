@@ -184,10 +184,11 @@ func gatewayNetwork(netMode, controlSock, cidr, namespace, id string, annotation
 	}
 	// urunc takes only an absolute path. The flag takes a relative one, as
 	// on macOS, relative to hull's working directory.
-	sock, err := filepath.Abs(qemuGatewaySock(controlSock))
+	control, err := filepath.Abs(controlSock)
 	if err != nil {
 		return nil, err
 	}
+	sock := qemuGatewaySock(control)
 	err = checkGatewaySock(sock)
 	if err != nil {
 		return nil, err
@@ -200,9 +201,10 @@ func gatewayNetwork(netMode, controlSock, cidr, namespace, id string, annotation
 	annotations[containerd.NetAddressAnnotation] = cidr
 	annotations[containerd.NetGatewayAnnotation] = gateway
 	return &containerd.Network{
-		Mode:       gatewayMode,
-		Dir:        dir,
-		ResolvConf: []byte("nameserver " + gateway + "\n"),
+		Mode:          gatewayMode,
+		GatewaySocket: control,
+		Dir:           dir,
+		ResolvConf:    []byte("nameserver " + gateway + "\n"),
 	}, nil
 }
 

@@ -233,18 +233,28 @@ func TestNewContainerThroughDaemon(t *testing.T) {
 	if !regexp.MustCompile(`^[0-9a-f]{16}$`).MatchString(ctr.ID()) {
 		t.Errorf("container ID = %q, want 16 hex digits", ctr.ID())
 	}
-	again, err := newContainer(ctx, c, image, RunConfig{Name: "vm", Args: []string{"true"}, Annotations: map[string]string{
-		ociclient.BootKernelAnnotation:    "/run/kernel",
-		ociclient.BootInitrdAnnotation:    "/run/initrd",
-		ociclient.UnikernelTypeAnnotation: "linux",
-	}, Network: testNetwork(filepath.Join(t.TempDir(), "vm.net"))})
-	if err != nil {
-		t.Fatal(err)
+	// Another run of vm, on a network, and one on a gateway.
+	networked := func(n *Network) client.Container {
+		t.Helper()
+		ctr, err := newContainer(ctx, c, image, RunConfig{Name: "vm", Args: []string{"true"}, Annotations: map[string]string{
+			ociclient.BootKernelAnnotation:    "/run/kernel",
+			ociclient.BootInitrdAnnotation:    "/run/initrd",
+			ociclient.UnikernelTypeAnnotation: "linux",
+		}, Network: n})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = ctr.Delete(context.Background(), client.WithSnapshotCleanup) })
+		return ctr
 	}
-	t.Cleanup(func() { _ = again.Delete(context.Background(), client.WithSnapshotCleanup) })
+	again := networked(testNetwork(filepath.Join(t.TempDir(), "vm.net")))
 	if again.ID() == ctr.ID() {
 		t.Errorf("a second container of vm has the first's ID, %s", ctr.ID())
 	}
+	gateway := testNetwork(filepath.Join(t.TempDir(), "vm.net"))
+	gateway.Mode = "gateway"
+	gateway.GatewaySocket = "/run/user/1000/gw.sock"
+	onGateway := networked(gateway)
 	wantLabels := map[string]string{
 		LabelName:        "vm",
 		LabelBackend:     "firecracker",
@@ -259,8 +269,16 @@ func TestNewContainerThroughDaemon(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if againInfo.Labels[LabelNetwork] != "shared" {
-		t.Errorf("network label of a run with a network = %q, want its mode, shared", againInfo.Labels[LabelNetwork])
+	_, hasSocket := againInfo.Labels[LabelGatewaySocket]
+	if againInfo.Labels[LabelNetwork] != "shared" || hasSocket {
+		t.Errorf("labels of a run with a network = %v, want its mode, shared, and no gateway socket", againInfo.Labels)
+	}
+	gatewayInfo, err := onGateway.Info(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gatewayInfo.Labels[LabelNetwork] != "gateway" || gatewayInfo.Labels[LabelGatewaySocket] != "/run/user/1000/gw.sock" {
+		t.Errorf("labels of a gateway run = %v, want its mode, gateway, and its control socket", gatewayInfo.Labels)
 	}
 	spec, err := ctr.Spec(ctx)
 	if err != nil {

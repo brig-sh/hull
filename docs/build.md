@@ -291,6 +291,12 @@ these differences:
   is missing for a container another client created, and for one an older
   hull created, which recorded no network: read that as unknown, not as
   `none`. macOS records no `network`; its network is in `cmdLine`.
+- For an instance on a gateway, `hull inspect` also prints
+  `gatewaySocket`, Linux only: the gateway's control socket, as
+  `--gateway-sock` named it, made absolute. A caller that runs more than
+  one gateway, such as one per sandbox beside a shared one, reads from it
+  which one an instance is on. It comes from a label too, so it is missing
+  for an instance an older hull ran. On macOS the socket is in `cmdLine`.
 - `hull rm` deletes the container's task, the container and its snapshot,
   the instance's log, and the exec processes and FIFOs a killed `hull exec`
   left, described below. A task that has not stopped is refused without
@@ -587,8 +593,9 @@ ways:
     set them. Nor can `--annotation`: `--gateway-sock` and
     `--gateway-cidr` set them, after the checks above.
   - `hull ps` and `hull inspect` show the network as `gateway`, and no
-    address. hull does not check that two instances take different
-    addresses: the caller hands them out, as brig does on macOS.
+    address; `hull inspect` shows the gateway's socket as `gatewaySocket`.
+    hull does not check that two instances take different addresses: the
+    caller hands them out, as brig does on macOS.
 - `--net shared` has limits. There is no `--publish`, no network of a
   sandbox's own (`--net <name>`, `hull network`), no `--dns`, `--add-host`
   or `--hostname`, and no network other than `bridge`. urunc gives the guest
