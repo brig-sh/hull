@@ -636,7 +636,7 @@ func TestGatewayNetwork(t *testing.T) {
 	}
 	// No hook: urunc has hvi join the gateway itself, and the guest asks
 	// the gateway's resolver.
-	want := &containerd.Network{Mode: "gateway", Dir: wantDir, ResolvConf: []byte("nameserver 10.87.0.1\n")}
+	want := &containerd.Network{Mode: "gateway", GatewaySocket: control, Dir: wantDir, ResolvConf: []byte("nameserver 10.87.0.1\n")}
 	if !reflect.DeepEqual(n, want) {
 		t.Errorf("network = %+v, want %+v", n, want)
 	}
@@ -649,12 +649,14 @@ func TestGatewayNetwork(t *testing.T) {
 		t.Errorf("annotations = %v, want %v", annotations, wantAnnotations)
 	}
 
-	// urunc takes only an absolute socket.
+	// urunc takes only an absolute socket, and hull inspect prints the
+	// control socket absolute too, so it names one socket wherever it runs.
 	t.Chdir(filepath.Dir(control))
 	annotations = map[string]string{}
-	_, err = gatewayNetwork("shared", "gw.sock", "10.87.0.10/24", "hull", "vm", annotations)
-	if err != nil || annotations[containerd.NetSocketAnnotation] != control+".qemu" {
-		t.Errorf("a relative socket: %q, %v; want %s", annotations[containerd.NetSocketAnnotation], err, control+".qemu")
+	n, err = gatewayNetwork("shared", "gw.sock", "10.87.0.10/24", "hull", "vm", annotations)
+	if err != nil || annotations[containerd.NetSocketAnnotation] != control+".qemu" || n.GatewaySocket != control {
+		t.Errorf("a relative socket: %q, %+v, %v; want %s and %s", annotations[containerd.NetSocketAnnotation], n, err,
+			control+".qemu", control)
 	}
 
 	dir := t.TempDir()

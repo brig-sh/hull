@@ -157,14 +157,15 @@ func TestInstanceLogPath(t *testing.T) {
 
 func TestInstanceRecordReadsHullLabels(t *testing.T) {
 	rec := instanceRecord(containerd.Instance{ID: "vm", Labels: map[string]string{
-		containerd.LabelBackend:     "cloud-hypervisor",
-		containerd.LabelImageDigest: "sha256:abc",
-		containerd.LabelLogFile:     "/logs/vm.log",
-		containerd.LabelNetwork:     "shared",
+		containerd.LabelBackend:       "cloud-hypervisor",
+		containerd.LabelImageDigest:   "sha256:abc",
+		containerd.LabelLogFile:       "/logs/vm.log",
+		containerd.LabelNetwork:       "gateway",
+		containerd.LabelGatewaySocket: "/run/gw.sock",
 	}})
 	if rec.Backend != "cloud-hypervisor" || rec.ImageDigest != "sha256:abc" || rec.LogFile != "/logs/vm.log" ||
-		rec.Network != "shared" {
-		t.Errorf("record = %+v, want the backend, digest, log file and network from the labels", rec)
+		rec.Network != "gateway" || rec.GatewaySocket != "/run/gw.sock" {
+		t.Errorf("record = %+v, want the backend, digest, log file, network and gateway socket from the labels", rec)
 	}
 }
 
@@ -591,9 +592,9 @@ func TestRunPassesTheGateway(t *testing.T) {
 			t.Errorf("%s = %q, want %q", k, cfg.Annotations[k], want)
 		}
 	}
-	if cfg.Network == nil || cfg.Network.Mode != "gateway" || cfg.Network.Hook.Path != "" ||
-		string(cfg.Network.ResolvConf) != "nameserver 10.87.0.1\n" {
-		t.Errorf("network = %+v, want mode gateway, the gateway's resolver and no hook", cfg.Network)
+	if cfg.Network == nil || cfg.Network.Mode != "gateway" || cfg.Network.GatewaySocket != control ||
+		cfg.Network.Hook.Path != "" || string(cfg.Network.ResolvConf) != "nameserver 10.87.0.1\n" {
+		t.Errorf("network = %+v, want mode gateway, its control socket, the gateway's resolver and no hook", cfg.Network)
 	}
 	if cfg.CheckStarted == nil {
 		t.Error("no CheckStarted, so a urunc that ignores the gateway would go unnoticed")

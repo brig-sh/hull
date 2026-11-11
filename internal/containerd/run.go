@@ -62,6 +62,13 @@ const LabelName = "sh.brig.hull/name"
 // label.
 const LabelNetwork = "sh.brig.hull/network"
 
+// LabelGatewaySocket holds the control socket of the network gateway a
+// container hull created joined, as hull run's --gateway-sock names it,
+// made absolute. A caller that runs a gateway per instance tells them apart
+// by it. The urunc annotation holds the QEMU stream socket beside it
+// instead, and only in the spec.
+const LabelGatewaySocket = "sh.brig.hull/gateway-socket"
+
 // ImageForRun returns the image ref names, for platform, pulling it as
 // policy says: "missing" pulls only an image the namespace does not have,
 // "always" pulls it whatever is there, and "never" fails when it is not
@@ -254,6 +261,10 @@ type Network struct {
 	// container's LabelNetwork keeps: the --net mode, such as shared, or
 	// gateway.
 	Mode string
+	// GatewaySocket is the control socket of the user-mode gateway a
+	// gateway run joins, which the container's LabelGatewaySocket keeps.
+	// It is empty for any other network.
+	GatewaySocket string
 	// Hook is the command the runtime runs, with "createRuntime" or
 	// "postStop" appended to its arguments. With no Path, no hook runs.
 	Hook specs.Hook
@@ -461,10 +472,19 @@ func newContainer(ctx context.Context, c *client.Client, image RunImage, cfg Run
 	if len(cfg.Mounts) > 0 {
 		specOpts = append(specOpts, oci.WithMounts(cfg.Mounts))
 	}
-	network := "none"
+	labels := map[string]string{
+		LabelName:        cfg.Name,
+		LabelBackend:     cfg.Backend,
+		LabelImageDigest: img.Target().Digest.String(),
+		LabelLogFile:     cfg.LogFile,
+		LabelNetwork:     "none",
+	}
 	if cfg.Network != nil {
 		specOpts = append(specOpts, withNetwork(cfg.Network))
-		network = cfg.Network.Mode
+		labels[LabelNetwork] = cfg.Network.Mode
+		if cfg.Network.GatewaySocket != "" {
+			labels[LabelGatewaySocket] = cfg.Network.GatewaySocket
+		}
 	}
 
 	ctr, err := c.NewContainer(ctx, id,
@@ -478,13 +498,7 @@ func newContainer(ctx context.Context, c *client.Client, image RunImage, cfg Run
 		// Not client.WithImageConfigLabels: urunc's shim copies a
 		// container's com.urunc.unikernel.* labels into the spec, and the
 		// image's labels are the image's to set.
-		client.WithContainerLabels(map[string]string{
-			LabelName:        cfg.Name,
-			LabelBackend:     cfg.Backend,
-			LabelImageDigest: img.Target().Digest.String(),
-			LabelLogFile:     cfg.LogFile,
-			LabelNetwork:     network,
-		}),
+		client.WithContainerLabels(labels),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create container for %s: %w", cfg.Name, err)

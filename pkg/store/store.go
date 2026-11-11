@@ -99,6 +99,11 @@ type InstanceState struct {
 	// CmdLine, and for a container hull did not create or created before it
 	// recorded one.
 	Network string `json:"network,omitempty"`
+	// GatewaySocket is the control socket of the network gateway an
+	// instance on Linux joined, absolute, when Network is gateway. It is
+	// empty on macOS, whose gateway socket is in CmdLine, and for an
+	// instance an older hull created.
+	GatewaySocket string `json:"gatewaySocket,omitempty"`
 	// TelemetryEndSent guards the telemetry `end` event to exactly once
 	// across the foreground exit path and `stop`.
 	TelemetryEndSent bool `json:"telemetryEndSent,omitempty"`
