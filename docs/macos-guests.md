@@ -32,6 +32,35 @@ The instance takes the directory's name unless `--name` is given. `--mem` and
 `--cpus` override the sizing in `config.json`. `--net` is `none` (the default)
 or `shared`. The flags that describe an OCI image or a Linux guest are refused.
 
+## Fast start: checkpoint and restore
+
+A cold boot takes about 20 s to reach a desktop with the application open.
+Restoring a checkpoint takes about 4 s, and the guest resumes exactly where it
+was saved:
+
+```bash
+hull run -d --gui --net shared claude-desktop   # boot once, let the app start
+hull checkpoint claude-desktop                  # about 2 s
+hull stop claude-desktop
+hull restore -d claude-desktop                  # about 4 s, every time
+```
+
+A restore rewinds the disk and the auxiliary storage to the checkpoint, so
+anything written after it is gone. For a sandbox this is usually what we want:
+every restore starts from the same state.
+
+The checkpoint is saved in `<vm-dir>/hull-checkpoint`, next to `disk.img`. The
+disk is copied with an APFS clone, which cannot cross volumes, and hull's store
+is a volume of its own. The instance's `checkpoint` directory links to it. The
+clone costs no space at first, and grows as the guest's disk changes. `hull rm`
+leaves it in place, and the next `hull run` of the directory clears it.
+
+## Recording the window
+
+`--gui-record <file.mov>` records the guest's window from the first frame.
+vz-runner captures its own window, so no Screen Recording permission is needed.
+`kill -USR2 <runner pid>` ends the recording and leaves the guest running.
+
 ## The guest agent
 
 `hull exec` talks to `hull-guest-agent`, a launchd daemon inside the guest. It
@@ -63,6 +92,4 @@ use Accessibility, as in the Cirrus Labs images.
 - The guest image has to carry the agent. hull does not build images.
 - `hull pull` does not know Tart's OCI format. Use `tart clone`.
 - Shared directories, secrets and the network gateway are not wired up.
-- Checkpoint and restore are passed through to the runner, but not tested with
-  a macOS guest.
 - macOS allows two macOS guests per host.

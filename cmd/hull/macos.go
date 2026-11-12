@@ -343,6 +343,20 @@ func runMacOSGuest(ctx context.Context, cmd *cli.Command, dir string) error {
 	}); err != nil {
 		return fmt.Errorf("failed to record instance: %w", err)
 	}
+	// A checkpoint clones the guest's disk, and only an APFS clone makes that
+	// cheap. A clone cannot cross volumes, and hull's store is a volume of its
+	// own, so the checkpoint lives in the guest directory and the instance's
+	// checkpoint directory links to it. A fresh run starts with an empty one.
+	ckpt := filepath.Join(dir, "hull-checkpoint")
+	if err := os.RemoveAll(ckpt); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(ckpt, 0o700); err != nil {
+		return err
+	}
+	if err := os.Symlink(ckpt, instanceCheckpointDir(s, instanceName)); err != nil {
+		return err
+	}
 	agentSock := s.InstanceAgentSocket(instanceName)
 	if err := checkUnixSocketPath("agent", agentSock); err != nil {
 		return err
@@ -350,7 +364,7 @@ func runMacOSGuest(ctx context.Context, cmd *cli.Command, dir string) error {
 
 	opts := macosRunOptions{
 		AgentSock: agentSock,
-		StateDir:  filepath.Join(instanceDir, "checkpoint"),
+		StateDir:  ckpt,
 		StopGrace: macosStopGrace,
 		GUI:       gui,
 		GUITitle:  guiTitle,

@@ -442,6 +442,11 @@ func requireBlockRootfs(cmdLine []string) error {
 	if slices.Contains(cmdLine, "--rootfs") {
 		return nil
 	}
+	// A macOS guest boots from its own disk image, a block device the runner
+	// attaches itself, so its command line names the bundle instead.
+	if slices.Contains(cmdLine, "--macos-bundle") {
+		return nil
+	}
 	// vz-runner's --disk flags come only from HULL_ROOTFS_MODE=overlay-block,
 	// which refuses --rootfs-type block, so the generic advice would point at
 	// a combination the mode rejects.

@@ -245,6 +245,9 @@ struct VMConfig {
     var machineIDPath: String { stateDir + "/machine-id" }
     var vmStatePath: String { stateDir + "/vm.vzstate" }
     var diskStatePath: String { stateDir + "/rootfs.img" }
+    // A macOS guest's auxiliary storage, saved with its disk. The boot chain
+    // keeps state there, so it has to rewind together with the machine.
+    var nvramStatePath: String { stateDir + "/nvram.bin" }
     // The checkpoint clone of the writable --disk with serial disk<n>.
     // Read-only disks are never cloned: nothing can have changed them.
     func diskCloneName(_ n: Int) -> String { "disk\(n).img" }
@@ -903,6 +906,13 @@ class VZManager: NSObject, VZVirtualMachineDelegate {
         // devices. Everything else below is shared with Linux guests.
         let macBundle = config.macosBundle.isEmpty ? nil : try MacOSBundle.load(config.macosBundle)
 
+        // Checkpoints and their error marker land in the state dir. A Linux
+        // guest also creates it while persisting its machine identifier; a
+        // macOS guest does not, so it is made here for both.
+        if !config.stateDir.isEmpty {
+            try FileManager.default.createDirectory(atPath: config.stateDir, withIntermediateDirectories: true)
+        }
+
         if let macBundle {
             try macBundle.configure(vmConfig)
             guiContentSize = NSSize(width: macBundle.displayWidth, height: macBundle.displayHeight)
@@ -1323,6 +1333,17 @@ class VZManager: NSObject, VZVirtualMachineDelegate {
                     if !diskCloned {
                         print("VZRunner: checkpoint: disk clone failed (cp -c exit \(status))", to: &standardError)
                     }
+                    if diskCloned && !self.config.macosBundle.isEmpty {
+                        try? FileManager.default.removeItem(atPath: self.config.nvramStatePath)
+                        let nvram = MacOSBundle(dir: self.config.macosBundle, hardwareModel: Data(), machineIdentifier: Data()).nvramPath
+                        let status = (try? runShellQuietly("/bin/cp", ["-c", nvram, self.config.nvramStatePath])) ?? 1
+                        if status != 0 {
+                            // A disk without its auxiliary storage cannot be
+                            // restored, so the checkpoint names no disk.
+                            diskCloned = false
+                            print("VZRunner: checkpoint: nvram clone failed (cp -c exit \(status))", to: &standardError)
+                        }
+                    }
                 }
                 // The --disk* devices: writable ones are cloned beside the
                 // machine state like the rootfs; read-only ones are recorded
@@ -1403,6 +1424,14 @@ class VZManager: NSObject, VZVirtualMachineDelegate {
         if !config.rootfsPath.isEmpty {
             if FileManager.default.fileExists(atPath: config.diskStatePath) {
                 restores.append((config.diskStatePath, config.rootfsPath, "rootfs"))
+                if !config.macosBundle.isEmpty {
+                    guard FileManager.default.fileExists(atPath: config.nvramStatePath) else {
+                        throw NSError(domain: "VZRunner", code: 3, userInfo: [NSLocalizedDescriptionKey:
+                            "no nvram.bin in checkpoint; the macOS guest's disk cannot rewind without it"])
+                    }
+                    let nvram = MacOSBundle(dir: config.macosBundle, hardwareModel: Data(), machineIdentifier: Data()).nvramPath
+                    restores.append((config.nvramStatePath, nvram, "nvram"))
+                }
             } else {
                 print("VZRunner: restore: no disk image in checkpoint, keeping current rootfs", to: &standardError)
             }
