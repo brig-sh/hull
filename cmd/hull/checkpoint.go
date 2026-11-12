@@ -320,6 +320,10 @@ func restoreCommand() *cli.Command {
 				Name:  "gateway-sock",
 				Usage: "re-join the user-mode network gateway at this control socket (required if the instance ran on the gateway)",
 			},
+			&cli.StringFlag{
+				Name:  "gui-record",
+				Usage: "record the window to this .mov file (an instance started with --gui, macOS 15 or later)",
+			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			return restoreInstance(ctx, cmd)
@@ -381,6 +385,10 @@ func restoreInstance(ctx context.Context, cmd *cli.Command) error {
 	cmdArgs := slices.Clone(state.CmdLine)
 	if !slices.Contains(cmdArgs, "--restore") {
 		cmdArgs = append(cmdArgs, "--restore")
+	}
+	cmdArgs, err = withGUIRecord(cmdArgs, cmd.String("gui-record"))
+	if err != nil {
+		return err
 	}
 
 	// The gateway datagram socket is an inherited fd; it does not survive the

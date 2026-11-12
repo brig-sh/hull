@@ -148,3 +148,20 @@ func TestBundleOfCmdLine(t *testing.T) {
 		t.Fatalf("a flag with no value must not match, got %q", got)
 	}
 }
+
+func TestWithGUIRecord(t *testing.T) {
+	base := []string{"/x/vz-runner", "--macos-bundle", "/vm", "--gui", "--gui-record", "/old.mov", "--restore"}
+	got, err := withGUIRecord(base, "/new.mov")
+	want := []string{"/x/vz-runner", "--macos-bundle", "/vm", "--gui", "--restore", "--gui-record", "/new.mov"}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, %v; want %v", got, err, want)
+	}
+	got, err = withGUIRecord(base, "")
+	want = []string{"/x/vz-runner", "--macos-bundle", "/vm", "--gui", "--restore"}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("an old recording must be dropped: got %v, %v", got, err)
+	}
+	if _, err := withGUIRecord([]string{"/x/vz-runner", "--macos-bundle", "/vm"}, "/new.mov"); err == nil {
+		t.Fatal("a recording without a window must be refused")
+	}
+}
