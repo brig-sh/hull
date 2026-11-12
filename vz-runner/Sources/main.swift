@@ -2,6 +2,7 @@ import Foundation
 import Virtualization
 import Darwin
 import AppKit
+import ScreenCaptureKit
 
 // MARK: - Command Line Arguments
 
@@ -81,6 +82,7 @@ struct VMConfig {
     var restore: Bool = false       // boot by restoring the saved state instead of a cold start
     var gui = false                 // show the guest display in a native macOS window
     var guiTitle = "urunc"          // window title in --gui mode
+    var guiRecord = ""              // record the --gui window to this movie file
     var rosetta = false             // share the Rosetta translator so the arm64 guest kernel can run amd64 userspace
     // A macOS guest, booted from a VM directory in Tart's layout: config.json,
     // disk.img and nvram.bin. It replaces --kernel: the guest boots through
@@ -173,6 +175,9 @@ struct VMConfig {
                 config.restore = true
             case "--gui":
                 config.gui = true
+            case "--gui-record":
+                i += 1
+                if i < args.count { config.guiRecord = args[i] }
             case "--gui-title":
                 i += 1
                 if i < args.count { config.guiTitle = args[i] }
@@ -203,6 +208,11 @@ struct VMConfig {
         }
 
         guard !config.kernelPath.isEmpty || !config.macosBundle.isEmpty else {
+            return nil
+        }
+
+        if !config.guiRecord.isEmpty && !config.gui {
+            print("VZRunner: --gui-record requires --gui", to: &standardError)
             return nil
         }
 
@@ -789,6 +799,18 @@ func signalHandler(sig: Int32) {
     }
 }
 
+@_silgen_name("record_signal_handler")
+func recordSignalHandler(sig: Int32) {
+    if let manager = gManager {
+        DispatchQueue.main.async {
+            manager.finishRecording {
+                print("VZRunner: --gui-record: recording finished", to: &standardError)
+                fflush(stderr)
+            }
+        }
+    }
+}
+
 @_silgen_name("checkpoint_signal_handler")
 func checkpointSignalHandler(sig: Int32) {
     if let manager = gManager {
@@ -1163,7 +1185,7 @@ class VZManager: NSObject, VZVirtualMachineDelegate {
         // holding the terminal.
         if isShuttingDown, let vm = self.vm {
             print("VZRunner: second signal, forcing stop", to: &standardError)
-            vm.stop { _ in exit(0) }
+            vm.stop { _ in self.exitAfterRecording(0) }
             return
         }
         if !isShuttingDown, let vm = self.vm {
@@ -1182,7 +1204,7 @@ class VZManager: NSObject, VZVirtualMachineDelegate {
                         return
                     }
                     print("VZRunner: guest ignored stop request, forcing stop", to: &standardError)
-                    vm.stop { _ in exit(0) }
+                    vm.stop { _ in self.exitAfterRecording(0) }
                 }
             }
             let requestStop = {
@@ -1191,7 +1213,7 @@ class VZManager: NSObject, VZVirtualMachineDelegate {
                     forceAfterGrace()
                 } catch {
                     print("VZRunner: Error requesting stop: \(error)", to: &standardError)
-                    vm.stop { _ in exit(0) }
+                    vm.stop { _ in self.exitAfterRecording(0) }
                 }
             }
             if config.macosBundle.isEmpty {
@@ -1458,6 +1480,8 @@ class VZManager: NSObject, VZVirtualMachineDelegate {
             signal(SIGTERM, signalHandler)
             signal(SIGINT, signalHandler)
             signal(SIGUSR1, checkpointSignalHandler)
+            // SIGUSR2 ends a --gui-record recording and leaves the VM running.
+            signal(SIGUSR2, recordSignalHandler)
 
             if config.restore {
                 print("VZRunner: restoring VM state from \(config.vmStatePath)", to: &standardError)
@@ -1546,6 +1570,58 @@ class VZManager: NSObject, VZVirtualMachineDelegate {
         app.activate(ignoringOtherApps: true)
         print("VZRunner: --gui: window '\(config.guiTitle)' shown", to: &standardError)
         fflush(stderr)
+
+        if !config.guiRecord.isEmpty {
+            startRecording(window: window, to: URL(fileURLWithPath: config.guiRecord))
+        }
+    }
+
+    // MARK: - Recording (--gui-record)
+
+    // The recorder, while one runs. It is typed loosely because the
+    // recorder needs macOS 15 and the runner supports macOS 14.
+    private var recorder: AnyObject?
+
+    // startRecording records the window into a movie file. A process may
+    // capture its own windows without the Screen Recording permission, so this
+    // works under hull with no prompt.
+    func startRecording(window: NSWindow, to url: URL) {
+        guard #available(macOS 15.0, *) else {
+            print("VZRunner: --gui-record needs macOS 15 or later", to: &standardError)
+            return
+        }
+        let rec = WindowRecorder()
+        recorder = rec
+        // The window server lists the window shortly after it is ordered in.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            Task { @MainActor in
+                do {
+                    try await rec.start(window: window, to: url)
+                    print("VZRunner: --gui-record: recording to \(url.path)", to: &standardError)
+                } catch {
+                    print("VZRunner: --gui-record: \(error.localizedDescription)", to: &standardError)
+                    self.recorder = nil
+                }
+                fflush(stderr)
+            }
+        }
+    }
+
+    // finishRecording closes the movie file, then calls done. It calls done
+    // at once when nothing is recording.
+    func finishRecording(_ done: @escaping () -> Void) {
+        guard #available(macOS 15.0, *), let rec = recorder as? WindowRecorder else {
+            done()
+            return
+        }
+        recorder = nil
+        rec.stop(done)
+    }
+
+    // exitAfterRecording exits once the movie file is closed, so a recording
+    // survives the VM stopping.
+    func exitAfterRecording(_ code: Int32) {
+        finishRecording { exit(code) }
     }
 
     // MARK: - Agent bridge (host unix socket <-> guest vsock port 1024)
@@ -1698,13 +1774,78 @@ class VZManager: NSObject, VZVirtualMachineDelegate {
     nonisolated func guestDidStop(_ virtualMachine: VZVirtualMachine) {
         drainConsole()
         print("VZRunner: VM stopped", to: &standardError)
-        exit(0)
+        DispatchQueue.main.async { gManager?.exitAfterRecording(0) }
     }
 
     nonisolated func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: Error) {
         drainConsole()
         print("VZRunner: VM stopped with error: \(error)", to: &standardError)
-        exit(1)
+        DispatchQueue.main.async { gManager?.exitAfterRecording(1) }
+    }
+}
+
+// MARK: - Window recorder
+
+// WindowRecorder streams one window of this process into a movie file.
+@available(macOS 15.0, *)
+final class WindowRecorder: NSObject, SCRecordingOutputDelegate {
+    private var stream: SCStream?
+    private var done: (() -> Void)?
+
+    @MainActor
+    func start(window: NSWindow, to url: URL) async throws {
+        let content = try await SCShareableContent.currentProcess
+        guard let mine = content.windows.first(where: { $0.windowID == CGWindowID(window.windowNumber) }) else {
+            throw NSError(domain: "VZRunner", code: 8, userInfo: [NSLocalizedDescriptionKey:
+                "the window is not in this process's shareable content"])
+        }
+        let scale = window.backingScaleFactor
+        let config = SCStreamConfiguration()
+        config.width = Int(mine.frame.width * scale)
+        config.height = Int(mine.frame.height * scale)
+        config.minimumFrameInterval = CMTime(value: 1, timescale: 30)
+        config.showsCursor = false
+
+        let output = SCRecordingOutputConfiguration()
+        try? FileManager.default.removeItem(at: url)
+        output.outputURL = url
+        output.outputFileType = .mov
+        output.videoCodecType = .h264
+        let recording = SCRecordingOutput(configuration: output, delegate: self)
+
+        let stream = SCStream(filter: SCContentFilter(desktopIndependentWindow: mine),
+                              configuration: config, delegate: nil)
+        try stream.addRecordingOutput(recording)
+        try await stream.startCapture()
+        self.stream = stream
+    }
+
+    // stop ends the capture and calls done once the file is written. A file
+    // that never reports finishing still lets done run after a few seconds.
+    func stop(_ done: @escaping () -> Void) {
+        guard let stream else {
+            done()
+            return
+        }
+        self.stream = nil
+        self.done = done
+        Task { try? await stream.stopCapture() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { self.complete() }
+    }
+
+    func recordingOutputDidFinishRecording(_ recordingOutput: SCRecordingOutput) {
+        DispatchQueue.main.async { self.complete() }
+    }
+
+    func recordingOutput(_ recordingOutput: SCRecordingOutput, didFailWithError error: Error) {
+        print("VZRunner: --gui-record: \(error.localizedDescription)", to: &standardError)
+        DispatchQueue.main.async { self.complete() }
+    }
+
+    private func complete() {
+        guard let done else { return }
+        self.done = nil
+        done()
     }
 }
 
@@ -1740,7 +1881,7 @@ struct VzRunner {
         }
 
         guard let config = VMConfig.parse(args) else {
-            print("Usage: vz-runner (--kernel <path> | --macos-bundle <dir>) [--initrd <path>] [--rootfs <path>] [--disk <path>]... [--disk-ro <path>]... [--cmdline <string>] [--mem MB] [--cpus N] [--efi] [--share <path> <tag>] [--mac <address>] [--net-fd <n>] [--stop-grace <s>] [--qmp socket] [--state-dir <dir>] [--restore] [--gui] [--gui-title <str>] [--rosetta]", to: &standardError)
+            print("Usage: vz-runner (--kernel <path> | --macos-bundle <dir>) [--initrd <path>] [--rootfs <path>] [--disk <path>]... [--disk-ro <path>]... [--cmdline <string>] [--mem MB] [--cpus N] [--efi] [--share <path> <tag>] [--mac <address>] [--net-fd <n>] [--stop-grace <s>] [--qmp socket] [--state-dir <dir>] [--restore] [--gui] [--gui-title <str>] [--gui-record <file.mov>] [--rosetta]", to: &standardError)
             exit(1)
         }
 

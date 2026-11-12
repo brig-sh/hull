@@ -126,6 +126,10 @@ func runCommand() *cli.Command {
 				Usage: "open a graphical window for the instance (Vz only)",
 			},
 			&cli.StringFlag{
+				Name:  "gui-record",
+				Usage: "with --gui, record the window to this .mov file (macOS guests, macOS 15 or later)",
+			},
+			&cli.StringFlag{
 				Name:  "gui-title",
 				Usage: "title for the GUI window (requires --gui)",
 			},
@@ -227,6 +231,9 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	}
 	if guiTitle != "" && !gui {
 		return errors.New("--gui-title requires --gui")
+	}
+	if cmd.IsSet("gui-record") {
+		return errors.New("--gui-record is supported for macOS guests only")
 	}
 
 	// Generate instance ID if not provided

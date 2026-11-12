@@ -78,6 +78,7 @@ type macosRunOptions struct {
 	StopGrace int
 	GUI       bool
 	GUITitle  string
+	GUIRecord string
 	CPUs      int
 	MemoryMB  int
 	NoNet     bool
@@ -178,6 +179,9 @@ func macosRunnerArgs(dir string, opts macosRunOptions) []string {
 		if opts.GUITitle != "" {
 			args = append(args, "--gui-title", opts.GUITitle)
 		}
+		if opts.GUIRecord != "" {
+			args = append(args, "--gui-record", opts.GUIRecord)
+		}
 	}
 	return args
 }
@@ -271,6 +275,17 @@ func runMacOSGuest(ctx context.Context, cmd *cli.Command, dir string) error {
 	if guiTitle != "" && !gui {
 		return errors.New("--gui-title requires --gui")
 	}
+	guiRecord := cmd.String("gui-record")
+	if guiRecord != "" {
+		if !gui {
+			return errors.New("--gui-record requires --gui")
+		}
+		abs, err := filepath.Abs(guiRecord)
+		if err != nil {
+			return err
+		}
+		guiRecord = abs
+	}
 	cfg, err := readMacOSBundleConfig(dir)
 	if err != nil {
 		return err
@@ -339,6 +354,7 @@ func runMacOSGuest(ctx context.Context, cmd *cli.Command, dir string) error {
 		StopGrace: macosStopGrace,
 		GUI:       gui,
 		GUITitle:  guiTitle,
+		GUIRecord: guiRecord,
 		NoNet:     netMode == "none",
 	}
 	// --mem and --cpus default to a Linux microVM's sizing. Only a value the
