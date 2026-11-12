@@ -806,6 +806,9 @@ class VZManager: NSObject, VZVirtualMachineDelegate {
     var isShuttingDown = false
     var isCheckpointing = false
     var window: NSWindow?  // retained in --gui mode so the window outlives run()
+    // The --gui window's initial content size. A macOS guest sets it to its
+    // display size, so the window opens at one guest pixel per point.
+    var guiContentSize = NSSize(width: 1280, height: 800)
     // Console filtering state: the pipe the guest's serial output is written
     // into, and the sanitizer draining it. Both are retained here because the
     // readability handler runs for the life of the VM.
@@ -880,6 +883,7 @@ class VZManager: NSObject, VZVirtualMachineDelegate {
 
         if let macBundle {
             try macBundle.configure(vmConfig)
+            guiContentSize = NSSize(width: macBundle.displayWidth, height: macBundle.displayHeight)
         } else {
             // Platform: Generic (required for Linux guests). With a state dir the
             // machine identifier is persisted: restoring a saved state requires
@@ -1117,8 +1121,9 @@ class VZManager: NSObject, VZVirtualMachineDelegate {
             vmConfig.networkDevices = [netConfig]
         }
 
-        // vsock device for the urunit-agent exec transport
-        if !config.agentSockPath.isEmpty {
+        // vsock device for the urunit-agent exec transport. A macOS guest
+        // always has one: the runner asks its agent for a clean shutdown.
+        if !config.agentSockPath.isEmpty || macBundle != nil {
             vmConfig.socketDevices = [VZVirtioSocketDeviceConfiguration()]
         }
 
@@ -1164,12 +1169,11 @@ class VZManager: NSObject, VZVirtualMachineDelegate {
         if !isShuttingDown, let vm = self.vm {
             isShuttingDown = true
             print("VZRunner: Graceful shutdown initiated", to: &standardError)
-            do {
-                try vm.requestStop()
-                // Guests without ACPI handling (bare init processes) never
-                // answer requestStop; force-stop after the configured grace
-                // (wired from run --stop-grace, docker's stop_grace_period)
-                // so the runner exits promptly instead of being SIGKILLed.
+            // Guests without ACPI handling (bare init processes) never
+            // answer requestStop; force-stop after the configured grace
+            // (wired from run --stop-grace, docker's stop_grace_period)
+            // so the runner exits promptly instead of being SIGKILLed.
+            let forceAfterGrace = {
                 let grace = DispatchTimeInterval.seconds(self.config.stopGraceSeconds)
                 DispatchQueue.main.asyncAfter(deadline: .now() + grace) {
                     // A guest that already stopped (or is mid-stop) must not
@@ -1180,10 +1184,67 @@ class VZManager: NSObject, VZVirtualMachineDelegate {
                     print("VZRunner: guest ignored stop request, forcing stop", to: &standardError)
                     vm.stop { _ in exit(0) }
                 }
-            } catch {
-                print("VZRunner: Error requesting stop: \(error)", to: &standardError)
-                vm.stop { _ in exit(0) }
             }
+            let requestStop = {
+                do {
+                    try vm.requestStop()
+                    forceAfterGrace()
+                } catch {
+                    print("VZRunner: Error requesting stop: \(error)", to: &standardError)
+                    vm.stop { _ in exit(0) }
+                }
+            }
+            if config.macosBundle.isEmpty {
+                requestStop()
+            } else {
+                // macOS answers requestStop with a dialog that waits for the
+                // user, so the guest's agent is asked to shut the system down.
+                // requestStop remains the fallback for a guest with no agent.
+                requestAgentShutdown(vm) { asked in
+                    if asked {
+                        forceAfterGrace()
+                    } else {
+                        requestStop()
+                    }
+                }
+            }
+        }
+    }
+
+    // The connection the shutdown request went out on. The agent kills a
+    // session when its connection closes, so this one stays open until the
+    // guest is down.
+    private var shutdownConnection: VZVirtioSocketConnection?
+
+    // requestAgentShutdown asks the guest's agent to run shutdown(8) as root.
+    // It reports whether the request was sent. The agent speaks urunc's
+    // agentproto: a frame is a type byte, a big-endian stream id and payload
+    // length, and the payload, and type 1 opens a session from a JSON request.
+    func requestAgentShutdown(_ vm: VZVirtualMachine, completion: @escaping (Bool) -> Void) {
+        guard let device = vm.socketDevices.first as? VZVirtioSocketDevice else {
+            completion(false)
+            return
+        }
+        device.connect(toPort: 1024) { result in
+            guard case .success(let connection) = result else {
+                print("VZRunner: no agent in the guest to ask for a shutdown", to: &standardError)
+                completion(false)
+                return
+            }
+            let payload = Array(#"{"argv":["/sbin/shutdown","-h","now"],"user":"root","tty":false}"#.utf8)
+            var frame: [UInt8] = [1, 0, 0, 0, 1]
+            withUnsafeBytes(of: UInt32(payload.count).bigEndian) { frame.append(contentsOf: $0) }
+            frame.append(contentsOf: payload)
+            let fd = connection.fileDescriptor
+            _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) & ~O_NONBLOCK)
+            let sent = frame.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) } == frame.count
+            if sent {
+                self.shutdownConnection = connection
+                print("VZRunner: asked the guest agent to shut down", to: &standardError)
+            } else {
+                connection.close()
+            }
+            completion(sent)
         }
     }
 
@@ -1461,7 +1522,7 @@ class VZManager: NSObject, VZVirtualMachineDelegate {
         // key/front even though it launched from a CLI without an app bundle.
         app.setActivationPolicy(.regular)
 
-        let frame = NSRect(x: 0, y: 0, width: 1280, height: 800)
+        let frame = NSRect(origin: .zero, size: guiContentSize)
         let vmView = VZVirtualMachineView(frame: frame)
         vmView.virtualMachine = vm
         vmView.automaticallyReconfiguresDisplay = true  // macOS 14+

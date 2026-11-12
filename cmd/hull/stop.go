@@ -84,7 +84,11 @@ func stopInstance(ctx context.Context, cmd *cli.Command) error {
 	if err != nil {
 		return err
 	}
-	return stopInstanceIn(s, args.First(), int(cmd.Int("timeout")))
+	timeout := int(cmd.Int("timeout"))
+	if !cmd.IsSet("timeout") {
+		timeout = stopTimeoutFor(s, args.First(), timeout)
+	}
+	return stopInstanceIn(s, args.First(), timeout)
 }
 
 // stopInstanceIn is stopInstance without the CLI plumbing, so the signal

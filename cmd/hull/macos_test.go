@@ -24,6 +24,23 @@ import (
 	"testing"
 )
 
+// writeMacOSBundle makes dir a guest directory whose config.json names guestOS.
+func writeMacOSBundle(t *testing.T, dir, guestOS string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range macosBundleFiles {
+		data := []byte(nil)
+		if name == "config.json" {
+			data = []byte(`{"os":"` + guestOS + `","macAddress":"9e:df:0d:1a:6f:d2"}`)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestMacosRunnerArgs(t *testing.T) {
 	cases := []struct {
 		name string
@@ -33,6 +50,12 @@ func TestMacosRunnerArgs(t *testing.T) {
 		{
 			name: "bundle defaults",
 			want: []string{"--macos-bundle", "/vm"},
+		},
+		{
+			name: "recorded instance",
+			opts: macosRunOptions{AgentSock: "/i/agent.sock", StateDir: "/i/checkpoint", StopGrace: 10},
+			want: []string{"--macos-bundle", "/vm", "--agent-sock", "/i/agent.sock",
+				"--state-dir", "/i/checkpoint", "--stop-grace", "10"},
 		},
 		{
 			name: "sizing overrides",
@@ -76,5 +99,52 @@ func TestCheckMacOSBundle(t *testing.T) {
 	}
 	if err := checkMacOSBundle(dir); err != nil {
 		t.Fatalf("a complete directory was refused: %v", err)
+	}
+}
+
+func TestResolveMacOSGuest(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("TART_HOME", home)
+	mac := filepath.Join(home, "vms", "mac")
+	writeMacOSBundle(t, mac, "darwin")
+	writeMacOSBundle(t, filepath.Join(home, "vms", "penguin"), "linux")
+	// An OCI bundle is also a directory with a config.json.
+	oci := filepath.Join(home, "oci")
+	if err := os.MkdirAll(oci, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(oci, "config.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		ref  string
+		want string
+	}{
+		{ref: "mac", want: mac},
+		{ref: mac, want: mac},
+		{ref: "penguin"},
+		{ref: "missing"},
+		{ref: "mac:latest"},
+		{ref: "library/mac"},
+		{ref: oci},
+	}
+	for _, tc := range cases {
+		got, ok := resolveMacOSGuest(tc.ref)
+		if got != tc.want || ok != (tc.want != "") {
+			t.Errorf("resolveMacOSGuest(%q) = %q, %v; want %q", tc.ref, got, ok, tc.want)
+		}
+	}
+}
+
+func TestBundleOfCmdLine(t *testing.T) {
+	if got := bundleOfCmdLine([]string{"/x/vz-runner", "--macos-bundle", "/vm", "--gui"}); got != "/vm" {
+		t.Fatalf("got %q", got)
+	}
+	if got := bundleOfCmdLine([]string{"/x/vz-runner", "--kernel", "/k"}); got != "" {
+		t.Fatalf("got %q", got)
+	}
+	if got := bundleOfCmdLine([]string{"/x/vz-runner", "--macos-bundle"}); got != "" {
+		t.Fatalf("a flag with no value must not match, got %q", got)
 	}
 }

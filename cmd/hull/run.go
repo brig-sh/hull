@@ -162,6 +162,10 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	}
 
 	imageRef := args.First()
+	// A macOS guest is a directory, not an image: nothing below applies to it.
+	if dir, ok := resolveMacOSGuest(imageRef); ok {
+		return runMacOSGuest(ctx, cmd, dir)
+	}
 	detach := cmd.Bool("detach")
 	netMode := cmd.String("net")
 	pullPolicy := cmd.String("pull")
