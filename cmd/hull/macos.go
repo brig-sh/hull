@@ -46,7 +46,7 @@ const macosBundleFlag = "--macos-bundle"
 // a Linux guest. They are refused for a macOS guest, so that none of them is
 // dropped without a word.
 var macosRunFlagsRefused = []string{
-	"shared-dir", "shared-dir-fd", "image-disk", "rootfs-type", "no-boot-assets",
+	"shared-dir-fd", "image-disk", "rootfs-type", "no-boot-assets",
 	"add-host", "gateway-sock", "gateway-cidr", "rosetta", "platform", "pull",
 	"env", "annotation", "qemu-path",
 }
@@ -82,6 +82,68 @@ type macosRunOptions struct {
 	CPUs      int
 	MemoryMB  int
 	NoNet     bool
+	// ConfigDir is shared read-only under macosConfigTag. The guest agent
+	// reads the mounts it should make from mounts.json in it.
+	ConfigDir string
+	Shares    []hostShare
+}
+
+// macosConfigTag is the virtiofs tag of the config share. hull-guest-agent
+// looks for it by this name.
+const macosConfigTag = "hull-config"
+
+// macosMount is one entry of the mount table the guest agent applies at boot.
+// The agent defines the same fields.
+type macosMount struct {
+	Kind     string `json:"kind"`
+	Tag      string `json:"tag,omitempty"`
+	Path     string `json:"path"`
+	ReadOnly bool   `json:"readOnly,omitempty"`
+	SizeMB   int    `json:"sizeMB,omitempty"`
+}
+
+// parseMacOSTmpfs parses --tmpfs /guest/path[:SIZE], where SIZE is a number of
+// megabytes with an optional m or g suffix. The default is 64m.
+func parseMacOSTmpfs(spec string) (macosMount, error) {
+	path, size, hasSize := strings.Cut(spec, ":")
+	if !filepath.IsAbs(path) {
+		return macosMount{}, fmt.Errorf("--tmpfs %q: the guest path must be absolute", spec)
+	}
+	m := macosMount{Kind: "ram", Path: filepath.Clean(path), SizeMB: 64}
+	if !hasSize {
+		return m, nil
+	}
+	mult := 1
+	switch {
+	case strings.HasSuffix(size, "g"):
+		mult, size = 1024, strings.TrimSuffix(size, "g")
+	case strings.HasSuffix(size, "m"):
+		size = strings.TrimSuffix(size, "m")
+	}
+	n, err := strconv.Atoi(size)
+	if err != nil || n <= 0 {
+		return macosMount{}, fmt.Errorf("--tmpfs %q: size must be a number of megabytes, eg. 256m or 1g", spec)
+	}
+	m.SizeMB = n * mult
+	return m, nil
+}
+
+// writeMacOSMounts writes the mount table for the shares and RAM volumes into
+// dir, which becomes the config share.
+func writeMacOSMounts(dir string, shares []hostShare, ram []macosMount) error {
+	mounts := []macosMount{}
+	for _, sh := range shares {
+		mounts = append(mounts, macosMount{Kind: "virtiofs", Tag: sh.tag, Path: sh.guest, ReadOnly: sh.readOnly})
+	}
+	mounts = append(mounts, ram...)
+	data, err := json.MarshalIndent(mounts, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "mounts.json"), data, 0o600)
 }
 
 // macosBundleConfig is the part of a bundle's config.json that hull reads.
@@ -170,6 +232,16 @@ func macosRunnerArgs(dir string, opts macosRunOptions) []string {
 	}
 	if opts.NoNet {
 		args = append(args, "--no-net")
+	}
+	if opts.ConfigDir != "" {
+		args = append(args, "--share-ro", opts.ConfigDir, macosConfigTag)
+	}
+	for _, sh := range opts.Shares {
+		flag := "--share"
+		if sh.readOnly {
+			flag = "--share-ro"
+		}
+		args = append(args, flag, sh.host, sh.tag)
 	}
 	if opts.StopGrace > 0 {
 		args = append(args, "--stop-grace", strconv.Itoa(opts.StopGrace))
@@ -286,6 +358,18 @@ func runMacOSGuest(ctx context.Context, cmd *cli.Command, dir string) error {
 		}
 		guiRecord = abs
 	}
+	shares, _, err := parseShares(cmd.StringSlice("shared-dir"), nil, string(hypervisors.VzVmm))
+	if err != nil {
+		return err
+	}
+	var ram []macosMount
+	for _, spec := range cmd.StringSlice("tmpfs") {
+		m, err := parseMacOSTmpfs(spec)
+		if err != nil {
+			return err
+		}
+		ram = append(ram, m)
+	}
 	cfg, err := readMacOSBundleConfig(dir)
 	if err != nil {
 		return err
@@ -357,6 +441,10 @@ func runMacOSGuest(ctx context.Context, cmd *cli.Command, dir string) error {
 	if err := os.Symlink(ckpt, instanceCheckpointDir(s, instanceName)); err != nil {
 		return err
 	}
+	configDir := filepath.Join(instanceDir, "guest-config")
+	if err := writeMacOSMounts(configDir, shares, ram); err != nil {
+		return fmt.Errorf("failed to write the guest's mount table: %w", err)
+	}
 	agentSock := s.InstanceAgentSocket(instanceName)
 	if err := checkUnixSocketPath("agent", agentSock); err != nil {
 		return err
@@ -369,6 +457,8 @@ func runMacOSGuest(ctx context.Context, cmd *cli.Command, dir string) error {
 		GUI:       gui,
 		GUITitle:  guiTitle,
 		GUIRecord: guiRecord,
+		ConfigDir: configDir,
+		Shares:    shares,
 		NoNet:     netMode == "none",
 	}
 	// --mem and --cpus default to a Linux microVM's sizing. Only a value the

@@ -198,3 +198,17 @@ func TestParseUserShell(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestIsMountPointAndParentOwner(t *testing.T) {
+	if !isMountPoint("/dev") {
+		t.Fatal("/dev is a mount point")
+	}
+	dir := t.TempDir()
+	if isMountPoint(dir) {
+		t.Fatalf("%s is not a mount point", dir)
+	}
+	uid, _, err := parentOwner(dir + "/a/b/c")
+	if err != nil || uid != os.Getuid() {
+		t.Fatalf("got uid %d, %v; want the owner of %s", uid, err, dir)
+	}
+}

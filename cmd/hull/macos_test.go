@@ -165,3 +165,40 @@ func TestWithGUIRecord(t *testing.T) {
 		t.Fatal("a recording without a window must be refused")
 	}
 }
+
+func TestParseMacOSTmpfs(t *testing.T) {
+	cases := []struct {
+		spec string
+		size int
+		ok   bool
+	}{
+		{"/Users/admin/.secrets", 64, true},
+		{"/Users/admin/.secrets:256m", 256, true},
+		{"/Users/admin/.secrets:2g", 2048, true},
+		{"/Users/admin/.secrets:300", 300, true},
+		{"relative/path", 0, false},
+		{"/x:0", 0, false},
+		{"/x:lots", 0, false},
+	}
+	for _, tc := range cases {
+		m, err := parseMacOSTmpfs(tc.spec)
+		if (err == nil) != tc.ok || (tc.ok && (m.SizeMB != tc.size || m.Kind != "ram")) {
+			t.Errorf("parseMacOSTmpfs(%q) = %+v, %v", tc.spec, m, err)
+		}
+	}
+}
+
+func TestMacosRunnerArgsShares(t *testing.T) {
+	got := macosRunnerArgs("/vm", macosRunOptions{
+		ConfigDir: "/i/guest-config",
+		Shares: []hostShare{
+			{host: "/h/work", guest: "/Users/admin/work", tag: "share0"},
+			{host: "/h/ref", guest: "/Users/admin/ref", tag: "share1", readOnly: true},
+		},
+	})
+	want := []string{"--macos-bundle", "/vm", "--share-ro", "/i/guest-config", "hull-config",
+		"--share", "/h/work", "share0", "--share-ro", "/h/ref", "share1"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}

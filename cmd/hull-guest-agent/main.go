@@ -32,6 +32,8 @@
 //   - Users come from Directory Services, not /etc/passwd.
 //   - A session for the console user starts inside that user's launchd
 //     session. See desktopSessionArgv.
+//
+// It also mounts what hull asked for at boot. See applyGuestMounts.
 package main
 
 import (
@@ -72,6 +74,11 @@ func main() {
 
 	if os.Getenv("PATH") == "" {
 		_ = os.Setenv("PATH", defaultPath)
+	}
+
+	// Only the daemon, which runs as root, can mount.
+	if os.Geteuid() == 0 {
+		go applyGuestMounts()
 	}
 
 	// launchd can start the daemon before the vsock device is ready, so a

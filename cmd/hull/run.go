@@ -125,6 +125,10 @@ func runCommand() *cli.Command {
 				Name:  "gui",
 				Usage: "open a graphical window for the instance (Vz only)",
 			},
+			&cli.StringSliceFlag{
+				Name:  "tmpfs",
+				Usage: "mount a memory-only volume at this guest path: /guest/path[:SIZE], eg. :256m (macOS guests, repeatable)",
+			},
 			&cli.StringFlag{
 				Name:  "gui-record",
 				Usage: "with --gui, record the window to this .mov file (macOS guests, macOS 15 or later)",
@@ -234,6 +238,9 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	}
 	if cmd.IsSet("gui-record") {
 		return errors.New("--gui-record is supported for macOS guests only")
+	}
+	if cmd.IsSet("tmpfs") {
+		return errors.New("--tmpfs is supported for macOS guests only")
 	}
 
 	// Generate instance ID if not provided

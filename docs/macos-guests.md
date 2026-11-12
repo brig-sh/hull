@@ -32,6 +32,44 @@ The instance takes the directory's name unless `--name` is given. `--mem` and
 `--cpus` override the sizing in `config.json`. `--net` is `none` (the default)
 or `shared`. The flags that describe an OCI image or a Linux guest are refused.
 
+## Passing files and storage to the guest
+
+`--shared-dir` works as it does for a Linux guest, and `--tmpfs` adds a
+memory-only volume:
+
+```bash
+hull run -d --gui --net shared \
+  --shared-dir ~/work:/Users/admin/work \
+  --shared-dir ~/reference:/Users/admin/ref:ro \
+  --tmpfs /Users/admin/.secrets:256m \
+  claude-desktop
+```
+
+- A shared directory is a virtiofs share. Writes go straight to the host
+  directory, and `:ro` makes the device itself read-only.
+- A `--tmpfs` volume is an HFS+ volume on a RAM device in the guest, 64m unless
+  a size is given. Nothing written there reaches the guest's disk, and it is
+  gone at shutdown.
+- Both are owned by whoever owns the directory they are created in, eg. the
+  user for a path under `/Users/<name>`.
+
+hull writes the mounts into `mounts.json` in a read-only share tagged
+`hull-config`. The guest agent mounts that share at boot and makes each mount,
+so this needs `hull-guest-agent` in the guest. The agent log
+(`/var/log/hull-guest-agent.log`) has a `guest mounts:` line per mount.
+
+A checkpoint saves guest memory, so it holds whatever a `--tmpfs` volume held
+at that moment, in `vm.vzstate` on the host disk. Keep secrets out of a guest
+you checkpoint, or treat the checkpoint as a secret.
+
+Single files need no share. The agent passes stdin through, so a tar stream
+works in both directions:
+
+```bash
+tar -cf - notes/ | hull exec claude-desktop -- tar -xf - -C /Users/admin
+hull exec claude-desktop -- tar -cf - -C /Users/admin Documents | tar -xf -
+```
+
 ## Fast start: checkpoint and restore
 
 A cold boot takes about 20 s to reach a desktop with the application open.
@@ -91,5 +129,5 @@ use Accessibility, as in the Cirrus Labs images.
 
 - The guest image has to carry the agent. hull does not build images.
 - `hull pull` does not know Tart's OCI format. Use `tart clone`.
-- Shared directories, secrets and the network gateway are not wired up.
+- Extra block disks and the network gateway are not wired up.
 - macOS allows two macOS guests per host.
