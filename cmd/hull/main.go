@@ -105,6 +105,7 @@ func main() {
 			assetsCommand(),
 			storeCommand(),
 			composeCommand(),
+			macosCommand(),
 			networkGatewayCommand(),
 			telemetryCommand(),
 			versionCommand(),

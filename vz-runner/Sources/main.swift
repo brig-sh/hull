@@ -82,6 +82,15 @@ struct VMConfig {
     var gui = false                 // show the guest display in a native macOS window
     var guiTitle = "urunc"          // window title in --gui mode
     var rosetta = false             // share the Rosetta translator so the arm64 guest kernel can run amd64 userspace
+    // A macOS guest, booted from a VM directory in Tart's layout: config.json,
+    // disk.img and nvram.bin. It replaces --kernel: the guest boots through
+    // Apple's own boot chain from its disk, so there is no kernel to hand over.
+    var macosBundle: String = ""
+    // Whether --mem / --cpus were given. A macOS bundle carries its own sizing
+    // and the flags only override it, so the defaults above must be
+    // distinguishable from a request.
+    var memorySet = false
+    var cpuSet = false
 
     static func parse(_ args: [String]) -> VMConfig? {
         var config = VMConfig()
@@ -113,12 +122,14 @@ struct VMConfig {
                 if i < args.count {
                     guard let mb = boundedInt(args[i], flag: "--mem", min: 1, max: maxMemoryMB) else { return nil }
                     config.memoryMB = mb
+                    config.memorySet = true
                 }
             case "--cpus":
                 i += 1
                 if i < args.count {
                     guard let cpus = boundedInt(args[i], flag: "--cpus", min: 1, max: maxCPUCount) else { return nil }
                     config.cpuCount = cpus
+                    config.cpuSet = true
                 }
             case "--qmp":
                 i += 1
@@ -167,6 +178,9 @@ struct VMConfig {
                 if i < args.count { config.guiTitle = args[i] }
             case "--rosetta":
                 config.rosetta = true
+            case "--macos-bundle":
+                i += 1
+                if i < args.count { config.macosBundle = args[i] }
             case "--share", "--share-ro":
                 // Format: --share <path> <tag>, or --share-ro for a share the
                 // guest must not be able to write to. Path and tag are separate
@@ -188,8 +202,22 @@ struct VMConfig {
             i += 1
         }
 
-        guard !config.kernelPath.isEmpty else {
+        guard !config.kernelPath.isEmpty || !config.macosBundle.isEmpty else {
             return nil
+        }
+
+        if !config.macosBundle.isEmpty {
+            if !config.kernelPath.isEmpty || config.rosetta {
+                print("VZRunner: --macos-bundle cannot be combined with --kernel or --rosetta", to: &standardError)
+                return nil
+            }
+            // The bundle's disk takes the --rootfs slot: it is the first
+            // writable virtio-blk device, which is what the macOS boot chain
+            // boots from, and it makes checkpoint and restore clone it with no
+            // further code.
+            if config.rootfsPath.isEmpty {
+                config.rootfsPath = MacOSBundle.diskPath(in: config.macosBundle)
+            }
         }
 
         if config.restore && config.stateDir.isEmpty {
@@ -213,6 +241,110 @@ struct VMConfig {
     func diskClonePath(_ n: Int) -> String { stateDir + "/" + diskCloneName(n) }
     var manifestPath: String { stateDir + "/latest.json" }
     var errorPath: String { stateDir + "/error" }
+}
+
+// MARK: - macOS guest bundle
+
+// MacOSBundle is a macOS guest's identity and sizing, read from a VM directory
+// in Tart's layout:
+//
+//   config.json  hardwareModel and ecid (both base64), cpuCount, memorySize,
+//                macAddress, display {width, height}
+//   disk.img     the installed system
+//   nvram.bin    the auxiliary storage the boot chain keeps its state in
+//
+// An installed macOS only boots on the hardware model and machine identifier
+// it was installed under, with the auxiliary storage that install wrote. The
+// runner therefore reads all three and never generates them, unlike a Linux
+// guest's machine identifier.
+struct MacOSBundle {
+    var dir: String
+    var hardwareModel: Data
+    var machineIdentifier: Data
+    var cpuCount: Int?
+    var memoryBytes: UInt64?
+    var macAddress: String?
+    var displayWidth = 1920
+    var displayHeight = 1200
+
+    static func diskPath(in dir: String) -> String { dir + "/disk.img" }
+    var nvramPath: String { dir + "/nvram.bin" }
+
+    static func fail(_ reason: String) -> NSError {
+        NSError(domain: "VZRunner", code: 7, userInfo: [NSLocalizedDescriptionKey: reason])
+    }
+
+    static func load(_ dir: String) throws -> MacOSBundle {
+        let configPath = dir + "/config.json"
+        guard let raw = FileManager.default.contents(atPath: configPath),
+              let json = (try? JSONSerialization.jsonObject(with: raw)) as? [String: Any] else {
+            throw fail("\(configPath) is missing or is not a JSON object")
+        }
+        if let os = json["os"] as? String, os != "darwin" {
+            throw fail("\(configPath) describes a '\(os)' guest, not a macOS one")
+        }
+        guard let model = (json["hardwareModel"] as? String).flatMap({ Data(base64Encoded: $0) }),
+              let ecid = (json["ecid"] as? String).flatMap({ Data(base64Encoded: $0) }) else {
+            throw fail("\(configPath) has no usable hardwareModel and ecid")
+        }
+        var bundle = MacOSBundle(dir: dir, hardwareModel: model, machineIdentifier: ecid)
+        bundle.cpuCount = json["cpuCount"] as? Int
+        if let bytes = json["memorySize"] as? NSNumber {
+            bundle.memoryBytes = bytes.uint64Value
+        }
+        bundle.macAddress = json["macAddress"] as? String
+        if let display = json["display"] as? [String: Any],
+           let width = display["width"] as? Int, let height = display["height"] as? Int,
+           width > 0, height > 0 {
+            bundle.displayWidth = width
+            bundle.displayHeight = height
+        }
+        for path in [diskPath(in: dir), bundle.nvramPath] {
+            guard FileManager.default.fileExists(atPath: path) else {
+                throw fail("\(path) is missing")
+            }
+        }
+        return bundle
+    }
+
+    // configure sets everything about the machine that differs for a macOS
+    // guest: the platform, the boot loader, and the display and input devices.
+    // macOS has no driver for virtio-gpu, and it expects a display whether or
+    // not a window is ever attached to it, so these are set with or without
+    // --gui.
+    func configure(_ vmConfig: VZVirtualMachineConfiguration) throws {
+        #if arch(arm64)
+        guard let model = VZMacHardwareModel(dataRepresentation: hardwareModel) else {
+            throw MacOSBundle.fail("the bundle's hardwareModel is not one this host can decode")
+        }
+        guard model.isSupported else {
+            throw MacOSBundle.fail("the bundle's hardware model is not supported on this host")
+        }
+        guard let identifier = VZMacMachineIdentifier(dataRepresentation: machineIdentifier) else {
+            throw MacOSBundle.fail("the bundle's ecid is not a valid machine identifier")
+        }
+        let platform = VZMacPlatformConfiguration()
+        platform.hardwareModel = model
+        platform.machineIdentifier = identifier
+        platform.auxiliaryStorage = VZMacAuxiliaryStorage(url: URL(fileURLWithPath: nvramPath))
+        vmConfig.platform = platform
+        vmConfig.bootLoader = VZMacOSBootLoader()
+
+        let graphics = VZMacGraphicsDeviceConfiguration()
+        graphics.displays = [
+            VZMacGraphicsDisplayConfiguration(
+                widthInPixels: displayWidth, heightInPixels: displayHeight, pixelsPerInch: 72)
+        ]
+        vmConfig.graphicsDevices = [graphics]
+        vmConfig.keyboards = [VZUSBKeyboardConfiguration(), VZMacKeyboardConfiguration()]
+        vmConfig.pointingDevices = [
+            VZUSBScreenCoordinatePointingDeviceConfiguration(), VZMacTrackpadConfiguration(),
+        ]
+        print("VZRunner: macOS guest from \(dir): display \(displayWidth)x\(displayHeight)", to: &standardError)
+        #else
+        throw MacOSBundle.fail("macOS guests need an Apple silicon host")
+        #endif
+    }
 }
 
 // MARK: - Shell Helper
@@ -742,24 +874,32 @@ class VZManager: NSObject, VZVirtualMachineDelegate {
     func createVM() throws -> VZVirtualMachine {
         let vmConfig = VZVirtualMachineConfiguration()
 
-        // Platform: Generic (required for Linux guests). With a state dir the
-        // machine identifier is persisted: restoring a saved state requires
-        // the identical identifier, and a stable identity across reruns also
-        // keeps the guest's view of the hardware consistent.
-        let platform = VZGenericPlatformConfiguration()
-        if !config.stateDir.isEmpty,
-           let data = try? Data(contentsOf: URL(fileURLWithPath: config.machineIDPath)),
-           let saved = VZGenericMachineIdentifier(dataRepresentation: data) {
-            platform.machineIdentifier = saved
+        // A macOS guest sets its own platform, boot loader, display and input
+        // devices. Everything else below is shared with Linux guests.
+        let macBundle = config.macosBundle.isEmpty ? nil : try MacOSBundle.load(config.macosBundle)
+
+        if let macBundle {
+            try macBundle.configure(vmConfig)
         } else {
-            platform.machineIdentifier = VZGenericMachineIdentifier()
-            if !config.stateDir.isEmpty {
-                try? FileManager.default.createDirectory(atPath: config.stateDir, withIntermediateDirectories: true)
-                try? platform.machineIdentifier.dataRepresentation.write(
-                    to: URL(fileURLWithPath: config.machineIDPath))
+            // Platform: Generic (required for Linux guests). With a state dir the
+            // machine identifier is persisted: restoring a saved state requires
+            // the identical identifier, and a stable identity across reruns also
+            // keeps the guest's view of the hardware consistent.
+            let platform = VZGenericPlatformConfiguration()
+            if !config.stateDir.isEmpty,
+               let data = try? Data(contentsOf: URL(fileURLWithPath: config.machineIDPath)),
+               let saved = VZGenericMachineIdentifier(dataRepresentation: data) {
+                platform.machineIdentifier = saved
+            } else {
+                platform.machineIdentifier = VZGenericMachineIdentifier()
+                if !config.stateDir.isEmpty {
+                    try? FileManager.default.createDirectory(atPath: config.stateDir, withIntermediateDirectories: true)
+                    try? platform.machineIdentifier.dataRepresentation.write(
+                        to: URL(fileURLWithPath: config.machineIDPath))
+                }
             }
+            vmConfig.platform = platform
         }
-        vmConfig.platform = platform
 
         // CPU and Memory — clamp to allowed range
         let maxCPU = VZVirtualMachineConfiguration.maximumAllowedCPUCount
@@ -772,14 +912,24 @@ class VZManager: NSObject, VZVirtualMachineDelegate {
         // to trap even if a future caller reaches createVM another way.
         let (memBytes, memOverflowed) = UInt64(clamping: config.memoryMB)
             .multipliedReportingOverflow(by: 1024 * 1024)
-        let requestedMem = memOverflowed ? maxMem : memBytes
-        vmConfig.cpuCount = max(minCPU, min(config.cpuCount, maxCPU))
+        // The bundle's own sizing stands unless --mem / --cpus override it.
+        var requestedMem = memOverflowed ? maxMem : memBytes
+        var requestedCPU = config.cpuCount
+        if let macBundle {
+            if !config.memorySet, let bytes = macBundle.memoryBytes { requestedMem = bytes }
+            if !config.cpuSet, let cpus = macBundle.cpuCount { requestedCPU = cpus }
+        }
+        vmConfig.cpuCount = max(minCPU, min(requestedCPU, maxCPU))
         vmConfig.memorySize = max(minMem, min(requestedMem, maxMem))
         print("VZRunner: CPU: \(vmConfig.cpuCount), Memory: \(vmConfig.memorySize / 1024 / 1024)MB", to: &standardError)
 
         let cmdline = config.cmdline.isEmpty ? "rdinit=/init console=hvc0" : config.cmdline
 
-        if config.useDirectBoot {
+        if macBundle != nil {
+            // VZMacOSBootLoader, set with the platform: no kernel, initrd or
+            // command line to hand over.
+            print("VZRunner: Using macOS boot (VZMacOSBootLoader)", to: &standardError)
+        } else if config.useDirectBoot {
             // Direct boot via VZLinuxBootLoader — passes cmdline to kernel
             let kernelURL = URL(fileURLWithPath: config.kernelPath)
             let bootLoader = VZLinuxBootLoader(kernelURL: kernelURL)
@@ -867,7 +1017,8 @@ class VZManager: NSObject, VZVirtualMachineDelegate {
         // console port for clipboard and dynamic-resize hints. The stdio
         // serial console above is kept so boot logs still stream to the
         // terminal. Attached only with --gui; headless config is unchanged.
-        if config.gui {
+        // A macOS guest already has its own display and input devices.
+        if config.gui && macBundle == nil {
             let graphics = VZVirtioGraphicsDeviceConfiguration()
             graphics.scanouts = [
                 VZVirtioGraphicsScanoutConfiguration(widthInPixels: 1280, heightInPixels: 800)
@@ -953,9 +1104,12 @@ class VZManager: NSObject, VZVirtualMachineDelegate {
             } else {
                 netConfig.attachment = VZNATNetworkDeviceAttachment()
             }
-            if !config.macAddress.isEmpty {
-                guard let mac = VZMACAddress(string: config.macAddress) else {
-                    print("VZRunner: invalid --mac '\(config.macAddress)'", to: &standardError)
+            // A macOS bundle records the address the guest was set up with;
+            // keeping it keeps the guest's DHCP lease. --mac still wins.
+            let macAddress = config.macAddress.isEmpty ? (macBundle?.macAddress ?? "") : config.macAddress
+            if !macAddress.isEmpty {
+                guard let mac = VZMACAddress(string: macAddress) else {
+                    print("VZRunner: invalid MAC address '\(macAddress)'", to: &standardError)
                     exit(1)
                 }
                 netConfig.macAddress = mac
@@ -1223,16 +1377,21 @@ class VZManager: NSObject, VZVirtualMachineDelegate {
             }
             let vm = try createVM()
 
-            let bootMode = config.useDirectBoot ? "direct" : "EFI"
+            let bootMode = !config.macosBundle.isEmpty ? "macOS" : (config.useDirectBoot ? "direct" : "EFI")
             print("VZRunner: Starting VM (\(bootMode) boot)", to: &standardError)
-            print("  Kernel: \(config.kernelPath)", to: &standardError)
+            if !config.macosBundle.isEmpty { print("  macOS bundle: \(config.macosBundle)", to: &standardError) }
+            if !config.kernelPath.isEmpty { print("  Kernel: \(config.kernelPath)", to: &standardError) }
             if !config.initrdPath.isEmpty { print("  Initrd: \(config.initrdPath)", to: &standardError) }
             if !config.rootfsPath.isEmpty { print("  Rootfs: \(config.rootfsPath)", to: &standardError) }
             for (n, disk) in config.disks.enumerated() {
                 print("  Disk disk\(n): \(disk.path)\(disk.readOnly ? " (ro)" : "")", to: &standardError)
             }
-            print("  Cmdline: \(config.cmdline)", to: &standardError)
-            print("  Memory: \(config.memoryMB)MB, CPUs: \(config.cpuCount)", to: &standardError)
+            // A macOS guest has no command line, and its sizing may come from
+            // the bundle. createVM has already printed the values in effect.
+            if config.macosBundle.isEmpty {
+                print("  Cmdline: \(config.cmdline)", to: &standardError)
+                print("  Memory: \(config.memoryMB)MB, CPUs: \(config.cpuCount)", to: &standardError)
+            }
             fflush(stderr)
 
             signal(SIGTERM, signalHandler)
@@ -1306,6 +1465,9 @@ class VZManager: NSObject, VZVirtualMachineDelegate {
         let vmView = VZVirtualMachineView(frame: frame)
         vmView.virtualMachine = vm
         vmView.automaticallyReconfiguresDisplay = true  // macOS 14+
+        // System shortcuts such as Cmd-Tab go to a macOS guest while its
+        // window has focus.
+        vmView.capturesSystemKeys = !config.macosBundle.isEmpty
 
         let window = NSWindow(
             contentRect: frame,
@@ -1517,7 +1679,7 @@ struct VzRunner {
         }
 
         guard let config = VMConfig.parse(args) else {
-            print("Usage: vz-runner --kernel <path> [--initrd <path>] [--rootfs <path>] [--disk <path>]... [--disk-ro <path>]... [--cmdline <string>] [--mem MB] [--cpus N] [--efi] [--share <path> <tag>] [--mac <address>] [--net-fd <n>] [--stop-grace <s>] [--qmp socket] [--state-dir <dir>] [--restore] [--gui] [--gui-title <str>] [--rosetta]", to: &standardError)
+            print("Usage: vz-runner (--kernel <path> | --macos-bundle <dir>) [--initrd <path>] [--rootfs <path>] [--disk <path>]... [--disk-ro <path>]... [--cmdline <string>] [--mem MB] [--cpus N] [--efi] [--share <path> <tag>] [--mac <address>] [--net-fd <n>] [--stop-grace <s>] [--qmp socket] [--state-dir <dir>] [--restore] [--gui] [--gui-title <str>] [--rosetta]", to: &standardError)
             exit(1)
         }
 
