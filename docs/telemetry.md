@@ -55,7 +55,8 @@ persisted either way.
 
 `hull version` and `hull --version` never show it. They send no event and
 read or write no telemetry state, so a tool can ask what a build supports
-without a prompt or a file. `hull --dnt version` still records the opt-out.
+without a prompt or a file. A crash in `hull version` queues no crash report
+for the same reason. `hull --dnt version` still records the opt-out.
 
 ```
 <product> collects anonymous usage events and crash reports to help us
