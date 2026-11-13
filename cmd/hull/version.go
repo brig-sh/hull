@@ -34,7 +34,7 @@ func init() { cli.VersionPrinter = printVersion }
 func printVersion(*cli.Command) { fmt.Printf("hull %s\n", build) }
 
 // versionCommand is `hull version`: one line naming the build, or the same
-// build as JSON.
+// build as JSON with what it can do.
 //
 // `hull --version` prints the same line. The subcommand exists because it
 // can take --json; a global flag cannot.
@@ -47,7 +47,9 @@ func versionCommand() *cli.Command {
 		},
 		Action: func(_ context.Context, cmd *cli.Command) error {
 			if cmd.Bool("json") {
-				return printJSON(os.Stdout, versionData(build))
+				p := versionData(build)
+				p.Capabilities = capabilitiesOf(cmd.Root())
+				return printJSON(os.Stdout, p)
 			}
 			printVersion(nil)
 			return nil
@@ -67,6 +69,32 @@ type versionPayload struct {
 	GoVersion  string `json:"goVersion"`
 	OS         string `json:"os"`
 	Arch       string `json:"arch"`
+
+	Capabilities capabilities `json:"capabilities"`
+}
+
+// capabilities is what this binary can do on this platform: the code paths
+// compiled in, not what the host allows at the moment. Reading it starts
+// nothing, opens no socket and needs no store or instance.
+//
+// Keys are only ever added, never renamed or removed. A caller reads a
+// missing key as "not supported" and ignores keys it does not know, so an
+// older hull and a newer caller still agree.
+type capabilities struct {
+	// Gateway is absent when this binary has no network-gateway command.
+	Gateway *gatewayCapabilities `json:"gateway,omitempty"`
+}
+
+// capabilitiesOf reads the capabilities of the command tree under root.
+// The gateway's come from the network-gateway command root registers, so a
+// command that is built but not reachable is not reported.
+func capabilitiesOf(root *cli.Command) capabilities {
+	var c capabilities
+	if gw := root.Command("network-gateway"); gw != nil {
+		g := gatewayCapabilitiesOf(gw)
+		c.Gateway = &g
+	}
+	return c
 }
 
 func versionData(info buildinfo.Info) versionPayload {
