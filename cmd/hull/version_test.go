@@ -173,13 +173,21 @@ func runVersionInEmptyHome(t *testing.T, spelling []string, ownStore bool) {
 		return
 	}
 	var got struct {
-		Version *string `json:"version"`
+		Version      *string `json:"version"`
+		Capabilities struct {
+			Gateway map[string]bool `json:"gateway"`
+		} `json:"capabilities"`
 	}
 	if err := json.Unmarshal([]byte(out), &got); err != nil {
 		t.Fatalf("hull version --json printed %q: %v", out, err)
 	}
 	if got.Version == nil {
 		t.Errorf("hull version --json has no version: %s", out)
+	}
+	for _, key := range []string{"api", "egressDefault", "divert", "divertLinkLocal"} {
+		if _, ok := got.Capabilities.Gateway[key]; !ok {
+			t.Errorf("hull version --json has no capabilities.gateway.%s: %s", key, out)
+		}
 	}
 }
 

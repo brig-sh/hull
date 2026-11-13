@@ -158,7 +158,7 @@ filters the terminal; see [Building on Linux](build.md#building-on-linux).
 | `store detach` | `--force` detach even with files still open |
 | `store compact` | `--force` detach even with files still open, before compacting |
 | `telemetry on\|off\|status` | none |
-| `version` | `--json` prints the version, full commit, commit time, modified flag, Go version and platform |
+| `version` | `--json` prints the version, full commit, commit time, modified flag, Go version, platform and what this build can do |
 
 `-t` means two different things: a pseudo-terminal on `exec`, and a force-kill
 timeout in seconds on `stop`.
@@ -253,6 +253,52 @@ Three commands emit JSON: `hull images --json`, `hull version --json`, and
 
 `hull version --json` leaves `commit` and `commitTime` out, rather than
 printing them empty, for a build that carried no VCS data.
+
+### What a build can do
+
+`hull version --json` also prints a `capabilities` object. A tool that drives
+hull reads it to learn what this binary supports before it uses a feature.
+It does not need to parse `--help` or match error text.
+
+```json
+{
+  "version": "v0.1.0",
+  "commit": "7e50ac3d9a1f4c0b8e2d6f5a3c1b9e7d4f2a0c86",
+  "commitTime": "2026-10-30T09:12:44Z",
+  "modified": false,
+  "goVersion": "go1.26.8",
+  "os": "darwin",
+  "arch": "arm64",
+  "capabilities": {
+    "gateway": {
+      "api": true,
+      "egressDefault": true,
+      "divert": true,
+      "divertLinkLocal": true
+    }
+  }
+}
+```
+
+| Key | True when |
+|---|---|
+| `gateway.api` | `hull network-gateway` takes `--api` |
+| `gateway.egressDefault` | `hull network-gateway` takes `--egress-default` |
+| `gateway.divert` | `hull network-gateway` takes `--divert` |
+| `gateway.divertLinkLocal` | `--divert` takes an address in `169.254.0.0/16` |
+
+A value says what is built into this binary on this platform. It does not
+say what the host allows at the moment. hull reads each value from the code
+it describes, so the report and the flags cannot disagree.
+
+The report is a pure read. It starts no process, opens no socket, needs no
+instance, and reads or writes no store. It does not ask for telemetry consent
+and sends no telemetry event. The one exception is `--dnt`: `hull --dnt version
+--json` records the opt-out you asked for.
+
+Keys are only ever added. A key is never renamed or removed. Read a missing
+key as "not supported", and ignore keys you do not know. A hull older than the
+report prints no `capabilities` object at all.
 
 `hull images --json` prints one record per stored image with whole digests, and
 omits `indexDigest` and `platform` from a record that has none rather than

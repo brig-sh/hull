@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -178,6 +179,58 @@ reset (TCP) or dropped (UDP).`),
 			return runGateway(ctx, cmd.String("socket"), cmd.String("api"), qemuSock, cmd.String("subnet"), cmd.String("gateway-ip"), forwards, cmd.StringSlice("host"), policy, cmd.Duration("egress-refresh"), diverts, sup)
 		},
 	}
+}
+
+// gatewayCapabilities is what this build's network-gateway can do, as
+// `hull version --json` reports it under capabilities.gateway.
+//
+// Without it a caller reads --help for a flag name, or starts the gateway with
+// a bad --divert and tells the errors apart, and rewording an error breaks
+// it. Each value here is read from the gateway command and the code its flags
+// feed, never written down on its own, so the report cannot say a build does
+// what it does not.
+//
+// Keys are only ever added. A caller reads a missing key as false.
+type gatewayCapabilities struct {
+	// API is --api, the HTTP socket for the probe, the leases, /forwards and
+	// /diverts.
+	API bool `json:"api"`
+	// EgressDefault is --egress-default and the egress policy it turns on.
+	EgressDefault bool `json:"egressDefault"`
+	// Divert is --divert.
+	Divert bool `json:"divert"`
+	// DivertLinkLocal is a --divert of a 169.254.0.0/16 literal, which an
+	// older gateway refused because it reset link-local before it matched
+	// a divert.
+	DivertLinkLocal bool `json:"divertLinkLocal"`
+}
+
+// linkLocalDivert is the --divert the report asks the gateway's own parser
+// about. 169.254.169.254 is the metadata service, the address the link-local
+// reset exists for, so a parser that takes it takes the range.
+const linkLocalDivert = "169.254.169.254:80=/divert.sock"
+
+// gatewayCapabilitiesOf reads the capabilities of gw, a network-gateway
+// command. It parses one --divert value and starts nothing.
+func gatewayCapabilitiesOf(gw *cli.Command) gatewayCapabilities {
+	has := func(name string) bool {
+		for _, f := range gw.Flags {
+			if slices.Contains(f.Names(), name) {
+				return true
+			}
+		}
+		return false
+	}
+	c := gatewayCapabilities{
+		API:           has("api"),
+		EgressDefault: has("egress-default"),
+		Divert:        has("divert"),
+	}
+	if c.Divert {
+		_, err := netgw.ParseDiverts([]string{linkLocalDivert})
+		c.DivertLinkLocal = err == nil
+	}
+	return c
 }
 
 // gatewayShutdownGrace bounds how long the daemon waits for an in-flight
