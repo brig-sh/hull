@@ -90,9 +90,18 @@ func topLevelCommand() string {
 // consent on the way to `telemetry off` would be absurd, so that path
 // manages state directly) and the network-gateway daemon (a supervised
 // child; its parent's command already counts).
+//
+// `hull version` is left out too, unless --dnt asks for an opt-out to be
+// recorded. It is how a caller learns what this build can do before it runs
+// anything, often from a fresh account, and a question about the binary
+// should not cost a consent prompt or a state file. `hull --version` never
+// reaches this hook, so the two spellings leave the same nothing behind.
 func initTelemetry(cmd *cli.Command) {
 	telemetryCmdName = topLevelCommand()
 	if telemetryCmdName == "telemetry" || telemetryCmdName == "network-gateway" {
+		return
+	}
+	if telemetryCmdName == "version" && !cmd.Bool("dnt") {
 		return
 	}
 	telemetryCmdName = knownCommand(cmd, telemetryCmdName)

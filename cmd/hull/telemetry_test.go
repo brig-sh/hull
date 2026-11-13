@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -132,6 +133,36 @@ func TestInitTelemetryNamesOnlyARealCommand(t *testing.T) {
 		if telemetryCmdName != want {
 			t.Errorf("hull %s: command = %q, want %q", token, telemetryCmdName, want)
 		}
+	}
+}
+
+// hull version leaves telemetry alone, but --dnt is an opt-out the user asked
+// for by name, and `hull --dnt version` is a natural way to give it. Skipping
+// it with the rest would drop the answer without a word.
+func TestDNTOnVersionStillRecordsTheOptOut(t *testing.T) {
+	t.Setenv("DO_NOT_TRACK", "")
+	t.Setenv(telemetry.EnvDisabled, "")
+	t.Setenv(telemetry.EnvSuppress, "")
+	t.Setenv(telemetry.EnvEndpoint, "http://127.0.0.1:1")
+	t.Setenv("HOME", t.TempDir())
+	prevArgs, prevClient, prevName := os.Args, telemetryClient, telemetryCmdName
+	t.Cleanup(func() { os.Args, telemetryClient, telemetryCmdName = prevArgs, prevClient, prevName })
+	store := t.TempDir()
+	os.Args = []string{"hull", "--store-dir", store, "--dnt", "version"}
+	captureVersionStdout(t, func() {
+		if err := newApp().Run(context.Background(), os.Args); err != nil {
+			t.Fatalf("hull --dnt version: %v", err)
+		}
+	})
+	data, err := os.ReadFile(filepath.Join(store, "telemetry.json"))
+	if err != nil {
+		t.Fatalf("hull --dnt version recorded no opt-out: %v", err)
+	}
+	var st struct {
+		Consent *bool `json:"consent"`
+	}
+	if err := json.Unmarshal(data, &st); err != nil || st.Consent == nil || *st.Consent {
+		t.Fatalf("hull --dnt version recorded %s, want consent false", data)
 	}
 }
 
