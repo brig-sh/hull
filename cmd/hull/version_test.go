@@ -20,7 +20,10 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
 	"reflect"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/brig-sh/hull/internal/buildinfo"
@@ -92,6 +95,99 @@ func TestVersionJSONCarriesTheBuild(t *testing.T) {
 	}
 	if got["commit"] != info.Commit {
 		t.Errorf("commit = %v, want the full revision %s", got["commit"], info.Commit)
+	}
+}
+
+// A caller asks hull what it can do before it runs anything, often from a
+// fresh account or a sandbox. The answer must not cost a consent prompt or
+// leave a file behind, so every spelling runs through the root command, with
+// its Before hook, against an empty home and store, and both stay empty.
+func TestVersionWritesNothing(t *testing.T) {
+	// Telemetry left on, so a write it would make is not hidden by the
+	// environment the test happens to run in. Nothing listens on the
+	// endpoint.
+	t.Setenv("DO_NOT_TRACK", "")
+	t.Setenv("HULL_TELEMETRY_DISABLED", "")
+	t.Setenv("HULL_TELEMETRY_SUPPRESS", "")
+	t.Setenv("HULL_TELEMETRY_ENDPOINT", "http://127.0.0.1:1")
+	prevArgs := os.Args
+	t.Cleanup(func() { os.Args = prevArgs })
+
+	spellings := [][]string{
+		{"version", "--json"},
+		{"version"},
+		{"--version"},
+	}
+	stores := []bool{false}
+	if runtime.GOOS == "darwin" {
+		// The default store keeps telemetry state in the home directory,
+		// and any other --store-dir keeps it inside the store, so both
+		// are places to look.
+		stores = append(stores, true)
+	}
+	for _, spelling := range spellings {
+		for _, ownStore := range stores {
+			name := strings.Join(spelling, " ")
+			if ownStore {
+				name += " with --store-dir"
+			}
+			t.Run(name, func(t *testing.T) {
+				runVersionInEmptyHome(t, spelling, ownStore)
+			})
+		}
+	}
+}
+
+// runVersionInEmptyHome runs `hull <spelling>` from the root command with an
+// empty home, and an empty store of its own when ownStore is set, and fails
+// when either is no longer empty afterwards.
+func runVersionInEmptyHome(t *testing.T, spelling []string, ownStore bool) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dirs := []string{home}
+	args := []string{"hull"}
+	if ownStore {
+		store := t.TempDir()
+		dirs = append(dirs, store)
+		args = append(args, "--store-dir", store)
+	}
+	args = append(args, spelling...)
+	// initTelemetry reads the command from os.Args, not from what Run is
+	// given.
+	os.Args = args
+	out := captureVersionStdout(t, func() {
+		if err := newApp().Run(context.Background(), args); err != nil {
+			t.Errorf("%v: %v", args, err)
+		}
+	})
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			t.Errorf("%v wrote %s", args, filepath.Join(dir, e.Name()))
+		}
+	}
+	if args[len(args)-1] != "--json" {
+		return
+	}
+	var got struct {
+		Version      *string `json:"version"`
+		Capabilities struct {
+			Gateway map[string]bool `json:"gateway"`
+		} `json:"capabilities"`
+	}
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("hull version --json printed %q: %v", out, err)
+	}
+	if got.Version == nil {
+		t.Errorf("hull version --json has no version: %s", out)
+	}
+	for _, key := range []string{"api", "egressDefault", "divert", "divertLinkLocal"} {
+		if _, ok := got.Capabilities.Gateway[key]; !ok {
+			t.Errorf("hull version --json has no capabilities.gateway.%s: %s", key, out)
+		}
 	}
 }
 

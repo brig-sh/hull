@@ -53,6 +53,11 @@ Shown on the first interactive invocation. Nothing is sent before you
 answer; a single enter (or `y`) approves, `n` opts out, and the answer is
 persisted either way.
 
+`hull version` and `hull --version` never show it. They send no event and
+read or write no telemetry state, so a tool can ask what a build supports
+without a prompt or a file. A crash in `hull version` queues no crash report
+for the same reason. `hull --dnt version` still records the opt-out.
+
 ```
 <product> collects anonymous usage events and crash reports to help us
 improve it: command names, which agent and backend you run, OS and tool
