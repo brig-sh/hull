@@ -47,18 +47,21 @@ func main() {
 		}
 	}()
 
-	// Default store directory
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
+	// The default --store-dir is under the home directory, and a store hull
+	// cannot place is not one to guess at.
+	if _, err := os.UserHomeDir(); err != nil {
 		fatal(fmt.Errorf("failed to get home directory: %w", err))
 	}
-	// Keep the image/instance store on the case-sensitive APFS volume mounted
-	// at ~/.hull/store. Linux package trees contain names that differ only by
-	// case (for example xt_CONNMARK.h and xt_connmark.h), which cannot coexist
-	// on the default case-insensitive home volume.
-	storeDirDefault := filepath.Join(homeDir, ".hull", "store")
+	if err := newApp().Run(context.Background(), os.Args); err != nil {
+		fatal(err)
+	}
+	sendCommandEvent("ok", "")
+}
 
-	app := &cli.Command{
+// newApp builds the command tree. It is separate from main so tests can run
+// a command the way a user would, through the root's flags and Before hook.
+func newApp() *cli.Command {
+	return &cli.Command{
 		Name:    "hull",
 		Usage:   "native macOS container CLI for unikernels",
 		Version: build.String(),
@@ -67,9 +70,14 @@ func main() {
 				Name:  "debug",
 				Usage: "enable debug logging",
 			},
+			// Keep the image/instance store on the case-sensitive APFS
+			// volume mounted at ~/.hull/store. Linux package trees contain
+			// names that differ only by case (for example xt_CONNMARK.h and
+			// xt_connmark.h), which cannot coexist on the default
+			// case-insensitive home volume.
 			&cli.StringFlag{
 				Name:  "store-dir",
-				Value: storeDirDefault,
+				Value: defaultStoreDir(),
 				Usage: "directory for storing images and instance state",
 			},
 			&cli.BoolFlag{
@@ -110,11 +118,6 @@ func main() {
 			versionCommand(),
 		},
 	}
-
-	if err := app.Run(context.Background(), os.Args); err != nil {
-		fatal(err)
-	}
-	sendCommandEvent("ok", "")
 }
 
 const defaultStoreImageSize = "200g"
