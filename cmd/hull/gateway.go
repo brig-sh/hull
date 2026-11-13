@@ -199,9 +199,12 @@ type gatewayCapabilities struct {
 	EgressDefault bool `json:"egressDefault"`
 	// Divert is --divert.
 	Divert bool `json:"divert"`
-	// DivertLinkLocal is a --divert of a 169.254.0.0/16 literal, which an
-	// older gateway refused because it reset link-local before it matched
-	// a divert.
+	// DivertLinkLocal is a --divert of a 169.254.0.0/16 literal. An older
+	// gateway reset link-local before it matched a divert, and its parser
+	// refused such a divert for that reason. The value here is read from
+	// the parser: it is true when the parser takes the literal. The
+	// forwarder's ordering is not asked; it changed in the same commit as
+	// the parser and has its own test in internal/netgw.
 	DivertLinkLocal bool `json:"divertLinkLocal"`
 }
 
