@@ -32,8 +32,8 @@ const RuntimeName = "io.containerd.urunc.v2"
 const uruncPrefix = "com.urunc.unikernel."
 
 // uruncKeys is every annotation the urunc of the brig-standalone-linux bundle
-// reads, at urunc-dev/urunc@3c00b69 (pkg/unikontainers/annotations.go), the
-// urunc of the bundle from v0.1.0-rc21.
+// reads, at urunc-dev/urunc@5c6bc70 (pkg/unikontainers/annotations.go), the
+// urunc of the bundle from the release after v0.1.0-rc21.
 //
 // urunc's containerd shim copies each com.urunc.unikernel.* key of the
 // image's manifest annotations and of the container's labels into the
@@ -137,9 +137,9 @@ func UruncAnnotations(explicit, image map[string]string) map[string]string {
 	return out
 }
 
-// Monitors are the monitors urunc boots a guest on, at urunc-dev/urunc@3c00b69
+// Monitors are the monitors urunc boots a guest on, at urunc-dev/urunc@5c6bc70
 // (supportedGuestMonitorPairs in pkg/unikontainers/annotations.go), the urunc
-// of the brig-standalone-linux bundle from v0.1.0-rc21. urunc refuses any
+// of the brig-standalone-linux bundle. urunc refuses any
 // other only when the task is created. hvi is new there: the urunc of an
 // older bundle refuses it at that point too, as an unsupported pair.
 var Monitors = []string{"cloud-hypervisor", "firecracker", "qemu", "hvi", "hvt", "spt", "hyperlight-unikraft"}
@@ -164,7 +164,7 @@ func checkCRIKeys(annotations map[string]string) error {
 
 // sharedFSMonitors are the monitors urunc shares a host directory with a
 // guest on, over virtio-fs or 9p (SupportsSharedfs in
-// pkg/unikontainers/hypervisors at urunc-dev/urunc@3c00b69).
+// pkg/unikontainers/hypervisors at urunc-dev/urunc@5c6bc70).
 var sharedFSMonitors = map[string]bool{"cloud-hypervisor": true, "hvi": true, "qemu": true}
 
 // CheckShares refuses bind mounts of directories, a run's shares, that urunc
