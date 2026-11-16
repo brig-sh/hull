@@ -731,3 +731,67 @@ func TestRemoveGoesOnPastARecordItCannotRemove(t *testing.T) {
 		t.Errorf("network directory: error = %v, want it removed", err)
 	}
 }
+
+// An instance on a gateway has the address hull run gave it in the spec, in
+// ps and inspect alike, and in inspect the MAC urunc gave hvi, read from the
+// recorded command line. An instance on no gateway gets neither from them.
+func TestGatewayInstanceShowsItsAddress(t *testing.T) {
+	privateLogDirs(t)
+	f := newInstanceFixture(t)
+	ctx := context.Background()
+	spec := &oci.Spec{Annotations: map[string]string{containerd.NetAddressAnnotation: "10.87.0.10/24"}}
+	for _, tc := range []struct{ name, network string }{{"gw", "gateway"}, {"other", "none"}} {
+		ctr, err := f.c.NewContainer(ctx, "ctr-"+tc.name, client.WithSpec(spec),
+			client.WithContainerLabels(map[string]string{containerd.LabelName: tc.name, containerd.LabelNetwork: tc.network}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = ctr.Delete(ctx) })
+		logFile, err := instanceLogFile(f.ns, tc.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		record, tmp := cmdLineFilesOf(logFile)
+		err = recordCmdLine(record, tmp, []string{"/opt/brig/bin/hvi", "boot", "--net-mac", "c6:2f:93:3b:97:cf"})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	addressOf := func(name string) (ip, mac string) {
+		t.Helper()
+		out, err := f.run(f.ns, "inspect", name)
+		if err != nil {
+			t.Fatalf("inspect %s: %v", name, err)
+		}
+		var rec struct{ IP, MAC string }
+		err = json.Unmarshal([]byte(out), &rec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rec.IP, rec.MAC
+	}
+	ip, mac := addressOf("gw")
+	if ip != "10.87.0.10" || mac != "c6:2f:93:3b:97:cf" {
+		t.Errorf("gateway instance: ip %q, mac %q; want 10.87.0.10 and c6:2f:93:3b:97:cf", ip, mac)
+	}
+	ip, mac = addressOf("other")
+	if ip != "" || mac != "" {
+		t.Errorf("instance on no gateway: ip %q, mac %q; want neither", ip, mac)
+	}
+
+	table, err := f.run(f.ns, "ps", "-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(table, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || (fields[0] != "gw" && fields[0] != "other") {
+			continue
+		}
+		hasIP := slices.Contains(fields, "10.87.0.10")
+		if hasIP != (fields[0] == "gw") {
+			t.Errorf("ps row %q: shows the gateway address %v, want %v", line, hasIP, fields[0] == "gw")
+		}
+	}
+}

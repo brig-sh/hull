@@ -619,3 +619,38 @@ func TestValidateName(t *testing.T) {
 		}
 	}
 }
+
+// rawSpec is a container record's spec as its raw bytes, the way containerd
+// hands it over.
+type rawSpec []byte
+
+func (rawSpec) GetTypeUrl() string { return "types.containerd.io/opencontainers/runtime-spec/1/Spec" }
+func (r rawSpec) GetValue() []byte { return r }
+
+// specAnnotation reads an annotation of a record's spec, and gives nothing,
+// rather than an error, for a record with no spec or one it cannot read.
+func TestSpecAnnotation(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		spec rawSpec
+		want string
+	}{
+		{name: "annotated", spec: rawSpec(`{"ociVersion":"1.2.0","annotations":{"` + NetAddressAnnotation + `":"10.87.0.10/24"}}`), want: "10.87.0.10/24"},
+		{name: "not annotated", spec: rawSpec(`{"ociVersion":"1.2.0"}`)},
+		{name: "not JSON", spec: rawSpec(`not a spec`)},
+		// A field of a type the runtime spec does not give it, which a
+		// decode into a whole specs.Spec would fail on.
+		{name: "an odd field beside it", spec: rawSpec(`{"process":"sh","annotations":{"` + NetAddressAnnotation + `":"10.87.0.10/24"}}`), want: "10.87.0.10/24"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := specAnnotation(containers.Container{Spec: tc.spec}, NetAddressAnnotation)
+			if got != tc.want {
+				t.Errorf("specAnnotation = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	got := specAnnotation(containers.Container{}, NetAddressAnnotation)
+	if got != "" {
+		t.Errorf("no spec: specAnnotation = %q, want none", got)
+	}
+}

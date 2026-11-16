@@ -277,8 +277,15 @@ these differences:
   other containers are still listed. `hull inspect` of it fails with
   containerd's error.
 - CREATED, and `startTime` in `hull inspect`, is when the container was
-  created. PID is the process ID containerd reports for the task. IP is
-  always `-`.
+  created. PID is the process ID containerd reports for the task. IP, and
+  `ip` and `mac` in `hull inspect`, come from the instance's CNI result on
+  a `--net shared` network. On a gateway IP is the address `--gateway-cidr`
+  gave the guest, which hull reads back from the container's spec, so it
+  stays after the instance stops. Nothing checks that the guest took it,
+  where macOS compares it with the gateway's leases and warns. urunc picks
+  a gateway guest's MAC and gives it to hvi as `--net-mac`, so `mac` comes
+  from the recorded `cmdLine` described below, and is empty when there is
+  none. Otherwise IP is `-`.
 - `hull inspect` prints the macOS fields, and `containerId`, the
   container's ID, which the `ctr` commands below take. `imageDigest`,
   `backend` and `logFile` come from labels `hull run` sets, so they are

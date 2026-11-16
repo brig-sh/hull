@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/containerd/errdefs"
 	"github.com/urfave/cli/v3"
@@ -82,5 +83,25 @@ func inspectInstance(ctx context.Context, cmd *cli.Command) error {
 	if err != nil {
 		_, _ = fmt.Fprintf(cmd.ErrWriter, "warning: cannot read the command line of %s: %v\n", instanceID, err)
 	}
+	if rec.MAC == "" && rec.Network == gatewayMode {
+		rec.MAC = flagValue(rec.CmdLine, "--net-mac")
+	}
 	return printJSON(cmd.Writer, rec)
+}
+
+// flagValue returns the value args give flag, as --flag value or
+// --flag=value, and empty when they do not give it. urunc picks the MAC of a
+// guest on a gateway and gives it to hvi as --net-mac, so the monitor's
+// recorded arguments are where hull learns it.
+func flagValue(args []string, flag string) string {
+	for i, a := range args {
+		if a == flag && i+1 < len(args) {
+			return args[i+1]
+		}
+		v, ok := strings.CutPrefix(a, flag+"=")
+		if ok {
+			return v
+		}
+	}
+	return ""
 }
