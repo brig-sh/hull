@@ -560,20 +560,9 @@ ways:
     `netAddress` and `netGateway` annotations, which hull sets: one with
     urunc-dev/urunc@034929e. The bundle's urunc, 3c00b69, ignores them and
     gives hvi a tap instead, so the guest would boot with no network. hull
-    cannot tell which urunc the shim runs before the run, so it checks what
-    urunc started: once the task has started, it reads the command line of
-    the task's process, which urunc turns into hvi once it has set the
-    instance up. When hvi has no
-    `--net-gateway`, the run fails and removes the instance. When hull
-    cannot see hvi start within 10 seconds, or cannot read the process's
-    command line, it warns and leaves the instance running. It also warns
-    when the process is gone at its first look: the task may have ended at
-    once, but `/proc` also hides it from hull when mounted with
-    `hidepid=invisible` and the task runs as another user, or when
-    containerd runs in another PID namespace (rootlesskit's `--pidns`).
-    In another PID namespace, the pid containerd reports can also name an
-    unrelated process of hull's, and hull then warns that hvi did not
-    start.
+    cannot tell which urunc the shim runs before the run, so the check of
+    what urunc started, below, also fails a gateway run whose hvi has no
+    `--net-gateway`.
   - `hull run` takes the gateway's address to be the first of the subnet
     `--gateway-cidr` names, as on macOS, and does not ask the gateway. A
     gateway started with another `--gateway-ip`, or with a `--subnet` that
@@ -790,6 +779,38 @@ ways:
   with `--annotation`. `--annotation io.kubernetes.cri.container-name` is
   refused too: urunc reads it as a Kubernetes container's name, and runs a
   container named `queue-proxy` with runc.
+- Once the task has started, `hull run` checks that urunc booted a VM,
+  and fails the run and removes the instance when it did not. containerd
+  reports a task running whatever the runtime, and the shim of urunc's
+  runtime runs whatever OCI runtime it was built to run: one that runs
+  runc runs the image as an ordinary container on the host's kernel. hull
+  reads the command line of the task's process. urunc starts as that
+  process and, once it has set the instance up, execs the monitor in its
+  place, with the monitor's path as the first argument. The run passes
+  when that names the program urunc looks the run's monitor up under:
+  `cloud-hypervisor`, `firecracker`, `hvi`, `solo5-hvt`, `solo5-spt`,
+  `hluk` for `hyperlight-unikraft`, and `qemu-system-` followed by the
+  host's architecture for `qemu`. On a gateway, hvi must also have
+  `--net-gateway`. The run fails at once when the process is any other
+  program, such as `runc` or the image's command, and after a minute when
+  urunc has still not started the monitor, so `hull run` waits that long
+  at most. hull cannot read urunc's configuration, so a monitor
+  configured at a path with another name fails the run too.
+  A process gone after hull saw it is a task that ended, and `hull ps`
+  shows its exit. A task that ends before hull first reads it passes the
+  check too, whatever it ran, so a shim that runs runc goes unnoticed for
+  an image whose command exits at once. hull cannot read the process when
+  `/proc` is mounted with `hidepid=invisible` and the task runs as another
+  user, or when containerd runs in another PID namespace (rootlesskit's
+  `--pidns`; the bundle's `containerd-rootless.sh` passes none). The run
+  then fails unless containerd reports the task stopped. In another PID
+  namespace the pid containerd reports can also name an unrelated process
+  of hull's, and the run then fails as if the shim had run another OCI
+  runtime.
+  `hull run` holds a lock on the namespace's log directory while it
+  creates and starts the instance, and lets go of it during this check,
+  so runs in one namespace boot side by side and `hull rm` is not held up.
+  A `hull rm --force` of the instance during the check fails the run.
 - The image's command follows docker's rules, which differ from macOS hull
   in two ways. Arguments after the image replace its `Cmd` and keep its
   `Entrypoint`, where macOS replaces both. An image with neither a command

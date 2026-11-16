@@ -400,6 +400,93 @@ func TestCreateInstanceRemovesAContainerWhoseTaskFails(t *testing.T) {
 	assertNoActiveSnapshot(ctx, t, c)
 }
 
+// eventLock is a Locker that records, in events, when it is taken and
+// released.
+type eventLock struct {
+	events *[]string
+	err    error
+}
+
+func (l eventLock) Lock() error {
+	*l.events = append(*l.events, "lock")
+	return l.err
+}
+
+func (l eventLock) Unlock() { *l.events = append(*l.events, "unlock") }
+
+// The check of a started task runs with the caller's lock released, so a
+// boot does not hold up every other run and removal in the namespace, and
+// returns with it held again. A container gone by then was removed by
+// someone else, and the paths of its files may be a new run's.
+func TestCheckStartedReleasesTheLock(t *testing.T) {
+	checkErr := errors.New("not a VM")
+	for _, tc := range []struct {
+		name     string
+		check    error
+		lockErr  error
+		gone     bool
+		existErr error
+		want     kept
+		wantErr  []string
+	}{
+		{name: "booted"},
+		{name: "not a VM", check: checkErr, wantErr: []string{"not a VM"}},
+		{name: "removed while it booted", gone: true, want: kept{instance: true, files: true},
+			wantErr: []string{"removed while hull run checked"}},
+		{name: "removed after a failed check", check: checkErr, gone: true, want: kept{instance: true, files: true},
+			wantErr: []string{"not a VM", "removed while hull run checked"}},
+		{name: "the lock not taken again", lockErr: errors.New("EBADF"), want: kept{files: true},
+			wantErr: []string{"take the lock on vm again: EBADF"}},
+		{name: "containerd does not answer", existErr: errors.New("ttrpc: closed"), want: kept{files: true},
+			wantErr: []string{"ttrpc: closed"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var events []string
+			cfg := RunConfig{
+				Name: "vm",
+				Lock: eventLock{events: &events, err: tc.lockErr},
+				CheckStarted: func(context.Context, client.Task) error {
+					events = append(events, "check")
+					return tc.check
+				},
+			}
+			exists := func(context.Context) (bool, error) {
+				events = append(events, "exists")
+				return !tc.gone, tc.existErr
+			}
+			got, err := checkStarted(context.Background(), cfg, nil, exists)
+			wantEvents := []string{"unlock", "check", "lock", "exists"}
+			if tc.lockErr != nil {
+				wantEvents = wantEvents[:3]
+			}
+			if !slices.Equal(events, wantEvents) {
+				t.Errorf("events = %q, want %q", events, wantEvents)
+			}
+			if got != tc.want {
+				t.Errorf("kept = %+v, want %+v", got, tc.want)
+			}
+			if len(tc.wantErr) == 0 && err != nil {
+				t.Errorf("error = %v, want none", err)
+			}
+			for _, w := range tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), w) {
+					t.Errorf("error = %v, want it to contain %q", err, w)
+				}
+			}
+		})
+	}
+
+	// Without a lock there is nothing to release, and nothing to ask.
+	cfg := RunConfig{CheckStarted: func(context.Context, client.Task) error { return checkErr }}
+	got, err := checkStarted(context.Background(), cfg, nil, func(context.Context) (bool, error) {
+		t.Error("asked whether the container exists without a lock")
+		return true, nil
+	})
+	if got != (kept{}) || !errors.Is(err, checkErr) {
+		t.Errorf("no lock: kept = %+v, error = %v; want nothing kept and the check's error", got, err)
+	}
+}
+
 func TestCheckBootsVM(t *testing.T) {
 	unikernel := map[string]string{
 		ociclient.UnikernelTypeAnnotation:   "unikraft",

@@ -568,8 +568,8 @@ func TestRunPassesTheShares(t *testing.T) {
 	if !reflect.DeepEqual(cfg.Mounts, want) {
 		t.Errorf("mounts = %+v, want %+v", cfg.Mounts, want)
 	}
-	if cfg.CheckStarted != nil {
-		t.Error("a run on no gateway has a CheckStarted")
+	if cfg.CheckStarted == nil {
+		t.Error("a run on no gateway has no CheckStarted, so a shim that runs runc would go unnoticed")
 	}
 }
 
@@ -610,6 +610,42 @@ func TestRunPassesTheMonitor(t *testing.T) {
 	got := cfg.Annotations[ociclient.HypervisorAnnotation]
 	if got != "hvi" {
 		t.Errorf("monitor = %q, want hvi", got)
+	}
+}
+
+// A run hands containerd.CreateInstance the lock on its log directory,
+// held, so CreateInstance can release it while it checks the boot. Released,
+// the directory is free for another run to lock.
+func TestRunPassesItsLock(t *testing.T) {
+	privateLogDirs(t)
+	f := newInstanceFixture(t)
+	logFile, err := instanceLogPath(f.ns, "vm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := createInstance
+	t.Cleanup(func() { createInstance = old })
+	ran := false
+	createInstance = func(_ context.Context, _ *client.Client, _ containerd.RunImage, cfg containerd.RunConfig) error {
+		ran = true
+		lock, ok := cfg.Lock.(*logDirLock)
+		if !ok || lock.unlock == nil || lock.dir != filepath.Dir(logFile) {
+			t.Fatalf("lock = %#v, want the held lock of %s", cfg.Lock, filepath.Dir(logFile))
+		}
+		cfg.Lock.Unlock()
+		unlock, err := lockLogDir(lock.dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		unlock()
+		return cfg.Lock.Lock()
+	}
+	_, err = f.run(f.ns, append(append([]string{"run", "-d", "--name", "vm"}, bootFileArgs(t)...), containerdtest.TaskImage)...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ran {
+		t.Fatal("hull run did not create the instance")
 	}
 }
 
