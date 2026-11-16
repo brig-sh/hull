@@ -283,7 +283,17 @@ these differences:
   container's ID, which the `ctr` commands below take. `imageDigest`,
   `backend` and `logFile` come from labels `hull run` sets, so they are
   empty for a container another client created. Those containerd has no
-  counterpart for, among them `cmdLine` and `bundleDir`, are always empty.
+  counterpart for, among them `bundleDir`, are always empty.
+- `cmdLine` in `hull inspect` is the monitor's command line, as on macOS,
+  where it is the VMM's: a caller such as brig reads the guest's memory and
+  vCPUs from it. urunc builds those arguments, so `hull run` records the
+  ones it sees the task's process start the monitor with, in
+  `<id>.cmdline` beside the instance's log, and `hull rm` deletes it with
+  the log. They stay after the instance stops. `cmdLine` is `null` for a
+  container another client created, one an older hull ran, and one whose
+  task ended before urunc started the monitor. The size is the monitor's
+  spelling of what urunc gave it: urunc gives cloud-hypervisor more memory
+  than `--mem`, `size=805M` for `--mem 768`, where hvi gets `--mem-mib 768`.
 - `hull inspect` prints `network`, Linux only: `none`, the `--net` mode
   that attached the instance, `shared`, or `gateway` for one on a
   `hull network-gateway`. It comes from a label `hull run`

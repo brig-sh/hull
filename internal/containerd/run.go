@@ -206,6 +206,11 @@ type RunConfig struct {
 	// LogFile is where the shim writes the guest's console. Its directory
 	// must exist.
 	LogFile string
+	// Files are the caller's files of the instance, kept beside LogFile.
+	// CreateInstance removes them when it removes the log: those an earlier
+	// instance of the name left, once the name is this run's, and this
+	// run's when it fails.
+	Files []string
 	// Snapshotter holds the instance's root filesystem. Empty means the
 	// namespace's default, the one a pull unpacks into.
 	Snapshotter string
@@ -379,9 +384,11 @@ func CreateInstance(ctx context.Context, c *client.Client, image RunImage, cfg R
 			if keep.files {
 				return
 			}
-			derr = os.Remove(cfg.LogFile)
-			if derr != nil && !errors.Is(derr, os.ErrNotExist) {
-				err = errors.Join(err, fmt.Errorf("remove the log of %s: %w", cfg.Name, derr))
+			for _, f := range append([]string{cfg.LogFile}, cfg.Files...) {
+				derr = os.Remove(f)
+				if derr != nil && !errors.Is(derr, os.ErrNotExist) {
+					err = errors.Join(err, fmt.Errorf("remove %s of %s: %w", f, cfg.Name, derr))
+				}
 			}
 			if cfg.Network != nil {
 				derr = RemoveNetworkDir(cfg.Network.Dir)
@@ -395,9 +402,11 @@ func CreateInstance(ctx context.Context, c *client.Client, image RunImage, cfg R
 	// The shim appends to the log, and a name can be used again once its
 	// instance is removed. Only now, with the name held by this container
 	// alone, is a log left at the path not another live instance's.
-	err = os.Remove(cfg.LogFile)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("remove the old log of %s: %w", cfg.Name, err)
+	for _, f := range append([]string{cfg.LogFile}, cfg.Files...) {
+		err = os.Remove(f)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove %s, which an earlier %s left: %w", f, cfg.Name, err)
+		}
 	}
 	// The network files are another live instance's until the name is
 	// taken, as the log is, and the resolver configuration must be in place

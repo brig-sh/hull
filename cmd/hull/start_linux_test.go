@@ -20,7 +20,9 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"syscall"
@@ -79,19 +81,21 @@ func TestCheckBooted(t *testing.T) {
 		// loaded machine under -race polls.
 		short bool
 		want  string
+		// booted is the monitor's arguments checkBooted returns.
+		booted []string
 	}{
-		{name: "hvi started", seen: [][]string{urunc, urunc, hvi}},
-		{name: "through libcontainer", seen: [][]string{libcontainer, hvi}},
+		{name: "hvi started", seen: [][]string{urunc, urunc, hvi}, booted: hvi},
+		{name: "through libcontainer", seen: [][]string{libcontainer, hvi}, booted: hvi},
 		// The command line reads empty while the process is mid-exec.
-		{name: "caught mid-exec", seen: [][]string{{""}, hvi}},
-		{name: "qemu of the host's architecture", monitor: "qemu", seen: [][]string{urunc, qemu}},
+		{name: "caught mid-exec", seen: [][]string{{""}, hvi}, booted: hvi},
+		{name: "qemu of the host's architecture", monitor: "qemu", seen: [][]string{urunc, qemu}, booted: qemu},
 		{name: "the image under runc", seen: [][]string{image}, want: "the task runs sleep, where urunc runs hvi"},
 		{name: "runc's init", seen: [][]string{runcInit}, want: "the task runs runc, where urunc runs hvi"},
 		{name: "urunc handed it to runc", seen: [][]string{urunc, runcInit}, want: "the task runs runc"},
 		{name: "another monitor", seen: [][]string{urunc, qemu}, want: "the task runs /usr/bin/qemu-system-x86_64, where urunc runs hvi"},
 		{name: "a bare qemu prefix", monitor: "qemu", seen: [][]string{{"qemu-system-"}}, want: "where urunc runs qemu-system-"},
 		{name: "no monitor in time", seen: [][]string{urunc}, short: true, want: "urunc did not start hvi within"},
-		{name: "hvi joined the gateway", gateway: true, seen: [][]string{urunc, joined}},
+		{name: "hvi joined the gateway", gateway: true, seen: [][]string{urunc, joined}, booted: joined},
 		{name: "hvi on a tap of a gateway run", gateway: true, seen: [][]string{urunc, hvi}, want: "urunc started hvi without --net-gateway"},
 		// A zombie's command line is empty, and a reaped process is gone.
 		{name: "the task ended", seen: [][]string{urunc, {""}}, err: fs.ErrNotExist},
@@ -132,7 +136,10 @@ func TestCheckBooted(t *testing.T) {
 			if task.statuses == nil {
 				task.statuses = running
 			}
-			err := checkBooted(context.Background(), task, monitor, tc.gateway)
+			booted, err := checkBooted(context.Background(), task, monitor, tc.gateway)
+			if !slices.Equal(booted, tc.booted) {
+				t.Errorf("monitor arguments = %q, want %q", booted, tc.booted)
+			}
 			if tc.want == "" && err != nil {
 				t.Errorf("error = %v, want none", err)
 			}
@@ -188,5 +195,46 @@ func TestProcCmdline(t *testing.T) {
 	_, err = procCmdline(1 << 30)
 	if !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("a process that does not exist: error = %v, want ErrNotExist", err)
+	}
+}
+
+// The record gives back the arguments as the monitor got them, whatever
+// they hold, and nothing when there is none.
+func TestRecordCmdLineRoundTrips(t *testing.T) {
+	path, tmp := cmdLineFilesOf(filepath.Join(t.TempDir(), "vm.log"))
+	got, err := readCmdLine(path)
+	if err != nil || got != nil {
+		t.Fatalf("no record: %q, %v; want nil, nil", got, err)
+	}
+	// What a run killed before its rename left is written over.
+	err = os.WriteFile(tmp, []byte(`["/opt/brig/bin/hvi", "boot", "--mem-mib", "4096", "--cpus", "8", "--cmdline"]`), 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"/opt/brig/bin/hvi", "boot", "--mem-mib", "768", "--cpus", "2",
+		"--cmdline", "panic=-1 console=ttyS0 root=fs0", "a\nnewline", "ünï"}
+	err = recordCmdLine(path, tmp, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err = readCmdLine(path)
+	if err != nil || !slices.Equal(got, args) {
+		t.Errorf("read back %q, %v; want %q", got, err, args)
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Errorf("record mode = %v, %v; want 0600, as a fresh file", info.Mode().Perm(), err)
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil || len(entries) != 1 {
+		t.Errorf("the directory holds %v (%v), want the record alone", entries, err)
+	}
+	err = os.WriteFile(path, []byte("hvi boot"), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = readCmdLine(path)
+	if err == nil {
+		t.Error("a record that is not JSON read without an error")
 	}
 }

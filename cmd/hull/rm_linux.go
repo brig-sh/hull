@@ -127,11 +127,26 @@ func removeInstance(ctx context.Context, cmd *cli.Command) error {
 	}
 	// The network files sit beside the log, under the same lock. Their path
 	// comes from the log's, the one run computes, and not from a label.
+	// They go even when the command line record does not, since a detach
+	// failure is only reported from them.
 	if logFile != "" {
+		var recordErr error
+		record, tmp := cmdLineFilesOf(logFile)
+		for _, f := range []string{record, tmp} {
+			err = os.Remove(f)
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				recordErr = errors.Join(recordErr,
+					fmt.Errorf("instance %s removed, but not its command line record: %w", instanceID, err))
+			}
+		}
 		warnDetachFailure(cmd.ErrWriter, instanceID, netDirOf(logFile), "")
 		err = containerd.RemoveNetworkDir(netDirOf(logFile))
 		if err != nil {
-			return fmt.Errorf("instance %s removed, but not its network files: %w", instanceID, err)
+			err = fmt.Errorf("instance %s removed, but not its network files: %w", instanceID, err)
+		}
+		err = errors.Join(recordErr, err)
+		if err != nil {
+			return err
 		}
 	}
 
