@@ -323,6 +323,40 @@ func TestNewContainerThroughDaemon(t *testing.T) {
 	}
 }
 
+// urunc starts the monitor without its own syscall filter, hvi with
+// --no-sandbox, when the spec has no seccomp profile. The container must
+// carry one, containerd's default, as nerdctl's does.
+func TestNewContainerKeepsTheMonitorSandboxed(t *testing.T) {
+	c := instancesClient(t)
+	ctx := containerdtest.Lease(context.Background(), t, c)
+	img, err := ImageForRun(ctx, c, containerdtest.TaskImage, "missing", runPlatform(t), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := LoadRunImage(ctx, img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := snapshotterRunConfig(t, "vm", "")
+	cfg.Annotations[ociclient.HypervisorAnnotation] = "hvi"
+	ctr, err := newSnapshotterContainer(ctx, t, c, image, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := ctr.Spec(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := spec.Linux.Seccomp
+	if sc == nil {
+		t.Fatal("the spec has no linux.seccomp, so urunc would start hvi with --no-sandbox")
+	}
+	if sc.DefaultAction != runtimespec.ActErrno || len(sc.Syscalls) == 0 {
+		t.Errorf("seccomp default action %q with %d syscall rules, want containerd's default profile: %s and its allow list",
+			sc.DefaultAction, len(sc.Syscalls), runtimespec.ActErrno)
+	}
+}
+
 // A task that cannot be created leaves no container, snapshot or log behind,
 // so the name is free for the next run.
 func TestCreateInstanceRemovesAContainerWhoseTaskFails(t *testing.T) {
