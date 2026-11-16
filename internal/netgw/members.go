@@ -84,7 +84,8 @@ func (s *memberSet) list() []Member {
 // from the moment the switch takes its connection until the switch lets it
 // go: a QEMU stream member until the connection closes, and a vfkit member
 // until its control connection does, which its VMM holds for its lifetime.
-// A VMM that has been started but has not connected yet is not listed.
+// A VMM that has been started but whose connection the switch has not taken
+// yet is not listed.
 func (n *Network) Members() []Member {
 	return n.members.list()
 }
