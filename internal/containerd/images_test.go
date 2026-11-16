@@ -251,6 +251,52 @@ func TestDescribeImageSkipsEntriesThatAreNotImages(t *testing.T) {
 	}
 }
 
+// An index entry's artifactType may name its manifest's config media type,
+// as the OCI descriptor spec defines it, and the brig-sh agent images on
+// ghcr.io carry the Docker one on every platform. Those entries are images:
+// the pull, the listing and the removal must all see them.
+func TestDescribeImageOfEntriesTypedAsImageConfigs(t *testing.T) {
+	for _, artifactType := range []string{images.MediaTypeDockerSchema2Config, ocispec.MediaTypeImageConfig} {
+		t.Run(artifactType, func(t *testing.T) {
+			ctx := context.Background()
+			cs := newContentStore(t)
+			amd := containerdtest.WriteImage(ctx, t, cs, linuxAMD64, nil, true)
+			arm := containerdtest.WriteImage(ctx, t, cs, linuxARM64, nil, false)
+			amd.ArtifactType = artifactType
+			arm.ArtifactType = artifactType
+			index := containerdtest.WriteBlob(ctx, t, cs, ocispec.MediaTypeImageIndex, ocispec.Index{
+				MediaType: ocispec.MediaTypeImageIndex,
+				Manifests: []ocispec.Descriptor{arm, amd},
+			})
+			img := images.Image{Name: "x", Target: index}
+
+			pulled, err := DescribePlatform(ctx, cs, img, platforms.OnlyStrict(linuxAMD64))
+			if err != nil {
+				t.Fatalf("DescribePlatform: %v", err)
+			}
+			if pulled.Digest != amd.Digest.String() || pulled.Size != 1024 {
+				t.Errorf("DescribePlatform: Digest, Size = %q, %d; want %q, 1024", pulled.Digest, pulled.Size, amd.Digest)
+			}
+
+			listed, err := DescribeImage(ctx, cs, img, platforms.Only(linuxAMD64))
+			if err != nil {
+				t.Fatalf("DescribeImage: %v", err)
+			}
+			if listed.Digest != amd.Digest.String() || listed.Size != 1024 {
+				t.Errorf("DescribeImage: Digest, Size = %q, %d; want %q, 1024", listed.Digest, listed.Size, amd.Digest)
+			}
+
+			manifests, err := ImageManifests(ctx, cs, img)
+			if err != nil {
+				t.Fatalf("ImageManifests: %v", err)
+			}
+			if len(manifests) != 2 {
+				t.Errorf("ImageManifests returned %d manifests, want both platforms", len(manifests))
+			}
+		})
+	}
+}
+
 // The other tests read from an in-process content store. hull reads through
 // the client's, which goes over gRPC to the daemon and maps its errors back,
 // and it finds images through the daemon's image service. Images written and

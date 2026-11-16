@@ -231,8 +231,18 @@ func pickManifest(ctx context.Context, cs content.Store, manifests []ocispec.Des
 // are never unpacked, so a containerd that discards unpacked layers keeps
 // theirs and drops the images', and pickManifest would rank them as the only
 // complete platforms.
+//
+// An artifactType that is an image config media type still marks an image.
+// The OCI descriptor spec (descriptor.md) sets an entry's artifactType to
+// its manifest's config mediaType, so an index may carry it for plain images
+// too: the brig-sh agent images on ghcr.io list each platform with
+// application/vnd.docker.container.image.v1+json.
+// Were every artifactType an artifact's, such an index would have no image
+// at all, and its pull would fail after downloading every layer.
 func isImage(m ocispec.Descriptor) bool {
-	if m.ArtifactType != "" {
+	switch m.ArtifactType {
+	case "", ocispec.MediaTypeImageConfig, images.MediaTypeDockerSchema2Config:
+	default:
 		return false
 	}
 	if m.Annotations["vnd.docker.reference.type"] != "" {
