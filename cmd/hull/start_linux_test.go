@@ -238,3 +238,24 @@ func TestRecordCmdLineRoundTrips(t *testing.T) {
 		t.Error("a record that is not JSON read without an error")
 	}
 }
+
+// flagValue finds a flag's value in either spelling, and nothing for a flag
+// that is missing or has no value after it.
+func TestFlagValue(t *testing.T) {
+	args := []string{"/opt/brig/bin/hvi", "boot", "--net-gateway", "/urunc-net/gateway.sock", "--net-mac", "c6:2f:93:3b:97:cf"}
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{args, "c6:2f:93:3b:97:cf"},
+		{[]string{"hvi", "--net-mac=c6:2f:93:3b:97:cf"}, "c6:2f:93:3b:97:cf"},
+		{[]string{"hvi", "--net-tap", "tap0_urunc"}, ""},
+		{[]string{"hvi", "--net-mac"}, ""},
+		{nil, ""},
+	} {
+		got := flagValue(tc.args, "--net-mac")
+		if got != tc.want {
+			t.Errorf("flagValue(%q) = %q, want %q", tc.args, got, tc.want)
+		}
+	}
+}

@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"net/netip"
 
 	"github.com/containerd/containerd/v2/client"
 	"github.com/urfave/cli/v3"
@@ -79,6 +80,7 @@ func instanceRecord(inst containerd.Instance) *store.InstanceState {
 		LogFile:       inst.Labels[containerd.LabelLogFile],
 		Network:       inst.Labels[containerd.LabelNetwork],
 		GatewaySocket: inst.Labels[containerd.LabelGatewaySocket],
+		IP:            gatewayGuestIP(inst),
 	}
 	if inst.Err != nil {
 		rec.Status = store.StatusUnreadable
@@ -102,4 +104,22 @@ func instanceRecord(inst containerd.Instance) *store.InstanceState {
 	}
 	rec.PID = int(inst.Task.Pid)
 	return rec
+}
+
+// gatewayGuestIP returns the address of an instance on a network gateway,
+// which is static: hull run gives it to urunc in the spec, and urunc boots
+// the guest with it. macOS records the same address when it boots a guest on
+// a gateway. It is the address the guest was told to take: macOS warns when
+// the gateway leased the guest another, and nothing here checks. It is empty
+// for an instance on no gateway, whose address, if any, comes from its CNI
+// result instead.
+func gatewayGuestIP(inst containerd.Instance) string {
+	if inst.Labels[containerd.LabelNetwork] != gatewayMode || inst.NetAddress == "" {
+		return ""
+	}
+	prefix, err := netip.ParsePrefix(inst.NetAddress)
+	if err != nil {
+		return ""
+	}
+	return prefix.Addr().String()
 }

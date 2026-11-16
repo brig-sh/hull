@@ -18,6 +18,7 @@ package containerd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -26,6 +27,7 @@ import (
 	"time"
 
 	"github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/containers"
 	"github.com/containerd/errdefs"
 
 	"github.com/brig-sh/hull/pkg/store"
@@ -48,6 +50,10 @@ type Instance struct {
 	// container that was never started from one whose task was deleted
 	// after it stopped.
 	Task *Task
+	// NetAddress is the address, with its prefix, that the container's spec
+	// gives the guest on a network gateway (NetAddressAnnotation), and empty
+	// for an instance on no gateway.
+	NetAddress string
 	// Err is set when Instances could not read the container's task, as
 	// when its shim does not answer. Task is then nil, though the container
 	// may still have a task, running or not.
@@ -242,8 +248,30 @@ func describeInstance(ctx context.Context, ctr client.Container) (Instance, erro
 	inst.ID = instanceName(ctr.ID(), info.Labels)
 	inst.CreatedAt = info.CreatedAt
 	inst.Labels = info.Labels
+	inst.NetAddress = specAnnotation(info, NetAddressAnnotation)
 	inst.Task, err = describeTask(ctx, ctr)
 	return inst, err
+}
+
+// specAnnotation returns the annotation key of the spec in a container's
+// record, and empty when the record has no spec or one that does not parse:
+// a container another client created need not hold one hull can read, and
+// listing it must not fail over that. Only the annotations are decoded:
+// the whole spec is still read, but nothing else in it is built, and a
+// field of a type hull does not expect elsewhere in a spec another client
+// wrote does not cost the address.
+func specAnnotation(info containers.Container, key string) string {
+	if info.Spec == nil {
+		return ""
+	}
+	var spec struct {
+		Annotations map[string]string `json:"annotations"`
+	}
+	err := json.Unmarshal(info.Spec.GetValue(), &spec)
+	if err != nil {
+		return ""
+	}
+	return spec.Annotations[key]
 }
 
 // describeTask returns the state of ctr's task, or nil when it has none.
