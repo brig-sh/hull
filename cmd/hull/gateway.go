@@ -17,10 +17,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
@@ -372,8 +374,14 @@ func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, ga
 				}
 				go func(c net.Conn) {
 					defer func() { _ = c.Close() }()
+					m, ok := memberConn(c, probeWindow)
+					if !ok {
+						log.Debug("gateway: a connection to the qemu socket closed before its first frame")
+						return
+					}
 					log.Debug("gateway: qemu member joined")
-					if err := vn.AcceptQemu(ctx, c); err != nil && ctx.Err() == nil {
+					err := vn.AcceptQemu(ctx, m)
+					if err != nil && ctx.Err() == nil {
 						log.WithError(err).Debug("gateway: qemu member ended")
 					}
 					log.Debug("gateway: qemu member left")
@@ -435,6 +443,51 @@ func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, ga
 		}
 		go handleGatewayMember(ctx, vn, conn.(*net.UnixConn))
 	}
+}
+
+// probeWindow is how long the gateway waits for the first byte of a
+// connection to its QEMU socket before it hands the connection to the switch.
+// A guest's VMM connects well before the guest's kernel sends a frame, so a
+// member is served from the end of the window at the latest, before it has
+// anything to send or to be sent.
+var probeWindow = 500 * time.Millisecond
+
+// memberConn tells a member's connection to the QEMU socket from a readiness
+// probe, which hull run, brig and anything else that checks the gateway is up
+// make: they connect and close without sending a frame. gvisor-tap-vsock's
+// switch logs every stream that ends before its first frame as an error, and
+// lists it as a member until then, so a probe would put an error in the
+// gateway's log on every boot and a member that is not one in /members.
+//
+// It reads the first byte, for window at most, and reports false when the
+// connection ends before one arrives. Otherwise it returns a connection that
+// reads that byte first, or c itself when none came in the window.
+func memberConn(c net.Conn, window time.Duration) (net.Conn, bool) {
+	err := c.SetReadDeadline(time.Now().Add(window))
+	if err != nil {
+		return c, true
+	}
+	first := make([]byte, 1)
+	n, err := c.Read(first)
+	_ = c.SetReadDeadline(time.Time{})
+	if n == 1 {
+		return &replayConn{Conn: c, r: io.MultiReader(bytes.NewReader(first), c)}, true
+	}
+	if errors.Is(err, io.EOF) {
+		return nil, false
+	}
+	return c, true
+}
+
+// replayConn is a connection whose reads come from r, which starts with what
+// memberConn read ahead of the switch.
+type replayConn struct {
+	net.Conn
+	r io.Reader
+}
+
+func (c *replayConn) Read(p []byte) (int, error) {
+	return c.r.Read(p)
 }
 
 // memberLister is what membersHandler asks of the gateway, so a test can

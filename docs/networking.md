@@ -251,7 +251,10 @@ socket at the same path inside its own root for every gateway.
 
 A guest is listed from the moment the gateway takes its connection until the
 connection closes, and for vz until the control connection, which vz-runner
-holds for its lifetime, closes. A wedged qemu or hvi that holds its
+holds for its lifetime, closes. The gateway takes a connection to the QEMU
+socket once its first byte arrives, or half a second after it opens if none
+has, and drops one that closes before sending anything: that is a check that
+the gateway is up, as `hull run` and brig make, not a guest. A wedged qemu or hvi that holds its
 connection open stays listed, as it stays in the switch. A `hull run` that has started a VMM which has
 not connected yet has no entry, so a caller that boots guests on the gateway
 has to account for a boot in flight itself. The list says how many guests

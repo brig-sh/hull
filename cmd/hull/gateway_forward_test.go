@@ -19,8 +19,12 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -264,5 +268,79 @@ func TestMembersAPIListsTheGuests(t *testing.T) {
 	w = call(t, mux, http.MethodPost, "/members", "{}")
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Errorf("POST /members = %d, want 405", w.Code)
+	}
+}
+
+// unixPair is a connection to a Unix socket and the gateway's end of it, as
+// the QEMU socket's listener accepts it. net.Pipe will not do: it refuses a
+// read deadline once the other end has closed, where a socket does not.
+func unixPair(t *testing.T) (client, gw net.Conn) {
+	t.Helper()
+	// A unix socket path is capped at 104 bytes on macOS, which t.TempDir's
+	// test-named directories exceed.
+	dir, err := os.MkdirTemp("/tmp", "hull-member-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	l, err := net.Listen("unix", filepath.Join(dir, "s"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+	client, err = net.Dial("unix", l.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw, err = l.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close(); _ = gw.Close() })
+	return client, gw
+}
+
+// A connection that closes before sending anything is a readiness probe and
+// never reaches the switch. A member's first bytes reach the switch intact,
+// and so does a member that stays silent past the window.
+func TestMemberConnTellsAProbeFromAMember(t *testing.T) {
+	probe, gw := unixPair(t)
+	_ = probe.Close()
+	_, ok := memberConn(gw, time.Second)
+	if ok {
+		t.Error("a connection closed before its first byte was taken for a member")
+	}
+
+	vmm, gw := unixPair(t)
+	_, err := vmm.Write([]byte{0, 0, 0, 2, 'h', 'i'})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, ok := memberConn(gw, time.Second)
+	if !ok {
+		t.Fatal("a connection that sent a frame was taken for a probe")
+	}
+	// A byte lost to the read-ahead would leave the read waiting for it.
+	_ = m.SetReadDeadline(time.Now().Add(5 * time.Second))
+	got := make([]byte, 6)
+	_, err = io.ReadFull(m, got)
+	if err != nil || string(got) != "\x00\x00\x00\x02hi" {
+		t.Errorf("the switch reads %q, %v; want the frame as sent", got, err)
+	}
+
+	silent, gw := unixPair(t)
+	m, ok = memberConn(gw, 50*time.Millisecond)
+	if !ok {
+		t.Fatal("a connection that sent nothing within the window was taken for a probe")
+	}
+	_, err = silent.Write([]byte("late"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = m.SetReadDeadline(time.Now().Add(5 * time.Second))
+	got = make([]byte, 4)
+	_, err = io.ReadFull(m, got)
+	if err != nil || string(got) != "late" {
+		t.Errorf("after the window the switch reads %q, %v; want what the member sent", got, err)
 	}
 }
