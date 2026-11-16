@@ -100,6 +100,7 @@ type Network struct {
 	resolver      resolver
 	egressRefresh time.Duration
 	diverts       *diverts
+	members       memberSet
 }
 
 func New(cfg Config) (*Network, error) {
@@ -186,9 +187,11 @@ func (n *Network) AcceptQemu(ctx context.Context, conn net.Conn) error {
 }
 
 // accept serves a member until it disconnects, then forgets the addresses
-// that resolved to it.
+// that resolved to it. Members lists it for as long as it is served.
 func (n *Network) accept(ctx context.Context, conn net.Conn, protocol gvntypes.Protocol) error {
 	defer n.forgetDeparted()
+	id := n.members.add(string(protocol))
+	defer n.members.remove(id)
 	return n.networkSwitch.Accept(ctx, conn, protocol)
 }
 

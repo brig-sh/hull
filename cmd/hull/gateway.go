@@ -121,7 +121,7 @@ the ports a --divert names are served, and every other connection to it is
 reset (TCP) or dropped (UDP).`),
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "socket", Required: true, Usage: "control socket path (required)"},
-			&cli.StringFlag{Name: "api", Usage: "HTTP API socket path (probe, leases, /forwards and /diverts)"},
+			&cli.StringFlag{Name: "api", Usage: "HTTP API socket path (probe, leases, /forwards, /diverts and /members)"},
 			&cli.StringFlag{Name: "qemu-socket", Usage: "unix socket for the QEMU stream netdev, used by both the QEMU and HVI backends (default: --socket plus .qemu)"},
 			&cli.StringFlag{Name: "subnet", Value: "10.87.0.0/24", Usage: "virtual subnet CIDR"},
 			&cli.StringFlag{Name: "gateway-ip", Value: "10.87.0.1", Usage: "gateway IP on the subnet"},
@@ -193,7 +193,11 @@ reset (TCP) or dropped (UDP).`),
 // Keys are only ever added. A caller reads a missing key as false.
 type gatewayCapabilities struct {
 	// API is --api, the HTTP socket for the probe, the leases, /forwards and
-	// /diverts.
+	// /diverts. A gateway of this build also serves /members there, which
+	// has no key of its own: a caller asks it of a gateway already running,
+	// which an older hull may have started, so a key for this binary could
+	// say yes to a gateway that answers 404. A caller reads that 404 as no
+	// /members.
 	API bool `json:"api"`
 	// EgressDefault is --egress-default and the egress policy it turns on.
 	EgressDefault bool `json:"egressDefault"`
@@ -341,6 +345,7 @@ func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, ga
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(vn.Diverts())
 		})
+		mux.Handle("GET /members", membersHandler(vn))
 		srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 		go func() { _ = srv.Serve(apiL) }()
 	}
@@ -430,6 +435,22 @@ func runGateway(ctx context.Context, sockPath, apiPath, qemuSockPath, subnet, ga
 		}
 		go handleGatewayMember(ctx, vn, conn.(*net.UnixConn))
 	}
+}
+
+// memberLister is what membersHandler asks of the gateway, so a test can
+// stand in for a netgw.Network.
+type memberLister interface {
+	Members() []netgw.Member
+}
+
+// membersHandler answers GET /members with the guests on the gateway, which
+// a caller that shares one gateway between guests reads to tell whether it
+// can stop it. The process table cannot answer that; netgw.Member says why.
+func membersHandler(src memberLister) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(src.Members())
+	})
 }
 
 // handleGatewayMember receives the member's datagram socket via SCM_RIGHTS

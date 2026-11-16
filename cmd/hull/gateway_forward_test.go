@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/brig-sh/hull/internal/netgw"
 )
@@ -235,5 +236,33 @@ func TestForwardsAPIDefaultsToTCP(t *testing.T) {
 	}
 	if w := call(t, h, http.MethodDelete, "/forwards?local="+local, ""); w.Code != http.StatusOK {
 		t.Fatalf("DELETE: %d %s", w.Code, w.Body)
+	}
+}
+
+// fakeMembers is a gateway's members without a gateway, for the reason
+// fakeForwards gives.
+type fakeMembers []netgw.Member
+
+func (f fakeMembers) Members() []netgw.Member { return f }
+
+// GET /members answers the members as JSON, and other methods are refused,
+// since the list is the gateway's to keep.
+func TestMembersAPIListsTheGuests(t *testing.T) {
+	joined := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	mux := http.NewServeMux()
+	mux.Handle("GET /members", membersHandler(fakeMembers{{Transport: "qemu", JoinedAt: joined}}))
+
+	w := call(t, mux, http.MethodGet, "/members", "")
+	if w.Code != http.StatusOK || w.Header().Get("Content-Type") != "application/json" {
+		t.Fatalf("GET /members = %d %q", w.Code, w.Header().Get("Content-Type"))
+	}
+	want := `[{"transport":"qemu","joinedAt":"2026-11-16T12:00:00Z"}]`
+	got := strings.TrimSpace(w.Body.String())
+	if got != want {
+		t.Errorf("GET /members = %s, want %s", got, want)
+	}
+	w = call(t, mux, http.MethodPost, "/members", "{}")
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("POST /members = %d, want 405", w.Code)
 	}
 }

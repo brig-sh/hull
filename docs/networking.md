@@ -231,6 +231,34 @@ This is the one thing about a running gateway that can change. The subnet and
 the egress rules are read once at startup, so changing either means restarting
 the gateway, which drops every member of its network.
 
+### Who is on a gateway
+
+With `--api`, `GET /members` lists the guests the gateway is serving, longest
+served first:
+
+```bash
+curl --unix-socket /tmp/gw.api http://gw/members
+# [{"transport":"qemu","joinedAt":"2026-11-16T12:00:00.123456789+02:00"}]
+```
+
+`transport` is how the guest joined: `vfkit` for vz, which hands over a
+datagram socket on the control socket, and `qemu` for hvi and qemu, which
+connect to the QEMU socket. A gateway with no guests answers `[]`. A caller
+that shares one gateway between guests reads this to tell whether it can stop
+it. The process table cannot tell it: vz-runner holds its connection as an
+inherited descriptor and names no socket, and on Linux urunc gives hvi the
+socket at the same path inside its own root for every gateway.
+
+A guest is listed from the moment the gateway takes its connection until the
+connection closes, and for vz until the control connection, which vz-runner
+holds for its lifetime, closes. A wedged qemu or hvi that holds its
+connection open stays listed, as it stays in the switch. A `hull run` that has started a VMM which has
+not connected yet has no entry, so a caller that boots guests on the gateway
+has to account for a boot in flight itself. The list says how many guests
+there are and how each joined, not which instance each one is. A gateway
+older than this answers 404, and the answer comes from the running gateway,
+which can be older than the hull on the host.
+
 ### IPv6 is not forwarded
 
 The netstack registers no IPv6 protocol, so a guest's IPv6 frame is counted as
