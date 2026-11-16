@@ -214,10 +214,21 @@ type RunConfig struct {
 	Network *Network
 	// Mounts are added to the spec's, for urunc to take into the guest.
 	Mounts []specs.Mount
-	// CheckStarted, when not nil, is called once the task has started, with
-	// the process ID of its process. An error fails the run, which then
-	// removes the instance, as a start that fails does.
-	CheckStarted func(ctx context.Context, pid uint32) error
+	// CheckStarted, when not nil, is called once the task has started. An
+	// error fails the run, which then removes the instance, as a start that
+	// fails does.
+	CheckStarted func(ctx context.Context, task client.Task) error
+	// Lock, when not nil, is the lock the caller holds over CreateInstance
+	// to keep other runs and removals of the name out. CreateInstance
+	// releases it while CheckStarted runs and holds it again when it
+	// returns.
+	Lock Locker
+}
+
+// Locker is a lock CreateInstance can release and take again.
+type Locker interface {
+	Lock() error
+	Unlock()
 }
 
 // afterCreate runs between CreateInstance's create of the container and its
@@ -355,13 +366,18 @@ func CreateInstance(ctx context.Context, c *client.Client, image RunImage, cfg R
 		}
 		return err
 	}
+	// What a failed run's cleanup leaves alone, as checkStarted finds it.
+	var keep kept
 	defer func() {
-		if err != nil {
+		if err != nil && !keep.instance {
 			// The run's own context may be what ended it.
 			cleanup := context.WithoutCancel(ctx)
 			derr := ctr.Delete(cleanup, client.WithSnapshotCleanup)
 			if derr != nil {
 				err = errors.Join(err, fmt.Errorf("remove the container %s of %s: %w", ctr.ID(), cfg.Name, derr))
+			}
+			if keep.files {
+				return
 			}
 			derr = os.Remove(cfg.LogFile)
 			if derr != nil && !errors.Is(derr, os.ErrNotExist) {
@@ -402,7 +418,7 @@ func CreateInstance(ctx context.Context, c *client.Client, image RunImage, cfg R
 		return err
 	}
 	defer func() {
-		if err != nil {
+		if err != nil && !keep.instance {
 			_, derr := task.Delete(context.WithoutCancel(ctx), client.WithProcessKill)
 			if derr != nil {
 				err = errors.Join(err, fmt.Errorf("remove the task of %s: %w", cfg.Name, derr))
@@ -414,12 +430,67 @@ func CreateInstance(ctx context.Context, c *client.Client, image RunImage, cfg R
 		return fmt.Errorf("start %s: %w", cfg.Name, err)
 	}
 	if cfg.CheckStarted != nil {
-		err = cfg.CheckStarted(ctx, task.Pid())
+		exists := func(ctx context.Context) (bool, error) {
+			_, err := ctr.Info(ctx)
+			if errdefs.IsNotFound(err) {
+				return false, nil
+			}
+			return err == nil, err
+		}
+		keep, err = checkStarted(ctx, cfg, task, exists)
 		if err != nil {
 			return fmt.Errorf("start %s: %w", cfg.Name, err)
 		}
 	}
 	return nil
+}
+
+// kept is what the cleanup of a run that failed after its start must leave
+// alone.
+type kept struct {
+	// instance is set when the container is gone already, so there is no
+	// task or container of this run to remove, and files is set with it.
+	instance bool
+	// files is set when the log and network files at the run's paths may
+	// be another run's.
+	files bool
+}
+
+// checkStarted runs cfg.CheckStarted with cfg.Lock released. The check
+// waits for urunc to start the monitor, which takes up to a minute when
+// urunc copies a large root filesystem first, and the caller's lock is one
+// per namespace: held, it would keep every other run and removal in the
+// namespace waiting that long, and runs started together would boot one
+// after another.
+//
+// With the lock released, hull rm can remove the instance, and a new run
+// can then take its name and its log path. So checkStarted takes the lock
+// again before it returns, and asks exists whether the container is still
+// there. A container that is gone was removed by someone else, along with
+// its log and network files, and what is at their paths now is a new
+// run's. A lock it cannot take again, or a containerd that cannot say
+// whether the container is there, leaves it unable to tell, so the cleanup
+// removes the container, whose ID is this run's alone, and no files.
+func checkStarted(ctx context.Context, cfg RunConfig, task client.Task,
+	exists func(context.Context) (bool, error)) (kept, error) {
+	if cfg.Lock == nil {
+		return kept{}, cfg.CheckStarted(ctx, task)
+	}
+	cfg.Lock.Unlock()
+	err := cfg.CheckStarted(ctx, task)
+	lerr := cfg.Lock.Lock()
+	if lerr != nil {
+		return kept{files: true}, errors.Join(err, fmt.Errorf("take the lock on %s again: %w", cfg.Name, lerr))
+	}
+	there, xerr := exists(context.WithoutCancel(ctx))
+	if xerr != nil {
+		return kept{files: true}, errors.Join(err, xerr)
+	}
+	if !there {
+		return kept{instance: true, files: true}, errors.Join(err,
+			fmt.Errorf("the instance was removed while hull run checked that it booted"))
+	}
+	return kept{}, err
 }
 
 // newContainer creates the container CreateInstance starts.

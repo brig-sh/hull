@@ -26,6 +26,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/pkg/identifiers"
 	"github.com/containerd/errdefs"
 	"github.com/urfave/cli/v3"
@@ -229,7 +230,6 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 			return err
 		}
 	}
-	var checkStarted func(ctx context.Context, pid uint32) error
 	if onGateway {
 		err = checkGatewayMonitor(backend)
 		if err != nil {
@@ -237,9 +237,9 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 		}
 		warnGatewayUser(cmd.ErrWriter, image.Config, annotations[containerd.NetSocketAnnotation],
 			containerd.RootlessKitStateDir() != "")
-		checkStarted = func(ctx context.Context, pid uint32) error {
-			return checkJoinedGateway(ctx, cmd.ErrWriter, pid)
-		}
+	}
+	checkStarted := func(ctx context.Context, task client.Task) error {
+		return checkBooted(ctx, task, backend, onGateway)
 	}
 	err = absBootFiles(annotations)
 	if err != nil {
@@ -254,11 +254,12 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	if err != nil {
 		return err
 	}
-	unlock, err := lockLogDir(filepath.Dir(logFile))
+	lock := &logDirLock{dir: filepath.Dir(logFile)}
+	err = lock.Lock()
 	if err != nil {
 		return err
 	}
-	defer unlock()
+	defer lock.Unlock()
 	err = createInstance(ctx, c, image, containerd.RunConfig{
 		Name:         name,
 		Args:         args.Tail(),
@@ -272,6 +273,7 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 		Network:      network,
 		Mounts:       mounts,
 		CheckStarted: checkStarted,
+		Lock:         lock,
 	})
 	if errdefs.IsAlreadyExists(err) {
 		return fmt.Errorf("%w: %s", store.ErrInstanceExists, name)
@@ -444,10 +446,13 @@ var rootLogDir = "/var/log/hull"
 // lockLogDir takes an exclusive lock on dir, a namespace's log directory,
 // and returns what releases it.
 //
-// hull run holds it from creating an instance until the instance's shim
-// has opened its log, and hull rm from removing an instance until its log
-// is gone. A run of a name whose old instance rm has removed, but whose old
-// log it has not, would otherwise have its new log deleted by that rm. It
+// hull run holds it from creating an instance until the instance's task
+// has started, which is after its shim has opened its log, and again from
+// the end of its check that the task booted a VM until it returns; it lets
+// go during the check, which can take a minute. hull rm holds it from
+// removing an instance until its log is gone. A run of a name whose old
+// instance rm has removed, but whose old log it has not, would otherwise
+// have its new log deleted by that rm. It
 // also keeps two runs of one name from both getting past
 // containerd.CreateInstance's first check of the name, after which the
 // second check fails one of them, and often both. The lock is flock(2)'s,
@@ -463,6 +468,30 @@ func lockLogDir(dir string) (unlock func(), err error) {
 		return nil, fmt.Errorf("lock %s: %w", dir, err)
 	}
 	return func() { _ = f.Close() }, nil
+}
+
+// logDirLock is lockLogDir's lock as containerd.CreateInstance releases
+// and takes it again. Unlock does nothing when the lock is not held, so a
+// caller can defer it whether or not a Lock after a release failed.
+type logDirLock struct {
+	dir    string
+	unlock func()
+}
+
+func (l *logDirLock) Lock() error {
+	unlock, err := lockLogDir(l.dir)
+	if err != nil {
+		return err
+	}
+	l.unlock = unlock
+	return nil
+}
+
+func (l *logDirLock) Unlock() {
+	if l.unlock != nil {
+		l.unlock()
+		l.unlock = nil
+	}
 }
 
 // instanceLogPath returns where the console of instance id in namespace is

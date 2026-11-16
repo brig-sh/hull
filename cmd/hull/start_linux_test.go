@@ -17,42 +17,93 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io/fs"
 	"os/exec"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
+
+	"github.com/containerd/containerd/v2/client"
+
+	"github.com/brig-sh/hull/internal/containerd"
 )
 
-// A gateway run fails when urunc started hvi without --net-gateway, as a
-// urunc that ignores the gateway's annotations does, and waits for urunc to
-// exec hvi first.
-func TestCheckJoinedGateway(t *testing.T) {
-	old, oldTimeout := procCmdline, gatewayJoinTimeout
-	t.Cleanup(func() { procCmdline, gatewayJoinTimeout = old, oldTimeout })
-	gatewayJoinTimeout = 200 * time.Millisecond
-	urunc := []string{"urunc", "--root", "/run/urunc", "reexec"}
+// fakeTask is a started task whose status reads as statuses, one per ask,
+// the last one repeated.
+type fakeTask struct {
+	statuses []client.ProcessStatus
+	err      error
+	asked    int
+}
+
+func (f *fakeTask) Pid() uint32 { return 4242 }
+
+func (f *fakeTask) Status(context.Context) (client.Status, error) {
+	if f.err != nil {
+		return client.Status{}, f.err
+	}
+	i := min(f.asked, len(f.statuses)-1)
+	f.asked++
+	return client.Status{Status: f.statuses[i]}, nil
+}
+
+// A run passes once urunc has exec'd the run's monitor, and fails at once
+// when the task is any other program, which a shim that runs runc leaves
+// there in place of a VM.
+func TestCheckBooted(t *testing.T) {
+	old, oldTimeout, oldGrace := procCmdline, bootTimeout, hiddenGrace
+	t.Cleanup(func() { procCmdline, bootTimeout, hiddenGrace = old, oldTimeout, oldGrace })
+	urunc := []string{"urunc", "--root", "/run/containerd/runc/hull", "create", "--bundle", "/b", "--reexec", "id"}
+	libcontainer := []string{"/proc/self/exe", "monitor", "id"}
+	hvi := []string{"/opt/brig/bin/hvi", "boot", "--net-tap", "tap0_urunc"}
 	joined := []string{"/opt/brig/bin/hvi", "boot", "--net-gateway", "/urunc-net/gateway.sock", "--net-mac", "16:1f:43:50:64:d3"}
-	tap := []string{"/opt/brig/bin/hvi", "boot", "--net-tap", "tap0_urunc"}
+	qemu := []string{"/usr/bin/qemu-system-x86_64", "-m", "256M"}
+	image := []string{"sleep", "infinity"}
+	runcInit := []string{"runc", "init"}
+	running := []client.ProcessStatus{client.Running}
 	for _, tc := range []struct {
-		name    string
-		seen    [][]string
-		err     error
-		want    string
-		warning string
+		name     string
+		monitor  string
+		gateway  bool
+		seen     [][]string
+		err      error
+		statuses []client.ProcessStatus
+		statErr  error
+		// short is set by a case that needs bootTimeout or hiddenGrace to
+		// run out, and only then are they short. Every other case gets a
+		// minute, so its reads never race either bound, however slowly a
+		// loaded machine under -race polls.
+		short bool
+		want  string
 	}{
-		{name: "hvi joined", seen: [][]string{urunc, urunc, joined}},
-		{name: "hvi on a tap", seen: [][]string{urunc, tap}, want: "urunc started hvi without --net-gateway"},
-		// A zombie's cmdline is empty.
+		{name: "hvi started", seen: [][]string{urunc, urunc, hvi}},
+		{name: "through libcontainer", seen: [][]string{libcontainer, hvi}},
+		// The command line reads empty while the process is mid-exec.
+		{name: "caught mid-exec", seen: [][]string{{""}, hvi}},
+		{name: "qemu of the host's architecture", monitor: "qemu", seen: [][]string{urunc, qemu}},
+		{name: "the image under runc", seen: [][]string{image}, want: "the task runs sleep, where urunc runs hvi"},
+		{name: "runc's init", seen: [][]string{runcInit}, want: "the task runs runc, where urunc runs hvi"},
+		{name: "urunc handed it to runc", seen: [][]string{urunc, runcInit}, want: "the task runs runc"},
+		{name: "another monitor", seen: [][]string{urunc, qemu}, want: "the task runs /usr/bin/qemu-system-x86_64, where urunc runs hvi"},
+		{name: "a bare qemu prefix", monitor: "qemu", seen: [][]string{{"qemu-system-"}}, want: "where urunc runs qemu-system-"},
+		{name: "no monitor in time", seen: [][]string{urunc}, short: true, want: "urunc did not start hvi within"},
+		{name: "hvi joined the gateway", gateway: true, seen: [][]string{urunc, joined}},
+		{name: "hvi on a tap of a gateway run", gateway: true, seen: [][]string{urunc, hvi}, want: "urunc started hvi without --net-gateway"},
+		// A zombie's command line is empty, and a reaped process is gone.
 		{name: "the task ended", seen: [][]string{urunc, {""}}, err: fs.ErrNotExist},
+		{name: "the task ended before the first read", err: fs.ErrNotExist, statuses: []client.ProcessStatus{client.Stopped}},
+		{name: "the task reaped mid-read", seen: [][]string{urunc}, err: &fs.PathError{Op: "read", Path: "/proc/4242/cmdline", Err: syscall.ESRCH}},
+		{name: "containerd records the exit late", err: fs.ErrNotExist,
+			statuses: []client.ProcessStatus{client.Running, client.Running, client.Stopped}},
 		// hidepid=invisible, or a containerd in another PID namespace.
-		{name: "the task never seen", err: fs.ErrNotExist, warning: "hull cannot see the task's process 4242"},
-		{name: "no hvi in time", seen: [][]string{urunc}, warning: "urunc did not start hvi within"},
-		{name: "no /proc access", seen: [][]string{urunc}, err: fs.ErrPermission, warning: "cannot tell whether hvi joined"},
+		{name: "the task hidden", err: fs.ErrNotExist, statuses: running, short: true, want: "hull cannot see the task's process 4242, which containerd reports running"},
+		{name: "containerd does not answer", err: fs.ErrNotExist, statErr: errors.New("ttrpc: closed"), want: "ttrpc: closed"},
+		{name: "no /proc access", seen: [][]string{urunc}, err: fs.ErrPermission, want: "read the command line of the task's process 4242"},
+		{name: "an unknown monitor", monitor: "vz", seen: [][]string{urunc}, want: `the monitor "vz"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := 0
@@ -69,18 +120,36 @@ func TestCheckJoinedGateway(t *testing.T) {
 				}
 				return tc.seen[calls-1], nil
 			}
-			var out bytes.Buffer
-			err := checkJoinedGateway(context.Background(), &out, 4242)
+			monitor := tc.monitor
+			if monitor == "" {
+				monitor = "hvi"
+			}
+			bootTimeout, hiddenGrace = time.Minute, time.Minute
+			if tc.short {
+				bootTimeout, hiddenGrace = 200*time.Millisecond, 100*time.Millisecond
+			}
+			task := &fakeTask{statuses: tc.statuses, err: tc.statErr}
+			if task.statuses == nil {
+				task.statuses = running
+			}
+			err := checkBooted(context.Background(), task, monitor, tc.gateway)
 			if tc.want == "" && err != nil {
 				t.Errorf("error = %v, want none", err)
 			}
 			if tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
 				t.Errorf("error = %v, want %q", err, tc.want)
 			}
-			if !strings.Contains(out.String(), tc.warning) || (tc.warning == "" && out.Len() != 0) {
-				t.Errorf("warned %q, want %q", out.String(), tc.warning)
-			}
 		})
+	}
+}
+
+// Every monitor hull lets a run name has a program checkBooted waits for,
+// or every run on it would fail.
+func TestMonitorBinariesCoverTheMonitors(t *testing.T) {
+	for _, m := range containerd.Monitors {
+		if monitorBinaries[m] == "" {
+			t.Errorf("monitor %s has no program in monitorBinaries", m)
+		}
 	}
 }
 
@@ -103,7 +172,7 @@ func TestProcCmdline(t *testing.T) {
 	})
 	// Start returns once the child has begun to exec, which can be before
 	// the kernel has set up the new program's arguments: the command line
-	// reads empty until then. checkJoinedGateway polls past it the same way.
+	// reads empty until then. checkBooted polls past it the same way.
 	var got []string
 	deadline := time.Now().Add(5 * time.Second)
 	for {
