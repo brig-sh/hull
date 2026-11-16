@@ -45,8 +45,9 @@ const uruncPrefix = "com.urunc.unikernel."
 // key, an empty value standing for an unset one, as urunc reads it, so
 // nothing is left for the shim to fill in.
 //
-// internal/urunckeys, a module that requires the bundle's urunc, checks
-// this list and hostKeys against it, through its keys.json.
+// internal/urunckeys, a module that requires the urunc the bundle ships
+// with this hull, checks this list and hostKeys against it, through its
+// keys.json.
 var uruncKeys = []string{
 	ociclient.UnikernelTypeAnnotation,
 	"com.urunc.unikernel.unikernelVersion",
