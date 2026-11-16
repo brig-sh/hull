@@ -238,9 +238,6 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 		warnGatewayUser(cmd.ErrWriter, image.Config, annotations[containerd.NetSocketAnnotation],
 			containerd.RootlessKitStateDir() != "")
 	}
-	checkStarted := func(ctx context.Context, task client.Task) error {
-		return checkBooted(ctx, task, backend, onGateway)
-	}
 	err = absBootFiles(annotations)
 	if err != nil {
 		return err
@@ -260,6 +257,13 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 	defer lock.Unlock()
+	var booted []string
+	checkStarted := func(ctx context.Context, task client.Task) error {
+		var err error
+		booted, err = checkBooted(ctx, task, backend, onGateway)
+		return err
+	}
+	cmdLineFile, cmdLineTmp := cmdLineFilesOf(logFile)
 	err = createInstance(ctx, c, image, containerd.RunConfig{
 		Name:         name,
 		Args:         args.Tail(),
@@ -274,6 +278,10 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 		Mounts:       mounts,
 		CheckStarted: checkStarted,
 		Lock:         lock,
+		// The arguments an earlier instance of the name left go once the
+		// name is this instance's: a task that ends before urunc starts
+		// the monitor leaves none to replace them with.
+		Files: []string{cmdLineFile, cmdLineTmp},
 	})
 	if errdefs.IsAlreadyExists(err) {
 		return fmt.Errorf("%w: %s", store.ErrInstanceExists, name)
@@ -285,6 +293,15 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	}
 	if err != nil {
 		return err
+	}
+	// createInstance returns with the lock held again and the name still
+	// this instance's, so the record cannot land on a later run's.
+	if booted != nil {
+		err = recordCmdLine(cmdLineFile, cmdLineTmp, booted)
+		if err != nil {
+			_, _ = fmt.Fprintf(cmd.ErrWriter, "warning: could not record the monitor's command line, so hull inspect "+
+				"shows none for %s: %v\n", name, err)
+		}
 	}
 	_, err = fmt.Fprintln(cmd.Writer, name)
 	return err

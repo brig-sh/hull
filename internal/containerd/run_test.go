@@ -372,10 +372,16 @@ func TestCreateInstanceRemovesAContainerWhoseTaskFails(t *testing.T) {
 	}
 	// urunc refuses a boot initrd without a boot kernel, and a daemon
 	// without urunc's shim, such as CI's, cannot create the task at all, so
-	// the task fails on either. A log left by an earlier instance of the
-	// name is there too, and goes.
-	logFile := filepath.Join(t.TempDir(), "vm.log")
+	// the task fails on either. A log and a file of the caller's left by an
+	// earlier instance of the name are there too, and go.
+	dir := t.TempDir()
+	logFile := filepath.Join(dir, "vm.log")
 	err = os.WriteFile(logFile, []byte("an earlier instance's console\n"), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := filepath.Join(dir, "vm.cmdline")
+	err = os.WriteFile(record, []byte(`["/earlier/hvi"]`), 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -388,14 +394,17 @@ func TestCreateInstanceRemovesAContainerWhoseTaskFails(t *testing.T) {
 			ociclient.HypervisorAnnotation:    "cloud-hypervisor",
 		},
 		LogFile: logFile,
+		Files:   []string{record},
 	})
 	if err == nil {
 		t.Fatal("CreateInstance started a task with a boot initrd and no kernel")
 	}
 	assertNoContainer(ctx, t, c, "vm")
-	_, err = os.Stat(logFile)
-	if !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("log %s: error = %v, want it removed", logFile, err)
+	for _, f := range []string{logFile, record} {
+		_, err = os.Stat(f)
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s: error = %v, want it removed", f, err)
+		}
 	}
 	assertNoActiveSnapshot(ctx, t, c)
 }

@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/containerd/errdefs"
 	"github.com/urfave/cli/v3"
@@ -39,7 +40,8 @@ func inspectCommand() *cli.Command {
 
 // inspectInstance prints the record instanceRecord builds for one
 // container, in the JSON form macOS prints. The fields containerd has no
-// counterpart for, such as cmdLine and logFile, are empty.
+// counterpart for, such as logFile, are empty. cmdLine is the monitor's
+// command line, which hull run records when it sees the monitor start.
 func inspectInstance(ctx context.Context, cmd *cli.Command) error {
 	args := cmd.Args()
 	if args.Len() == 0 {
@@ -69,6 +71,16 @@ func inspectInstance(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 	rec := instanceRecord(inst)
-	withNetworkAddress(rec, containerd.ResolveNamespace(cmd.String("namespace")))
+	namespace := containerd.ResolveNamespace(cmd.String("namespace"))
+	withNetworkAddress(rec, namespace)
+	// The path hull run computes for this name, not one a label names, as
+	// rm finds the log.
+	logFile, err := instanceLogPath(namespace, instanceID)
+	if err == nil {
+		rec.CmdLine, err = readCmdLine(cmdLineFileOf(logFile))
+	}
+	if err != nil {
+		_, _ = fmt.Fprintf(cmd.ErrWriter, "warning: cannot read the command line of %s: %v\n", instanceID, err)
+	}
 	return printJSON(cmd.Writer, rec)
 }

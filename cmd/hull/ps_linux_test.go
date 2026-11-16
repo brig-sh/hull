@@ -23,6 +23,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -624,5 +625,109 @@ func TestRemoveLeavesTheDetachToTheRuntime(t *testing.T) {
 	_, err = os.Stat(filepath.Join(out, "args"))
 	if !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("rm ran the hook after the runtime had: %v", err)
+	}
+}
+
+// inspect prints the monitor's arguments run recorded as cmdLine, as macOS
+// prints the VMM's command line, and rm removes the record with the log.
+func TestInspectPrintsTheRecordedCmdLine(t *testing.T) {
+	privateLogDirs(t)
+	f := newInstanceFixture(t)
+	ctx := context.Background()
+	ctr, err := f.c.NewContainer(ctx, "ctr-vm", client.WithSpec(&oci.Spec{}),
+		client.WithContainerLabels(map[string]string{containerd.LabelName: "vm"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ctr.Delete(ctx) })
+	cmdLineOf := func() []string {
+		t.Helper()
+		out, err := f.run(f.ns, "inspect", "vm")
+		if err != nil {
+			t.Fatalf("inspect vm: %v", err)
+		}
+		var rec struct {
+			CmdLine []string `json:"cmdLine"`
+		}
+		err = json.Unmarshal([]byte(out), &rec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rec.CmdLine
+	}
+	got := cmdLineOf()
+	if got != nil {
+		t.Errorf("cmdLine with no record = %q, want null", got)
+	}
+
+	logFile, err := instanceLogFile(f.ns, "vm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hvi := []string{"/opt/brig/bin/hvi", "boot", "--mem-mib", "768", "--cpus", "2"}
+	record, tmp := cmdLineFilesOf(logFile)
+	err = recordCmdLine(record, tmp, hvi)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = cmdLineOf()
+	if !slices.Equal(got, hvi) {
+		t.Errorf("cmdLine = %q, want %q", got, hvi)
+	}
+
+	// The temporary file a run killed before its rename leaves goes too.
+	err = os.WriteFile(tmp, []byte(`["/opt/brig/bin/h`), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.run(f.ns, "rm", "vm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{record, tmp} {
+		_, err = os.Stat(path)
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s after rm: %v, want it removed", path, err)
+		}
+	}
+}
+
+// A command line record rm cannot remove does not keep it from removing the
+// network files beside it.
+func TestRemoveGoesOnPastARecordItCannotRemove(t *testing.T) {
+	privateLogDirs(t)
+	f := newInstanceFixture(t)
+	ctx := context.Background()
+	ctr, err := f.c.NewContainer(ctx, "ctr-vm", client.WithSpec(&oci.Spec{}),
+		client.WithContainerLabels(map[string]string{containerd.LabelName: "vm"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ctr.Delete(ctx) })
+	logFile, err := instanceLogFile(f.ns, "vm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A directory that is not empty stands in for a record os.Remove fails
+	// on with something other than "not found".
+	record := cmdLineFileOf(logFile)
+	err = os.MkdirAll(filepath.Join(record, "x"), 0o700)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(record) })
+	netDir := netDirOf(logFile)
+	err = os.MkdirAll(netDir, 0o700)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = f.run(f.ns, "rm", "vm")
+	if err == nil || !strings.Contains(err.Error(), "not its command line record") {
+		t.Errorf("rm vm: error = %v, want the record reported", err)
+	}
+	_, err = os.Stat(netDir)
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("network directory: error = %v, want it removed", err)
 	}
 }

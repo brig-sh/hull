@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -75,7 +76,8 @@ type startedTask interface {
 	Status(ctx context.Context) (client.Status, error)
 }
 
-// checkBooted fails a run whose task is not the VM it asked for. The shim
+// checkBooted fails a run whose task is not the VM it asked for, and returns
+// the monitor's arguments once it has seen them. The shim
 // of urunc's runtime runs whatever OCI runtime it was built to run, and a
 // shim that runs runc runs the image as an ordinary container on the
 // host's kernel: containerd reports the task running, and nothing else
@@ -108,10 +110,10 @@ type startedTask interface {
 // under a shim that runs runc an image whose command exits at once passes
 // too. In another PID namespace the pid can also name an unrelated process
 // of hull's, which fails the run as a program other than the monitor.
-func checkBooted(ctx context.Context, task startedTask, monitor string, gateway bool) error {
+func checkBooted(ctx context.Context, task startedTask, monitor string, gateway bool) ([]string, error) {
 	binary, ok := monitorBinaries[monitor]
 	if !ok {
-		return fmt.Errorf("hull does not know the program urunc runs as the monitor %q, so it cannot tell "+
+		return nil, fmt.Errorf("hull does not know the program urunc runs as the monitor %q, so it cannot tell "+
 			"whether a VM booted", monitor)
 	}
 	pid := task.Pid()
@@ -125,27 +127,27 @@ func checkBooted(ctx context.Context, task startedTask, monitor string, gateway 
 		// fails the read with ESRCH rather than ENOENT, and is gone too.
 		case errors.Is(err, fs.ErrNotExist), errors.Is(err, syscall.ESRCH):
 			if seen {
-				return nil
+				return nil, nil
 			}
 			if hiddenSince.IsZero() {
 				hiddenSince = time.Now()
 			}
 			status, err := task.Status(ctx)
 			if err != nil {
-				return fmt.Errorf("ask containerd about the task's process %d, which /proc does not show: %w", pid, err)
+				return nil, fmt.Errorf("ask containerd about the task's process %d, which /proc does not show: %w", pid, err)
 			}
 			if status.Status == client.Stopped {
-				return nil
+				return nil, nil
 			}
 			if time.Since(hiddenSince) > hiddenGrace {
-				return fmt.Errorf("hull cannot see the task's process %d, which containerd reports %s, so it "+
+				return nil, fmt.Errorf("hull cannot see the task's process %d, which containerd reports %s, so it "+
 					"cannot tell whether urunc started a VM: /proc hides the process from hull when it is "+
 					"mounted with hidepid and the task runs as another user, or when containerd runs in "+
 					"another PID namespace, such as rootlesskit's --pidns. The instance is removed",
 					pid, status.Status)
 			}
 		case err != nil:
-			return fmt.Errorf("read the command line of the task's process %d, to tell whether urunc "+
+			return nil, fmt.Errorf("read the command line of the task's process %d, to tell whether urunc "+
 				"started a VM: %w. The instance is removed", pid, err)
 		default:
 			seen = true
@@ -153,26 +155,26 @@ func checkBooted(ctx context.Context, task startedTask, monitor string, gateway 
 			switch {
 			case isMonitor(name, binary):
 				if gateway && !slices.Contains(args[1:], "--net-gateway") {
-					return errors.New("urunc started hvi without --net-gateway, so the guest has no network: " +
+					return nil, errors.New("urunc started hvi without --net-gateway, so the guest has no network: " +
 						"the shim's urunc does not read the gateway's annotations, which takes " +
 						"urunc-dev/urunc@5c6bc70. The instance is removed")
 				}
-				return nil
+				return args, nil
 			case args[0] == "", name == "urunc", args[0] == "/proc/self/exe":
 			default:
-				return fmt.Errorf("the task runs %s, where urunc runs %s, so no VM booted: the "+
+				return nil, fmt.Errorf("the task runs %s, where urunc runs %s, so no VM booted: the "+
 					"containerd shim of urunc's runtime ran another OCI runtime, such as runc, which runs "+
 					"the image as an ordinary container on the host's kernel. The instance is removed",
 					args[0], binary)
 			}
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("urunc did not start %s within %s, so hull cannot tell whether a VM booted. "+
+			return nil, fmt.Errorf("urunc did not start %s within %s, so hull cannot tell whether a VM booted. "+
 				"The instance is removed", binary, bootTimeout)
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil, ctx.Err()
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
@@ -185,4 +187,83 @@ func isMonitor(name, binary string) bool {
 		return strings.HasPrefix(name, binary) && len(name) > len(binary)
 	}
 	return name == binary
+}
+
+// cmdLineFileOf returns the file that keeps the monitor's arguments of the
+// instance whose log is logFile. It sits beside the log, as netDirOf's
+// directory does, so rm, which locks the log's directory, removes it under
+// the same lock.
+func cmdLineFileOf(logFile string) string {
+	return strings.TrimSuffix(logFile, ".log") + ".cmdline"
+}
+
+// cmdLineFilesOf returns the record of the instance whose log is logFile and
+// the temporary file recordCmdLine writes it through, which a hull run
+// killed between the write and the rename leaves behind. Both are removed
+// together.
+//
+// The temporary file's name is fixed rather than random, so a later run of
+// the name and hull rm can find it: hull run writes the record under the
+// log directory's lock, so no two writers share it, and a name that ends in
+// .cmdline.tmp is no other instance's log, record or network directory.
+// Matching a pattern instead would reach other instances' files, since a
+// name may hold dots.
+func cmdLineFilesOf(logFile string) (record, tmp string) {
+	record = cmdLineFileOf(logFile)
+	return record, record + ".tmp"
+}
+
+// recordCmdLine keeps args, the arguments checkBooted saw the monitor start
+// with, for hull inspect to print as cmdLine. That is what macOS hull records
+// there, the VMM's command line, and what brig reads a guest's memory and
+// vCPUs from. On Linux urunc builds those arguments, so hull learns them
+// only from the process. They are written to tmp and renamed to path, so a
+// reader never sees half of them. The caller must hold the lock that keeps
+// other writers of tmp out.
+func recordCmdLine(path, tmp string, args []string) error {
+	data, err := json.Marshal(args)
+	if err != nil {
+		return err
+	}
+	// A file a killed run left at tmp goes first, so the record is created
+	// afresh, readable only by its owner as the guest's kernel command line
+	// should be, and never written through whatever the old one was.
+	err = os.Remove(tmp)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(data)
+	closeErr := f.Close()
+	if err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = os.Rename(tmp, path)
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+	}
+	return err
+}
+
+// readCmdLine returns what recordCmdLine kept at path, and nil when it kept
+// nothing there.
+func readCmdLine(path string) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var args []string
+	err = json.Unmarshal(data, &args)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	return args, nil
 }

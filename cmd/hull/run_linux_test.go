@@ -22,9 +22,11 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -664,5 +666,69 @@ func TestRunPassesTheEnvironment(t *testing.T) {
 	want := []string{"A=flag", "B=file", "C=x,y"}
 	if !reflect.DeepEqual(cfg.Env, want) {
 		t.Errorf("env = %q, want %q", cfg.Env, want)
+	}
+}
+
+// startedStub is a started task as checkBooted asks of one. The rest of
+// client.Task is left nil, since the check calls nothing else.
+type startedStub struct {
+	client.Task
+	f *fakeTask
+}
+
+func (s startedStub) Pid() uint32 { return s.f.Pid() }
+
+func (s startedStub) Status(ctx context.Context) (client.Status, error) { return s.f.Status(ctx) }
+
+// A run records the monitor's arguments its check saw, for hull inspect,
+// once its instance is created. It hands CreateInstance the record's path
+// among its files, so the record an earlier instance of the name left goes
+// once the name is this run's, and a task that ended before urunc started
+// the monitor leaves none.
+func TestRunRecordsTheMonitorsCmdLine(t *testing.T) {
+	privateLogDirs(t)
+	f := newInstanceFixture(t)
+	logFile, err := instanceLogPath(f.ns, "vm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, tmp := cmdLineFilesOf(logFile)
+	oldCmdline, oldCreate := procCmdline, createInstance
+	t.Cleanup(func() { procCmdline, createInstance = oldCmdline, oldCreate })
+	var status client.ProcessStatus
+	createInstance = func(ctx context.Context, _ *client.Client, _ containerd.RunImage, cfg containerd.RunConfig) error {
+		if !slices.Contains(cfg.Files, record) || !slices.Contains(cfg.Files, tmp) {
+			t.Errorf("files = %q, want %s and %s among them", cfg.Files, record, tmp)
+		}
+		// CreateInstance removes the files an earlier instance left.
+		for _, f := range cfg.Files {
+			_ = os.Remove(f)
+		}
+		return cfg.CheckStarted(ctx, startedStub{f: &fakeTask{statuses: []client.ProcessStatus{status}}})
+	}
+	run := func() {
+		t.Helper()
+		_, err := f.run(f.ns, append(append([]string{"run", "-d", "--name", "vm", "--hypervisor", "hvi"},
+			bootFileArgs(t)...), containerdtest.TaskImage)...)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	hvi := []string{"/opt/brig/bin/hvi", "boot", "--mem-mib", "768", "--cpus", "2"}
+	procCmdline = func(uint32) ([]string, error) { return hvi, nil }
+	status = client.Running
+	run()
+	got, err := readCmdLine(record)
+	if err != nil || !slices.Equal(got, hvi) {
+		t.Errorf("recorded %q, %v; want %q", got, err, hvi)
+	}
+
+	procCmdline = func(uint32) ([]string, error) { return nil, fs.ErrNotExist }
+	status = client.Stopped
+	run()
+	_, err = os.Stat(record)
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a task that ended before the monitor started: record %s: %v, want none", record, err)
 	}
 }
