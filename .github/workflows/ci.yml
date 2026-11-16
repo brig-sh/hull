@@ -314,8 +314,15 @@ jobs:
           "$dir/bin/ctr" --address "$dir/containerd.sock" version
           echo "HULL_TEST_CONTAINERD_ADDRESS=$dir/containerd.sock" >> "$GITHUB_ENV"
 
+      # cmd/hull's daemon tests run about ten times slower on the arm64
+      # runner than on amd64, which puts that package close to go test's
+      # default bound of 10m per package. -timeout raises the bound for each
+      # package's test binary. timeout-minutes bounds the step's wall clock
+      # across the whole ./... run, so a test that hangs still fails the job
+      # long before the runner's own six hours.
       - name: Unit tests
-        run: go test -count=1 -race ./...
+        timeout-minutes: 30
+        run: go test -count=1 -race -timeout=20m ./...
 
       - name: containerd log
         if: failure()
