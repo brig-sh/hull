@@ -155,7 +155,7 @@ func checkBooted(ctx context.Context, task startedTask, monitor string, gateway 
 				if gateway && !slices.Contains(args[1:], "--net-gateway") {
 					return errors.New("urunc started hvi without --net-gateway, so the guest has no network: " +
 						"the shim's urunc does not read the gateway's annotations, which takes " +
-						"urunc-dev/urunc@034929e. The instance is removed")
+						"urunc-dev/urunc@5c6bc70. The instance is removed")
 				}
 				return nil
 			case args[0] == "", name == "urunc", args[0] == "/proc/self/exe":

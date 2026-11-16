@@ -558,11 +558,18 @@ ways:
     both.
   - It needs a urunc that reads the `com.urunc.unikernel.netSocket`,
     `netAddress` and `netGateway` annotations, which hull sets: one with
-    urunc-dev/urunc@034929e. The bundle's urunc, 3c00b69, ignores them and
-    gives hvi a tap instead, so the guest would boot with no network. hull
-    cannot tell which urunc the shim runs before the run, so the check of
-    what urunc started, below, also fails a gateway run whose hvi has no
-    `--net-gateway`.
+    urunc-dev/urunc@5c6bc70, on urunc's `feat/linux-hvi-v050-socket`
+    branch. The bundle's urunc, 3c00b69, ignores them and gives hvi a tap
+    instead, so the guest would boot with no network. hull cannot tell
+    which urunc the shim runs before the run, so the check of what urunc
+    started, below, also fails a gateway run when urunc starts hvi without
+    `--net-gateway`, as that urunc does.
+    It also needs an hvi that takes `--net-gateway` on Linux. hvi
+    0.1.0-rc.2, the newest release and the bundle's, does not know the
+    option; hvi's main branch does. hull does not detect an hvi without it:
+    the check reads only the arguments urunc gave hvi, which hold
+    `--net-gateway` whichever hvi it is, so `hull run` succeeds whatever
+    hvi then does with the option.
   - `hull run` takes the gateway's address to be the first of the subnet
     `--gateway-cidr` names, as on macOS, and does not ask the gateway. A
     gateway started with another `--gateway-ip`, or with a `--subnet` that

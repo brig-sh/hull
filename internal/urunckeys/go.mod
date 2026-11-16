@@ -2,10 +2,12 @@ module github.com/brig-sh/hull/internal/urunckeys
 
 go 1.26.8
 
-// The urunc of the brig-standalone-linux bundle from v0.1.0-rc21, the
-// URUNC_REF of its pins.env. Move it with the bundle, not with the urunc
-// the root go.mod requires for the macOS backends.
-require github.com/urunc-dev/urunc v0.8.2-0.20261029205741-3c00b69ff9ac
+// The urunc the brig-standalone-linux bundle has to ship with this hull:
+// urunc-dev/urunc@5c6bc70, which reads the gateway's annotations, a child
+// of 3c00b69, the URUNC_REF of the bundle's pins.env from v0.1.0-rc21.
+// Move it with the bundle, not with the urunc the root go.mod requires for
+// the macOS backends.
+require github.com/urunc-dev/urunc v0.8.2-0.20261110121113-5c6bc7060d4f
 
 require (
 	cyphar.com/go-pathrs v0.2.6 // indirect
