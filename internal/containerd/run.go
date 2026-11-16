@@ -30,6 +30,7 @@ import (
 	"strings"
 
 	"github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/contrib/seccomp"
 	"github.com/containerd/containerd/v2/core/containers"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/defaults"
@@ -462,6 +463,15 @@ func newContainer(ctx context.Context, c *client.Client, image RunImage, cfg Run
 		oci.WithProcessCwd(process.Cwd),
 		oci.WithUIDGID(process.User.UID, process.User.GID),
 		oci.WithAnnotations(annotations),
+		// urunc reads a spec with no linux.seccomp as an unconfined
+		// container and starts the monitor without its own syscall filter:
+		// hvi gets --no-sandbox, firecracker --no-seccomp. urunc never
+		// applies the profile itself (it clears libcontainer's), so the
+		// profile's presence is what keeps the monitor's filter on.
+		// containerd's default spec has none; nerdctl adds this same
+		// default profile. It allows syscalls by the process's capabilities,
+		// so an option that changes them must come before it.
+		seccomp.WithDefaultProfile(),
 	}
 	if cfg.MemoryMB > 0 {
 		specOpts = append(specOpts, oci.WithMemoryLimit(uint64(cfg.MemoryMB)*1024*1024))
