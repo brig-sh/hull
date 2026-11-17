@@ -441,7 +441,11 @@ them off the host inode, so it can express modes a plain macOS share cannot. A
 read-only `hvi` share answers `EROFS` to every mutation. A writable one supports
 file and directory handles, hard links, atomic renames, timestamps, xattrs, OFD
 advisory locks, allocation, seek, `copy_file_range`, `statx`, `statfs`, FIFOs,
-tmpfiles and Unix sockets. Device nodes are always refused.
+tmpfiles and Unix sockets. Device nodes are always refused. The xattrs leave
+out the `com.apple.` names: the guest cannot list, read, set or remove them,
+so a guest copy of a quarantined file loses its quarantine. hvi's
+[limitations](https://github.com/brig-sh/hvi-vmm/blob/v0.1.0-rc.3/docs/limitations.md)
+page has the detail.
 
 On the `qemu` 9pfs root, hull clears every setuid and setgid bit on purpose.
 `security_model=none` reports the host's ownership to the guest, so a setuid

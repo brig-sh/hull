@@ -1066,9 +1066,10 @@ exec %s "$@"
 				return fmt.Errorf("add resolver to boot initrd: %w", err)
 			}
 		}
-		// Hypervisor.framework exposes the architectural counter but HVI does
-		// not yet emulate a wall-clock RTC. Seed Linux once at boot so TLS and
-		// build tools see a sane clock; it advances normally after this point.
+		// hvi has had a PL031 RTC on the bus since 0.1.0-rc.1, and the guest
+		// kernel builds its driver in, so the seed is most likely redundant.
+		// It stays until a boot without it is tested: TLS and build tools
+		// need a sane clock from the first second.
 		if vmmType == hypervisors.HviVmm {
 			epoch := strconv.FormatInt(time.Now().Unix(), 10) + "\n"
 			if err := initrd.AddFileToInitrd(initrdPath, epoch, "/urunc-epoch"); err != nil {

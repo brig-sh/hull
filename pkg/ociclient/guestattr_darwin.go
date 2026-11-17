@@ -31,11 +31,10 @@ import (
 // ran it. The information is not wrong, it just has nowhere to live -- so it
 // lives here, and hvi's virtio-fs reads it back when it answers the guest.
 //
-// The name and the layout are hvi's, not ours: see HVI_XATTR_LINUX_ATTR and
-// stored_guest_attr in hvi-vmm's src/virtio_fs.rs. Twelve bytes,
-// little-endian, mode then uid then gid. Changing either side alone silently
-// stops the other from reading it, which is why this comment names the file to
-// change with it.
+// The name and the layout are hvi's, not ours: see HVI_XATTR_LINUX_ATTR in
+// hvi-vmm's src/devices/virtio/fs/server.rs. Twelve bytes, little-endian,
+// mode then uid then gid. Changing either side alone silently stops the other
+// from reading it, which is why this comment names the file to change with it.
 const guestAttrXattr = "com.nofire.hvi.linux-attr"
 
 // recordsOwnership says the manual extractor has to run on every layer, not
