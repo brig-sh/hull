@@ -143,8 +143,10 @@ tap, and never touches vmnet.
 
 **Devices.** virtio-mmio only, no PCI anywhere. On macOS the model is
 virtio-blk, virtio-net, virtio-vsock, virtio-fs and a PL011 serial console.
-No hotplug. `hvi` takes exactly one disk, so a workload needing two block
-devices cannot be expressed.
+No hotplug. `hvi` has no fixed disk count: the disks, the NIC, the vsock
+device and the shares divide the interrupt lines the guest has, and a
+configuration with more devices than lines fails before the VM exists. hull
+boots `hvi` with two disks under `HULL_ROOTFS_MODE=overlay-block`.
 
 **Rootfs.** For a generic container boot, hull defaults `hvi` to virtiofs and
 passes it as a **writable** share. Before boot, hull replaces the instance
@@ -193,8 +195,9 @@ warning when it cannot reach the gateway and falls back to the built-in
 no-egress stack. Without hull's pre-flight, a run would look networked and
 carry no traffic.
 
-`--net-tap` and `--net-mac` are Linux-only in `hvi`. On macOS the tap flag is
-refused with an error naming the gateway flag, and the MAC flag has no effect.
+`--net-tap` is Linux-only in `hvi`; on macOS it is refused with an error
+naming the gateway flag. `--net-mac` is honored on every backend, and urunc
+passes it so the gateway gives each sandbox a DHCP lease of its own.
 
 **Exec** works. `hvi` stands up a host Unix listener and bridges it over
 virtio-vsock to an in-guest agent, and hull wires that up on every run.
@@ -208,14 +211,16 @@ and `restore` commands refuse any backend but `vz`.
 
 **Other limits `hvi` states about itself.** Eight vCPUs on a GICv2 arm64 Linux
 host, which does not apply on macOS because Apple's in-kernel GIC is a GICv3.
-One disk and one NIC, no hotplug, no PCI. virtio-fs on macOS only. It has had
-no external security audit. The boundary it is built to hold is the one around
-the guest; it does not claim to defend against a guest that hangs its own VM,
-or against CPU side channels.
+One NIC, as many disks as the interrupt lines allow, no hotplug, no PCI.
+virtio-fs is served in-process on macOS and by the caller's vhost-user daemon
+on Linux. It has had no external security audit. The boundary it is built to
+hold is the one around the guest; it does not claim to defend against a guest
+that hangs its own VM, or against CPU side channels.
 
-**No clock device.** `hvi` has no emulated RTC on macOS, so hull seeds the
-guest clock once at boot by writing the host epoch into the boot initrd. A
-long-running `hvi` guest has no host time source to correct drift against.
+**Clock.** `hvi` has had a PL031 RTC on macOS since 0.1.0-rc.1, and the
+guest kernel builds its driver in. hull still seeds the guest clock once at
+boot by writing the host epoch into the boot initrd; the seed predates the
+RTC and stays until a boot without it is tested.
 
 ## `qemu`
 
