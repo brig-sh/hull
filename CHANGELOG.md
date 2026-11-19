@@ -7,6 +7,84 @@ release. History before v0.1.0-rc21 predates the import of this tree and
 is kept below as it was generated then; v0.1.0-rc19 and rc20 were re-cut
 imports of the same tree as rc21, and rc23 was a version bump only.
 
+## [0.2.0] - 2026-11-19
+
+### Bug Fixes
+
+- Name the published urunc that joins hvi to a gateway
+- Keep readiness probes of the QEMU socket off the switch
+- Fail a Linux run whose task is not a VM
+- Give a Linux instance the default seccomp profile
+- Accept index entries typed as image configs
+- Leave telemetry alone in hull version
+- Retry in hull rm a detach that failed at postStop
+- Warn when the gateway check never sees the task
+- Forget a departed guest's MAC in the gateway's ARP cache
+- Boot a Linux instance on hvi again
+- Keep commas in the values of run's and exec's flags
+- End the execs a killed hull left when an instance stops
+- Ignore a relative XDG_RUNTIME_DIR for the containerd socket
+- Start the test containerd without SIGHUP ignored
+
+### Build
+
+- Disable MPTCP listeners with godebug in go.mod
+
+### Documentation
+
+- Match the hvi facts to the 0.1.0-rc.3 release
+- Say what divertLinkLocal is read from, and what version drops
+- Say what forgetDeparted's read order does not cover
+- Name urunc's own switch for its terminal filter
+- Add the 0.1.0 changelog section
+
+### Features
+
+- Show a Linux gateway guest's address and MAC
+- Print a Linux instance's monitor command line in inspect
+- Report the guests on a gateway in GET /members
+- Report what the build can do in hull version --json
+- Print a Linux instance's gateway socket in hull inspect
+- Join a Linux instance to a network gateway
+- Run hull network-gateway on Linux
+- Read CONTAINERD_ADDRESS and CONTAINERD_NAMESPACE on Linux
+- Take the instance names nerdctl takes on Linux
+- Boot a Linux instance on rc21's urunc and its hvi monitor
+- Take --shared-dir on Linux
+- Report a Linux instance's network in hull inspect
+- Accept ps -a
+- Attach a Linux instance to a CNI network with --net shared
+- Give each Linux instance a container ID of its own
+- Take --env-file on Linux
+- Take --snapshotter on Linux
+- Run commands in instances through containerd on Linux
+
+### Miscellaneous
+
+- Move hvi to 0.1.0-rc.3
+- Move the root go.mod to urunc 5c6bc70
+
+### Refactor
+
+- Move the Linux start check out of net_linux.go
+- Build the macOS command tree in newApp
+- Keep the gateway's member side in a macOS file
+- Share the ps command
+- Name the bundle's install directories on their own
+- Share the stop and rm commands
+- Share exec's setup and the following of resizes
+- Say where a refused user came from at the caller
+- Share the terminal size lookup
+- Share the exec command
+
+### Tests
+
+- Check the urunc keys against the bundle's urunc
+- Keep the exec test's instance log out of the user's state
+- Check that exec's signal and resize loops end
+- Check the grace after SIGKILL without a racing daemon
+- Give each test task a cgroup of its own
+
 ## [0.1.0] - 2026-10-30
 
 ### Bug Fixes
