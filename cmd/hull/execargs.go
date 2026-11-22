@@ -51,6 +51,14 @@ func execCommand() *cli.Command {
 				Aliases: []string{"e"},
 				Usage:   "set an environment variable in the guest: KEY=VALUE, or a bare KEY to inherit it from the host environment and keep the value out of argv (repeatable)",
 			},
+			&cli.StringSliceFlag{
+				Name: "env-fd",
+				Usage: "read KEY=VALUE environment records for the guest from a descriptor the caller " +
+					"already holds open: a number 3 or above (repeatable). Records are NUL-separated so a " +
+					"value may contain any byte. Unlike --env, a value here is never read from hull's own " +
+					"environment and never appears in argv. The descriptor must be inherited across the " +
+					"exec, so clear FD_CLOEXEC on it first",
+			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			return execInstance(ctx, cmd)
@@ -89,6 +97,11 @@ func newExecOptions(cmd *cli.Command, stdout, stdin, stderr int) (execOptions, e
 	if err != nil {
 		return execOptions{}, err
 	}
+	fdEnv, err := resolveEnvFds(cmd.StringSlice("env-fd"))
+	if err != nil {
+		return execOptions{}, err
+	}
+	env = append(env, fdEnv...)
 	o := execOptions{env: env, tty: cmd.Bool("tty"), rows: fallbackRows, cols: fallbackCols, sizeFd: -1}
 	if o.tty {
 		o.rows, o.cols, o.sizeFd, o.sizeFdIsTerminal = windowSize(stdout, stdin, stderr)
