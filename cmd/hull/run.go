@@ -79,6 +79,14 @@ func runCommand() *cli.Command {
 				Usage: "share a directory the caller already holds open: FD:/guest/path[:ro|rw] (repeatable). " +
 					"The descriptor must be inherited across the exec, so clear FD_CLOEXEC on it first",
 			},
+			&cli.StringSliceFlag{
+				Name: "env-fd",
+				Usage: "read KEY=VALUE environment records for the guest from a descriptor the caller " +
+					"already holds open: a number 3 or above (repeatable). Records are NUL-separated so a " +
+					"value may contain any byte. Unlike --env, a value here is never read from hull's own " +
+					"environment and never appears in argv. The descriptor must be inherited across the " +
+					"exec, so clear FD_CLOEXEC on it first",
+			},
 			&cli.StringFlag{
 				Name:  "hypervisor",
 				Value: "",
@@ -181,6 +189,11 @@ func runInstance(ctx context.Context, cmd *cli.Command) error {
 	if err != nil {
 		return err
 	}
+	fdEnv, err := resolveEnvFds(cmd.StringSlice("env-fd"))
+	if err != nil {
+		return err
+	}
+	envOverrides = append(envOverrides, fdEnv...)
 	addHosts := cmd.StringSlice("add-host")
 	gatewaySock := cmd.String("gateway-sock")
 	gatewayIP := cmd.String("gateway-cidr")
